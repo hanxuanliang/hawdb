@@ -15,6 +15,8 @@ use skein_integrity::{checksum_u64, integrity_digest, IntegrityHasher, Sha256Dig
 mod derived_repair;
 #[path = "store/doctor.rs"]
 mod doctor;
+#[path = "store/read_view.rs"]
+mod read_view;
 #[path = "store/source_scan.rs"]
 mod source_scan;
 #[path = "store/statistics_refresh.rs"]
@@ -28,6 +30,7 @@ pub use doctor::{
     DatabaseDoctor, WalDoctorOptions, WalRepairAcknowledgement, WalTailRepairPlan,
     WalTailRepairReason, WalTailRepairReport, WAL_DOCTOR_REPAIR_PROTOCOL,
 };
+pub use read_view::PublishedReadView;
 use skein_storage::{
     available_storage_space, decode_relational_checkpoint, decode_relational_checkpoint_file,
     decode_relational_wal_batch, durable_replace_file, encode_relational_checkpoint,
@@ -6516,6 +6519,18 @@ impl GraphStore {
 
     pub fn commit_epoch(&self) -> u64 {
         self.commit_epoch
+    }
+
+    pub fn published_read_view(&self) -> PublishedReadView {
+        let checkpoint = self
+            .durable
+            .as_ref()
+            .filter(|durable| durable.checkpoint_encoded_len.is_some());
+        PublishedReadView::new(
+            self.commit_epoch,
+            checkpoint.map(|durable| durable.checkpoint_commit_epoch),
+            checkpoint.map(|durable| ManifestGeneration(durable.checkpoint_epoch)),
+        )
     }
 
     pub fn search_projection_change_log_start_epoch(&self) -> u64 {

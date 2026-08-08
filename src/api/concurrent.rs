@@ -125,6 +125,10 @@ impl ConcurrentDatabase {
         Ok(self.inner.commits.lock()?.commit_epoch())
     }
 
+    pub fn published_read_view(&self) -> Result<crate::store::PublishedReadView> {
+        Ok(self.inner.commits.lock()?.published_read_view())
+    }
+
     pub fn begin_read_transaction(&self) -> Result<DatabaseReadTransaction> {
         Ok(self.inner.commits.lock()?.begin_read_transaction())
     }

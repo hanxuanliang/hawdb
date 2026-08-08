@@ -529,7 +529,7 @@ pub use store::{
     DerivedArtifactKind, DerivedArtifactRebuildOptions, DerivedArtifactRepairPlan,
     DerivedArtifactRepairReport, DistinctValueStatisticsConsistencyReport, DurabilityPolicy,
     FileSegmentRangeReader, OptimizerStatisticsRefreshOptions, OptimizerStatisticsRefreshReport,
-    OrderedAdjacencyEntry, PropertyIndexConsistencyReport, RecoveryMode,
+    OrderedAdjacencyEntry, PropertyIndexConsistencyReport, PublishedReadView, RecoveryMode,
     SearchProjectionChangefeedReadiness, SearchProjectionChangefeedStatus,
     SearchProjectionMutationId, SegmentCacheSnapshot, SegmentRangeReader, SegmentReadError,
     SegmentReadExecutionError, SegmentReadExecutionReport, SegmentReadExecutor, SegmentReadPayload,

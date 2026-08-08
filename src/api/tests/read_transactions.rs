@@ -1,5 +1,5 @@
 use super::*;
-use crate::store::StorageResidencyMode;
+use crate::store::{ManifestGeneration, StorageResidencyMode};
 use crate::DatabaseReadTransaction;
 use std::sync::{Arc, Barrier};
 
@@ -32,6 +32,52 @@ fn read_transaction_keeps_snapshot_before_later_commit() {
         latest.rows[0].get("title"),
         Some(&Value::String("After snapshot".to_string()))
     );
+}
+
+#[test]
+fn published_read_view_separates_logical_visibility_from_physical_generation() {
+    let path = unique_test_dir("published_read_view_identity");
+    let mut db = Database::open(&path).unwrap();
+
+    let empty = db.published_read_view();
+    assert_eq!(empty.visible_commit_epoch(), 0);
+    assert_eq!(empty.checkpoint_commit_epoch(), None);
+    assert_eq!(empty.physical_generation(), None);
+
+    db.query("CREATE (:Memory {id: 1, title: 'Checkpoint base'})")
+        .unwrap();
+    db.checkpoint().unwrap();
+    let checkpointed = db.published_read_view();
+    assert_eq!(checkpointed.visible_commit_epoch(), 1);
+    assert_eq!(checkpointed.checkpoint_commit_epoch(), Some(1));
+    assert_eq!(
+        checkpointed.physical_generation(),
+        Some(ManifestGeneration(1))
+    );
+    assert!(checkpointed.physical_base_is_current());
+    assert!(!checkpointed.has_delta_after_physical_generation());
+
+    db.query("CREATE (:Memory {id: 2, title: 'Logical delta'})")
+        .unwrap();
+    let reader = db.begin_read_transaction();
+    let pinned = reader.published_read_view();
+    assert_eq!(pinned.visible_commit_epoch(), 2);
+    assert_eq!(pinned.checkpoint_commit_epoch(), Some(1));
+    assert_eq!(pinned.physical_generation(), Some(ManifestGeneration(1)));
+    assert!(!pinned.physical_base_is_current());
+    assert!(pinned.has_delta_after_physical_generation());
+
+    db.checkpoint().unwrap();
+    let current = db.published_read_view();
+    assert_eq!(current.visible_commit_epoch(), 2);
+    assert_eq!(current.checkpoint_commit_epoch(), Some(2));
+    assert_eq!(current.physical_generation(), Some(ManifestGeneration(2)));
+    assert!(current.physical_base_is_current());
+    assert_eq!(reader.published_read_view(), pinned);
+
+    drop(reader);
+    drop(db);
+    std::fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
@@ -439,6 +485,13 @@ fn out_of_core_reader_pin_retains_its_canonical_generation_until_drop() {
     db.checkpoint().unwrap();
 
     let mut reader = db.begin_read_transaction();
+    let pinned_view = reader.published_read_view();
+    assert_eq!(pinned_view.visible_commit_epoch(), 1);
+    assert_eq!(pinned_view.checkpoint_commit_epoch(), Some(1));
+    assert_eq!(
+        pinned_view.physical_generation(),
+        Some(ManifestGeneration(1))
+    );
     db.query("CREATE (:Memory {id: 2, title: 'Second'})")
         .unwrap();
     db.checkpoint().unwrap();
@@ -452,6 +505,7 @@ fn out_of_core_reader_pin_retains_its_canonical_generation_until_drop() {
         .unwrap();
     assert_eq!(pinned.rows.len(), 1);
     assert_eq!(pinned.rows[0].get("id"), Some(&Value::Int(1)));
+    assert_eq!(reader.published_read_view(), pinned_view);
 
     drop(reader);
     db.checkpoint().unwrap();

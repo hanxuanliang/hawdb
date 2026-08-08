@@ -34,10 +34,10 @@ use crate::store::{
     DistinctValueStatisticsConsistencyReport, DurabilityPolicy, GraphMutationTransaction,
     GraphSnapshotNodeImport, GraphSnapshotRelationshipImport, GraphStore, NodeId, NodeRecord,
     PreparedCheckpoint, PropertyIndexConsistencyReport, PropertyIndexProjectionRebuildAction,
-    RecoveryMode, RelId, RelRecord, SchemaMaintenanceAction, SegmentCacheSnapshot,
-    StorageBackupReport, StoragePressureSnapshot, StorageReclamationWatermark,
-    StorageRecoveryReport, StorageRestoreReport, StorageScrubReport, StoreStableIdMapping,
-    WalReplayConfig,
+    PublishedReadView, RecoveryMode, RelId, RelRecord, SchemaMaintenanceAction,
+    SegmentCacheSnapshot, StorageBackupReport, StoragePressureSnapshot,
+    StorageReclamationWatermark, StorageRecoveryReport, StorageRestoreReport, StorageScrubReport,
+    StoreStableIdMapping, WalReplayConfig,
 };
 use crate::telemetry::{
     operations_telemetry_readiness, qos_telemetry_sink, KernelTelemetry, KernelTelemetryOperation,
@@ -515,6 +515,7 @@ pub struct DatabaseSession<'a> {
 pub struct DatabaseReadTransaction {
     catalog: Catalog,
     store: GraphStore,
+    published_read_view: PublishedReadView,
     optimizer: CascadesOptimizer,
     plan_cache: SharedState<PlanCache>,
     optimizer_planning_cache: SharedState<OptimizerPlanningCache>,
@@ -532,7 +533,7 @@ pub struct NowledgeGraphAdapter<'a> {
 #[derive(Debug, Default)]
 struct ReaderPins {
     next_reader_id: u64,
-    active_epochs: BTreeMap<u64, u64>,
+    active_views: BTreeMap<u64, PublishedReadView>,
 }
 
 #[derive(Debug)]
@@ -609,6 +610,10 @@ impl Database {
 
     pub fn commit_epoch(&self) -> u64 {
         self.store.commit_epoch()
+    }
+
+    pub fn published_read_view(&self) -> PublishedReadView {
+        self.store.published_read_view()
     }
 
     pub(crate) fn search_projection_changefeed_status(
@@ -842,6 +847,7 @@ impl Database {
     }
 
     pub fn begin_read_transaction(&self) -> DatabaseReadTransaction {
+        let published_read_view = self.store.published_read_view();
         let pin = {
             let mut pins = self
                 .reader_pins
@@ -849,12 +855,13 @@ impl Database {
                 .expect("database reader pins lock should not be poisoned");
             let id = pins.next_reader_id;
             pins.next_reader_id += 1;
-            pins.active_epochs.insert(id, self.store.commit_epoch());
+            pins.active_views.insert(id, published_read_view);
             ReaderPin::new(id, Arc::clone(&self.reader_pins))
         };
         DatabaseReadTransaction {
             catalog: self.catalog.clone(),
             store: self.store.snapshot(),
+            published_read_view,
             optimizer: self.optimizer.clone(),
             plan_cache: SharedState::new(PlanCache::new(self.config.max_plan_cache_entries)),
             optimizer_planning_cache: SharedState::new(
@@ -17355,7 +17362,10 @@ fn knowledge_entity_projection_source_id(entity: &KnowledgeEntity) -> Option<Str
 
 impl ReaderPins {
     fn oldest_epoch(&self) -> Option<u64> {
-        self.active_epochs.values().min().copied()
+        self.active_views
+            .values()
+            .map(|view| view.visible_commit_epoch())
+            .min()
     }
 }
 
@@ -17374,7 +17384,7 @@ impl Drop for ReaderPin {
         self.pins
             .lock()
             .expect("database reader pins lock should not be poisoned")
-            .active_epochs
+            .active_views
             .remove(&self.id);
     }
 }
@@ -18401,7 +18411,11 @@ fn reject_transaction_control_parameters(
 
 impl DatabaseReadTransaction {
     pub fn commit_epoch(&self) -> u64 {
-        self.store.commit_epoch()
+        self.published_read_view.visible_commit_epoch()
+    }
+
+    pub const fn published_read_view(&self) -> PublishedReadView {
+        self.published_read_view
     }
 
     pub fn query(&mut self, cypher_text: &str) -> Result<QueryOutput> {
