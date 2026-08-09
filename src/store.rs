@@ -38,7 +38,7 @@ use skein_storage::{
     AdjacencyPostingList, CanonicalEndpointDirection, CanonicalNodeIterator,
     CanonicalRelationshipIterator, CanonicalSegmentError, DatabaseDirectoryLease,
     RelationalDecodeLimits, RelationalMutationLimits, RelationalOverflowConfig, RelationalState,
-    RelationalTransaction,
+    RelationalTransaction, WalSyncGroupState,
 };
 pub use skein_storage::{
     AdjacencyDirection, AdjacencyGroupConsistencyMismatch, AdjacencyGroupKey, AdjacencyGroupStats,
@@ -71,6 +71,7 @@ pub use skein_storage::{
     StorageRestoreReport, StorageScrubReport, StoreId, StoreStableIdMapping, WalReplayConfig,
     STORAGE_PRESSURE_DELAY_RATIO_PER_MILLION, STORAGE_PRESSURE_SOFT_RATIO_PER_MILLION,
 };
+pub(crate) use skein_storage::{WalSyncGroupFlush, WalSyncGroupProgress};
 pub use source_scan::SourceScanRow;
 pub use statistics_refresh::{OptimizerStatisticsRefreshOptions, OptimizerStatisticsRefreshReport};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1348,20 +1349,6 @@ pub struct StorageResidencyReport {
     pub segment_cache_eviction_count: u64,
     pub segment_cache_admission_rejection_count: u64,
     pub segment_cache_digest_mismatch_count: u64,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct WalSyncGroupProgress {
-    pub entry_count: usize,
-    pub byte_count: u64,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct WalSyncGroupFlush {
-    pub entry_count: usize,
-    pub byte_count: u64,
-    pub fsync_micros: u64,
-    pub fsync_performed: bool,
 }
 
 pub struct GraphNodeIterator {
@@ -11785,13 +11772,6 @@ struct DurableStore {
     wal_sync_group: Option<WalSyncGroupState>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-struct WalSyncGroupState {
-    entry_count: usize,
-    byte_count: u64,
-    created: bool,
-}
-
 struct CheckpointImage<'a> {
     catalog: &'a Catalog,
     commit_epoch: u64,
@@ -12147,35 +12127,25 @@ impl DurableStore {
 
     fn wal_sync_group_progress(&self) -> WalSyncGroupProgress {
         self.wal_sync_group
-            .map_or_else(WalSyncGroupProgress::default, |group| {
-                WalSyncGroupProgress {
-                    entry_count: group.entry_count,
-                    byte_count: group.byte_count,
-                }
-            })
+            .map_or_else(WalSyncGroupProgress::default, WalSyncGroupState::progress)
     }
 
     fn finish_wal_sync_group(&mut self) -> Result<WalSyncGroupFlush> {
         let Some(group) = self.wal_sync_group.take() else {
             return Ok(WalSyncGroupFlush::default());
         };
-        if group.entry_count == 0 {
+        if group.is_empty() {
             return Ok(WalSyncGroupFlush::default());
         }
         wal_group_sync_failpoint()?;
         let started = std::time::Instant::now();
         let file = OpenOptions::new().write(true).open(&self.wal_path)?;
         file.sync_data()?;
-        if group.created {
+        if group.requires_parent_sync() {
             sync_parent_dir(&self.wal_path)?;
         }
         process_crash_failpoint("after_wal_sync");
-        Ok(WalSyncGroupFlush {
-            entry_count: group.entry_count,
-            byte_count: group.byte_count,
-            fsync_micros: elapsed_micros(started),
-            fsync_performed: true,
-        })
+        Ok(group.into_flush(elapsed_micros(started)))
     }
 
     fn wal_age_millis(&self) -> Option<u64> {
@@ -12783,8 +12753,7 @@ impl DurableStore {
             self.next_lsn += 1;
             self.wal_bytes = self.wal_bytes.saturating_add(byte_count);
             if let Some(group) = &mut self.wal_sync_group {
-                group.entry_count = group.entry_count.saturating_add(1);
-                group.byte_count = group.byte_count.saturating_add(byte_count);
+                group.record_entry(byte_count);
             }
         } else if let Ok(metadata) = fs::metadata(&self.wal_path) {
             self.wal_bytes = metadata.len();
@@ -12826,7 +12795,9 @@ impl DurableStore {
     fn finish_wal_append(&mut self, file: &mut File, created: bool) -> Result<u64> {
         file.flush()?;
         if let Some(group) = &mut self.wal_sync_group {
-            group.created |= created;
+            if created {
+                group.record_wal_created();
+            }
             return Ok(0);
         }
         let mut fsync_micros = 0;

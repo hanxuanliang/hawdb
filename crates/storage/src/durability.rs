@@ -3,6 +3,70 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WalSyncGroupProgress {
+    pub entry_count: usize,
+    pub byte_count: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WalSyncGroupFlush {
+    pub entry_count: usize,
+    pub byte_count: u64,
+    pub fsync_micros: u64,
+    pub fsync_performed: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WalSyncGroupState {
+    entry_count: usize,
+    byte_count: u64,
+    created: bool,
+}
+
+impl WalSyncGroupState {
+    pub fn record_entry(&mut self, byte_count: u64) {
+        self.entry_count = self.entry_count.saturating_add(1);
+        self.byte_count = self.byte_count.saturating_add(byte_count);
+    }
+
+    pub fn record_wal_created(&mut self) {
+        self.created = true;
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.entry_count == 0
+    }
+
+    pub const fn requires_parent_sync(self) -> bool {
+        self.created
+    }
+
+    pub const fn progress(self) -> WalSyncGroupProgress {
+        WalSyncGroupProgress {
+            entry_count: self.entry_count,
+            byte_count: self.byte_count,
+        }
+    }
+
+    pub const fn into_flush(self, fsync_micros: u64) -> WalSyncGroupFlush {
+        if self.entry_count == 0 {
+            return WalSyncGroupFlush {
+                entry_count: 0,
+                byte_count: 0,
+                fsync_micros: 0,
+                fsync_performed: false,
+            };
+        }
+        WalSyncGroupFlush {
+            entry_count: self.entry_count,
+            byte_count: self.byte_count,
+            fsync_micros,
+            fsync_performed: true,
+        }
+    }
+}
+
 /// Atomically publishes a file whose contents have already been synchronized.
 ///
 /// Unix persists the directory entry after rename. Windows uses a write-through
@@ -92,6 +156,35 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn wal_sync_group_state_owns_bounded_flush_accounting() {
+        let mut group = WalSyncGroupState::default();
+        assert!(group.is_empty());
+        assert_eq!(group.progress(), WalSyncGroupProgress::default());
+        assert_eq!(group.into_flush(42), WalSyncGroupFlush::default());
+
+        group.record_wal_created();
+        group.record_entry(128);
+        group.record_entry(64);
+        assert_eq!(
+            group.progress(),
+            WalSyncGroupProgress {
+                entry_count: 2,
+                byte_count: 192,
+            }
+        );
+        assert!(group.requires_parent_sync());
+        assert_eq!(
+            group.into_flush(42),
+            WalSyncGroupFlush {
+                entry_count: 2,
+                byte_count: 192,
+                fsync_micros: 42,
+                fsync_performed: true,
+            }
+        );
+    }
 
     #[test]
     fn durable_replace_publishes_and_replaces_content() {

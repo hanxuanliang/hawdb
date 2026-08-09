@@ -75,7 +75,7 @@ crates/
   qos/                 work classes, local admission, background ranking
   optimizer/           Cascades memo/rules/search plus graph cost and lowering
   cypher/              token cursor, parser, AST, parameter model
-  storage/             embedded persistence, WAL, MVCC, indexes
+  storage/             storage protocols, durable primitives, MVCC, indexes
   executor/            physical operators and query execution
   fuzz/                development-only differential oracles and replay bundles
   qualification/       synthetic revision-bound CI qualification workloads
@@ -95,6 +95,17 @@ background hints, expected-value ranking, and scheduler state. It must remain
 free of graph storage, search index, planner, and executor dependencies so
 resource policy can be reused by projection, import, schema maintenance, and
 retrieval loops without creating ownership cycles.
+
+The storage split is intentionally transitional. `skein-storage` owns reusable
+durability primitives, WAL group accounting, immutable snapshot coordination,
+canonical segment formats, relational state, and storage indexes. The root
+`src/store.rs` still owns the concrete `DurableStore` adapter because checkpoint
+encoding currently depends on the root catalog, graph statistics, WAL operation
+model, and telemetry facade. New protocol state must move inward to
+`skein-storage`; the concrete adapter should move only after those dependencies
+have stable inward-facing contracts. This avoids presenting the root facade or
+the internal storage crate as an accidental second production API.
+
 Cypher exposes lightweight runtime resource intent through session-scoped
 system variables instead of query-shape-specific typed APIs.
 `SET system.work_priority`, `SET SYSTEM VARIABLE work_priority`,

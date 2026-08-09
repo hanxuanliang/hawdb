@@ -51,6 +51,13 @@ The checkpoint actions map directly to `GraphStore::checkpoint_with_reader_epoch
 and `DurableStore::{write_checkpoint,prepare_wal_generation,
 publish_checkpoint_manifest}`. WAL actions map to
 `DurableStore::{append_entry,finish_wal_append}` and `GraphStore::apply_wal_op`.
+When several contiguous records share one sync boundary,
+`skein_storage::durability::WalSyncGroupState` owns the accumulated record and
+byte counts from deferred append through flush reporting. `DurableStore` remains
+the filesystem adapter that performs the shared sync. The model treats each
+logical batch as a separate commit; the grouped implementation refines that
+boundary only when every member is acknowledged after the shared sync and the
+handle is poisoned if the barrier fails.
 
 ## Generation Reclamation
 
@@ -72,6 +79,7 @@ They are implementation evidence, not a machine-checked refinement proof.
 | Protocol obligation | Implementation boundary | Regression evidence |
 | --- | --- | --- |
 | WAL sync precedes visibility and apply failure closes the handle | `finish_wal_append`, `apply_wal_op`, `ensure_usable` | `post_wal_apply_failure_poisons_handle_until_reopen` |
+| A grouped WAL sync acknowledges every member after one successful barrier or fails the whole group closed | `WalSyncGroupState`, `finish_wal_sync_group`, `CommitSequencer` | `wal_group_commit_shares_one_sync_without_changing_record_order`, `wal_group_sync_failure_rejects_commit_and_poisons_until_reopen`, `panicking_group_commit_task_completes_followers_and_releases_leader` |
 | A torn WAL batch has no partial recovered visibility | `replay_wal` record decode and batch apply | `stops_replay_at_torn_wal_tail`, `skips_torn_batch_wal_without_partial_path_recovery` |
 | Complete-record corruption and LSN gaps fail closed | `replay_wal` framing, checksum, and expected-LSN checks | `rejects_and_quarantines_checksum_corruption_at_wal_tail`, `rejects_and_quarantines_checksum_corruption_before_valid_wal_suffix`, `rejects_and_quarantines_non_contiguous_wal_lsn` |
 | Checkpoint publication selects one complete generation | checkpoint failpoints and manifest replacement | `checkpoint_publish_failpoints_recover_one_complete_generation`, `subprocess_crash_matrix_recovers_whole_batches_and_artifact_generations` |
