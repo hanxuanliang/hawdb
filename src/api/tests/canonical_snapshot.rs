@@ -18,8 +18,8 @@ use crate::{
     CanonicalSnapshotIdentityAudit, CanonicalSnapshotNode, CanonicalSnapshotRelationship,
     SkeinLightningBootstrapManifest, SkeinLightningInitialImportCheckpoint,
     SkeinLightningInitialImportCheckpointProgress, SkeinLightningInitialImportDocumentIdentity,
-    SkeinLightningInitialImportIdempotencyKey, SkeinLightningInitialImportResumeActionKind,
-    SkeinLightningRelationalStream,
+    SkeinLightningInitialImportIdempotencyKey, SkeinLightningInitialImportReadinessInputs,
+    SkeinLightningInitialImportResumeActionKind, SkeinLightningRelationalStream,
 };
 use crate::{SearchProjectionDelta, SearchProjectionRow};
 
@@ -1674,13 +1674,16 @@ fn skein_lightning_initial_import_startup_readiness_accepts_ready_session() {
     .expect("expected persistable durable state");
     let freshness = initial_import_projection_freshness(&export.manifest);
 
+    let projection_batches = [delta];
     let report = db.skein_lightning_initial_import_startup_readiness(
-        &export.graph_stream.encoded,
-        &export.relational_stream.encoded,
-        &export.manifest,
-        &[delta],
-        Some(&freshness),
-        Some(&freshness),
+        SkeinLightningInitialImportReadinessInputs {
+            encoded_graph_stream: &export.graph_stream.encoded,
+            encoded_relational_stream: &export.relational_stream.encoded,
+            manifest: &export.manifest,
+            projection_batches: &projection_batches,
+            target_projection_freshness: Some(&freshness),
+            live_projection_freshness: Some(&freshness),
+        },
         Some(&durable_state),
     );
 
@@ -1724,13 +1727,16 @@ fn skein_lightning_initial_import_startup_readiness_blocks_live_projection_lag()
     live_freshness.durable_source_graph_commit_epoch =
         Some(export.manifest.graph_commit_epoch.saturating_sub(1));
 
+    let projection_batches = [delta];
     let report = db.skein_lightning_initial_import_startup_readiness(
-        &export.graph_stream.encoded,
-        &export.relational_stream.encoded,
-        &export.manifest,
-        &[delta],
-        Some(&target_freshness),
-        Some(&live_freshness),
+        SkeinLightningInitialImportReadinessInputs {
+            encoded_graph_stream: &export.graph_stream.encoded,
+            encoded_relational_stream: &export.relational_stream.encoded,
+            manifest: &export.manifest,
+            projection_batches: &projection_batches,
+            target_projection_freshness: Some(&target_freshness),
+            live_projection_freshness: Some(&live_freshness),
+        },
         Some(&durable_state),
     );
 
@@ -1776,13 +1782,16 @@ fn skein_lightning_initial_import_recovery_readiness_resumes_encoded_state() {
     };
     let freshness = initial_import_projection_freshness(&export.manifest);
 
+    let projection_batches = [delta];
     let report = db.skein_lightning_initial_import_recovery_readiness(
-        &export.graph_stream.encoded,
-        &export.relational_stream.encoded,
-        &export.manifest,
-        &[delta],
-        Some(&freshness),
-        Some(&freshness),
+        SkeinLightningInitialImportReadinessInputs {
+            encoded_graph_stream: &export.graph_stream.encoded,
+            encoded_relational_stream: &export.relational_stream.encoded,
+            manifest: &export.manifest,
+            projection_batches: &projection_batches,
+            target_projection_freshness: Some(&freshness),
+            live_projection_freshness: Some(&freshness),
+        },
         Some(&encoded),
     );
 
@@ -1806,12 +1815,14 @@ fn skein_lightning_initial_import_recovery_readiness_quarantines_invalid_payload
     let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
 
     let report = db.skein_lightning_initial_import_recovery_readiness(
-        &export.graph_stream.encoded,
-        &export.relational_stream.encoded,
-        &export.manifest,
-        &[],
-        None,
-        None,
+        SkeinLightningInitialImportReadinessInputs {
+            encoded_graph_stream: &export.graph_stream.encoded,
+            encoded_relational_stream: &export.relational_stream.encoded,
+            manifest: &export.manifest,
+            projection_batches: &[],
+            target_projection_freshness: None,
+            live_projection_freshness: None,
+        },
         Some("{"),
     );
 
@@ -1858,12 +1869,14 @@ fn skein_lightning_initial_import_recovery_readiness_quarantines_source_mismatch
     let encoded = serde_json::to_string(&value).unwrap();
 
     let report = db.skein_lightning_initial_import_recovery_readiness(
-        &export.graph_stream.encoded,
-        &export.relational_stream.encoded,
-        &export.manifest,
-        &[],
-        None,
-        None,
+        SkeinLightningInitialImportReadinessInputs {
+            encoded_graph_stream: &export.graph_stream.encoded,
+            encoded_relational_stream: &export.relational_stream.encoded,
+            manifest: &export.manifest,
+            projection_batches: &[],
+            target_projection_freshness: None,
+            live_projection_freshness: None,
+        },
         Some(&encoded),
     );
 

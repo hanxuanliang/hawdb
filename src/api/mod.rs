@@ -130,8 +130,8 @@ pub use canonical_snapshot::{
     SkeinLightningInitialImportDurableStateCodecReport,
     SkeinLightningInitialImportDurableStateReport, SkeinLightningInitialImportIdempotencyKey,
     SkeinLightningInitialImportPlan, SkeinLightningInitialImportReadiness,
-    SkeinLightningInitialImportRecoveryReadinessReport, SkeinLightningInitialImportResumeAction,
-    SkeinLightningInitialImportResumeActionKind,
+    SkeinLightningInitialImportReadinessInputs, SkeinLightningInitialImportRecoveryReadinessReport,
+    SkeinLightningInitialImportResumeAction, SkeinLightningInitialImportResumeActionKind,
     SkeinLightningInitialImportSearchProjectionBatchReport,
     SkeinLightningInitialImportSessionBundleReadiness, SkeinLightningInitialImportSessionReport,
     SkeinLightningInitialImportSourceBundleReadiness, SkeinLightningInitialImportSourceFingerprint,
@@ -1235,44 +1235,24 @@ impl Database {
 
     pub fn skein_lightning_initial_import_startup_readiness(
         &self,
-        encoded_graph_stream: &str,
-        encoded_relational_stream: &[u8],
-        manifest: &SkeinLightningBootstrapManifest,
-        projection_batches: &[SearchProjectionDelta],
-        target_projection_freshness: Option<&SearchProjectionFreshness>,
-        live_projection_freshness: Option<&SearchProjectionFreshness>,
+        inputs: SkeinLightningInitialImportReadinessInputs<'_>,
         durable_state: Option<&SkeinLightningInitialImportDurableState>,
     ) -> SkeinLightningInitialImportStartupReadinessReport {
         skein_lightning_initial_import_startup_readiness(
-            encoded_graph_stream,
-            encoded_relational_stream,
-            manifest,
+            inputs,
             self.store.commit_epoch(),
-            projection_batches,
-            target_projection_freshness,
-            live_projection_freshness,
             durable_state,
         )
     }
 
     pub fn skein_lightning_initial_import_recovery_readiness(
         &self,
-        encoded_graph_stream: &str,
-        encoded_relational_stream: &[u8],
-        manifest: &SkeinLightningBootstrapManifest,
-        projection_batches: &[SearchProjectionDelta],
-        target_projection_freshness: Option<&SearchProjectionFreshness>,
-        live_projection_freshness: Option<&SearchProjectionFreshness>,
+        inputs: SkeinLightningInitialImportReadinessInputs<'_>,
         durable_state_payload: Option<&str>,
     ) -> SkeinLightningInitialImportRecoveryReadinessReport {
         skein_lightning_initial_import_recovery_readiness(
-            encoded_graph_stream,
-            encoded_relational_stream,
-            manifest,
+            inputs,
             self.store.commit_epoch(),
-            projection_batches,
-            target_projection_freshness,
-            live_projection_freshness,
             durable_state_payload,
         )
     }

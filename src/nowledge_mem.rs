@@ -12625,9 +12625,10 @@ mod tests {
         SearchProjectionFreshness, SearchProjectionKind, SearchProjectionProbeOptions,
         SearchProjectionRow, SkeinLightningInitialImportCheckpoint,
         SkeinLightningInitialImportCutoverCatchUpReport,
-        SkeinLightningInitialImportDocumentIdentity, StorageRecoveryReport, StorageResidencyMode,
-        StorageResourceProfileLimits, VectorRecallValidationOptions, VectorRecallValidationReport,
-        WorkClass, PRODUCTION_QUALIFICATION_POLICY_VERSION, VECTOR_RECALL_VALIDATION_PROTOCOL,
+        SkeinLightningInitialImportDocumentIdentity, SkeinLightningInitialImportReadinessInputs,
+        StorageRecoveryReport, StorageResidencyMode, StorageResourceProfileLimits,
+        VectorRecallValidationOptions, VectorRecallValidationReport, WorkClass,
+        PRODUCTION_QUALIFICATION_POLICY_VERSION, VECTOR_RECALL_VALIDATION_PROTOCOL,
     };
     use std::collections::BTreeMap;
     use std::sync::mpsc;
@@ -17727,13 +17728,16 @@ mod tests {
             embedding_dimension: None,
         };
 
+        let projection_batches = [projection_delta];
         let recovery = source.skein_lightning_initial_import_recovery_readiness(
-            &export.graph_stream.encoded,
-            &export.relational_stream.encoded,
-            &export.manifest,
-            &[projection_delta],
-            Some(&freshness),
-            Some(&freshness),
+            SkeinLightningInitialImportReadinessInputs {
+                encoded_graph_stream: &export.graph_stream.encoded,
+                encoded_relational_stream: &export.relational_stream.encoded,
+                manifest: &export.manifest,
+                projection_batches: &projection_batches,
+                target_projection_freshness: Some(&freshness),
+                live_projection_freshness: Some(&freshness),
+            },
             Some(&durable_state_payload),
         );
         assert!(recovery.ready);

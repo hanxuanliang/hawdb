@@ -647,6 +647,22 @@ pub struct SkeinLightningInitialImportSessionBundleReadiness {
     pub blocker_codes: Vec<String>,
 }
 
+/// Immutable source material and projection watermarks used to evaluate an
+/// initial-import startup or recovery attempt.
+///
+/// Keeping these values together prevents callers from accidentally mixing a
+/// graph stream, relational stream, manifest, and projection evidence from
+/// different bootstrap exports.
+#[derive(Debug, Clone, Copy)]
+pub struct SkeinLightningInitialImportReadinessInputs<'a> {
+    pub encoded_graph_stream: &'a str,
+    pub encoded_relational_stream: &'a [u8],
+    pub manifest: &'a SkeinLightningBootstrapManifest,
+    pub projection_batches: &'a [SearchProjectionDelta],
+    pub target_projection_freshness: Option<&'a SearchProjectionFreshness>,
+    pub live_projection_freshness: Option<&'a SearchProjectionFreshness>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkeinLightningInitialImportStartupReadinessReport {
     pub ready: bool,
@@ -2378,34 +2394,29 @@ pub fn skein_lightning_initial_import_session_bundle_readiness(
 }
 
 pub fn skein_lightning_initial_import_startup_readiness(
-    encoded_graph_stream: &str,
-    encoded_relational_stream: &[u8],
-    manifest: &SkeinLightningBootstrapManifest,
+    inputs: SkeinLightningInitialImportReadinessInputs<'_>,
     target_graph_commit_epoch: u64,
-    projection_batches: &[SearchProjectionDelta],
-    target_projection_freshness: Option<&SearchProjectionFreshness>,
-    live_projection_freshness: Option<&SearchProjectionFreshness>,
     durable_state: Option<&SkeinLightningInitialImportDurableState>,
 ) -> SkeinLightningInitialImportStartupReadinessReport {
     let checkpoint = durable_state.map(|state| &state.checkpoint);
     let source_bundle = skein_lightning_initial_import_source_bundle_readiness(
-        manifest,
+        inputs.manifest,
         checkpoint,
-        projection_batches,
+        inputs.projection_batches,
     );
     let session = skein_lightning_initial_import_session_report(
-        encoded_graph_stream,
-        encoded_relational_stream,
-        manifest,
+        inputs.encoded_graph_stream,
+        inputs.encoded_relational_stream,
+        inputs.manifest,
         target_graph_commit_epoch,
-        target_projection_freshness,
+        inputs.target_projection_freshness,
         durable_state,
     );
     let cutover_catch_up = session.ready_for_cutover.then(|| {
         skein_lightning_initial_import_cutover_catch_up_report(
             &session,
             target_graph_commit_epoch,
-            live_projection_freshness,
+            inputs.live_projection_freshness,
         )
     });
     let readiness = skein_lightning_initial_import_session_bundle_readiness(
@@ -2424,19 +2435,14 @@ pub fn skein_lightning_initial_import_startup_readiness(
 }
 
 pub fn skein_lightning_initial_import_recovery_readiness(
-    encoded_graph_stream: &str,
-    encoded_relational_stream: &[u8],
-    manifest: &SkeinLightningBootstrapManifest,
+    inputs: SkeinLightningInitialImportReadinessInputs<'_>,
     target_graph_commit_epoch: u64,
-    projection_batches: &[SearchProjectionDelta],
-    target_projection_freshness: Option<&SearchProjectionFreshness>,
-    live_projection_freshness: Option<&SearchProjectionFreshness>,
     durable_state_payload: Option<&str>,
 ) -> SkeinLightningInitialImportRecoveryReadinessReport {
     let durable_state_payload_present = durable_state_payload.is_some();
     let mut decode_blocker_codes = BTreeSet::new();
     let durable_state_codec = durable_state_payload.and_then(|payload| {
-        match skein_lightning_initial_import_decode_durable_state(manifest, payload) {
+        match skein_lightning_initial_import_decode_durable_state(inputs.manifest, payload) {
             Ok(report) => {
                 if !report.ready {
                     decode_blocker_codes.extend(report.blocker_codes.iter().cloned());
@@ -2455,13 +2461,8 @@ pub fn skein_lightning_initial_import_recovery_readiness(
         .filter(|report| report.ready)
         .and_then(|report| report.state.as_ref());
     let startup = skein_lightning_initial_import_startup_readiness(
-        encoded_graph_stream,
-        encoded_relational_stream,
-        manifest,
+        inputs,
         target_graph_commit_epoch,
-        projection_batches,
-        target_projection_freshness,
-        live_projection_freshness,
         durable_state,
     );
     let invalid_payload = durable_state_payload_present && durable_state.is_none();
