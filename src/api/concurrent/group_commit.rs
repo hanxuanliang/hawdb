@@ -28,6 +28,9 @@ pub struct WalGroupCommitEvidence {
     pub grouped_fsync_count: u64,
     pub grouped_p95_commit_micros: u64,
     pub max_accepted_p95_commit_micros: u64,
+    pub single_writer_commit_count: usize,
+    pub single_writer_grouped_p95_commit_micros: u64,
+    pub max_accepted_single_writer_p95_commit_micros: u64,
     pub strict_recovery_verified: bool,
     pub wal_order_verified: bool,
 }
@@ -147,6 +150,7 @@ pub struct WalGroupCommitSnapshot {
     pub submitted_commits: u64,
     pub completed_commits: u64,
     pub group_count: u64,
+    pub coalescing_wait_count: u64,
     pub shared_sync_count: u64,
     pub grouped_wal_entries: u64,
     pub grouped_wal_bytes: u64,
@@ -170,6 +174,14 @@ fn validate_evidence(evidence: WalGroupCommitEvidence) -> Result<()> {
     }
     if evidence.grouped_p95_commit_micros > evidence.max_accepted_p95_commit_micros {
         blockers.push("tail_latency_budget_exceeded");
+    }
+    if evidence.single_writer_commit_count == 0 {
+        blockers.push("single_writer_evidence_missing");
+    }
+    if evidence.single_writer_grouped_p95_commit_micros
+        > evidence.max_accepted_single_writer_p95_commit_micros
+    {
+        blockers.push("single_writer_tail_latency_budget_exceeded");
     }
     if !evidence.strict_recovery_verified {
         blockers.push("strict_recovery_not_verified");

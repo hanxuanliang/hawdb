@@ -211,8 +211,16 @@ impl CommitSequencer {
     }
 
     fn wait_for_group_commit_peers(&self) -> Result<()> {
+        if self.group_commit.config.max_entries().get() == 1 {
+            return Ok(());
+        }
+        std::thread::yield_now();
         let deadline = Instant::now() + self.group_commit.config.max_delay();
         let mut state = self.group_commit.lock_state()?;
+        if state.queue.len() < 2 {
+            return Ok(());
+        }
+        state.metrics.coalescing_wait_count = state.metrics.coalescing_wait_count.saturating_add(1);
         while state.queue.len() < self.group_commit.config.max_entries().get() {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {

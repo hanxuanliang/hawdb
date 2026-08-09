@@ -177,17 +177,28 @@ fn wal_group_commit_requires_performance_and_recovery_evidence() {
         NonZeroU64::new(1024 * 1024).unwrap(),
         Duration::from_millis(1),
     );
+    let accepted_evidence = WalGroupCommitEvidence {
+        commit_count: 8,
+        baseline_elapsed_micros: 200,
+        baseline_fsync_count: 8,
+        grouped_elapsed_micros: 100,
+        grouped_fsync_count: 1,
+        grouped_p95_commit_micros: 20,
+        max_accepted_p95_commit_micros: 25,
+        single_writer_commit_count: 16,
+        single_writer_grouped_p95_commit_micros: 20,
+        max_accepted_single_writer_p95_commit_micros: 25,
+        strict_recovery_verified: true,
+        wal_order_verified: true,
+    };
     let rejected = WalGroupCommitConfig::enabled_after_evidence(
         WalGroupCommitEvidence {
-            commit_count: 8,
             baseline_elapsed_micros: 100,
-            baseline_fsync_count: 8,
             grouped_elapsed_micros: 100,
             grouped_fsync_count: 8,
-            grouped_p95_commit_micros: 20,
-            max_accepted_p95_commit_micros: 25,
             strict_recovery_verified: false,
             wal_order_verified: false,
+            ..accepted_evidence
         },
         bounds.0,
         bounds.1,
@@ -201,18 +212,22 @@ fn wal_group_commit_requires_performance_and_recovery_evidence() {
         .to_string()
         .contains("strict_recovery_not_verified"));
 
-    let admitted = WalGroupCommitConfig::enabled_after_evidence(
+    let low_concurrency_rejected = WalGroupCommitConfig::enabled_after_evidence(
         WalGroupCommitEvidence {
-            commit_count: 8,
-            baseline_elapsed_micros: 200,
-            baseline_fsync_count: 8,
-            grouped_elapsed_micros: 100,
-            grouped_fsync_count: 1,
-            grouped_p95_commit_micros: 20,
-            max_accepted_p95_commit_micros: 25,
-            strict_recovery_verified: true,
-            wal_order_verified: true,
+            single_writer_grouped_p95_commit_micros: 26,
+            ..accepted_evidence
         },
+        bounds.0,
+        bounds.1,
+        bounds.2,
+    )
+    .unwrap_err();
+    assert!(low_concurrency_rejected
+        .to_string()
+        .contains("single_writer_tail_latency_budget_exceeded"));
+
+    let admitted = WalGroupCommitConfig::enabled_after_evidence(
+        accepted_evidence,
         bounds.0,
         bounds.1,
         bounds.2,
@@ -222,6 +237,29 @@ fn wal_group_commit_requires_performance_and_recovery_evidence() {
         admitted.activation(),
         WalGroupCommitActivation::EvidenceValidated
     );
+}
+
+#[test]
+fn wal_group_commit_skips_the_coalescing_window_without_contention() {
+    let group_commit = WalGroupCommitConfig::benchmark_candidate(
+        NonZeroUsize::new(16).unwrap(),
+        NonZeroU64::new(1024 * 1024).unwrap(),
+        Duration::from_millis(10),
+    )
+    .unwrap();
+    let db = ConcurrentDatabase::new_with_wal_group_commit(Database::new(), group_commit);
+    let mut transaction = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_secs(1),
+        ))
+        .unwrap();
+    transaction.query("CREATE (:Memory {id: 1})").unwrap();
+    transaction.commit().unwrap();
+
+    let snapshot = db.wal_group_commit_snapshot().unwrap();
+    assert_eq!(snapshot.submitted_commits, 1);
+    assert_eq!(snapshot.completed_commits, 1);
+    assert_eq!(snapshot.coalescing_wait_count, 0);
 }
 
 #[test]
