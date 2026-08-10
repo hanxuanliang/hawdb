@@ -3,6 +3,33 @@ load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
 package(default_visibility = ["//visibility:public"])
 
+_SKEIN_SRCS = glob(
+    ["src/**/*.rs"],
+    exclude = [
+        "src/bin/**",
+        "src/main.rs",
+    ],
+)
+
+_SKEIN_BASE_DEPS = all_crate_deps(normal = True) + [
+    "//crates/core:skein_core",
+    "//crates/cypher:skein_cypher",
+    "//crates/ddl:skein_ddl",
+    "//crates/executor:skein_executor",
+    "//crates/expression:skein_expression",
+    "//crates/integrity:skein_integrity",
+    "//crates/optimizer:skein_optimizer",
+    "//crates/plan:skein_plan",
+    "//crates/plan-cache:skein_plan_cache",
+    "//crates/qos:skein_qos",
+    "//crates/query:skein_query",
+    "//crates/readiness:skein_readiness",
+    "//crates/route-ownership:skein_route_ownership",
+    "//crates/sql:skein_sql",
+    "//crates/storage:skein_storage",
+    "//crates/telemetry:skein_telemetry",
+]
+
 rust_library(
     name = "skein",
     crate_name = "skein",
@@ -14,35 +41,25 @@ rust_library(
         "tokio-runtime",
         "vector-search",
     ],
-    srcs = glob(
-        ["src/**/*.rs"],
-        exclude = [
-            "src/bin/**",
-            "src/main.rs",
-        ],
-    ),
+    srcs = _SKEIN_SRCS,
     edition = "2024",
     aliases = aliases(),
-    deps = all_crate_deps(normal = True) + [
-        "//crates/core:skein_core",
-        "//crates/cypher:skein_cypher",
-        "//crates/ddl:skein_ddl",
-        "//crates/executor:skein_executor",
-        "//crates/expression:skein_expression",
-        "//crates/integrity:skein_integrity",
-        "//crates/optimizer:skein_optimizer",
-        "//crates/plan:skein_plan",
-        "//crates/plan-cache:skein_plan_cache",
-        "//crates/qos:skein_qos",
-        "//crates/query:skein_query",
-        "//crates/readiness:skein_readiness",
-        "//crates/route-ownership:skein_route_ownership",
+    deps = _SKEIN_BASE_DEPS + [
         "//crates/runtime-tokio:skein_runtime_tokio",
-        "//crates/sql:skein_sql",
-        "//crates/storage:skein_storage",
-        "//crates/telemetry:skein_telemetry",
         "//crates/vector-projection:skein_vector_projection",
     ],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+)
+
+# Matches `skein = { default-features = false }` for dependency-boundary checks.
+rust_library(
+    name = "skein_minimal",
+    crate_name = "skein",
+    crate_root = "src/lib.rs",
+    srcs = _SKEIN_SRCS,
+    edition = "2024",
+    aliases = aliases(),
+    deps = _SKEIN_BASE_DEPS,
     proc_macro_deps = all_crate_deps(proc_macro = True),
 )
 

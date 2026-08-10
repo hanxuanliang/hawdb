@@ -52,6 +52,12 @@ jobs:
       - name: Build
         run: bazel build //:skein
 
+      - name: Check minimal feature boundary
+        run: >-
+          bazel build //:skein_minimal
+          --@rules_rust//rust/settings:pipelined_compilation=True
+          --output_groups=build_metadata
+
   test-root:
     name: Bazel Test (Root)
     runs-on: ubuntu-latest
