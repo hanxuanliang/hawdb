@@ -9,6 +9,7 @@ readonly tla_work_root="${TLA_WORK_ROOT:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/skein-t
 readonly downloaded_jar="$tla_work_root/tla2tools-$tla_version.jar"
 readonly specifications=(
   SkeinStorageDurability
+  SkeinWalGroupCommit
   SkeinGenerationReclamation
   SkeinConcurrentSnapshots
   SkeinTransactionConcurrency

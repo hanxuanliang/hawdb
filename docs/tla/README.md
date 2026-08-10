@@ -15,7 +15,7 @@ a Java 11 or newer runtime. Without `TLA2TOOLS_JAR`, the script downloads TLA+
 Tools 1.7.4 and verifies its SHA-256 digest before execution.
 
 Set `TLA_RESULTS_DIR` and `TLA_SOURCE_REVISION` to retain a release artifact.
-The artifact contains the exact five `.tla` and `.cfg` inputs, one complete TLC
+The artifact contains the exact six `.tla` and `.cfg` inputs, one complete TLC
 log per model, the Java version, and a revision- and tool-bound manifest. CI
 validates the downloaded artifact with:
 
@@ -58,6 +58,14 @@ the filesystem adapter that performs the shared sync. The model treats each
 logical batch as a separate commit; the grouped implementation refines that
 boundary only when every member is acknowledged after the shared sync and the
 handle is poisoned if the barrier fails.
+
+`SkeinWalGroupCommit.tla` models the bounded request queue and the leader-owned
+shared durability barrier directly. Applied group members remain unobservable
+until the shared sync succeeds. A successful barrier completes every member only
+after its assigned contiguous LSN is durable; a sync failure or leader panic
+fails the affected group, poisons the database, releases leadership, and causes
+queued followers to fail closed. Weak fairness checks that every submitted
+request eventually completes or fails instead of waiting forever.
 
 ## Generation Reclamation
 
@@ -142,6 +150,11 @@ rely on these environmental assumptions:
 - the model's checkpoint artifact represents the checkpoint, canonical graph,
   adjacency, property spill, and property projection artifacts as one validated
   generation selected by the manifest.
+
+The group-commit liveness property assumes a finite submitted request set and
+weakly fair scheduling of the leader, queue drain, durability barrier, request
+completion, and poison rejection actions. It does not establish a wall-clock
+latency bound for the Rust `Condvar` implementation.
 
 `SyncOnCheckpoint` is intentionally outside the acknowledged-commit durability
 claim: writes accepted under that policy may be lost before the next successful
