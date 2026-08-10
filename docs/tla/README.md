@@ -68,6 +68,17 @@ completes every member only after its assigned contiguous LSN is durable; a sync
 failure or leader panic fails the affected group, poisons the database, releases
 leadership, and causes queued followers to fail closed. Weak fairness checks that
 every submitted request eventually completes or fails instead of waiting forever.
+The model intentionally abstracts the collection delay: fixed and adaptive delay
+policies both refine `StartGroup` followed by zero or more bounded collection
+steps. The implementation preserves that abstraction by never waiting for a
+single queued request, retaining the same entry and byte bounds, and clamping
+every adaptive delay to the configured `max_delay`. When no completed fsync
+baseline is available, a contended queue falls back to the smaller of the
+configured bound and the fixed default delay. This keeps cold-start and
+post-idle bursts inside the same bounded scheduling refinement without adding a
+lone-request delay. Fsync sampling and evidence admission affect scheduling
+only; they do not change WAL ordering, durability, visibility, failure, or
+acknowledgement transitions represented by the model.
 
 `SkeinWalDoctor.tla` models the destructive repair protocol separately from
 ordinary recovery. Planning and applying each hold the exclusive database
@@ -99,6 +110,7 @@ They are implementation evidence, not a machine-checked refinement proof.
 | --- | --- | --- |
 | WAL sync precedes visibility and apply failure closes the handle | `finish_wal_append`, `apply_wal_op`, `ensure_usable` | `post_wal_apply_failure_poisons_handle_until_reopen` |
 | A grouped WAL sync acknowledges every member after one successful barrier or fails the whole group closed | `WalSyncGroupState`, `finish_wal_sync_group`, `CommitSequencer` | `wal_group_commit_shares_one_sync_without_changing_record_order`, `wal_group_sync_failure_rejects_commit_and_poisons_until_reopen`, `panicking_group_commit_task_completes_followers_and_releases_leader` |
+| Fixed and adaptive collection policies remain bounded scheduling refinements, use a bounded fallback without a recent baseline, and never delay a lone request | `effective_group_commit_delay`, `wait_for_group_commit_peers`, `WalGroupCommitConfig::adaptive_enabled_after_evidence` | `wal_group_commit_skips_the_coalescing_window_without_contention`, `adaptive_delay_is_derived_from_the_completed_baseline`, `adaptive_delay_uses_bounded_fallback_before_the_completed_sample_floor`, `adaptive_delay_falls_back_after_the_recent_window_expires`, `wal_group_commit_requires_performance_and_recovery_evidence` |
 | A torn WAL batch has no partial recovered visibility | `replay_wal` record decode and batch apply | `default_recovery_rejects_torn_wal_tail_until_explicit_doctor_repair`, `doctor_discards_torn_batch_wal_without_partial_path_recovery` |
 | Doctor repair binds destructive truncation to an exact acknowledged plan and resumes a durable pending audit | `DatabaseDoctor::{plan_wal_tail_repair,apply_wal_tail_repair}` | `apply_rejects_toctou_change_without_preparing_repair`, `prepared_repair_blocks_open_and_can_continue`, `truncated_pending_repair_is_resumable_and_blocks_open_until_finalized` |
 | Complete-record corruption and LSN gaps fail closed | `replay_wal` framing, checksum, and expected-LSN checks | `rejects_and_quarantines_checksum_corruption_at_wal_tail`, `rejects_and_quarantines_checksum_corruption_before_valid_wal_suffix`, `rejects_and_quarantines_non_contiguous_wal_lsn` |

@@ -1,6 +1,8 @@
 use crate::{
     ConcurrentDatabase, ConcurrentTransactionOptions, Database, SkeinError, Value,
-    WalGroupCommitActivation, WalGroupCommitConfig, WalGroupCommitEvidence,
+    WalGroupCommitActivation, WalGroupCommitAdaptiveColdStartEvidence,
+    WalGroupCommitAdaptivePolicyEvidence, WalGroupCommitConfig, WalGroupCommitDelayPolicy,
+    WalGroupCommitEvidence, WalGroupCommitTailLatencyEvidence, WalGroupCommitWaitDecision,
 };
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::{Arc, Barrier};
@@ -178,16 +180,43 @@ fn wal_group_commit_requires_performance_and_recovery_evidence() {
         Duration::from_millis(1),
     );
     let accepted_evidence = WalGroupCommitEvidence {
+        measurement_rounds: 9,
         commit_count: 8,
         baseline_elapsed_micros: 200,
         baseline_fsync_count: 8,
         grouped_elapsed_micros: 100,
         grouped_fsync_count: 1,
-        grouped_p95_commit_micros: 20,
-        max_accepted_p95_commit_micros: 25,
-        single_writer_commit_count: 16,
-        single_writer_grouped_p95_commit_micros: 20,
-        max_accepted_single_writer_p95_commit_micros: 25,
+        concurrent_tail_latency: WalGroupCommitTailLatencyEvidence {
+            commit_count: 8,
+            paired_p95_regression_micros: 5,
+            paired_p95_mad_micros: 1,
+            max_accepted_p95_regression_micros: 10,
+        },
+        single_writer_tail_latency: WalGroupCommitTailLatencyEvidence {
+            commit_count: 16,
+            paired_p95_regression_micros: 5,
+            paired_p95_mad_micros: 1,
+            max_accepted_p95_regression_micros: 10,
+        },
+        single_writer_max_coalescing_wait_count: 0,
+        single_writer_max_observed_group_entries: 1,
+        adaptive_cold_start_behavior: Some(WalGroupCommitAdaptiveColdStartEvidence {
+            commit_count: 8,
+            min_fallback_delay_count: 1,
+            min_coalescing_wait_count: 1,
+            min_observed_group_entries: 2,
+        }),
+        adaptive_steady_state_comparison: Some(WalGroupCommitAdaptivePolicyEvidence {
+            paired_elapsed_regression_micros: -10,
+            paired_elapsed_mad_micros: 1,
+            max_accepted_elapsed_regression_micros: 10,
+            tail_latency: WalGroupCommitTailLatencyEvidence {
+                commit_count: 8,
+                paired_p95_regression_micros: -5,
+                paired_p95_mad_micros: 1,
+                max_accepted_p95_regression_micros: 10,
+            },
+        }),
         strict_recovery_verified: true,
         wal_order_verified: true,
     };
@@ -214,7 +243,10 @@ fn wal_group_commit_requires_performance_and_recovery_evidence() {
 
     let low_concurrency_rejected = WalGroupCommitConfig::enabled_after_evidence(
         WalGroupCommitEvidence {
-            single_writer_grouped_p95_commit_micros: 26,
+            single_writer_tail_latency: WalGroupCommitTailLatencyEvidence {
+                paired_p95_regression_micros: 11,
+                ..accepted_evidence.single_writer_tail_latency
+            },
             ..accepted_evidence
         },
         bounds.0,
@@ -225,6 +257,55 @@ fn wal_group_commit_requires_performance_and_recovery_evidence() {
     assert!(low_concurrency_rejected
         .to_string()
         .contains("single_writer_tail_latency_budget_exceeded"));
+
+    let single_round_rejected = WalGroupCommitConfig::enabled_after_evidence(
+        WalGroupCommitEvidence {
+            measurement_rounds: 1,
+            ..accepted_evidence
+        },
+        bounds.0,
+        bounds.1,
+        bounds.2,
+    )
+    .unwrap_err();
+    assert!(single_round_rejected
+        .to_string()
+        .contains("insufficient_measurement_rounds"));
+
+    let missing_concurrent_tail = WalGroupCommitConfig::enabled_after_evidence(
+        WalGroupCommitEvidence {
+            concurrent_tail_latency: WalGroupCommitTailLatencyEvidence {
+                commit_count: 0,
+                ..accepted_evidence.concurrent_tail_latency
+            },
+            ..accepted_evidence
+        },
+        bounds.0,
+        bounds.1,
+        bounds.2,
+    )
+    .unwrap_err();
+    assert!(missing_concurrent_tail
+        .to_string()
+        .contains("concurrent_tail_latency_evidence_missing"));
+
+    let structural_rejected = WalGroupCommitConfig::enabled_after_evidence(
+        WalGroupCommitEvidence {
+            single_writer_max_coalescing_wait_count: 1,
+            single_writer_max_observed_group_entries: 2,
+            ..accepted_evidence
+        },
+        bounds.0,
+        bounds.1,
+        bounds.2,
+    )
+    .unwrap_err();
+    assert!(structural_rejected
+        .to_string()
+        .contains("single_writer_coalescing_wait_observed"));
+    assert!(structural_rejected
+        .to_string()
+        .contains("single_writer_grouping_observed"));
 
     let admitted = WalGroupCommitConfig::enabled_after_evidence(
         accepted_evidence,
@@ -237,11 +318,242 @@ fn wal_group_commit_requires_performance_and_recovery_evidence() {
         admitted.activation(),
         WalGroupCommitActivation::EvidenceValidated
     );
+    let adaptive = WalGroupCommitConfig::adaptive_enabled_after_evidence(
+        accepted_evidence,
+        bounds.0,
+        bounds.1,
+        bounds.2,
+    )
+    .unwrap();
+    assert_eq!(
+        adaptive.delay_policy(),
+        WalGroupCommitDelayPolicy::AdaptiveFsync
+    );
+
+    let missing_policy_comparison = WalGroupCommitConfig::adaptive_enabled_after_evidence(
+        WalGroupCommitEvidence {
+            adaptive_cold_start_behavior: None,
+            ..accepted_evidence
+        },
+        bounds.0,
+        bounds.1,
+        bounds.2,
+    )
+    .unwrap_err();
+    assert!(missing_policy_comparison
+        .to_string()
+        .contains("cold_start_behavior_missing"));
+
+    let missing_steady_state_comparison = WalGroupCommitConfig::adaptive_enabled_after_evidence(
+        WalGroupCommitEvidence {
+            adaptive_steady_state_comparison: None,
+            ..accepted_evidence
+        },
+        bounds.0,
+        bounds.1,
+        bounds.2,
+    )
+    .unwrap_err();
+    assert!(missing_steady_state_comparison
+        .to_string()
+        .contains("steady_state_fixed_policy_comparison_missing"));
+
+    let empty_policy_comparison = WalGroupCommitConfig::adaptive_enabled_after_evidence(
+        WalGroupCommitEvidence {
+            adaptive_steady_state_comparison: Some(WalGroupCommitAdaptivePolicyEvidence {
+                tail_latency: WalGroupCommitTailLatencyEvidence {
+                    commit_count: 0,
+                    ..accepted_evidence
+                        .adaptive_steady_state_comparison
+                        .unwrap()
+                        .tail_latency
+                },
+                ..accepted_evidence.adaptive_steady_state_comparison.unwrap()
+            }),
+            ..accepted_evidence
+        },
+        bounds.0,
+        bounds.1,
+        bounds.2,
+    )
+    .unwrap_err();
+    assert!(empty_policy_comparison
+        .to_string()
+        .contains("steady_state_adaptive_policy_evidence_missing"));
+
+    let policy_regression = WalGroupCommitConfig::adaptive_enabled_after_evidence(
+        WalGroupCommitEvidence {
+            adaptive_steady_state_comparison: Some(WalGroupCommitAdaptivePolicyEvidence {
+                paired_elapsed_regression_micros: 11,
+                paired_elapsed_mad_micros: 1,
+                max_accepted_elapsed_regression_micros: 10,
+                tail_latency: WalGroupCommitTailLatencyEvidence {
+                    paired_p95_regression_micros: 11,
+                    ..accepted_evidence
+                        .adaptive_steady_state_comparison
+                        .unwrap()
+                        .tail_latency
+                },
+            }),
+            ..accepted_evidence
+        },
+        bounds.0,
+        bounds.1,
+        bounds.2,
+    )
+    .unwrap_err();
+    assert!(policy_regression
+        .to_string()
+        .contains("steady_state_adaptive_policy_elapsed_budget_exceeded"));
+    assert!(policy_regression
+        .to_string()
+        .contains("steady_state_adaptive_policy_tail_latency_budget_exceeded"));
+
+    let noisy_tail_latency = WalGroupCommitConfig::enabled_after_evidence(
+        WalGroupCommitEvidence {
+            concurrent_tail_latency: WalGroupCommitTailLatencyEvidence {
+                paired_p95_regression_micros: 8,
+                paired_p95_mad_micros: 21,
+                max_accepted_p95_regression_micros: 10,
+                ..accepted_evidence.concurrent_tail_latency
+            },
+            ..accepted_evidence
+        },
+        bounds.0,
+        bounds.1,
+        bounds.2,
+    )
+    .unwrap_err();
+    assert!(noisy_tail_latency
+        .to_string()
+        .contains("tail_latency_insufficient_signal_quality"));
+
+    let noisy_adaptive_elapsed = WalGroupCommitConfig::adaptive_enabled_after_evidence(
+        WalGroupCommitEvidence {
+            adaptive_steady_state_comparison: Some(WalGroupCommitAdaptivePolicyEvidence {
+                paired_elapsed_regression_micros: 8,
+                paired_elapsed_mad_micros: 21,
+                ..accepted_evidence.adaptive_steady_state_comparison.unwrap()
+            }),
+            ..accepted_evidence
+        },
+        bounds.0,
+        bounds.1,
+        bounds.2,
+    )
+    .unwrap_err();
+    assert!(noisy_adaptive_elapsed
+        .to_string()
+        .contains("steady_state_adaptive_policy_elapsed_insufficient_signal_quality"));
+
+    let strong_but_variable_improvement = WalGroupCommitConfig::adaptive_enabled_after_evidence(
+        WalGroupCommitEvidence {
+            adaptive_steady_state_comparison: Some(WalGroupCommitAdaptivePolicyEvidence {
+                paired_elapsed_regression_micros: -27_000,
+                paired_elapsed_mad_micros: 39_374,
+                max_accepted_elapsed_regression_micros: 1_790,
+                tail_latency: WalGroupCommitTailLatencyEvidence {
+                    paired_p95_regression_micros: -27_000,
+                    paired_p95_mad_micros: 39_374,
+                    max_accepted_p95_regression_micros: 1_790,
+                    ..accepted_evidence
+                        .adaptive_steady_state_comparison
+                        .unwrap()
+                        .tail_latency
+                },
+            }),
+            ..accepted_evidence
+        },
+        bounds.0,
+        bounds.1,
+        bounds.2,
+    )
+    .unwrap();
+    assert_eq!(
+        strong_but_variable_improvement.delay_policy(),
+        WalGroupCommitDelayPolicy::AdaptiveFsync
+    );
+
+    // Cold start is gated on behavior. Losing the fallback means the adaptive
+    // policy stops coalescing until an fsync baseline exists, which is exactly
+    // the regression the fallback was added to prevent.
+    for (behavior, blocker) in [
+        (
+            WalGroupCommitAdaptiveColdStartEvidence {
+                min_fallback_delay_count: 0,
+                ..accepted_evidence.adaptive_cold_start_behavior.unwrap()
+            },
+            "cold_start_fallback_not_exercised",
+        ),
+        (
+            WalGroupCommitAdaptiveColdStartEvidence {
+                min_coalescing_wait_count: 0,
+                ..accepted_evidence.adaptive_cold_start_behavior.unwrap()
+            },
+            "cold_start_coalescing_disabled",
+        ),
+        (
+            WalGroupCommitAdaptiveColdStartEvidence {
+                min_observed_group_entries: 1,
+                ..accepted_evidence.adaptive_cold_start_behavior.unwrap()
+            },
+            "cold_start_grouping_not_observed",
+        ),
+    ] {
+        let rejected = WalGroupCommitConfig::adaptive_enabled_after_evidence(
+            WalGroupCommitEvidence {
+                adaptive_cold_start_behavior: Some(behavior),
+                ..accepted_evidence
+            },
+            bounds.0,
+            bounds.1,
+            bounds.2,
+        )
+        .unwrap_err();
+        assert!(rejected.to_string().contains(blocker), "{rejected}");
+    }
+
+    // Cold-start admission must not depend on paired timing. The elapsed and
+    // p95 spreads observed on real hardware are variance between two arms that
+    // are meant to behave identically, so no timing value can block it.
+    let unstable_cold_start_timing = WalGroupCommitConfig::adaptive_enabled_after_evidence(
+        WalGroupCommitEvidence {
+            adaptive_cold_start_behavior: Some(WalGroupCommitAdaptiveColdStartEvidence {
+                commit_count: 256,
+                min_fallback_delay_count: 3,
+                min_coalescing_wait_count: 12,
+                min_observed_group_entries: 4,
+            }),
+            ..accepted_evidence
+        },
+        bounds.0,
+        bounds.1,
+        bounds.2,
+    )
+    .unwrap();
+    assert_eq!(
+        unstable_cold_start_timing.delay_policy(),
+        WalGroupCommitDelayPolicy::AdaptiveFsync
+    );
+
+    let too_few_rounds = WalGroupCommitConfig::enabled_after_evidence(
+        WalGroupCommitEvidence {
+            measurement_rounds: 5,
+            ..accepted_evidence
+        },
+        bounds.0,
+        bounds.1,
+        bounds.2,
+    )
+    .unwrap_err();
+    assert!(too_few_rounds
+        .to_string()
+        .contains("insufficient_measurement_rounds"));
 }
 
 #[test]
 fn wal_group_commit_skips_the_coalescing_window_without_contention() {
-    let group_commit = WalGroupCommitConfig::benchmark_candidate(
+    let group_commit = WalGroupCommitConfig::benchmark_adaptive_candidate(
         NonZeroUsize::new(16).unwrap(),
         NonZeroU64::new(1024 * 1024).unwrap(),
         Duration::from_millis(10),
@@ -260,6 +572,15 @@ fn wal_group_commit_skips_the_coalescing_window_without_contention() {
     assert_eq!(snapshot.submitted_commits, 1);
     assert_eq!(snapshot.completed_commits, 1);
     assert_eq!(snapshot.coalescing_wait_count, 0);
+    assert_eq!(
+        snapshot.delay_policy,
+        WalGroupCommitDelayPolicy::AdaptiveFsync
+    );
+    assert_eq!(
+        snapshot.last_wait_decision,
+        WalGroupCommitWaitDecision::SingleRequest
+    );
+    assert_eq!(snapshot.effective_delay_micros, 0);
 }
 
 #[test]

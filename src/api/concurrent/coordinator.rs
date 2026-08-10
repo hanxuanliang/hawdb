@@ -1,5 +1,8 @@
 use super::super::transaction_locks::{LockRequest, LockTable, WaitForGraph};
-use super::{Database, QueryOutput, WalGroupCommitConfig, WalGroupCommitSnapshot};
+use super::{
+    Database, QueryOutput, WalGroupCommitConfig, WalGroupCommitDelayPolicy, WalGroupCommitSnapshot,
+    WalGroupCommitWaitDecision, DEFAULT_WAL_GROUP_COMMIT_MAX_DELAY,
+};
 use crate::error::{Result, SkeinError};
 use std::collections::VecDeque;
 use std::fmt::{self, Debug, Formatter};
@@ -7,6 +10,15 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
+
+const ADAPTIVE_FSYNC_BUCKET_COUNT: usize = 100;
+const ADAPTIVE_FSYNC_BUCKET_DURATION: Duration = Duration::from_millis(100);
+const ADAPTIVE_FSYNC_MIN_COMPLETED_SAMPLES: u64 = 8;
+// Keep the collection window proportional to device latency without letting it
+// dominate the durability operation it is intended to amortize.
+const ADAPTIVE_FSYNC_FRACTION_PER_MILLION: u64 = 75_000;
+// Delays below this policy floor add scheduler jitter without useful batching.
+const MIN_USEFUL_COALESCING_DELAY: Duration = Duration::from_micros(50);
 
 pub(super) struct CommitSequencer {
     database: Mutex<Database>,
@@ -71,7 +83,9 @@ impl CommitSequencer {
     }
 
     pub(super) fn group_commit_snapshot(&self) -> Result<WalGroupCommitSnapshot> {
-        Ok(self.group_commit.lock_state()?.metrics)
+        let mut state = self.group_commit.lock_state()?;
+        state.refresh_fsync_estimate(Instant::now());
+        Ok(state.metrics)
     }
 
     fn run_group_commit(&self) -> Result<()> {
@@ -119,6 +133,11 @@ impl CommitSequencer {
             .count() as u64;
         {
             let mut state = self.group_commit.lock_state_recover();
+            if flush.fsync_performed {
+                state
+                    .fsync_window
+                    .record(Instant::now(), flush.fsync_micros);
+            }
             state.metrics.completed_commits = state
                 .metrics
                 .completed_commits
@@ -146,6 +165,7 @@ impl CommitSequencer {
                 .metrics
                 .total_fsync_micros
                 .saturating_add(flush.fsync_micros);
+            state.refresh_fsync_estimate(Instant::now());
         }
         complete_commit_requests(completed)?;
         self.group_commit.available.notify_all();
@@ -212,14 +232,22 @@ impl CommitSequencer {
 
     fn wait_for_group_commit_peers(&self) -> Result<()> {
         if self.group_commit.config.max_entries().get() == 1 {
+            self.group_commit
+                .lock_state()?
+                .record_wait_decision(WalGroupCommitWaitDecision::MaxEntriesBound, Duration::ZERO);
             return Ok(());
         }
         std::thread::yield_now();
-        let deadline = Instant::now() + self.group_commit.config.max_delay();
         let mut state = self.group_commit.lock_state()?;
         if state.queue.len() < 2 {
+            state.record_wait_decision(WalGroupCommitWaitDecision::SingleRequest, Duration::ZERO);
             return Ok(());
         }
+        let delay = effective_group_commit_delay(&mut state, self.group_commit.config);
+        if delay.is_zero() {
+            return Ok(());
+        }
+        let deadline = Instant::now() + delay;
         state.metrics.coalescing_wait_count = state.metrics.coalescing_wait_count.saturating_add(1);
         while state.queue.len() < self.group_commit.config.max_entries().get() {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -328,13 +356,7 @@ impl GroupCommitCoordinator {
     fn new(config: WalGroupCommitConfig) -> Self {
         Self {
             config,
-            state: Mutex::new(GroupCommitState {
-                metrics: WalGroupCommitSnapshot {
-                    activation: config.activation(),
-                    ..WalGroupCommitSnapshot::default()
-                },
-                ..GroupCommitState::default()
-            }),
+            state: Mutex::new(GroupCommitState::new(config, Instant::now())),
             available: Condvar::new(),
         }
     }
@@ -399,11 +421,175 @@ fn complete_commit_requests(
     }
 }
 
-#[derive(Default)]
 struct GroupCommitState {
     queue: VecDeque<Arc<QueuedCommit>>,
     leader_active: bool,
     metrics: WalGroupCommitSnapshot,
+    fsync_window: AdaptiveFsyncWindow,
+}
+
+impl GroupCommitState {
+    fn new(config: WalGroupCommitConfig, now: Instant) -> Self {
+        Self {
+            queue: VecDeque::new(),
+            leader_active: false,
+            metrics: WalGroupCommitSnapshot {
+                activation: config.activation(),
+                delay_policy: config.delay_policy(),
+                ..WalGroupCommitSnapshot::default()
+            },
+            fsync_window: AdaptiveFsyncWindow::new(now),
+        }
+    }
+
+    fn refresh_fsync_estimate(&mut self, now: Instant) -> AdaptiveFsyncEstimate {
+        let estimate = self.fsync_window.estimate(now);
+        self.metrics.fsync_baseline_micros = estimate.baseline_micros;
+        self.metrics.fsync_baseline_sample_count = estimate.sample_count;
+        estimate
+    }
+
+    fn record_wait_decision(&mut self, decision: WalGroupCommitWaitDecision, delay: Duration) {
+        let delay_micros = duration_micros(delay);
+        self.metrics.last_wait_decision = decision;
+        self.metrics.effective_delay_micros = delay_micros;
+        self.metrics.max_observed_effective_delay_micros = self
+            .metrics
+            .max_observed_effective_delay_micros
+            .max(delay_micros);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct AdaptiveFsyncBucket {
+    tick: Option<u64>,
+    total_micros: u64,
+    sample_count: u64,
+}
+
+struct AdaptiveFsyncWindow {
+    origin: Instant,
+    buckets: [AdaptiveFsyncBucket; ADAPTIVE_FSYNC_BUCKET_COUNT],
+}
+
+impl AdaptiveFsyncWindow {
+    fn new(origin: Instant) -> Self {
+        Self {
+            origin,
+            buckets: [AdaptiveFsyncBucket::default(); ADAPTIVE_FSYNC_BUCKET_COUNT],
+        }
+    }
+
+    fn record(&mut self, now: Instant, fsync_micros: u64) {
+        let tick = self.tick(now);
+        let bucket_index = (tick % ADAPTIVE_FSYNC_BUCKET_COUNT as u64) as usize;
+        let bucket = &mut self.buckets[bucket_index];
+        if bucket.tick != Some(tick) {
+            *bucket = AdaptiveFsyncBucket {
+                tick: Some(tick),
+                ..AdaptiveFsyncBucket::default()
+            };
+        }
+        bucket.total_micros = bucket.total_micros.saturating_add(fsync_micros);
+        bucket.sample_count = bucket.sample_count.saturating_add(1);
+    }
+
+    fn estimate(&self, now: Instant) -> AdaptiveFsyncEstimate {
+        let current_tick = self.tick(now);
+        let mut sample_count = 0u64;
+        let mut baseline_micros = None;
+        for bucket in &self.buckets {
+            let Some(tick) = bucket.tick else {
+                continue;
+            };
+            let age = current_tick.saturating_sub(tick);
+            if age == 0 || age > ADAPTIVE_FSYNC_BUCKET_COUNT as u64 || tick > current_tick {
+                continue;
+            }
+            // Excluding the in-progress bucket prevents a partial low average
+            // from being mistaken for a faster durability baseline.
+            sample_count = sample_count.saturating_add(bucket.sample_count);
+            let average = bucket.total_micros.div_ceil(bucket.sample_count.max(1));
+            baseline_micros =
+                Some(baseline_micros.map_or(average, |baseline: u64| baseline.min(average)));
+        }
+        if sample_count < ADAPTIVE_FSYNC_MIN_COMPLETED_SAMPLES {
+            baseline_micros = None;
+        }
+        AdaptiveFsyncEstimate {
+            baseline_micros,
+            sample_count,
+        }
+    }
+
+    fn tick(&self, now: Instant) -> u64 {
+        let elapsed = now.saturating_duration_since(self.origin).as_nanos();
+        let bucket_nanos = ADAPTIVE_FSYNC_BUCKET_DURATION.as_nanos().max(1);
+        u64::try_from(elapsed / bucket_nanos).unwrap_or(u64::MAX)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AdaptiveFsyncEstimate {
+    baseline_micros: Option<u64>,
+    sample_count: u64,
+}
+
+fn effective_group_commit_delay(
+    state: &mut GroupCommitState,
+    config: WalGroupCommitConfig,
+) -> Duration {
+    effective_group_commit_delay_at(state, config, Instant::now())
+}
+
+fn effective_group_commit_delay_at(
+    state: &mut GroupCommitState,
+    config: WalGroupCommitConfig,
+    now: Instant,
+) -> Duration {
+    if config.delay_policy() == WalGroupCommitDelayPolicy::Fixed {
+        let delay = config.max_delay();
+        state.record_wait_decision(WalGroupCommitWaitDecision::FixedDelay, delay);
+        return delay;
+    }
+
+    let estimate = state.refresh_fsync_estimate(now);
+    let Some(baseline_micros) = estimate.baseline_micros else {
+        state.metrics.adaptive_fallback_count =
+            state.metrics.adaptive_fallback_count.saturating_add(1);
+        // The adaptive cap may be intentionally larger for slow devices. Until
+        // measurements justify that larger window, retain the known fixed
+        // default while still honoring a caller's tighter bound.
+        let fallback = config.max_delay().min(DEFAULT_WAL_GROUP_COMMIT_MAX_DELAY);
+        if fallback < MIN_USEFUL_COALESCING_DELAY {
+            state
+                .record_wait_decision(WalGroupCommitWaitDecision::BelowUsefulDelay, Duration::ZERO);
+            return Duration::ZERO;
+        }
+        state.record_wait_decision(WalGroupCommitWaitDecision::AdaptiveFallbackDelay, fallback);
+        return fallback;
+    };
+    let derived_micros = u64::try_from(
+        u128::from(baseline_micros) * u128::from(ADAPTIVE_FSYNC_FRACTION_PER_MILLION) / 1_000_000,
+    )
+    .unwrap_or(u64::MAX);
+    let max_delay_micros = duration_micros(config.max_delay());
+    let effective_micros = derived_micros.min(max_delay_micros);
+    if derived_micros > max_delay_micros {
+        state.metrics.adaptive_delay_clamp_count =
+            state.metrics.adaptive_delay_clamp_count.saturating_add(1);
+    }
+    let delay = Duration::from_micros(effective_micros);
+    if delay < MIN_USEFUL_COALESCING_DELAY {
+        state.record_wait_decision(WalGroupCommitWaitDecision::BelowUsefulDelay, Duration::ZERO);
+        return Duration::ZERO;
+    }
+    state.record_wait_decision(WalGroupCommitWaitDecision::AdaptiveDelay, delay);
+    delay
+}
+
+fn duration_micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
 #[derive(Debug, Default)]
@@ -543,6 +729,15 @@ mod group_commit_tests {
         .unwrap()
     }
 
+    fn adaptive_test_config(max_delay: Duration) -> WalGroupCommitConfig {
+        WalGroupCommitConfig::benchmark_adaptive_candidate(
+            NonZeroUsize::new(8).unwrap(),
+            NonZeroU64::new(1024).unwrap(),
+            max_delay,
+        )
+        .unwrap()
+    }
+
     fn successful_task() -> CommitTask {
         Box::new(|_| Ok(QueryOutput { rows: Vec::new() }))
     }
@@ -611,5 +806,196 @@ mod group_commit_tests {
         let state = sequencer.group_commit.lock_state().unwrap();
         assert!(!state.leader_active);
         assert_eq!(state.metrics.completed_commits, 1);
+    }
+
+    #[test]
+    fn adaptive_fsync_window_uses_completed_bucket_average_lower_envelope() {
+        let origin = Instant::now();
+        let mut window = AdaptiveFsyncWindow::new(origin);
+        for _ in 0..ADAPTIVE_FSYNC_MIN_COMPLETED_SAMPLES {
+            window.record(origin + Duration::from_millis(1), 4_000);
+        }
+        assert_eq!(
+            window.estimate(origin + Duration::from_millis(50)),
+            AdaptiveFsyncEstimate::default()
+        );
+        assert_eq!(
+            window.estimate(origin + ADAPTIVE_FSYNC_BUCKET_DURATION),
+            AdaptiveFsyncEstimate {
+                baseline_micros: Some(4_000),
+                sample_count: ADAPTIVE_FSYNC_MIN_COMPLETED_SAMPLES,
+            }
+        );
+
+        for _ in 0..ADAPTIVE_FSYNC_MIN_COMPLETED_SAMPLES {
+            window.record(origin + Duration::from_millis(110), 8_000);
+        }
+        assert_eq!(
+            window.estimate(origin + Duration::from_millis(200)),
+            AdaptiveFsyncEstimate {
+                baseline_micros: Some(4_000),
+                sample_count: ADAPTIVE_FSYNC_MIN_COMPLETED_SAMPLES * 2,
+            }
+        );
+        assert_eq!(
+            window.estimate(origin + Duration::from_millis(10_100)),
+            AdaptiveFsyncEstimate {
+                baseline_micros: Some(8_000),
+                sample_count: ADAPTIVE_FSYNC_MIN_COMPLETED_SAMPLES,
+            }
+        );
+    }
+
+    #[test]
+    fn adaptive_delay_is_derived_from_the_completed_baseline() {
+        let origin = Instant::now();
+        let config = adaptive_test_config(Duration::from_micros(500));
+        let mut state = GroupCommitState::new(config, origin);
+        for _ in 0..ADAPTIVE_FSYNC_MIN_COMPLETED_SAMPLES {
+            state
+                .fsync_window
+                .record(origin + Duration::from_millis(1), 4_000);
+        }
+        assert_eq!(
+            effective_group_commit_delay_at(
+                &mut state,
+                config,
+                origin + ADAPTIVE_FSYNC_BUCKET_DURATION,
+            ),
+            Duration::from_micros(300)
+        );
+        assert_eq!(
+            state.metrics.last_wait_decision,
+            WalGroupCommitWaitDecision::AdaptiveDelay
+        );
+        assert_eq!(state.metrics.effective_delay_micros, 300);
+    }
+
+    #[test]
+    fn adaptive_delay_uses_bounded_fallback_before_the_completed_sample_floor() {
+        let origin = Instant::now();
+        let config = adaptive_test_config(Duration::from_micros(500));
+        let mut state = GroupCommitState::new(config, origin);
+        for _ in 0..ADAPTIVE_FSYNC_MIN_COMPLETED_SAMPLES - 1 {
+            state
+                .fsync_window
+                .record(origin + Duration::from_millis(1), 4_000);
+        }
+        assert_eq!(
+            effective_group_commit_delay_at(
+                &mut state,
+                config,
+                origin + ADAPTIVE_FSYNC_BUCKET_DURATION,
+            ),
+            DEFAULT_WAL_GROUP_COMMIT_MAX_DELAY
+        );
+        assert_eq!(
+            state.metrics.last_wait_decision,
+            WalGroupCommitWaitDecision::AdaptiveFallbackDelay
+        );
+        assert_eq!(state.metrics.adaptive_fallback_count, 1);
+        assert_eq!(
+            state.metrics.fsync_baseline_sample_count,
+            ADAPTIVE_FSYNC_MIN_COMPLETED_SAMPLES - 1
+        );
+
+        let short_origin = Instant::now();
+        let short_config = adaptive_test_config(Duration::from_micros(40));
+        let mut short_state = GroupCommitState::new(short_config, short_origin);
+        assert_eq!(
+            effective_group_commit_delay_at(&mut short_state, short_config, short_origin),
+            Duration::ZERO
+        );
+        assert_eq!(
+            short_state.metrics.last_wait_decision,
+            WalGroupCommitWaitDecision::BelowUsefulDelay
+        );
+        assert_eq!(short_state.metrics.adaptive_fallback_count, 1);
+    }
+
+    #[test]
+    fn adaptive_delay_falls_back_after_the_recent_window_expires() {
+        let origin = Instant::now();
+        let config = adaptive_test_config(Duration::from_micros(500));
+        let mut state = GroupCommitState::new(config, origin);
+        for _ in 0..ADAPTIVE_FSYNC_MIN_COMPLETED_SAMPLES {
+            state
+                .fsync_window
+                .record(origin + Duration::from_millis(1), 4_000);
+        }
+        assert_eq!(
+            effective_group_commit_delay_at(
+                &mut state,
+                config,
+                origin + ADAPTIVE_FSYNC_BUCKET_DURATION,
+            ),
+            Duration::from_micros(300)
+        );
+
+        assert_eq!(
+            effective_group_commit_delay_at(
+                &mut state,
+                config,
+                origin + Duration::from_millis(10_200),
+            ),
+            DEFAULT_WAL_GROUP_COMMIT_MAX_DELAY
+        );
+        assert_eq!(
+            state.metrics.last_wait_decision,
+            WalGroupCommitWaitDecision::AdaptiveFallbackDelay
+        );
+        assert_eq!(state.metrics.adaptive_fallback_count, 1);
+        assert_eq!(state.metrics.fsync_baseline_sample_count, 0);
+    }
+
+    #[test]
+    fn adaptive_delay_matrix_tracks_fast_and_slow_fsync_baselines() {
+        let cases = [
+            (
+                50,
+                Duration::ZERO,
+                WalGroupCommitWaitDecision::BelowUsefulDelay,
+                0,
+            ),
+            (
+                400,
+                Duration::ZERO,
+                WalGroupCommitWaitDecision::BelowUsefulDelay,
+                0,
+            ),
+            (
+                3_500,
+                Duration::from_micros(262),
+                WalGroupCommitWaitDecision::AdaptiveDelay,
+                0,
+            ),
+            (
+                20_000,
+                Duration::from_micros(500),
+                WalGroupCommitWaitDecision::AdaptiveDelay,
+                1,
+            ),
+        ];
+        for (fsync_micros, expected_delay, expected_decision, expected_clamps) in cases {
+            let origin = Instant::now();
+            let config = adaptive_test_config(Duration::from_micros(500));
+            let mut state = GroupCommitState::new(config, origin);
+            for _ in 0..ADAPTIVE_FSYNC_MIN_COMPLETED_SAMPLES {
+                state
+                    .fsync_window
+                    .record(origin + Duration::from_millis(1), fsync_micros);
+            }
+
+            assert_eq!(
+                effective_group_commit_delay_at(
+                    &mut state,
+                    config,
+                    origin + ADAPTIVE_FSYNC_BUCKET_DURATION,
+                ),
+                expected_delay
+            );
+            assert_eq!(state.metrics.last_wait_decision, expected_decision);
+            assert_eq!(state.metrics.adaptive_delay_clamp_count, expected_clamps);
+        }
     }
 }
