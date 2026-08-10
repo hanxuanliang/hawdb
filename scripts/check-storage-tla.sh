@@ -10,6 +10,7 @@ readonly downloaded_jar="$tla_work_root/tla2tools-$tla_version.jar"
 readonly specifications=(
   SkeinStorageDurability
   SkeinWalGroupCommit
+  SkeinWalDoctor
   SkeinGenerationReclamation
   SkeinConcurrentSnapshots
   SkeinTransactionConcurrency

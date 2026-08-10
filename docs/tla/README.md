@@ -15,7 +15,7 @@ a Java 11 or newer runtime. Without `TLA2TOOLS_JAR`, the script downloads TLA+
 Tools 1.7.4 and verifies its SHA-256 digest before execution.
 
 Set `TLA_RESULTS_DIR` and `TLA_SOURCE_REVISION` to retain a release artifact.
-The artifact contains the exact six `.tla` and `.cfg` inputs, one complete TLC
+The artifact contains the exact seven `.tla` and `.cfg` inputs, one complete TLC
 log per model, the Java version, and a revision- and tool-bound manifest. CI
 validates the downloaded artifact with:
 
@@ -66,6 +66,15 @@ after its assigned contiguous LSN is durable; a sync failure or leader panic
 fails the affected group, poisons the database, releases leadership, and causes
 queued followers to fail closed. Weak fairness checks that every submitted
 request eventually completes or fails instead of waiting forever.
+
+`SkeinWalDoctor.tla` models the destructive repair protocol separately from
+ordinary recovery. Planning and applying each hold the exclusive database
+directory lease. A repair can mutate the WAL only after an exact source-identity
+plan has been acknowledged, a quarantine copy is durable, and a `Prepared` audit
+record has been published. The retained WAL is published before the `Applied`
+audit record, and the pending record is removed last. Crashes preserve these
+durable phases so an interrupted repair either resumes or keeps ordinary open
+fail-closed. Stale or unacknowledged plans are rejected without changing the WAL.
 
 ## Generation Reclamation
 
@@ -155,6 +164,11 @@ The group-commit liveness property assumes a finite submitted request set and
 weakly fair scheduling of the leader, queue drain, durability barrier, request
 completion, and poison rejection actions. It does not establish a wall-clock
 latency bound for the Rust `Condvar` implementation.
+
+The WAL-doctor liveness property assumes strong fairness for resuming an exact
+pending repair and for its truncate, applied-audit, and pending-audit removal
+steps. External modification after the durable `Prepared` audit record is outside
+that progress assumption and remains a fail-closed integrity error.
 
 `SyncOnCheckpoint` is intentionally outside the acknowledged-commit durability
 claim: writes accepted under that policy may be lost before the next successful
