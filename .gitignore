@@ -1,4 +1,8 @@
 /target/
 /.idea/
+# Local Claude Code scratch state. Shared project configuration under
+# .claude/ (settings.json, agents, commands, skills, hooks) stays tracked.
+/.claude/worktrees/
+/.claude/settings.local.json
 bazel-*
 MODULE.bazel.lock
