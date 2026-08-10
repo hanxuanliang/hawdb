@@ -60,12 +60,14 @@ boundary only when every member is acknowledged after the shared sync and the
 handle is poisoned if the barrier fails.
 
 `SkeinWalGroupCommit.tla` models the bounded request queue and the leader-owned
-shared durability barrier directly. Applied group members remain unobservable
-until the shared sync succeeds. A successful barrier completes every member only
-after its assigned contiguous LSN is durable; a sync failure or leader panic
-fails the affected group, poisons the database, releases leadership, and causes
-queued followers to fail closed. Weak fairness checks that every submitted
-request eventually completes or fails instead of waiting forever.
+shared durability barrier directly. Entry count is a hard group bound; the byte
+threshold is checked after each request and therefore permits at most one
+request-sized overshoot, matching the implementation. Applied group members
+remain unobservable until the shared sync succeeds. A successful barrier
+completes every member only after its assigned contiguous LSN is durable; a sync
+failure or leader panic fails the affected group, poisons the database, releases
+leadership, and causes queued followers to fail closed. Weak fairness checks that
+every submitted request eventually completes or fails instead of waiting forever.
 
 `SkeinWalDoctor.tla` models the destructive repair protocol separately from
 ordinary recovery. Planning and applying each hold the exclusive database

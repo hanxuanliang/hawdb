@@ -1,9 +1,13 @@
 ------------------------ MODULE SkeinWalGroupCommit ------------------------
 EXTENDS FiniteSets, Integers, Naturals, Sequences
 
-CONSTANT Requests, MaxGroupSize
+CONSTANT Requests, HeavyRequest, MaxGroupSize, MaxGroupBytes, MaxRequestBytes
 
-ASSUME Requests # {} /\ MaxGroupSize \in Nat \ {0}
+ASSUME Requests # {}
+       /\ HeavyRequest \in Requests
+       /\ MaxGroupSize \in Nat \ {0}
+       /\ MaxGroupBytes \in Nat \ {0}
+       /\ MaxRequestBytes \in Nat \ {0}
 
 VARIABLES requestPhase,
           requestLsn,
@@ -30,6 +34,14 @@ vars == <<requestPhase,
 RequestPhases == {"idle", "queued", "applied", "synced", "completed", "failed"}
 GroupPhases == {"none", "collecting", "sealed", "durable"}
 TerminalPhases == {"completed", "failed"}
+
+RequestBytes(request) == IF request = HeavyRequest THEN MaxRequestBytes ELSE 1
+
+RECURSIVE SequenceBytes(_)
+SequenceBytes(sequence) ==
+    IF sequence = <<>>
+      THEN 0
+      ELSE RequestBytes(Head(sequence)) + SequenceBytes(Tail(sequence))
 
 SeqSet(sequence) ==
     {sequence[index] : index \in 1..Len(sequence)}
@@ -76,6 +88,7 @@ ExecuteFront ==
     /\ groupPhase = "collecting"
     /\ queue # <<>>
     /\ Len(group) < MaxGroupSize
+    /\ SequenceBytes(group) < MaxGroupBytes
     /\ requestPhase[request] = "queued"
     /\ requestPhase' = [requestPhase EXCEPT ![request] = "applied"]
     /\ requestLsn' = [requestLsn EXCEPT ![request] = nextLsn]
@@ -192,7 +205,9 @@ QueueAndGroupMatchPhases ==
     /\ \A request \in GroupRequests:
         requestPhase[request] \in {"applied", "synced"}
 
-GroupIsBounded == Len(group) <= MaxGroupSize
+GroupIsBounded ==
+    /\ Len(group) <= MaxGroupSize
+    /\ SequenceBytes(group) <= MaxGroupBytes + MaxRequestBytes - 1
 
 LeaderOwnsGroup ==
     /\ (groupPhase = "none" => ~leaderActive /\ group = <<>>)
