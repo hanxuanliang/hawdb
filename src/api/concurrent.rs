@@ -4,10 +4,11 @@ mod group_commit;
 use self::coordinator::{CommitSequencer, LockManager, TransactionIdAllocator};
 pub use self::group_commit::{
     WalGroupCommitActivation, WalGroupCommitAdaptiveColdStartEvidence,
-    WalGroupCommitAdaptivePolicyEvidence, WalGroupCommitConfig, WalGroupCommitDelayPolicy,
-    WalGroupCommitEvidence, WalGroupCommitSnapshot, WalGroupCommitTailLatencyEvidence,
-    WalGroupCommitWaitDecision, DEFAULT_WAL_GROUP_COMMIT_MAX_BYTES,
-    DEFAULT_WAL_GROUP_COMMIT_MAX_DELAY, DEFAULT_WAL_GROUP_COMMIT_MAX_ENTRIES,
+    WalGroupCommitAdaptivePolicyEvidence, WalGroupCommitAdaptiveSteadyStateEvidence,
+    WalGroupCommitConfig, WalGroupCommitDelayPolicy, WalGroupCommitEvidence,
+    WalGroupCommitSnapshot, WalGroupCommitTailLatencyEvidence, WalGroupCommitWaitDecision,
+    DEFAULT_WAL_GROUP_COMMIT_MAX_BYTES, DEFAULT_WAL_GROUP_COMMIT_MAX_DELAY,
+    DEFAULT_WAL_GROUP_COMMIT_MAX_ENTRIES,
 };
 use super::transaction_locks::{LockMode, LockRequest};
 use super::{

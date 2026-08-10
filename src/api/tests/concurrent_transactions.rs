@@ -1,8 +1,9 @@
 use crate::{
     ConcurrentDatabase, ConcurrentTransactionOptions, Database, SkeinError, Value,
     WalGroupCommitActivation, WalGroupCommitAdaptiveColdStartEvidence,
-    WalGroupCommitAdaptivePolicyEvidence, WalGroupCommitConfig, WalGroupCommitDelayPolicy,
-    WalGroupCommitEvidence, WalGroupCommitTailLatencyEvidence, WalGroupCommitWaitDecision,
+    WalGroupCommitAdaptivePolicyEvidence, WalGroupCommitAdaptiveSteadyStateEvidence,
+    WalGroupCommitConfig, WalGroupCommitDelayPolicy, WalGroupCommitEvidence,
+    WalGroupCommitTailLatencyEvidence, WalGroupCommitWaitDecision,
 };
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::{Arc, Barrier};
@@ -206,20 +207,31 @@ fn wal_group_commit_requires_performance_and_recovery_evidence() {
             min_coalescing_wait_count: 1,
             min_observed_group_entries: 2,
         }),
-        adaptive_steady_state_comparison: Some(WalGroupCommitAdaptivePolicyEvidence {
-            paired_elapsed_regression_micros: -10,
-            paired_elapsed_mad_micros: 1,
-            max_accepted_elapsed_regression_micros: 10,
-            tail_latency: WalGroupCommitTailLatencyEvidence {
-                commit_count: 8,
-                paired_p95_regression_micros: -5,
-                paired_p95_mad_micros: 1,
-                max_accepted_p95_regression_micros: 10,
+        adaptive_steady_state_behavior: Some(WalGroupCommitAdaptiveSteadyStateEvidence {
+            commit_count: 8,
+            max_fallback_delay_count: 0,
+            min_fsync_baseline_sample_count: 8,
+            min_coalescing_wait_count: 1,
+            min_observed_group_entries: 2,
+            safety_net: WalGroupCommitAdaptivePolicyEvidence {
+                paired_elapsed_regression_micros: -10,
+                paired_elapsed_mad_micros: 1,
+                max_accepted_elapsed_regression_micros: 10,
+                tail_latency: WalGroupCommitTailLatencyEvidence {
+                    commit_count: 8,
+                    paired_p95_regression_micros: -5,
+                    paired_p95_mad_micros: 1,
+                    max_accepted_p95_regression_micros: 10,
+                },
             },
         }),
         strict_recovery_verified: true,
         wal_order_verified: true,
     };
+    let steady_state_safety_net = accepted_evidence
+        .adaptive_steady_state_behavior
+        .unwrap()
+        .safety_net;
     let rejected = WalGroupCommitConfig::enabled_after_evidence(
         WalGroupCommitEvidence {
             baseline_elapsed_micros: 100,
@@ -346,7 +358,7 @@ fn wal_group_commit_requires_performance_and_recovery_evidence() {
 
     let missing_steady_state_comparison = WalGroupCommitConfig::adaptive_enabled_after_evidence(
         WalGroupCommitEvidence {
-            adaptive_steady_state_comparison: None,
+            adaptive_steady_state_behavior: None,
             ..accepted_evidence
         },
         bounds.0,
@@ -356,19 +368,19 @@ fn wal_group_commit_requires_performance_and_recovery_evidence() {
     .unwrap_err();
     assert!(missing_steady_state_comparison
         .to_string()
-        .contains("steady_state_fixed_policy_comparison_missing"));
+        .contains("steady_state_behavior_missing"));
 
     let empty_policy_comparison = WalGroupCommitConfig::adaptive_enabled_after_evidence(
         WalGroupCommitEvidence {
-            adaptive_steady_state_comparison: Some(WalGroupCommitAdaptivePolicyEvidence {
-                tail_latency: WalGroupCommitTailLatencyEvidence {
-                    commit_count: 0,
-                    ..accepted_evidence
-                        .adaptive_steady_state_comparison
-                        .unwrap()
-                        .tail_latency
+            adaptive_steady_state_behavior: Some(WalGroupCommitAdaptiveSteadyStateEvidence {
+                safety_net: WalGroupCommitAdaptivePolicyEvidence {
+                    tail_latency: WalGroupCommitTailLatencyEvidence {
+                        commit_count: 0,
+                        ..steady_state_safety_net.tail_latency
+                    },
+                    ..steady_state_safety_net
                 },
-                ..accepted_evidence.adaptive_steady_state_comparison.unwrap()
+                ..accepted_evidence.adaptive_steady_state_behavior.unwrap()
             }),
             ..accepted_evidence
         },
@@ -383,17 +395,17 @@ fn wal_group_commit_requires_performance_and_recovery_evidence() {
 
     let policy_regression = WalGroupCommitConfig::adaptive_enabled_after_evidence(
         WalGroupCommitEvidence {
-            adaptive_steady_state_comparison: Some(WalGroupCommitAdaptivePolicyEvidence {
-                paired_elapsed_regression_micros: 11,
-                paired_elapsed_mad_micros: 1,
-                max_accepted_elapsed_regression_micros: 10,
-                tail_latency: WalGroupCommitTailLatencyEvidence {
-                    paired_p95_regression_micros: 11,
-                    ..accepted_evidence
-                        .adaptive_steady_state_comparison
-                        .unwrap()
-                        .tail_latency
+            adaptive_steady_state_behavior: Some(WalGroupCommitAdaptiveSteadyStateEvidence {
+                safety_net: WalGroupCommitAdaptivePolicyEvidence {
+                    paired_elapsed_regression_micros: 11,
+                    paired_elapsed_mad_micros: 1,
+                    max_accepted_elapsed_regression_micros: 10,
+                    tail_latency: WalGroupCommitTailLatencyEvidence {
+                        paired_p95_regression_micros: 11,
+                        ..steady_state_safety_net.tail_latency
+                    },
                 },
+                ..accepted_evidence.adaptive_steady_state_behavior.unwrap()
             }),
             ..accepted_evidence
         },
@@ -430,10 +442,13 @@ fn wal_group_commit_requires_performance_and_recovery_evidence() {
 
     let noisy_adaptive_elapsed = WalGroupCommitConfig::adaptive_enabled_after_evidence(
         WalGroupCommitEvidence {
-            adaptive_steady_state_comparison: Some(WalGroupCommitAdaptivePolicyEvidence {
-                paired_elapsed_regression_micros: 8,
-                paired_elapsed_mad_micros: 21,
-                ..accepted_evidence.adaptive_steady_state_comparison.unwrap()
+            adaptive_steady_state_behavior: Some(WalGroupCommitAdaptiveSteadyStateEvidence {
+                safety_net: WalGroupCommitAdaptivePolicyEvidence {
+                    paired_elapsed_regression_micros: 8,
+                    paired_elapsed_mad_micros: 21,
+                    ..steady_state_safety_net
+                },
+                ..accepted_evidence.adaptive_steady_state_behavior.unwrap()
             }),
             ..accepted_evidence
         },
@@ -448,19 +463,19 @@ fn wal_group_commit_requires_performance_and_recovery_evidence() {
 
     let strong_but_variable_improvement = WalGroupCommitConfig::adaptive_enabled_after_evidence(
         WalGroupCommitEvidence {
-            adaptive_steady_state_comparison: Some(WalGroupCommitAdaptivePolicyEvidence {
-                paired_elapsed_regression_micros: -27_000,
-                paired_elapsed_mad_micros: 39_374,
-                max_accepted_elapsed_regression_micros: 1_790,
-                tail_latency: WalGroupCommitTailLatencyEvidence {
-                    paired_p95_regression_micros: -27_000,
-                    paired_p95_mad_micros: 39_374,
-                    max_accepted_p95_regression_micros: 1_790,
-                    ..accepted_evidence
-                        .adaptive_steady_state_comparison
-                        .unwrap()
-                        .tail_latency
+            adaptive_steady_state_behavior: Some(WalGroupCommitAdaptiveSteadyStateEvidence {
+                safety_net: WalGroupCommitAdaptivePolicyEvidence {
+                    paired_elapsed_regression_micros: -27_000,
+                    paired_elapsed_mad_micros: 39_374,
+                    max_accepted_elapsed_regression_micros: 1_790,
+                    tail_latency: WalGroupCommitTailLatencyEvidence {
+                        paired_p95_regression_micros: -27_000,
+                        paired_p95_mad_micros: 39_374,
+                        max_accepted_p95_regression_micros: 1_790,
+                        ..steady_state_safety_net.tail_latency
+                    },
                 },
+                ..accepted_evidence.adaptive_steady_state_behavior.unwrap()
             }),
             ..accepted_evidence
         },
@@ -535,6 +550,52 @@ fn wal_group_commit_requires_performance_and_recovery_evidence() {
         unstable_cold_start_timing.delay_policy(),
         WalGroupCommitDelayPolicy::AdaptiveFsync
     );
+
+    // A warm window must prove it is the derived path being exercised: a
+    // baseline exists, no decision falls back to the fixed delay, and
+    // coalescing still groups.
+    for (behavior, blocker) in [
+        (
+            WalGroupCommitAdaptiveSteadyStateEvidence {
+                min_fsync_baseline_sample_count: 0,
+                ..accepted_evidence.adaptive_steady_state_behavior.unwrap()
+            },
+            "steady_state_baseline_not_established",
+        ),
+        (
+            WalGroupCommitAdaptiveSteadyStateEvidence {
+                max_fallback_delay_count: 1,
+                ..accepted_evidence.adaptive_steady_state_behavior.unwrap()
+            },
+            "steady_state_fell_back_to_fixed_delay",
+        ),
+        (
+            WalGroupCommitAdaptiveSteadyStateEvidence {
+                min_coalescing_wait_count: 0,
+                ..accepted_evidence.adaptive_steady_state_behavior.unwrap()
+            },
+            "steady_state_coalescing_disabled",
+        ),
+        (
+            WalGroupCommitAdaptiveSteadyStateEvidence {
+                min_observed_group_entries: 1,
+                ..accepted_evidence.adaptive_steady_state_behavior.unwrap()
+            },
+            "steady_state_grouping_not_observed",
+        ),
+    ] {
+        let rejected = WalGroupCommitConfig::adaptive_enabled_after_evidence(
+            WalGroupCommitEvidence {
+                adaptive_steady_state_behavior: Some(behavior),
+                ..accepted_evidence
+            },
+            bounds.0,
+            bounds.1,
+            bounds.2,
+        )
+        .unwrap_err();
+        assert!(rejected.to_string().contains(blocker), "{rejected}");
+    }
 
     let too_few_rounds = WalGroupCommitConfig::enabled_after_evidence(
         WalGroupCommitEvidence {

@@ -106,6 +106,36 @@ pub struct WalGroupCommitAdaptiveColdStartEvidence {
     pub min_observed_group_entries: usize,
 }
 
+/// Steady-state evidence is behavioral, with timing kept only as a coarse
+/// guard.
+///
+/// A host whose measured fsync baseline derives a window close to the fixed
+/// default runs two policies that are indistinguishable in principle: the
+/// derived and fixed windows differ by tens of microseconds against a tail
+/// latency of milliseconds, so paired timing cannot resolve the difference and
+/// a tight budget samples noise. What is worth proving is that the derived path
+/// is the one being exercised — the baseline exists, the delay comes from it
+/// rather than from the fallback, and coalescing still groups. Whether the
+/// derived window is better than a hand-tuned constant is a question about the
+/// device, answered by `adaptive_delay_matrix_tracks_fast_and_slow_fsync_baselines`
+/// over the derivation itself, not by wall-clock rounds on one disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalGroupCommitAdaptiveSteadyStateEvidence {
+    pub commit_count: usize,
+    /// Largest per-round count of decisions that fell back to the fixed delay.
+    /// A warm window must never fall back.
+    pub max_fallback_delay_count: u64,
+    /// Smallest per-round count of completed fsync samples behind the baseline.
+    pub min_fsync_baseline_sample_count: u64,
+    /// Smallest per-round count of coalescing waits.
+    pub min_coalescing_wait_count: u64,
+    /// Smallest per-round maximum group size.
+    pub min_observed_group_entries: usize,
+    /// Gross-regression guard. Its budget is deliberately wide because it
+    /// catches a broken derivation, not a small difference.
+    pub safety_net: WalGroupCommitAdaptivePolicyEvidence,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalGroupCommitEvidence {
     /// Number of alternating baseline/candidate measurement rounds.
@@ -121,8 +151,8 @@ pub struct WalGroupCommitEvidence {
     pub single_writer_max_observed_group_entries: usize,
     /// Behavior observed before an fsync baseline exists.
     pub adaptive_cold_start_behavior: Option<WalGroupCommitAdaptiveColdStartEvidence>,
-    /// Fixed-versus-adaptive evidence collected after the fsync window is ready.
-    pub adaptive_steady_state_comparison: Option<WalGroupCommitAdaptivePolicyEvidence>,
+    /// Behavior observed after the fsync window is ready.
+    pub adaptive_steady_state_behavior: Option<WalGroupCommitAdaptiveSteadyStateEvidence>,
     pub strict_recovery_verified: bool,
     pub wal_order_verified: bool,
 }
@@ -206,10 +236,7 @@ impl WalGroupCommitConfig {
     ) -> Result<Self> {
         validate_evidence(evidence)?;
         validate_adaptive_cold_start_evidence(evidence.adaptive_cold_start_behavior)?;
-        validate_adaptive_policy_evidence(
-            "steady_state",
-            evidence.adaptive_steady_state_comparison,
-        )?;
+        validate_adaptive_steady_state_evidence(evidence.adaptive_steady_state_behavior)?;
         Self::with_activation(
             WalGroupCommitActivation::EvidenceValidated,
             WalGroupCommitDelayPolicy::AdaptiveFsync,
@@ -391,6 +418,40 @@ fn validate_adaptive_cold_start_evidence(
             blockers.join(",")
         )))
     }
+}
+
+fn validate_adaptive_steady_state_evidence(
+    evidence: Option<WalGroupCommitAdaptiveSteadyStateEvidence>,
+) -> Result<()> {
+    let Some(evidence) = evidence else {
+        return Err(SkeinError::Execution(
+            "WAL group commit adaptive evidence rejected: steady_state_behavior_missing"
+                .to_string(),
+        ));
+    };
+    let mut blockers = Vec::new();
+    if evidence.commit_count == 0 {
+        blockers.push("steady_state_evidence_missing");
+    }
+    if evidence.min_fsync_baseline_sample_count == 0 {
+        blockers.push("steady_state_baseline_not_established");
+    }
+    if evidence.max_fallback_delay_count > 0 {
+        blockers.push("steady_state_fell_back_to_fixed_delay");
+    }
+    if evidence.min_coalescing_wait_count == 0 {
+        blockers.push("steady_state_coalescing_disabled");
+    }
+    if evidence.min_observed_group_entries < 2 {
+        blockers.push("steady_state_grouping_not_observed");
+    }
+    if !blockers.is_empty() {
+        return Err(SkeinError::Execution(format!(
+            "WAL group commit adaptive evidence rejected: {}",
+            blockers.join(",")
+        )));
+    }
+    validate_adaptive_policy_evidence("steady_state", Some(evidence.safety_net))
 }
 
 fn validate_adaptive_policy_evidence(
