@@ -1608,9 +1608,11 @@ dependencies = [
  "serde",
  "serde_json",
  "simsimd",
+ "skein-analytics",
  "skein-core",
  "skein-cypher",
  "skein-ddl",
+ "skein-evidence",
  "skein-executor",
  "skein-expression",
  "skein-integrity",
@@ -1628,6 +1630,14 @@ dependencies = [
  "skein-vector-projection",
  "unicode-width",
  "zstd",
+]
+
+[[package]]
+name = "skein-analytics"
+version = "0.1.0"
+dependencies = [
+ "skein-core",
+ "skein-storage",
 ]
 
 [[package]]
@@ -1653,6 +1663,15 @@ dependencies = [
 name = "skein-ddl"
 version = "0.1.0"
 dependencies = [
+ "skein-core",
+]
+
+[[package]]
+name = "skein-evidence"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "skein-core",
 ]
 
