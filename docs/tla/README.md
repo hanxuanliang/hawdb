@@ -15,7 +15,7 @@ a Java 11 or newer runtime. Without `TLA2TOOLS_JAR`, the script downloads TLA+
 Tools 1.7.4 and verifies its SHA-256 digest before execution.
 
 Set `TLA_RESULTS_DIR` and `TLA_SOURCE_REVISION` to retain a release artifact.
-The artifact contains the exact eight `.tla` and `.cfg` inputs, one complete TLC
+The artifact contains the exact nine `.tla` and `.cfg` inputs, one complete TLC
 log per model, the Java version, and a revision- and tool-bound manifest. CI
 validates the downloaded artifact with:
 
@@ -216,6 +216,63 @@ has already observed with a smaller timestamp, and the stale value wins the
 next join. The specification now requires the hybrid logical clock to merge
 past every observed timestamp on delta apply, which the model represents as
 a Lamport clock merged on each sync round.
+
+## Confirmed-Log Delivery Between Slaves
+
+`SkeinGossipDelivery.tla` models the delivery layer of the master-slave CRDT
+contract. It is deliberately separate from `SkeinCrdtReplication.tla`: that
+model checks what the join computes once a batch arrives, this one checks
+what arrives and what is allowed to. The split is what makes three replicas
+checkable.
+
+The rule it exists for is that a slave's local operation stays pending until
+the master confirms it, and that gossip carries confirmed operations only.
+Pending work reaches the master over the session and nowhere else, so the
+master has seen everything that exists anywhere in the deployment.
+
+That rule is what collapses the delivery problem. Gossip carries one totally
+ordered confirmation log, so a digest is a single integer and a response is
+a contiguous run above it — no version vector on the wire, and no reorder
+buffer, because a responder shipping from the position the requester
+declared cannot leave a hole. `held` is explicit state rather than derived,
+so an action that shipped pending work is expressible and therefore
+catchable.
+
+The model checks that a replica holds only confirmed work and its own, that
+no replica claims a position beyond the log, that positions are contiguous
+and unique, and that a position implies possession of its whole prefix.
+Under fair sessions and rounds it also checks that every operation is
+confirmed and reaches every replica.
+
+The checked-in instance is three nodes with `n1` as master and two
+operations per replica (about 47k distinct states, three seconds). Mutation
+testing sizes it: leaking the peer's pending work into a gossip response
+reports `HeldIsConfirmedOrOwn`, advancing a position past what was actually
+pulled reports `PositionImpliesPrefix`, and reusing a confirmation position
+instead of appending reports `LogIsContiguousAndUnique`.
+
+### Losing the Master
+
+`SlaveFairSpec` and `SlavesAgreeWithoutMaster` cover the partition case:
+only gossip is fair, so the master may stall forever, and the property is
+that slaves still agree on the confirmed prefix. They do not converge on
+each other's pending work — that is the stated cost of the confirmation
+rule, not a defect. Because TLC takes one specification per configuration,
+this is checked out of band:
+
+```bash
+sed -e 's/^SPECIFICATION FairSpec/SPECIFICATION SlaveFairSpec/' \
+    -e 's/^PROPERTY EventualDelivery/PROPERTY SlavesAgreeWithoutMaster/' \
+    docs/tla/SkeinGossipDelivery.cfg > /tmp/partition.cfg
+```
+
+It passes, and it has teeth: disabling slave-to-slave gossip so everything
+must route through the master makes it fail.
+
+What neither model covers is the composition itself. That fair delivery
+plus a convergent join yields a convergent system is argued from the join's
+commutativity, associativity, and idempotence, not machine-checked, because
+the composed model is the three-replica instance that does not terminate.
 
 ## Proof Boundary
 
