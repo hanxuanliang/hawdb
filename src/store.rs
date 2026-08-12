@@ -115,9 +115,13 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
+use wal_codec::binary::encode_binary_wal_record;
+use wal_codec::frame::{
+    encode_binary_wal_header, frame_binary_wal_record, WAL_BINARY_FILE_HEADER_BYTES,
+};
 use wal_codec::{
-    decode_wal_header, encode_wal_header, quarantine_corrupt_wal, read_bounded_wal_record,
-    reject_corrupt_wal_record, WalDecodeResult, WalEntry, WalOp,
+    encode_wal_header, quarantine_corrupt_wal, reject_corrupt_wal_record, sniff_wal_format,
+    WalCursorEvent, WalEntry, WalFileFormat, WalOp, WalOpenOutcome, WalRecordCursor,
 };
 
 const STORAGE_VERSION: &str = "skein-storage-v1";
@@ -225,6 +229,100 @@ fn wal_apply_failpoint() -> Result<()> {
             ));
         }
     }
+    Ok(())
+}
+
+/// Test support: renders a WAL file (either format) as its canonical V1
+/// text record lines, one encoded record per line, header excluded. A torn
+/// tail ends the rendering; corruption renders a terminal marker line so
+/// identity comparisons on damaged files stay deterministic.
+#[cfg(test)]
+pub(crate) fn decode_wal_records_as_v1_text(path: &Path) -> std::io::Result<String> {
+    use std::io::{Error, ErrorKind};
+    let invalid = |reason: String| Error::new(ErrorKind::InvalidData, reason);
+    let mut cursor =
+        match WalRecordCursor::open(path, None).map_err(|error| invalid(error.to_string()))? {
+            WalOpenOutcome::Cursor(cursor) => cursor,
+            WalOpenOutcome::MissingHeader => {
+                return Err(invalid("WAL is missing its header".to_string()));
+            }
+            WalOpenOutcome::HeaderTorn { reason } | WalOpenOutcome::HeaderCorrupt { reason } => {
+                return Err(invalid(reason));
+            }
+        };
+    let mut out = String::new();
+    loop {
+        match cursor.next().map_err(|error| invalid(error.to_string()))? {
+            WalCursorEvent::Entry { entry, .. } => {
+                out.push_str(&entry.encode());
+                out.push('\n');
+            }
+            WalCursorEvent::Corrupt { offset, reason } => {
+                out.push_str(&format!("<corrupt at {offset}: {reason}>\n"));
+                break;
+            }
+            WalCursorEvent::TornTail { .. } | WalCursorEvent::Eof => break,
+        }
+    }
+    Ok(out)
+}
+
+/// Test support: rewrites a cleanly decodable WAL file into the V1 text
+/// encoding with the same generation header and records. Exercises the
+/// text-to-binary upgrade path that real databases cross at checkpoint.
+#[cfg(test)]
+pub(crate) fn rewrite_wal_as_v1_text(path: &Path) -> Result<()> {
+    let mut cursor = match WalRecordCursor::open(path, None)? {
+        WalOpenOutcome::Cursor(cursor) => cursor,
+        _ => {
+            return Err(SkeinError::Storage(
+                "cannot rewrite a WAL without a valid header".to_string(),
+            ));
+        }
+    };
+    let mut text = encode_wal_header(cursor.generation(), cursor.start_lsn());
+    text.push('\n');
+    loop {
+        match cursor.next()? {
+            WalCursorEvent::Entry { entry, .. } => {
+                text.push_str(&entry.encode());
+                text.push('\n');
+            }
+            WalCursorEvent::Eof => break,
+            WalCursorEvent::TornTail { .. } | WalCursorEvent::Corrupt { .. } => {
+                return Err(SkeinError::Storage(
+                    "cannot rewrite a damaged WAL as V1 text".to_string(),
+                ));
+            }
+        }
+    }
+    // Drop the cursor's handle on this exact path before truncating it, and
+    // sync on the write handle itself: Windows FlushFileBuffers denies a
+    // read-only handle, which POSIX fsync happily accepts.
+    drop(cursor);
+    let mut file = File::create(path)?;
+    std::io::Write::write_all(&mut file, text.as_bytes())?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Test support: appends one well-formed framed record carrying a stale
+/// WAL generation, emulating a recycled-log region past the logical tail.
+/// Recovery must read it as clean end of log.
+#[cfg(test)]
+pub(crate) fn append_stale_generation_wal_fragment(path: &Path) -> Result<()> {
+    let bytes = fs::read(path)?;
+    let (generation, _) = wal_codec::frame::decode_binary_wal_header(&bytes)?;
+    let position = bytes.len() as u64 - WAL_BINARY_FILE_HEADER_BYTES as u64;
+    let stale_generation = generation.wrapping_sub(1);
+    let framed = frame_binary_wal_record(
+        stale_generation,
+        b"recycled-region-record-from-a-previous-generation",
+        position,
+    );
+    let mut file = OpenOptions::new().append(true).open(path)?;
+    file.write_all(&framed)?;
+    file.sync_all()?;
     Ok(())
 }
 
@@ -10870,87 +10968,50 @@ impl GraphStore {
                 config.max_bytes.unwrap_or_default()
             )));
         }
-        let file = File::open(&wal_path)?;
-        let mut reader = BufReader::new(file);
-        let mut expected_lsn = wal_replay_start_lsn;
-        let mut byte_offset = 0u64;
-        let mut saw_wal_header = false;
-        while let Some(record) = read_bounded_wal_record(&mut reader, config.max_record_bytes)? {
-            let record_start = byte_offset;
-            byte_offset = byte_offset.saturating_add(record.encoded_len);
-            if !record.terminated_by_newline {
-                if !saw_wal_header {
-                    return Err(SkeinError::Storage(
-                        "WAL header is not newline-terminated".to_string(),
-                    ));
-                }
-                let reason = "WAL tail record is not newline-terminated";
+        let mut cursor = match WalRecordCursor::open(&wal_path, config.max_record_bytes)? {
+            WalOpenOutcome::Cursor(cursor) => cursor,
+            WalOpenOutcome::MissingHeader => {
                 return Err(SkeinError::Storage(format!(
-                    "strict WAL recovery rejected torn tail: {reason}; use DatabaseDoctor to inspect and explicitly repair the incomplete final record"
+                    "WAL generation {wal_generation} is missing its header"
                 )));
             }
-            let line = match std::str::from_utf8(&record.bytes) {
-                Ok(line) => line,
-                Err(error) => {
-                    return reject_corrupt_wal_record(
-                        &wal_path,
-                        wal_generation,
-                        read_only,
-                        record_start,
-                        format!("record is not valid UTF-8: {error}"),
-                    );
-                }
-            };
-            if !saw_wal_header {
-                let (generation, start_lsn) = match decode_wal_header(line) {
-                    Ok(header) => header,
-                    Err(error) => {
-                        return reject_corrupt_wal_record(
-                            &wal_path,
-                            wal_generation,
-                            read_only,
-                            record_start,
-                            error.to_string(),
-                        );
-                    }
-                };
-                if generation != wal_generation || start_lsn != wal_replay_start_lsn {
+            WalOpenOutcome::HeaderTorn { reason } => {
+                return Err(SkeinError::Storage(reason));
+            }
+            WalOpenOutcome::HeaderCorrupt { reason } => {
+                return reject_corrupt_wal_record(&wal_path, wal_generation, read_only, 0, reason);
+            }
+        };
+        if cursor.generation() != wal_generation || cursor.start_lsn() != wal_replay_start_lsn {
+            return Err(SkeinError::Storage(format!(
+                "WAL header generation/start ({}, {}) does not match manifest ({wal_generation}, {wal_replay_start_lsn})",
+                cursor.generation(),
+                cursor.start_lsn()
+            )));
+        }
+        let mut expected_lsn = wal_replay_start_lsn;
+        loop {
+            let (entry, record_start, record_encoded_len) = match cursor.next()? {
+                WalCursorEvent::Eof => break,
+                WalCursorEvent::TornTail { reason, .. } => {
                     return Err(SkeinError::Storage(format!(
-                        "WAL header generation/start ({generation}, {start_lsn}) does not match manifest ({wal_generation}, {wal_replay_start_lsn})"
+                        "strict WAL recovery rejected torn tail: {reason}; use DatabaseDoctor to inspect and explicitly repair the incomplete final record"
                     )));
                 }
-                saw_wal_header = true;
-                continue;
-            }
-            if line.is_empty() {
-                return reject_corrupt_wal_record(
-                    &wal_path,
-                    wal_generation,
-                    read_only,
-                    record_start,
-                    "record is empty",
-                );
-            }
-            let entry = match WalEntry::decode(line) {
-                Err(error) => {
+                WalCursorEvent::Corrupt { offset, reason } => {
                     return reject_corrupt_wal_record(
                         &wal_path,
                         wal_generation,
                         read_only,
-                        record_start,
-                        error.to_string(),
-                    );
-                }
-                Ok(WalDecodeResult::Entry(entry)) => entry,
-                Ok(WalDecodeResult::Corrupt(reason)) => {
-                    return reject_corrupt_wal_record(
-                        &wal_path,
-                        wal_generation,
-                        read_only,
-                        record_start,
+                        offset,
                         reason,
                     );
                 }
+                WalCursorEvent::Entry {
+                    entry,
+                    start_offset,
+                    encoded_len,
+                } => (entry, start_offset, encoded_len),
             };
             if entry.lsn != expected_lsn {
                 quarantine_corrupt_wal(&wal_path, wal_generation, read_only)?;
@@ -10977,7 +11038,7 @@ impl GraphStore {
                 )));
             }
             replayed_entries += 1;
-            replayed_bytes = replayed_bytes.saturating_add(record.encoded_len);
+            replayed_bytes = replayed_bytes.saturating_add(record_encoded_len);
             expected_lsn = expected_lsn
                 .checked_add(1)
                 .ok_or_else(|| SkeinError::Storage("WAL LSN overflow during replay".to_string()))?;
@@ -11008,13 +11069,9 @@ impl GraphStore {
                 }
             }
         }
-        if !saw_wal_header {
-            return Err(SkeinError::Storage(format!(
-                "WAL generation {wal_generation} is missing its header"
-            )));
-        }
         if let Some(durable) = &mut self.durable {
             durable.next_lsn = expected_lsn;
+            durable.wal_commit_epoch = self.commit_epoch;
         }
         Ok(StorageRecoveryReport {
             durable: true,
@@ -17900,9 +17957,7 @@ mod tests {
                 .unwrap();
         }
         let wal_path = active_wal_path(&path);
-        let wal = std::fs::read_to_string(&wal_path).unwrap();
-        let torn = wal.rsplit_once('\t').unwrap().0;
-        std::fs::write(&wal_path, torn).unwrap();
+        truncate_test_wal_tail(&wal_path, 8);
 
         let plan =
             DatabaseDoctor::plan_wal_tail_repair(&path, WalDoctorOptions::default()).unwrap();
@@ -17920,6 +17975,18 @@ mod tests {
         std::fs::remove_dir_all(path).unwrap();
     }
 
+    /// Cuts `cut` bytes off the WAL tail, leaving the final record's
+    /// fragment chain physically incomplete (a binary torn tail).
+    fn truncate_test_wal_tail(wal_path: &std::path::Path, cut: u64) {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(wal_path)
+            .unwrap();
+        let len = file.metadata().unwrap().len();
+        file.set_len(len - cut).unwrap();
+        file.sync_all().unwrap();
+    }
+
     #[test]
     fn rejects_and_quarantines_checksum_corruption_before_valid_wal_suffix() {
         let path = unique_test_dir("wal_middle_corruption");
@@ -17934,11 +18001,13 @@ mod tests {
                 .unwrap();
         }
         let wal_path = active_wal_path(&path);
-        let wal = std::fs::read_to_string(&wal_path).unwrap();
-        let mut lines = wal.lines().map(str::to_string).collect::<Vec<_>>();
-        let first_record = lines[1].rsplit_once('\t').unwrap().0;
-        lines[1] = format!("{first_record}\t0");
-        std::fs::write(&wal_path, format!("{}\n", lines.join("\n"))).unwrap();
+        // Flip one payload byte of the first record: mid-log corruption
+        // ahead of a valid suffix must fail closed.
+        let mut wal = std::fs::read(&wal_path).unwrap();
+        let first_payload_offset = super::WAL_BINARY_FILE_HEADER_BYTES
+            + super::wal_codec::frame::WAL_FRAGMENT_HEADER_BYTES;
+        wal[first_payload_offset] ^= 0xff;
+        std::fs::write(&wal_path, &wal).unwrap();
 
         let mut catalog = Catalog::default();
         let error = GraphStore::open(&path, &mut catalog).unwrap_err();
@@ -17962,20 +18031,18 @@ mod tests {
                 .unwrap();
         }
         let wal_path = active_wal_path(&path);
-        let wal = std::fs::read_to_string(&wal_path).unwrap();
-        let mut lines = wal.lines().map(str::to_string).collect::<Vec<_>>();
-        let (body, raw_checksum) = lines.last().unwrap().rsplit_once('\t').unwrap();
-        let body = body.to_string();
-        let corrupt_checksum = raw_checksum.parse::<u64>().unwrap().wrapping_add(1);
-        *lines.last_mut().unwrap() = format!("{body}\t{corrupt_checksum}");
-        let corrupt_wal = format!("{}\n", lines.join("\n"));
+        // Flip the stored checksum of the final complete fragment chain:
+        // a complete chain failing its checksum is corruption, never a
+        // repairable torn tail.
+        let mut corrupt_wal = std::fs::read(&wal_path).unwrap();
+        corrupt_wal[super::WAL_BINARY_FILE_HEADER_BYTES] ^= 0xff;
         std::fs::write(&wal_path, &corrupt_wal).unwrap();
 
         let mut catalog = Catalog::default();
         let error = GraphStore::open(&path, &mut catalog).unwrap_err();
         assert!(error.to_string().contains("WAL corruption at byte offset"));
         assert!(error.to_string().contains("checksum mismatch"));
-        assert_eq!(std::fs::read_to_string(&wal_path).unwrap(), corrupt_wal);
+        assert_eq!(std::fs::read(&wal_path).unwrap(), corrupt_wal);
         assert_eq!(
             std::fs::read_dir(path.join("quarantine")).unwrap().count(),
             1
@@ -17997,16 +18064,32 @@ mod tests {
                 .unwrap();
         }
         let wal_path = active_wal_path(&path);
-        let wal = std::fs::read_to_string(&wal_path).unwrap();
-        let mut lines = wal.lines().map(str::to_string).collect::<Vec<_>>();
-        let (body, _) = lines[2].rsplit_once('\t').unwrap();
-        let (_, payload) = body.split_once('\t').unwrap();
-        let rewritten_body = format!("3\t{payload}");
-        lines[2] = format!(
-            "{rewritten_body}\t{}",
-            checksum_bytes(rewritten_body.as_bytes())
-        );
-        std::fs::write(&wal_path, format!("{}\n", lines.join("\n"))).unwrap();
+        // Rebuild the WAL with well-formed framing but a gap in the LSN
+        // sequence: the second record claims LSN 3 instead of 2.
+        let mut cursor = match super::WalRecordCursor::open(&wal_path, None).unwrap() {
+            super::WalOpenOutcome::Cursor(cursor) => cursor,
+            _ => panic!("test WAL is missing its header"),
+        };
+        let generation = cursor.generation();
+        let start_lsn = cursor.start_lsn();
+        let mut entries = Vec::new();
+        loop {
+            match cursor.next().unwrap() {
+                super::WalCursorEvent::Entry { entry, .. } => entries.push(entry),
+                super::WalCursorEvent::Eof => break,
+                _ => panic!("test WAL is damaged"),
+            }
+        }
+        entries.last_mut().unwrap().lsn += 1;
+        let mut rewritten = super::encode_binary_wal_header(generation, start_lsn);
+        for (index, entry) in entries.iter().enumerate() {
+            let payload = super::encode_binary_wal_record(entry, index as u64 + 1);
+            let position = rewritten.len() as u64 - super::WAL_BINARY_FILE_HEADER_BYTES as u64;
+            rewritten.extend_from_slice(&super::frame_binary_wal_record(
+                generation, &payload, position,
+            ));
+        }
+        std::fs::write(&wal_path, rewritten).unwrap();
 
         let mut catalog = Catalog::default();
         let error = GraphStore::open(&path, &mut catalog).unwrap_err();
@@ -18129,9 +18212,7 @@ mod tests {
         }
 
         let wal_path = active_wal_path(&path);
-        let wal = std::fs::read_to_string(&wal_path).unwrap();
-        let torn = wal.rsplit_once('\t').unwrap().0;
-        std::fs::write(&wal_path, torn).unwrap();
+        truncate_test_wal_tail(&wal_path, 8);
 
         let plan =
             DatabaseDoctor::plan_wal_tail_repair(&path, WalDoctorOptions::default()).unwrap();
@@ -18896,16 +18977,7 @@ mod tests {
     }
 
     fn read_test_wal(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
-        let wal = std::fs::read_to_string(active_wal_path(path))?;
-        if !wal.starts_with("SKEIN_WAL_V1\t") {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "WAL is missing the V1 header",
-            ));
-        }
-        Ok(wal
-            .split_once('\n')
-            .map_or_else(String::new, |(_, records)| records.to_string()))
+        super::decode_wal_records_as_v1_text(&active_wal_path(path))
     }
 
     fn active_generation_path(
