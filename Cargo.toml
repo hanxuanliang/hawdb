@@ -153,6 +153,10 @@ name = "search_generation"
 harness = false
 
 [[bench]]
+name = "index_restart_cost"
+harness = false
+
+[[bench]]
 name = "canonical_point_lookup"
 harness = false
 
@@ -174,6 +178,10 @@ harness = false
 
 [[bench]]
 name = "relational_index_access"
+harness = false
+
+[[bench]]
+name = "relational_oltp_mix"
 harness = false
 
 [[bench]]
