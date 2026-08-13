@@ -256,7 +256,7 @@ pub struct DatabaseConfig {
     pub storage_residency_mode: skein_storage::StorageResidencyMode,
     pub auto_materialize_checkpoint_bytes: u64,
     pub max_out_of_core_delta_bytes: Option<u64>,
-    /// Columnar shadow double-write (spec §3.7): every checkpoint also
+    /// Derived columnar shadow double-write: every checkpoint also
     /// publishes a column-group catalog under `column-groups/`, and recovery
     /// validates it. Off by default; with the flag off checkpoints are
     /// byte-for-byte unchanged and no shadow directory exists. Reads are
@@ -1219,7 +1219,7 @@ impl Database {
 
     /// Shadow write-amplification evidence of the most recent checkpoint,
     /// `None` while `graph_columnar_shadow_checkpoint` is off or before the first
-    /// shadow checkpoint (spec §3.7).
+    /// derived shadow checkpoint.
     pub fn columnar_shadow_checkpoint_report(
         &self,
     ) -> Option<crate::store::ColumnarShadowCheckpointReport> {

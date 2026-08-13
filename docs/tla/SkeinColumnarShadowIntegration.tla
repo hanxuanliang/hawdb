@@ -2,7 +2,7 @@
 EXTENDS Integers, Naturals, FiniteSets
 
 (***************************************************************************)
-(* Columnar shadow adoption phase (spec §3.7). A checkpoint is a           *)
+(* Derived columnar shadow adoption phase. A checkpoint is a              *)
 (* four-phase machine: publish the canonical manifest, publish the shadow  *)
 (* key dictionary, publish the shadow manifest, then update the in-memory  *)
 (* shadow catalog. A crash may land at every boundary. The shadow is       *)
@@ -237,7 +237,7 @@ SweepShadowArtifacts ==
 
 (***************************************************************************)
 (* The shadow build or publication fails after the canonical manifest      *)
-(* replaced (spec §3.7). The checkpoint call still returns success —       *)
+(* replaced. The checkpoint call still returns success —                  *)
 (* canonical publication is what its result reflects — and the dirty       *)
 (* state is preserved untouched for the retry.                             *)
 (***************************************************************************)

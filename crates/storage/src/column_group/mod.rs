@@ -1,7 +1,7 @@
 //! Standalone columnar node-group format layer.
 //!
-//! Implements §3.1–§3.3 and §3.5 of
-//! `docs/specs/COLUMNAR_CANONICAL_AND_PROJECTION_SPEC.md`: physical column
+//! Implements a derived column-group projection governed by
+//! `docs/specs/ROW_PAGE_AND_DEMAND_PAGED_INDEX_SPEC.md`: physical column
 //! chunk encodings over the logical `Value` types, an id-ordered node-group
 //! artifact with a fixed-layout directory and checksummed footer, per-chunk
 //! zone maps reusing the `FieldSummary` machinery, and a generation-bound

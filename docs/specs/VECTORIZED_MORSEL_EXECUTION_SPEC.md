@@ -7,11 +7,12 @@ initial vectorized read fragment, morsel resource admission, deterministic
 execution, fallback behavior, and performance evidence.
 
 The durable canonical representation is governed by
-[`COLUMNAR_CANONICAL_AND_PROJECTION_SPEC.md`](COLUMNAR_CANONICAL_AND_PROJECTION_SPEC.md):
-canonical storage is columnar, and executor columnar batches become zero-copy
-views over canonical column chunks as its phases land. Until a phase lands,
-the executor projection remains storage-neutral and MUST NOT introduce an
-additional durable representation beyond the canonical one.
+[`ROW_PAGE_AND_DEMAND_PAGED_INDEX_SPEC.md`](ROW_PAGE_AND_DEMAND_PAGED_INDEX_SPEC.md):
+canonical storage is row-oriented and page-bounded. Executor columnar batches
+are a storage-neutral in-memory execution format. A row-page adapter decodes
+only required fields into reusable typed columns and keeps page pins for at
+most one pipeline wave. Vectorization MUST NOT require a second canonical
+durable representation.
 
 ## Columnar Batch Contract
 

@@ -2,7 +2,7 @@
 //!
 //! Record-level payloads (binary WAL records, residual column rows) follow
 //! the protobuf wire discipline required by
-//! `COLUMNAR_CANONICAL_AND_PROJECTION_SPEC.md` §3.5.1: each field is a
+//! `ROW_PAGE_AND_DEMAND_PAGED_INDEX_SPEC.md`: each field is a
 //! `(field_id << 3) | wire_type` varint tag followed by a varint,
 //! fixed-width, or length-delimited body. Readers skip unknown field ids by
 //! wire type. The codec is hand-rolled; no code generation enters the

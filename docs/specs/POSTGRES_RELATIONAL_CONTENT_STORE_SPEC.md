@@ -7,13 +7,12 @@ PostgreSQL-dialect SQL subset required to replace the scoped Nowledge SQLite
 Content Store. PostgreSQL is a syntax and semantic reference. Skein MUST NOT
 require a PostgreSQL server or client library to execute this workload.
 
-The durable storage clauses of this contract (private relational checkpoint
-`SKRLCKP1`, private relational WAL `SKRLWAL1`, and private overflow
-`SKOVFL01`) are superseded by
-[`COLUMNAR_CANONICAL_AND_PROJECTION_SPEC.md`](COLUMNAR_CANONICAL_AND_PROJECTION_SPEC.md)
-§3–§7 as its phases land: relational tables become columnar tables in the
-unified format, sharing one WAL, one blob store, and the durable projection
-framework for secondary indexes. The SQL statement corpus, semantics, and
+The durable migration target is governed by
+[`ROW_PAGE_AND_DEMAND_PAGED_INDEX_SPEC.md`](ROW_PAGE_AND_DEMAND_PAGED_INDEX_SPEC.md):
+relational tables remain row-oriented, use the shared canonical WAL and large
+value extents, and publish primary, unique, and secondary index roots with the
+same row generation. Normal open demand-pages those indexes instead of
+rebuilding every posting. The SQL statement corpus, semantics, and
 qualification obligations of this document are unchanged by that migration.
 
 The initial schema scope is:

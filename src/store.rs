@@ -1549,7 +1549,7 @@ impl GraphStore {
         store.load_checkpoint(catalog, replay_config)?;
         if replay_config.graph_columnar_shadow_checkpoint {
             // Mounted between checkpoint load and WAL replay so replayed
-            // mutations mark their shadow tables dirty (spec §3.7).
+            // mutations mark their derived shadow tables dirty.
             store.mount_columnar_shadow_for_recovery()?;
         }
         let checkpoint_catalog = catalog.clone();

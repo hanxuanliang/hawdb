@@ -1,8 +1,8 @@
 //! The TP shape of the Nowledge Mem content store, as one mixed loop.
 //!
-//! The columnar canonical contract promises point read/write p99 parity with
-//! the current row storage and strictly better scans (§10 of
-//! COLUMNAR_CANONICAL_AND_PROJECTION_SPEC.md). This benchmark records that
+//! The row-page and demand-paged-index contract preserves point read/write
+//! latency while bounding index residency and improving scans (see
+//! ROW_PAGE_AND_DEMAND_PAGED_INDEX_SPEC.md). This benchmark records that
 //! baseline on whatever engine it is compiled against: a YCSB-B-style mix
 //! over the real `thread_messages` schema — primary-key point reads, ordered
 //! `LIMIT` pagination, single-message insert transactions, content updates —

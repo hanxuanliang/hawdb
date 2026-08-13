@@ -363,7 +363,7 @@ impl GraphStore {
             self.full_text_property_index = CowSegmentedMap::default();
             self.relationship_property_index = CowSegmentedMap::default();
         }
-        // Shadow double-write (spec §3.7): published after the row-oriented
+        // Derived shadow double-write: published after the row-oriented
         // checkpoint so its `source_commit_epoch` is the epoch this
         // checkpoint made durable. The checkpoint's Result reflects
         // canonical publication only — a shadow failure is recorded in the

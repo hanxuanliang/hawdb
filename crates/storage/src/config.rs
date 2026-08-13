@@ -49,7 +49,7 @@ pub struct WalReplayConfig {
     pub residency_mode: StorageResidencyMode,
     pub auto_materialize_checkpoint_bytes: u64,
     pub max_out_of_core_delta_bytes: Option<u64>,
-    /// Columnar shadow double-write (spec §3.7): checkpoints additionally
+    /// Derived columnar shadow double-write: checkpoints additionally
     /// publish a column-group catalog under `column-groups/` and recovery
     /// validates it. Off by default; reads are never served from the shadow.
     pub graph_columnar_shadow_checkpoint: bool,

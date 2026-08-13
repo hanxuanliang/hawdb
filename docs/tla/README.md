@@ -137,8 +137,8 @@ and `DurableStore::reclaim_old_generations`.
 ## Durable Projection Cursor and Catch-up
 
 `SkeinProjectionDurability.tla` models the durable projection framework of
-[`../specs/COLUMNAR_CANONICAL_AND_PROJECTION_SPEC.md`](../specs/COLUMNAR_CANONICAL_AND_PROJECTION_SPEC.md)
-§6. A projection's only durable incremental progress state is the cursor
+[`../specs/ROW_PAGE_AND_DEMAND_PAGED_INDEX_SPEC.md`](../specs/ROW_PAGE_AND_DEMAND_PAGED_INDEX_SPEC.md)
+under "Derived projections". A projection's only durable incremental progress state is the cursor
 inside its manifest; a delta artifact becomes durable before the manifest
 replace that both registers it and advances the cursor, so a crash at any
 point leaves the previous manifest intact and incremental builds are
@@ -161,15 +161,16 @@ distinct states): keeping the projection Ready when reclamation passes its
 cursor reports `ReadyImpliesCatchUpCoverage`, publishing a manifest without
 first making the delta artifact durable reports `CursorIsAlwaysDurable`, and
 recovery that ignores the replay floor reports
-`ReadyImpliesCatchUpCoverage`. The generation-diff catch-up fallback of
-§6.4 is deliberately not modeled; the model treats a below-floor cursor as
+`ReadyImpliesCatchUpCoverage`. Generation-diff catch-up is deliberately not
+modeled; the model treats a below-floor cursor as
 requiring rebuild, which over-approximates the implementation conservatively.
 
-## Layered Columnar Visibility and Compaction Identity
+## Derived Columnar Visibility and Compaction Identity
 
-`SkeinCompactionVisibility.tla` models the layered read path of
-[`../specs/COLUMNAR_CANONICAL_AND_PROJECTION_SPEC.md`](../specs/COLUMNAR_CANONICAL_AND_PROJECTION_SPEC.md)
-§3.3: base groups filtered by generation-scoped deletion vectors, delta
+`SkeinCompactionVisibility.tla` models a derived column-group read path
+governed by
+[`../specs/ROW_PAGE_AND_DEMAND_PAGED_INDEX_SPEC.md`](../specs/ROW_PAGE_AND_DEMAND_PAGED_INDEX_SPEC.md):
+base groups filtered by generation-scoped deletion vectors, delta
 groups, and the WAL-backed memtable. Flush publishes a new generation by
 marking superseded base rows in the deletion vector and appending delta
 rows without rewriting base bytes; compaction publishes a merged
@@ -213,11 +214,11 @@ publication generation guard permits `PrepareCompaction -> Flush ->
 PublishCompaction` and reports `LayeredReadEqualsLogicalState`: the stale
 output loses the flush's newer deletion vector and delta rows.
 
-## Layered Column-Group Manifest Publication
+## Derived Layered Column-Group Manifest Publication
 
 `SkeinColumnGroupManifest.tla` models the publication protocol in
-[`../specs/COLUMNAR_CANONICAL_AND_PROJECTION_SPEC.md`](../specs/COLUMNAR_CANONICAL_AND_PROJECTION_SPEC.md)
-§3.6. Newly changed immutable artifacts become durable before their per-table
+[`../specs/ROW_PAGE_AND_DEMAND_PAGED_INDEX_SPEC.md`](../specs/ROW_PAGE_AND_DEMAND_PAGED_INDEX_SPEC.md).
+Newly changed immutable artifacts become durable before their per-table
 directories; directories become durable before a single active manifest
 atomically selects the complete catalog. Untouched tables keep referencing an
 older immutable directory, so checkpoint metadata writes scale with changed
@@ -276,8 +277,8 @@ evidence in the runtime-tokio timing tests.
 ## Columnar Shadow Checkpoint Integration
 
 `SkeinColumnarShadowIntegration.tla` models the shadow adoption phase of
-[`../specs/COLUMNAR_CANONICAL_AND_PROJECTION_SPEC.md`](../specs/COLUMNAR_CANONICAL_AND_PROJECTION_SPEC.md)
-§3.7 as a four-phase checkpoint machine — publish the canonical manifest,
+[`../specs/ROW_PAGE_AND_DEMAND_PAGED_INDEX_SPEC.md`](../specs/ROW_PAGE_AND_DEMAND_PAGED_INDEX_SPEC.md)
+under "Derived projections" as a four-phase checkpoint machine — publish the canonical manifest,
 publish the shadow key dictionary, publish the shadow manifest, update the
 in-memory shadow catalog — with a crash enabled at every boundary and a
 reader pinned to the canonical side. The shadow is derived, rebuildable

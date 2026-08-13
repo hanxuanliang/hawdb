@@ -1,4 +1,4 @@
-//! Columnar shadow double-write for [`GraphStore`] checkpoints (spec §3.7).
+//! Derived columnar shadow double-write for [`GraphStore`] checkpoints.
 //!
 //! With `graph_columnar_shadow_checkpoint` on, every checkpoint additionally
 //! publishes column groups, per-table directories, and the layered
@@ -48,7 +48,7 @@
 //!
 //! Write amplification in this phase is proportional to the **dirty table
 //! count**, not to change volume: a dirty table is rebuilt whole, so a
-//! one-row edit rewrites its entire table until C4's delta groups land.
+//! one-row edit rewrites its entire table in the current implementation.
 //! Untouched tables reuse their previous directory references without
 //! rebuilding bytes (§3.6.5). Memory, by contrast, is bounded regardless
 //! of table size: rows stream through per-table group buffers under one
@@ -1434,7 +1434,7 @@ impl GraphStore {
     /// validates the published catalog per §3.6.6, and discards a corrupt
     /// shadow instead of failing the open — it is rebuildable derived state,
     /// the same policy `docs/STORAGE.md` recovery step 10 applies to
-    /// projected-graph artifacts (spec §3.7.3).
+    /// projected-graph artifacts under the derived-projection contract.
     pub(super) fn mount_columnar_shadow_for_recovery(&mut self) -> Result<()> {
         self.columnar_shadow.enabled = true;
         self.columnar_shadow.all_dirty = true;

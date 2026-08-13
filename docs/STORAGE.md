@@ -964,10 +964,9 @@ The remaining page-store gaps are explicit:
   older transaction snapshot; such transactions abort and retry on epoch drift
 - no in-place page-version chain; snapshots use immutable COW pages and pinned
   canonical generations
-- columnar property segments are governed by
-  `specs/COLUMNAR_CANONICAL_AND_PROJECTION_SPEC.md` (phased adoption); the
-  row-oriented canonical encoding remains authoritative until each phase of
-  that contract lands
+- canonical row pages and demand-paged persistent indexes are governed by
+  `specs/ROW_PAGE_AND_DEMAND_PAGED_INDEX_SPEC.md`; column groups remain
+  derived projection artifacts and are not a recovery dependency
 - no database-owned blob/content parser runtime
 - production-sized resource evidence from a representative Mem replica remains
   a cutover artifact rather than a property established by unit tests

@@ -1,11 +1,11 @@
 # Relational OLTP Mix Benchmark
 
-`cargo bench --bench relational_oltp_mix` records the TP-shaped baseline the
-columnar canonical contract must not regress
-([`specs/COLUMNAR_CANONICAL_AND_PROJECTION_SPEC.md`](specs/COLUMNAR_CANONICAL_AND_PROJECTION_SPEC.md)
-§10: point read/write p99 parity, scans strictly better, and the same mix
-re-run under a concurrent background analytics job within 2× of the quiet
-baseline).
+`cargo bench --bench relational_oltp_mix` records the TP-shaped baseline that
+the row-page and demand-paged-index contract must not regress
+([`specs/ROW_PAGE_AND_DEMAND_PAGED_INDEX_SPEC.md`](specs/ROW_PAGE_AND_DEMAND_PAGED_INDEX_SPEC.md)).
+Point reads and low-concurrency commits may regress by no more than five
+percent at p95. Cold and warm index reads, startup phases, resident bytes, and
+background interference are reported separately.
 
 ## Shape
 
@@ -21,12 +21,12 @@ per-request durability is the workload's truth. The scan/aggregate class
 
 The rollup deliberately cannot yet take its production form — the current
 aggregate subset rejects `ORDER BY`, so the "top threads by message count"
-query is expressed without the ordering. Closing that subset gap is phase 4
-scope of the columnar contract.
+query is expressed without the ordering. Closing that subset gap is an
+executor capability task, not a storage-layout prerequisite.
 
 ## Baseline — current row-oriented engine
 
-Recorded 2026-08-12 on the pre-columnar engine (branch
+Recorded 2026-08-12 on the row-oriented engine (branch
 `feat/columnar-canonical-redesign`, macOS/arm64, release profile), 50,000
 rows:
 
@@ -39,15 +39,13 @@ rows:
 | Space `COUNT(*)` | 21 | 1.65 ms | 1.76 ms | 1.76 ms |
 | Thread rollup (`GROUP BY` over 50k rows) | 21 | 43.8 ms | 45.2 ms | 45.2 ms |
 
-Reading the baseline against the contract's promises:
+Reading the baseline against the target contract:
 
-- Point reads and mutations are the parity target: mutations are
-  fsync-bound, which is why the columnar write path must not add work to
-  the commit path (§5.1).
-- The 43.8 ms rollup against 16 µs point reads is the AP tail the columnar
-  representation exists to remove: the rollup touches every row's full
-  record today, while a columnar scan reads two chunks per group and the
-  space count collapses to group metadata (§3.2).
+- Point reads and mutations are the parity target. Persistent index roots and
+  page-cache admission must not add an unbounded commit or residency cost.
+- The 43.8 ms rollup against 16 µs point reads is the AP tail addressed by
+  required-field row-page decoding, typed batches, metadata summaries, and,
+  only when measured, optional derived scan projections.
 
 Numbers are single-machine medians for trend tracking, not representative
 Mem-replica qualification; production admission still follows
