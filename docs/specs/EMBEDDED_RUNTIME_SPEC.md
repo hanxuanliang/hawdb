@@ -154,22 +154,69 @@ batches and deletes remain typed for grouped WAL and mutation validation.
 
 ## Concurrency Model
 
-Skein MUST support concurrent readers and a concurrent writer through
-multi-version snapshots:
+Skein supports in-process snapshot MVCC. The term MVCC in this specification
+means immutable published snapshots, copy-on-write transaction workspaces, and
+commit-epoch visibility. It does not mean PostgreSQL-style tuple version
+chains, arbitrary historical `AS OF` reads, or serializable snapshot
+isolation.
+
+The `Database` facade supports one mutable owner with any number of pinned read
+transactions. `ConcurrentDatabase` additionally permits multiple transactions
+to prepare concurrently and provides optimistic and pessimistic coordination.
+Both facades share these publication rules:
 
 - Readers pin an immutable published snapshot.
 - A writer stages changes without mutating a published snapshot.
-- Commits are serialized until write-write conflict detection is specified.
+- Durable commit decisions and snapshot publication are serialized.
 - A staged snapshot becomes visible only after its WAL commit is durable.
 - Existing readers continue against their pinned snapshot after publication.
 - Foreground work MUST remain admissible while internal background work is
   saturated.
 
-The initial contract is multi-reader, single-writer. Multi-writer execution is
-out of scope until conflict detection, abort semantics, and index delta ordering
-are modeled and tested. Multi-reader means snapshots derived from the owning
-handle inside one application process; it does not permit multiple root handles
-or another process to reopen the database directory.
+An optimistic concurrent transaction begins from a private copy-on-write
+snapshot. At commit it acquires the database-wide exclusive publication span
+and applies first-committer-wins validation against its base commit epoch. The
+validation is intentionally coarse: any intervening write makes a non-empty
+optimistic transaction stale, even when the two write sets are disjoint.
+
+A pessimistic concurrent transaction obtains locks before statement execution.
+Supported relational primary-key lookups and inserts may use shared or
+exclusive point/range spans. Statements whose complete access span cannot be
+derived conservatively use a database-wide lock. Cypher statements currently
+use that database-wide fallback. Lock waits are bounded, a wait-for graph
+selects the current waiter as the deadlock victim, and abort or drop releases
+all owned locks and dependencies. These mechanisms provide the documented lock
+compatibility and publication invariants; they MUST NOT be advertised as a
+general serializable isolation level.
+
+A transaction-private graph and relational workspace provides read-your-own-
+writes. Graph and relational mutations publish atomically in one commit. A
+read-only transaction fixes both its logical `visible_commit_epoch` and the
+physical checkpoint generation beneath that epoch. Later commits or
+checkpoints do not change that pinned identity. Reader pins participate in the
+safe reclamation watermark for obsolete generations.
+
+The supported boundary remains one active root handle per database path inside
+one application process. `ConcurrentDatabase` is a cloneable coordinator over
+that one root; it does not authorize another root handle or process to open the
+same directory for writes. Multi-process writers and historical time-travel
+queries remain out of scope.
+
+### Concurrency Evidence Map
+
+| Contract | Implementation owner | Required evidence |
+| --- | --- | --- |
+| Logical visibility is independent of the checkpoint base | `PublishedReadView`, `Database::begin_read_transaction` | `published_read_view_separates_logical_visibility_from_physical_generation` |
+| A pinned reader keeps its original snapshot across later commits | `GraphStore::snapshot`, `ReaderPin` | `read_transaction_keeps_snapshot_before_later_commit` |
+| Reader pins delay obsolete-generation reclamation | `ReaderPins`, `GraphStore::storage_reclamation_watermark` | `read_transaction_pins_checkpoint_manifest_until_drop`, `out_of_core_reader_pin_retains_its_canonical_generation_until_drop` |
+| Optimistic writers use coarse first-committer-wins validation | `ConcurrentDatabaseTransaction::commit`, `GraphStore::commit_mutation_transaction_and_relational` | `optimistic_transactions_prepare_in_parallel_and_reject_the_stale_committer` |
+| Pessimistic point/range locks preserve compatibility | `LockManager`, `LockTable` | `disjoint_primary_key_point_locks_allow_both_pessimistic_writers_to_commit`, `shared_primary_key_range_blocks_phantoms_but_not_the_excluded_boundary` |
+| Deadlock victims terminate and release dependencies | `WaitForGraph`, `ConcurrentDatabaseTransaction::abort_after_lock_failure` | `point_lock_upgrade_cycle_selects_one_deadlock_victim`, `wait_for_graph_detects_a_cycle_with_multiple_blockers` |
+| Uncommitted work is private and a durable commit becomes visible atomically | `DatabaseTransactionState`, `CommitSequencer` | `optimistic_transaction_reads_its_private_workspace`, `SkeinTransactionConcurrency.tla` |
+
+The implementation-to-model mapping and release model-check requirements live
+in `docs/tla/README.md`. A change to any row in this table MUST update its Rust
+evidence and formal model in the same pull request.
 
 ## Runtime Resource Budget
 

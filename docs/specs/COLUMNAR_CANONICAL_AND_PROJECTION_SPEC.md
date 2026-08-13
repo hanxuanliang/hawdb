@@ -365,10 +365,14 @@ ownership model in `EMBEDDED_RUNTIME_SPEC.md`.
 1. Commit protocol is unchanged: private write set → single WAL batch per
    commit epoch → group-commit fsync → memtable apply. Columnarization
    happens only at checkpoint and MUST NOT add work to the commit path.
-2. Snapshot isolation: a reader snapshot is
-   `(pinned generation, commit epoch, memtable COW snapshot)`. Optimistic
-   and pessimistic modes, the lock table, and deadlock victim selection are
-   unchanged (`SkeinTransactionConcurrency.tla`).
+2. Snapshot MVCC: a reader snapshot is
+   `(pinned generation, commit epoch, memtable COW snapshot)`. This is the
+   immutable-snapshot definition in `EMBEDDED_RUNTIME_SPEC.md`, not a claim of
+   tuple-version chains, arbitrary time travel, or general serializable
+   isolation. Optimistic transactions retain coarse first-committer-wins epoch
+   validation. Pessimistic point/range locks, database-wide fallbacks, and
+   deadlock victim selection remain unchanged
+   (`SkeinTransactionConcurrency.tla`).
 3. A single transaction MAY mutate graph and relational data; the combined
    mutation set MUST commit atomically in one WAL batch (cross-model
    transaction).

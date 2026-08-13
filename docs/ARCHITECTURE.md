@@ -569,9 +569,15 @@ Transactions should expose:
 - rollback
 - checkpoint
 
-The initial concurrency model can be single-writer/multi-reader. This matches
-the embedded local runtime shape and is safer than prematurely designing a
-high-concurrency server engine.
+The embedded runtime uses immutable snapshot/COW MVCC under one active root
+handle. `Database` retains a single mutable owner, while `ConcurrentDatabase`
+allows optimistic or pessimistic transactions to prepare concurrently and
+serializes the durable commit/publication decision. Optimistic validation is
+currently coarse first-committer-wins by commit epoch. Pessimistic relational
+statements use point/range locks when their access span is known and a
+database-wide fallback otherwise; Cypher currently uses the fallback. This is
+an in-process concurrency contract, not tuple-version MVCC, arbitrary
+time-travel, general serializable isolation, or multi-process writing.
 
 ## Nowledge Integration
 
