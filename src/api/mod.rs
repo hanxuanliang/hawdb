@@ -256,6 +256,12 @@ pub struct DatabaseConfig {
     pub storage_residency_mode: skein_storage::StorageResidencyMode,
     pub auto_materialize_checkpoint_bytes: u64,
     pub max_out_of_core_delta_bytes: Option<u64>,
+    /// Columnar shadow double-write (spec §3.7): every checkpoint also
+    /// publishes a column-group catalog under `column-groups/`, and recovery
+    /// validates it. Off by default; with the flag off checkpoints are
+    /// byte-for-byte unchanged and no shadow directory exists. Reads are
+    /// never served from the shadow.
+    pub graph_columnar_shadow_checkpoint: bool,
     pub max_search_projection_change_log_entries: Option<usize>,
     pub max_plan_cache_entries: Option<usize>,
     pub slow_query_log_capacity: usize,
@@ -334,6 +340,7 @@ impl Default for DatabaseConfig {
             auto_materialize_checkpoint_bytes:
                 skein_storage::DEFAULT_AUTO_MATERIALIZE_CHECKPOINT_BYTES,
             max_out_of_core_delta_bytes: Some(skein_storage::DEFAULT_MAX_OUT_OF_CORE_DELTA_BYTES),
+            graph_columnar_shadow_checkpoint: false,
             max_search_projection_change_log_entries: Some(
                 DEFAULT_SEARCH_PROJECTION_CHANGE_LOG_MAX_ENTRIES,
             ),
@@ -706,6 +713,7 @@ impl Database {
             residency_mode: config.storage_residency_mode,
             auto_materialize_checkpoint_bytes: config.auto_materialize_checkpoint_bytes,
             max_out_of_core_delta_bytes: config.max_out_of_core_delta_bytes,
+            graph_columnar_shadow_checkpoint: config.graph_columnar_shadow_checkpoint,
         };
         let mut store = if config.read_only {
             GraphStore::open_read_only_with_durability_and_replay_config(
@@ -1082,12 +1090,50 @@ impl Database {
     }
 
     pub fn checkpoint(&mut self) -> Result<()> {
+        self.checkpoint_internal(None)
+    }
+
+    /// Checkpoint entry carrying an explicit pre-admitted columnar-shadow
+    /// context, for callers that already hold a governor permit and
+    /// extended it by [`Database::columnar_shadow_admission_bytes`]. The
+    /// shadow build then draws only against the passed token — it never
+    /// touches the governor, so nested admission cannot deadlock a
+    /// constrained configuration.
+    pub(crate) fn checkpoint_with_shadow_admission(
+        &mut self,
+        shadow_admission: crate::store::ColumnarShadowAdmission,
+    ) -> Result<()> {
+        self.checkpoint_internal(Some(shadow_admission))
+    }
+
+    /// The builder-lifetime byte reservation one shadow build needs; zero
+    /// when `graph_columnar_shadow_checkpoint` is off.
+    pub fn columnar_shadow_admission_bytes(&self) -> u64 {
+        self.store.columnar_shadow_admission_bytes()
+    }
+
+    fn checkpoint_internal(
+        &mut self,
+        shadow_admission: Option<crate::store::ColumnarShadowAdmission>,
+    ) -> Result<()> {
         self.ensure_writable()?;
         let started = std::time::Instant::now();
         let durable = self.store.storage_recovery_report().durable;
         let prepared = self.checkpoint_source()?.prepare()?;
         let result = match prepared {
-            Some(prepared) => self.publish_prepared_checkpoint(prepared),
+            Some(prepared) => {
+                let oldest_reader_epoch = self
+                    .reader_pins
+                    .lock()
+                    .expect("database reader pins lock should not be poisoned")
+                    .oldest_epoch();
+                self.store
+                    .publish_prepared_checkpoint_with_shadow_admission(
+                        prepared,
+                        oldest_reader_epoch,
+                        shadow_admission,
+                    )
+            }
             None => Ok(()),
         };
         if durable && let Some(telemetry) = &self.telemetry {
@@ -1161,6 +1207,28 @@ impl Database {
 
     pub fn storage_residency_report(&self) -> crate::store::StorageResidencyReport {
         self.store.storage_residency_report()
+    }
+
+    /// Threads the engine's runtime governor into the storage layer so
+    /// background columnar-shadow work can request admission. Called by the
+    /// embedding layers that own the governor (`SkeinEmbedded`,
+    /// `NowledgeMemGraph`); a second governor is never constructed here.
+    pub fn set_runtime_governor(&mut self, governor: skein_qos::RuntimeGovernor) {
+        self.store.set_runtime_governor(governor);
+    }
+
+    /// Shadow write-amplification evidence of the most recent checkpoint,
+    /// `None` while `graph_columnar_shadow_checkpoint` is off or before the first
+    /// shadow checkpoint (spec §3.7).
+    pub fn columnar_shadow_checkpoint_report(
+        &self,
+    ) -> Option<crate::store::ColumnarShadowCheckpointReport> {
+        self.store.columnar_shadow_checkpoint_report()
+    }
+
+    /// What recovery observed about the columnar shadow catalog.
+    pub fn columnar_shadow_recovery_status(&self) -> crate::store::ColumnarShadowRecoveryStatus {
+        self.store.columnar_shadow_recovery_status()
     }
 
     pub fn storage_pressure_snapshot(&self) -> StoragePressureSnapshot {

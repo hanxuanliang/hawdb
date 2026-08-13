@@ -285,6 +285,64 @@ ownership model in `EMBEDDED_RUNTIME_SPEC.md`.
    `ColumnGroupManifest::{publish, open}`, and
    `PublishedColumnGroupCatalog::scrub_artifacts`.
 
+### 3.7 Shadow adoption phase
+
+1. While the columnar representation is adopted behind a configuration flag
+   (`graph_columnar_shadow_checkpoint`), a checkpoint with the flag on MUST
+   additionally publish column groups, per-table directories, and the §3.6
+   manifest under a self-contained `column-groups/` subdirectory of the
+   database root, using the §3.6 publication protocol. The shadow covers
+   graph tables only; relational tables join with the §7 unification. With
+   the flag off (the default), checkpoint output MUST be byte-for-byte
+   identical to the pre-shadow implementation and the shadow directory MUST
+   NOT be created. A corrupt shadow at open is unmounted and recorded, and
+   cleanup failure MUST NOT block open — leftover bytes are retried by the
+   next checkpoint.
+2. The shadow phase runs two publication points (the canonical manifest and
+   the shadow manifest), which is sound only because no read path consumes
+   the shadow. Before any read path serves from the columnar
+   representation, generation selection MUST move to a single root durable
+   manifest that selects the canonical and columnar generations atomically.
+3. The shadow is derived, rebuildable state. Reads MUST NOT be served from
+   it. Reopen with the flag on MUST validate the shadow catalog per §3.6.6;
+   a validation failure MUST discard the shadow (the projected-graph
+   recovery policy) instead of failing the open, and the next checkpoint
+   MUST rebuild every table.
+4. Shadow checkpoints MUST rebuild only tables dirtied since the previous
+   shadow publication and MUST reuse untouched tables' directory references
+   per §3.6.5. Shadow write amplification in this phase is proportional to
+   the dirty table count, not to change volume: a dirty table is rebuilt
+   whole (a one-row edit rewrites its table) until delta groups (§3.3)
+   reach the shadow. The checkpoint report MUST expose total/dirty/reused
+   table counts and shadow group and metadata bytes written.
+5. Shadow property keys MUST be interned under field-id discipline
+   (§3.5.3(c)) in a persistent per-shadow key dictionary inside
+   `column-groups/`; dictionary ids are assigned once in first-seen order
+   and never reused or reordered, so every published generation keeps
+   decoding under any later dictionary.
+6. The canonical checkpoint's result MUST reflect canonical publication
+   only. A shadow build or publication failure after the canonical
+   manifest replaced MUST NOT fail the checkpoint call; it MUST be
+   surfaced through the shadow checkpoint report, MUST preserve the dirty
+   state it would have consumed, and the next checkpoint MUST retry from
+   that state.
+7. Each shadow scan record is an owned transfer into its group buffer. The
+   builder MUST move typed property payloads out of that record rather than
+   cloning their backing allocation. Residual encoding MAY borrow the owned
+   record only for the duration of encoding; no shadow buffer may retain a
+   second logical copy merely to cross the scan-to-builder boundary.
+8. The writer and reader MUST enforce one identical limit on each logical,
+   uncompressed chunk body. The writer MUST reject an oversized body before
+   zstd compression or artifact publication; compression MUST NOT make an
+   otherwise unreadable chunk publishable. Uncompressed reads MUST enforce
+   the same limit as decompression.
+9. Shadow metadata uses an explicit builder-lifetime budget included in the
+   up-front admission. Loading or interning a dictionary key, adding pass-1
+   type state, constructing a typed layout, and materializing dictionary
+   serialization bytes MUST charge that budget before allocation. Exceeding
+   it fails only the derived shadow build, preserves dirty state, and MUST
+   publish neither a new shadow manifest nor a partial dictionary.
+
 ## 4. Declared indexes
 
 1. Only declared indexes exist (`CREATE INDEX ...`); the write path MUST NOT

@@ -531,6 +531,7 @@ pub use store::{
     restore_storage_backup, AdjacencyConsistencyReport, AdjacencyConsolidationPlan,
     AdjacencyConsolidationReport, AdjacencyDirection, AdjacencyGroupConsistencyMismatch,
     AdjacencyGroupKey, AdjacencyGroupStats, AdjacencyLayout, BasicStatisticsConsistencyReport,
+    ColumnarShadowCheckpointReport, ColumnarShadowCheckpointStatus, ColumnarShadowRecoveryStatus,
     DatabaseDoctor, DegreeStatisticsConsistencyReport, DegreeStatisticsEntry, DegreeStatisticsKey,
     DerivedArtifactHealth, DerivedArtifactHealthReport, DerivedArtifactHealthState,
     DerivedArtifactKind, DerivedArtifactRebuildOptions, DerivedArtifactRepairPlan,

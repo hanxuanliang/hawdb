@@ -16,6 +16,7 @@ pub mod property_spill;
 pub mod relational;
 pub mod scan;
 pub mod snapshot;
+pub mod wire;
 
 pub use adjacency::{
     AdjacencyDirection, AdjacencyGroupConsistencyMismatch, AdjacencyGroupKey, AdjacencyGroupStats,
@@ -29,7 +30,9 @@ pub use cache::{
     SegmentCacheError, SegmentCacheKey, SegmentCacheLease, SegmentCacheSnapshot, StoreId,
 };
 pub use canonical::{
-    CanonicalEndpointBloom, CanonicalEndpointDirection, CanonicalNodeIterator, CanonicalReadReport,
+    decode_residual_row_properties, encode_residual_row_properties,
+    residual_row_properties_encoded_len, write_residual_row_properties, CanonicalEndpointBloom,
+    CanonicalEndpointDirection, CanonicalNodeIterator, CanonicalReadReport,
     CanonicalRelationshipIterator, CanonicalScanControl, CanonicalSegmentConfig,
     CanonicalSegmentDescriptor, CanonicalSegmentError, CanonicalSegmentKind,
     CanonicalSegmentManifest, CanonicalSegmentReader, CanonicalSegmentWriter,
@@ -46,7 +49,8 @@ pub use column_group::{
     group::{
         ColumnChunkDescriptor, ColumnGroupByteSource, ColumnGroupConfig, ColumnGroupDirectory,
         ColumnGroupPruneDecision, ColumnGroupPruneReason, ColumnGroupReader, ColumnGroupWriter,
-        ColumnPredicate, FileByteSource, IdChunkDescriptor, DEFAULT_GROUP_ROW_CAPACITY,
+        ColumnPredicate, FileByteSource, IdChunkDescriptor, StreamedBlob,
+        DEFAULT_GROUP_ROW_CAPACITY,
     },
     manifest::{
         ColumnGroupArtifactDescriptor, ColumnGroupManifest, ColumnGroupTableDirectory,

@@ -1,5 +1,5 @@
 use crate::{
-    content_digest, durable_replace_file, ContentDigest, FileSegmentRangeReader,
+    content_digest, durable_replace_file, wire, ContentDigest, FileSegmentRangeReader,
     ManifestGeneration, NodeId, NodeRecord, PropertySpillConfig, PropertySpillError,
     PropertySpillManifest, PropertySpillReader, PropertySpillWriter, RelId, RelRecord,
     SegmentCache, SegmentRangeReader, SegmentReadError, SegmentReadRange, StoreId,
@@ -1945,6 +1945,271 @@ pub(crate) fn decode_standalone_value(encoded: &[u8]) -> Result<Value, Canonical
     Ok(value)
 }
 
+// Residual-row wire schema (§3.5.1 field-tagged varint discipline). The row
+// is `repeated field 1 (LEN): property`; each property envelope carries the
+// interned key id plus exactly one length-delimited value field whose body
+// is the canonical tagged-value encoding — one value mapping for every
+// `Value` variant, so a future variant extends the canonical codec once
+// instead of two synchronized mappings. Unknown field ids are skippable by
+// wire type at both levels, so future readers within a storage version stay
+// forward compatible.
+const RESIDUAL_ROW_PROPERTY_FIELD: u32 = 1;
+const RESIDUAL_KEY_ID_FIELD: u32 = 1;
+/// Every value — scalar or nested — rides the canonical tagged-value codec
+/// as the length-delimited field body; no second value encoding exists.
+const RESIDUAL_CANONICAL_VALUE_FIELD: u32 = 2;
+
+fn wire_corrupt(error: skein_core::error::SkeinError) -> CanonicalSegmentError {
+    CanonicalSegmentError::Corrupt(format!("residual row wire payload is invalid: {error}"))
+}
+
+/// Exact canonical encoded length of one value, computed without
+/// materializing any bytes — the streaming writers use it for
+/// length-delimited framing.
+fn encoded_value_len(value: &Value, depth: usize) -> Result<u64, CanonicalSegmentError> {
+    ensure_depth(depth)?;
+    Ok(match value {
+        Value::Null => 1,
+        Value::Bool(_) => 2,
+        Value::Int(_) | Value::Float(_) => 9,
+        Value::String(value) => {
+            u32_len(value.len(), "string")?;
+            1 + 4 + value.len() as u64
+        }
+        Value::List(values) => {
+            u32_len(values.len(), "value list")?;
+            let mut total = 1u64 + 4;
+            for value in values {
+                total = total.saturating_add(encoded_value_len(value, depth.saturating_add(1))?);
+            }
+            total
+        }
+        Value::Map(entries) => {
+            u32_len(entries.len(), "property map")?;
+            let mut total = 1u64 + 4;
+            for (key, value) in entries {
+                u32_len(key.len(), "string")?;
+                total = total
+                    .saturating_add(4 + key.len() as u64)
+                    .saturating_add(encoded_value_len(value, depth.saturating_add(2))?);
+            }
+            total
+        }
+    })
+}
+
+/// Streams one value's canonical tagged encoding into `out` without an
+/// intermediate value-sized buffer: strings write their borrowed bytes
+/// directly, so the transient memory is O(recursion frame), never
+/// O(value). Byte-for-byte identical to [`encode_value`].
+fn write_value_streaming<W: Write + ?Sized>(
+    out: &mut W,
+    value: &Value,
+    depth: usize,
+) -> Result<(), CanonicalSegmentError> {
+    ensure_depth(depth)?;
+    match value {
+        Value::Null => out.write_all(&[0])?,
+        Value::Bool(value) => out.write_all(&[1, u8::from(*value)])?,
+        Value::Int(value) => {
+            out.write_all(&[2])?;
+            out.write_all(&value.to_le_bytes())?;
+        }
+        Value::Float(value) => {
+            out.write_all(&[3])?;
+            out.write_all(&value.to_bits().to_le_bytes())?;
+        }
+        Value::String(value) => {
+            out.write_all(&[4])?;
+            out.write_all(&u32_len(value.len(), "string")?.to_le_bytes())?;
+            out.write_all(value.as_bytes())?;
+        }
+        Value::List(values) => {
+            out.write_all(&[5])?;
+            out.write_all(&u32_len(values.len(), "value list")?.to_le_bytes())?;
+            for value in values {
+                write_value_streaming(out, value, depth.saturating_add(1))?;
+            }
+        }
+        Value::Map(entries) => {
+            out.write_all(&[6])?;
+            out.write_all(&u32_len(entries.len(), "property map")?.to_le_bytes())?;
+            for (key, value) in entries {
+                out.write_all(&u32_len(key.len(), "string")?.to_le_bytes())?;
+                out.write_all(key.as_bytes())?;
+                write_value_streaming(out, value, depth.saturating_add(2))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn varint_len(value: u64) -> u64 {
+    let mut scratch = Vec::with_capacity(10);
+    wire::encode_varint_u64(value, &mut scratch);
+    scratch.len() as u64
+}
+
+fn residual_property_envelope_len(
+    key_id: u32,
+    value: &Value,
+) -> Result<u64, CanonicalSegmentError> {
+    let value_len = encoded_value_len(value, 1)?;
+    let mut key_field = Vec::new();
+    wire::encode_varint_field(RESIDUAL_KEY_ID_FIELD, u64::from(key_id), &mut key_field);
+    let mut value_tag = Vec::new();
+    wire::encode_tag(
+        RESIDUAL_CANONICAL_VALUE_FIELD,
+        wire::WIRE_TYPE_LEN,
+        &mut value_tag,
+    );
+    Ok((key_field.len() + value_tag.len()) as u64 + varint_len(value_len) + value_len)
+}
+
+/// Exact encoded length of one residual row, computed without
+/// materializing it.
+pub fn residual_row_properties_encoded_len(
+    entries: &[(u32, &Value)],
+) -> Result<u64, CanonicalSegmentError> {
+    let mut total = 0u64;
+    let mut row_tag = Vec::new();
+    wire::encode_tag(
+        RESIDUAL_ROW_PROPERTY_FIELD,
+        wire::WIRE_TYPE_LEN,
+        &mut row_tag,
+    );
+    for (key_id, value) in entries {
+        let envelope_len = residual_property_envelope_len(*key_id, value)?;
+        total = total
+            .saturating_add(row_tag.len() as u64)
+            .saturating_add(varint_len(envelope_len))
+            .saturating_add(envelope_len);
+    }
+    Ok(total)
+}
+
+/// Streams one residual row into `out`: the small framing pieces are built
+/// in tiny scratch buffers while every value's bytes stream through the
+/// canonical writer, so transient memory is O(recursion frame), never
+/// O(value). Byte-for-byte identical to
+/// [`encode_residual_row_properties`].
+pub fn write_residual_row_properties<W: Write + ?Sized>(
+    out: &mut W,
+    entries: &[(u32, &Value)],
+) -> Result<(), CanonicalSegmentError> {
+    for (key_id, value) in entries {
+        let value_len = encoded_value_len(value, 1)?;
+        let mut framing = Vec::new();
+        wire::encode_tag(
+            RESIDUAL_ROW_PROPERTY_FIELD,
+            wire::WIRE_TYPE_LEN,
+            &mut framing,
+        );
+        wire::encode_varint_u64(
+            residual_property_envelope_len(*key_id, value)?,
+            &mut framing,
+        );
+        wire::encode_varint_field(RESIDUAL_KEY_ID_FIELD, u64::from(*key_id), &mut framing);
+        wire::encode_tag(
+            RESIDUAL_CANONICAL_VALUE_FIELD,
+            wire::WIRE_TYPE_LEN,
+            &mut framing,
+        );
+        wire::encode_varint_u64(value_len, &mut framing);
+        out.write_all(&framing)?;
+        write_value_streaming(out, value, 1)?;
+    }
+    Ok(())
+}
+
+/// Encodes one residual-column row for the columnar shadow (§3.1.3) in the
+/// §3.5.1 field-tagged varint style: each property is a length-delimited
+/// envelope of `(varint key id, length-delimited canonical tagged value)`.
+/// Buffered convenience over [`write_residual_row_properties`].
+pub fn encode_residual_row_properties(
+    entries: &[(u32, &Value)],
+) -> Result<Vec<u8>, CanonicalSegmentError> {
+    let mut bytes = Vec::new();
+    write_residual_row_properties(&mut bytes, entries)?;
+    Ok(bytes)
+}
+
+fn decode_residual_property(body: &[u8]) -> Result<(u32, Value), CanonicalSegmentError> {
+    let mut pos = 0usize;
+    let mut key_id = None;
+    let mut value = None;
+    while pos < body.len() {
+        let (field_id, wire_type) = wire::decode_tag(body, &mut pos).map_err(wire_corrupt)?;
+        match (field_id, wire_type) {
+            (RESIDUAL_KEY_ID_FIELD, wire::WIRE_TYPE_VARINT) => {
+                let raw = wire::decode_varint_u64(body, &mut pos).map_err(wire_corrupt)?;
+                let id = u32::try_from(raw).map_err(|_| {
+                    CanonicalSegmentError::Corrupt(
+                        "residual row property key id overflows u32".to_string(),
+                    )
+                })?;
+                if key_id.replace(id).is_some() {
+                    return Err(CanonicalSegmentError::Corrupt(
+                        "residual row property repeats its key id".to_string(),
+                    ));
+                }
+            }
+            (RESIDUAL_CANONICAL_VALUE_FIELD, wire::WIRE_TYPE_LEN) => {
+                let encoded = wire::decode_len_body(body, &mut pos).map_err(wire_corrupt)?;
+                let mut cursor = SliceCursor::new(encoded);
+                let decoded = decode_value(&mut cursor, 1)?;
+                if !cursor.is_empty() {
+                    return Err(CanonicalSegmentError::Corrupt(
+                        "residual row canonical value has trailing bytes".to_string(),
+                    ));
+                }
+                if value.replace(decoded).is_some() {
+                    return Err(CanonicalSegmentError::Corrupt(
+                        "residual row property carries two values".to_string(),
+                    ));
+                }
+            }
+            // Unknown field ids are future extensions: skip by wire type.
+            (_, wire_type) => {
+                wire::skip_field(body, &mut pos, wire_type).map_err(wire_corrupt)?;
+            }
+        }
+    }
+    match (key_id, value) {
+        (Some(key_id), Some(value)) => Ok((key_id, value)),
+        _ => Err(CanonicalSegmentError::Corrupt(
+            "residual row property is missing its key id or value".to_string(),
+        )),
+    }
+}
+
+/// Decodes one residual-column row back to its `(interned key id, value)`
+/// pairs, skipping unknown fields and rejecting duplicates and truncation.
+pub fn decode_residual_row_properties(
+    bytes: &[u8],
+) -> Result<Vec<(u32, Value)>, CanonicalSegmentError> {
+    let mut pos = 0usize;
+    let mut entries = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    while pos < bytes.len() {
+        let (field_id, wire_type) = wire::decode_tag(bytes, &mut pos).map_err(wire_corrupt)?;
+        if field_id == RESIDUAL_ROW_PROPERTY_FIELD && wire_type == wire::WIRE_TYPE_LEN {
+            let body = wire::decode_len_body(bytes, &mut pos).map_err(wire_corrupt)?;
+            let (key_id, value) = decode_residual_property(body)?;
+            if !seen.insert(key_id) {
+                return Err(CanonicalSegmentError::Corrupt(format!(
+                    "residual row repeats property key id {key_id}"
+                )));
+            }
+            entries.push((key_id, value));
+        } else {
+            // Unknown row-level field ids are future extensions.
+            wire::skip_field(bytes, &mut pos, wire_type).map_err(wire_corrupt)?;
+        }
+    }
+    Ok(entries)
+}
+
 fn decode_value_with_property_spills(
     cursor: &mut SliceCursor<'_>,
     depth: usize,
@@ -2986,6 +3251,80 @@ mod tests {
             .unwrap();
         assert!(manifest.artifact_len < V1_FIXTURE_ARTIFACT.len() as u64);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn residual_rows_round_trip_every_value_shape_on_the_wire_codec() {
+        let values = [
+            (4u32, Value::Bool(false)),
+            (5, Value::Int(i64::MIN)),
+            (6, Value::Float(-2.5)),
+            (7, Value::String("列存".to_string())),
+            (8, Value::Null),
+            (
+                9,
+                Value::List(vec![Value::Int(1), Value::String("x".to_string())]),
+            ),
+            (
+                10,
+                Value::Map(BTreeMap::from([("k".to_string(), Value::Bool(true))])),
+            ),
+        ];
+        let entries: Vec<(u32, &Value)> = values
+            .iter()
+            .map(|(key_id, value)| (*key_id, value))
+            .collect();
+        let encoded = encode_residual_row_properties(&entries).unwrap();
+        let decoded = decode_residual_row_properties(&encoded).unwrap();
+        assert_eq!(
+            decoded,
+            entries
+                .iter()
+                .map(|(key_id, value)| (*key_id, (*value).clone()))
+                .collect::<Vec<_>>()
+        );
+        // An empty row is zero bytes.
+        assert!(encode_residual_row_properties(&[]).unwrap().is_empty());
+        assert_eq!(decode_residual_row_properties(&[]).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn residual_rows_skip_unknown_fields_and_reject_corruption() {
+        let value = Value::Int(41);
+        let mut encoded = encode_residual_row_properties(&[(4, &value)]).unwrap();
+        // A future row-level field and a future property-level field are
+        // both skipped by wire type (§3.5.1 forward compatibility).
+        wire::encode_varint_field(90, 7, &mut encoded);
+        wire::encode_fixed64_field(91, u64::MAX, &mut encoded);
+        let mut future_property = Vec::new();
+        wire::encode_varint_field(1, 12, &mut future_property);
+        let mut canonical_value = Vec::new();
+        encode_value(&Value::Int(-3), &mut canonical_value, 1).unwrap();
+        wire::encode_len_field(2, &canonical_value, &mut future_property);
+        wire::encode_len_field(77, b"future-extension", &mut future_property);
+        wire::encode_len_field(1, &future_property, &mut encoded);
+        assert_eq!(
+            decode_residual_row_properties(&encoded).unwrap(),
+            vec![(4, Value::Int(41)), (12, Value::Int(-3))]
+        );
+        // Truncation, duplicate keys, and value-less properties fail closed.
+        assert!(matches!(
+            decode_residual_row_properties(&encoded[..encoded.len() - 1]),
+            Err(CanonicalSegmentError::Corrupt(_))
+        ));
+        let duplicate = encode_residual_row_properties(&[(4, &value), (4, &value)]).unwrap();
+        assert!(matches!(
+            decode_residual_row_properties(&duplicate),
+            Err(CanonicalSegmentError::Corrupt(_))
+        ));
+        let mut missing_value = Vec::new();
+        let mut property = Vec::new();
+        wire::encode_varint_field(1, 4, &mut property);
+        wire::encode_len_field(1, &property, &mut missing_value);
+        assert!(matches!(
+            decode_residual_row_properties(&missing_value),
+            Err(CanonicalSegmentError::Corrupt(_))
+        ));
     }
 
     fn reseal_manifest(encoded: &str, rewrite: impl FnMut(&str) -> String) -> String {

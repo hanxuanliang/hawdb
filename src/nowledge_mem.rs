@@ -5619,7 +5619,8 @@ impl NowledgeMemGraph {
         } else {
             NowledgeMemGraphMode::WritableCutover
         };
-        let db = Database::open_with_config(path, config)?;
+        let mut db = Database::open_with_config(path, config)?;
+        db.set_runtime_governor(runtime_governor.clone());
         Ok(Self {
             db,
             mode,
@@ -5633,10 +5634,11 @@ impl NowledgeMemGraph {
     }
 
     pub fn from_database_with_runtime_governor(
-        db: Database,
+        mut db: Database,
         mode: NowledgeMemGraphMode,
         runtime_governor: RuntimeGovernor,
     ) -> Self {
+        db.set_runtime_governor(runtime_governor.clone());
         Self {
             db,
             mode,
@@ -8103,10 +8105,27 @@ impl NowledgeMemEmbeddedStoreHandle {
     ///
     /// Import and qualification hosts use this typed boundary instead of
     /// issuing a textual `CHECKPOINT` statement or reaching through the
-    /// facade to the storage engine.
+    /// facade to the storage engine. The single maintenance admission's
+    /// memory request is extended by the columnar shadow's builder-lifetime
+    /// reservation, and that pre-admitted context travels into the
+    /// checkpoint so the shadow build never issues a nested admission
+    /// against the permit this method already holds.
     pub fn checkpoint(&self) -> Result<()> {
-        let _permit = self.admit_typed_maintenance(0, 1)?;
-        self.write_store()?.graph_mut().database_mut().checkpoint()
+        let shadow_admission_bytes = self
+            .read_store()?
+            .graph
+            .database()
+            .columnar_shadow_admission_bytes();
+        let _permit = self.admit_typed_maintenance(
+            usize::try_from(shadow_admission_bytes).unwrap_or(usize::MAX),
+            1,
+        )?;
+        self.write_store()?
+            .graph_mut()
+            .database_mut()
+            .checkpoint_with_shadow_admission(crate::store::ColumnarShadowAdmission::pre_admitted(
+                shadow_admission_bytes,
+            ))
     }
 
     pub fn query_with_report(&self, cypher: &str) -> Result<NowledgeMemQueryOutput> {
