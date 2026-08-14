@@ -25,7 +25,13 @@ Generations == 0..MaxGeneration
 Pages == 1..MaxPage
 ReaderGenerations == (-1)..MaxGeneration
 PendingPhases == {"none", "appended", "durable"}
-CandidatePhases == {"idle", "building", "durable"}
+CandidatePhases == {
+    "idle",
+    "building",
+    "pagesDurable",
+    "rootDurable",
+    "manifestDurable"
+}
 PageRefs == [generation : Generations, page : Pages]
 RootType == [Pages -> Generations]
 
@@ -112,7 +118,7 @@ RequiredPageRefs ==
     }
 
 StaleCandidate ==
-    /\ candidatePhase \in {"building", "durable"}
+    /\ candidatePhase # "idle"
     /\ candidateBaseGeneration # activeGeneration
 
 Init ==
@@ -284,7 +290,7 @@ PersistCandidatePages ==
           /\ pageEpoch' =
               [ref \in PageRefs |->
                   IF ref \in refs THEN candidateEpoch ELSE pageEpoch[ref]]
-    /\ candidatePhase' = "durable"
+    /\ candidatePhase' = "pagesDurable"
     /\ UNCHANGED <<
         walDurableEpoch,
         walDirtyByEpoch,
@@ -309,8 +315,66 @@ PersistCandidatePages ==
         staleCandidateRejected
         >>
 
+PersistCandidateRoot ==
+    /\ candidatePhase = "pagesDurable"
+    /\ candidatePhase' = "rootDurable"
+    /\ UNCHANGED <<
+        walDurableEpoch,
+        walDirtyByEpoch,
+        visibleEpoch,
+        dirtyPages,
+        pendingPhase,
+        pendingEpoch,
+        pendingPage,
+        activeGeneration,
+        previousGeneration,
+        manifestEpoch,
+        nextGeneration,
+        publishedRoots,
+        rootByGeneration,
+        generationEpoch,
+        durablePages,
+        pageEpoch,
+        candidateGeneration,
+        candidateEpoch,
+        candidateBaseGeneration,
+        candidateDirtyPages,
+        candidateRoot,
+        readerGeneration,
+        staleCandidateRejected
+        >>
+
+PersistCandidateManifest ==
+    /\ candidatePhase = "rootDurable"
+    /\ candidatePhase' = "manifestDurable"
+    /\ UNCHANGED <<
+        walDurableEpoch,
+        walDirtyByEpoch,
+        visibleEpoch,
+        dirtyPages,
+        pendingPhase,
+        pendingEpoch,
+        pendingPage,
+        activeGeneration,
+        previousGeneration,
+        manifestEpoch,
+        nextGeneration,
+        publishedRoots,
+        rootByGeneration,
+        generationEpoch,
+        durablePages,
+        pageEpoch,
+        candidateGeneration,
+        candidateEpoch,
+        candidateBaseGeneration,
+        candidateDirtyPages,
+        candidateRoot,
+        readerGeneration,
+        staleCandidateRejected
+        >>
+
 PublishCheckpoint ==
-    /\ candidatePhase = "durable"
+    /\ candidatePhase = "manifestDurable"
     /\ candidateBaseGeneration = activeGeneration
     /\ \A page \in candidateDirtyPages:
         PageRef(candidateGeneration, page) \in durablePages
@@ -349,7 +413,7 @@ PublishCheckpoint ==
 (* the older candidate can only be rejected, never overwrite the winner.   *)
 (***************************************************************************)
 PublishCompetingCheckpoint ==
-    /\ candidatePhase \in {"building", "durable"}
+    /\ candidatePhase # "idle"
     /\ nextGeneration <= MaxGeneration
     /\ LET generation == nextGeneration
            root == [page \in Pages |-> generation]
@@ -387,7 +451,7 @@ PublishCompetingCheckpoint ==
         >>
 
 RejectStaleCandidate ==
-    /\ candidatePhase \in {"building", "durable"}
+    /\ candidatePhase # "idle"
     /\ candidateBaseGeneration # activeGeneration
     /\ candidatePhase' = "idle"
     /\ candidateGeneration' = 0
@@ -544,6 +608,8 @@ Next ==
     \/ PublishCommit
     \/ BeginCheckpoint
     \/ PersistCandidatePages
+    \/ PersistCandidateRoot
+    \/ PersistCandidateManifest
     \/ PublishCheckpoint
     \/ PublishCompetingCheckpoint
     \/ RejectStaleCandidate
@@ -630,11 +696,21 @@ CandidateRootCopiesOnlyDirtyPages ==
                 ELSE rootByGeneration[candidateBaseGeneration][page]
 
 DurableCandidateHasCompletePages ==
-    candidatePhase = "durable" =>
+    candidatePhase \in {"pagesDurable", "rootDurable", "manifestDurable"} =>
         \A page \in candidateDirtyPages:
             LET ref == PageRef(candidateGeneration, page)
             IN /\ ref \in durablePages
                /\ pageEpoch[ref] = candidateEpoch
+
+ManifestCandidateHasDurableClosure ==
+    candidatePhase = "manifestDurable" =>
+        /\ \A page \in candidateDirtyPages:
+            PageRef(candidateGeneration, page) \in durablePages
+        /\ \A page \in Pages:
+            candidateRoot[page] =
+                IF page \in candidateDirtyPages
+                THEN candidateGeneration
+                ELSE rootByGeneration[candidateBaseGeneration][page]
 
 ReclamationPreservesRequiredClosure ==
     /\ RequiredRootGenerations \subseteq publishedRoots

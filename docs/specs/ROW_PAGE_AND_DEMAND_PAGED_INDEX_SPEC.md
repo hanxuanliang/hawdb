@@ -385,9 +385,111 @@ The default codec envelope is one MiB and 256 rows, matching the current COW
 row-page split target. It separately limits columns, key bytes, row bytes,
 inline-value bytes, logical overflow bytes, and projected-field count. The
 encoder applies the same limits as the decoder and rejects a page before
-accumulating payload beyond the page budget. The codec is not yet a serving or
-recovery path; publication, root selection, WAL overlays, cache admission, and
+accumulating payload beyond the page budget. The codec and shadow publication
+path are not yet a serving or recovery path; WAL overlays, cache admission, and
 large-value hydration remain separate activation stages.
+
+### Relational row-root v1 publication
+
+`RelationalRowPagePublisher` publishes a generation through five immutable or
+publish-last artifacts:
+
+```text
+relational-row-pages-{generation}.pages.skein
+relational-row-root-{generation}.descriptors.skein
+relational-row-root-{generation}.keys.skein
+relational-row-pages-{generation}.manifest.skein
+relational-row-pages.manifest.skein
+```
+
+The page artifact contains only dirty page images from the new generation in
+fixed one-MiB slots. Clean logical pages retain their prior physical generation
+and slot. A generation root is a complete, streaming-written directory over
+the selected base root plus inserted, replaced, and deleted logical page ids;
+the publisher does not materialize the complete page map in memory. Root
+metadata may be rewritten sequentially while row payload write amplification
+remains proportional to dirty pages.
+
+Each root descriptor is exactly 136 little-endian bytes:
+
+```text
+u64 logical_page_id
+u64 physical_generation
+u64 physical_slot
+u64 page_source_commit_epoch
+u32 row_count
+u32 exact_encoded_page_length
+u64 lower_key_offset
+u32 lower_key_length
+u64 upper_key_offset
+u32 upper_key_length
+u32 page_slot_crc32c
+u8[32] page_slot_sha256
+u32 descriptor_binding_crc32c
+u8[32] descriptor_binding_sha256
+```
+
+The descriptor binding digest covers the first 100 descriptor bytes followed
+by the referenced lower and upper key bytes. This rejects corrupted physical
+identity, slot, bounds, lengths, or offsets when that descriptor is selected.
+The slot digest covers the complete fixed page slot, including the required
+zero tail. Table descriptors are contiguous and ordered by disjoint primary-key
+bounds. A table root in the compact manifest stores only its schema digest,
+descriptor range, and outer bounds.
+
+The `SKRPGM01` version-1 manifest has a fixed 268-byte header followed by a
+bounded table-root payload. Its header binds generation, source commit epoch,
+optional previous generation, slot size, dirty and root page counts, exact
+length plus CRC32C/SHA-256 metadata for the page, descriptor, and key artifacts,
+and a table-root-set SHA-256. The manifest has its own CRC32C and SHA-256. Table
+names and key bounds are length-prefixed and bounded before allocation. Table
+descriptor ranges MUST be contiguous and cover the declared root page count
+exactly.
+
+Publication holds one directory-scoped exclusive lock and follows this order:
+
+1. pre-admit table count, dirty page count, fixed-slot dirty bytes, root pages,
+   root-key bytes, and manifest bytes before creating a candidate;
+2. write and synchronize dirty page slots;
+3. stream and synchronize the complete root descriptor and key artifacts;
+4. publish the immutable page artifact, then both root artifacts;
+5. publish the immutable generation manifest;
+6. re-read and compare the selected latest generation with the caller's
+   expected base;
+7. atomically replace `relational-row-pages.manifest.skein` last.
+
+A target generation is immutable and MUST be fresh. A stale publisher or a
+generation whose files already exist fails without replacing the latest
+manifest. A crash may leave page, root, or generation-manifest candidates, but
+none is reachable until the latest manifest is replaced. Retrying uses a fresh
+generation. Publication does not reclaim old artifacts, so a generation-pinned
+`RelationalRowPageRootReader` continues to resolve its complete
+cross-generation descriptor closure while a newer root is published.
+
+Normal root open reads and validates only the bounded manifest and exact
+artifact file lengths. It MUST NOT hash or enumerate every descriptor or row
+page. Descriptor/key binding checks occur when a descriptor is selected; page
+slot integrity remains a demand-read obligation. Full artifact digest checking
+belongs to scrub. The current shadow publisher rejects row pages containing an
+overflow descriptor because the overflow extent manifest is a later protocol;
+it cannot publish a dangling canonical reference.
+
+`RelationalRowPagePublicationReport.events` is the fixed refinement trace:
+
+```text
+CandidateStarted
+CandidatePagesDurable
+CandidateRootDurable
+CandidateManifestDurable
+BaseRevalidated
+LatestManifestPublished
+```
+
+These events map in order to `BeginCheckpoint`, `PersistCandidatePages`,
+`PersistCandidateRoot`, `PersistCandidateManifest`, the generation fence, and
+`PublishCheckpoint` in `SkeinCowPagePublication.tla`. Recovery from the
+published root plus WAL, physical page demand reads, overflow hydration,
+reclamation, and production serving activation remain later contracts.
 
 ### Graph layout
 
@@ -692,10 +794,12 @@ of this contract. The remaining model names below are planned ownership
 boundaries and MUST land before their corresponding production activation:
 
 The row-page codec is a pure byte transformation and does not add a visible
-state transition. Its current evidence is exact round-trip, ordered-key
-differential, projected-decode, shared-limit, and corruption testing. The first
-stateful use of these bytes remains owned by `SkeinCowPagePublication.tla` and
-MUST add concrete runtime refinement traces when publication is implemented.
+state transition. Its evidence is exact round-trip, ordered-key differential,
+projected-decode, shared-limit, and corruption testing. Shadow COW publication
+is the first stateful use of these bytes. Its fixed runtime event trace, stale
+generation fence, immutable artifacts, crash boundaries, and pinned
+cross-generation descriptors refine `SkeinCowPagePublication.tla`. WAL recovery
+and serving activation remain separate obligations.
 
 - `SkeinTransactionConcurrency.tla`: logical lock namespaces, compatibility,
   wait-for deadlocks, escalation, savepoint release, and durable publication.

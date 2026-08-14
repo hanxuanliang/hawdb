@@ -50,12 +50,22 @@ pub use overflow::{
     DEFAULT_MAX_RELATIONAL_HYDRATION_BYTES, DEFAULT_RELATIONAL_OVERFLOW_THRESHOLD_BYTES,
 };
 pub use row_page::{
+    relational_row_page_artifact_file, relational_row_page_manifest_generation_file,
+    relational_row_page_root_descriptor_file, relational_row_page_root_key_file,
     ImmutableRelationalRowPage, RelationalProjectedField, RelationalProjectedRow,
-    RelationalRowPageEntry, RelationalRowPageError, RelationalRowPageId, RelationalRowPageLimits,
+    RelationalRowPageArtifactMetadata, RelationalRowPageEntry, RelationalRowPageError,
+    RelationalRowPageId, RelationalRowPageLimits, RelationalRowPagePublicationConfig,
+    RelationalRowPagePublicationError, RelationalRowPagePublicationPhase,
+    RelationalRowPagePublicationReport, RelationalRowPagePublisher,
+    RelationalRowPageRootDescriptor, RelationalRowPageRootManifest, RelationalRowPageRootReader,
+    RelationalRowPageSlotIntegrity, RelationalRowPageTableDelta, RelationalRowPageTableRoot,
     RelationalRowPageView, DEFAULT_RELATIONAL_ROW_PAGE_BYTES, DEFAULT_RELATIONAL_ROW_PAGE_COLUMNS,
+    DEFAULT_RELATIONAL_ROW_PAGE_DIRTY_BYTES, DEFAULT_RELATIONAL_ROW_PAGE_DIRTY_PAGES,
     DEFAULT_RELATIONAL_ROW_PAGE_INLINE_VALUE_BYTES, DEFAULT_RELATIONAL_ROW_PAGE_KEY_BYTES,
-    DEFAULT_RELATIONAL_ROW_PAGE_ROWS, DEFAULT_RELATIONAL_ROW_PAGE_ROW_BYTES,
-    DEFAULT_RELATIONAL_ROW_PAGE_VALUE_BYTES,
+    DEFAULT_RELATIONAL_ROW_PAGE_MANIFEST_BYTES, DEFAULT_RELATIONAL_ROW_PAGE_ROOT_KEY_BYTES,
+    DEFAULT_RELATIONAL_ROW_PAGE_ROOT_PAGES, DEFAULT_RELATIONAL_ROW_PAGE_ROWS,
+    DEFAULT_RELATIONAL_ROW_PAGE_ROW_BYTES, DEFAULT_RELATIONAL_ROW_PAGE_TABLES,
+    DEFAULT_RELATIONAL_ROW_PAGE_VALUE_BYTES, RELATIONAL_ROW_PAGE_MANIFEST_FILE,
 };
 
 pub const DEFAULT_MAX_RELATIONAL_MUTATION_ROWS: usize = 100_000;

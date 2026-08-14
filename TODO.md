@@ -97,14 +97,8 @@ a stale index or a database-sized resident set to become a correctness
 dependency.
 
 - [ ] Implement the canonical relational row-page runtime.
-  - Publish dirty COW pages into fresh generations and replace the manifest
-    only after all referenced pages are durable. Reject stale publishers and
-    preserve reader-pinned cross-generation page references.
   - Recover from the published root plus a bounded WAL dirty overlay without
     skipping durable WAL or scanning all row pages during open.
-  - Add concrete publication traces and crash-point tests that refine
-    `SkeinCowPagePublication.tla`; the protocol model alone is not runtime
-    completion evidence.
 
 - [ ] Demand-page relational rows and large values.
   - Support primary-key point reads, admitted ordered pages, and bounded range

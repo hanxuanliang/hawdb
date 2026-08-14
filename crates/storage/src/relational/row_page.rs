@@ -8,7 +8,22 @@ use skein_integrity::{IntegrityHasher, Sha256Digest, SHA256_BYTES};
 use std::fmt;
 use std::num::{NonZeroU64, NonZeroUsize};
 
+mod publication;
 mod value;
+
+pub use publication::{
+    relational_row_page_artifact_file, relational_row_page_manifest_generation_file,
+    relational_row_page_root_descriptor_file, relational_row_page_root_key_file,
+    RelationalRowPageArtifactMetadata, RelationalRowPagePublicationConfig,
+    RelationalRowPagePublicationError, RelationalRowPagePublicationPhase,
+    RelationalRowPagePublicationReport, RelationalRowPagePublisher,
+    RelationalRowPageRootDescriptor, RelationalRowPageRootManifest, RelationalRowPageRootReader,
+    RelationalRowPageSlotIntegrity, RelationalRowPageTableDelta, RelationalRowPageTableRoot,
+    DEFAULT_RELATIONAL_ROW_PAGE_DIRTY_BYTES, DEFAULT_RELATIONAL_ROW_PAGE_DIRTY_PAGES,
+    DEFAULT_RELATIONAL_ROW_PAGE_MANIFEST_BYTES, DEFAULT_RELATIONAL_ROW_PAGE_ROOT_KEY_BYTES,
+    DEFAULT_RELATIONAL_ROW_PAGE_ROOT_PAGES, DEFAULT_RELATIONAL_ROW_PAGE_TABLES,
+    RELATIONAL_ROW_PAGE_MANIFEST_FILE,
+};
 
 use value::{decode_row_fields, encode_row, validate_requested_fields};
 

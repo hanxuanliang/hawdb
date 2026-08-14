@@ -143,12 +143,12 @@ and `DurableStore::reclaim_old_generations`.
 ## Canonical COW Row-Page Publication
 
 `SkeinCowPagePublication.tla` specifies the publication protocol required by
-the canonical row-page format before runtime activation. A commit is visible
+the canonical row-page format before serving activation. A commit is visible
 only after its WAL record is durable. The recoverable dirty overlay is exactly
 the visible WAL suffix after the published manifest epoch. A checkpoint writes
 only dirty pages into a fresh physical generation, reuses immutable clean-page
-references from its selected base root, and publishes the candidate manifest
-only after every new page is durable.
+references from its selected base root, durably publishes page, root, and
+generation-manifest artifacts in order, and replaces the latest manifest last.
 
 The model includes a competing checkpoint so a candidate prepared from a stale
 base must be rejected. Published generations and epochs cannot regress.
@@ -162,10 +162,18 @@ The configured instance uses two readers, two logical commit epochs, four
 physical generations, and two logical pages. TLC checks WAL-before-visible,
 manifest-last publication, immutable physical page identity, dirty-only COW,
 stale-builder rejection, pinned-root retention, durable reference closure, and
-crash recovery. This is a protocol model, not a refinement proof of a shipped
-persistent row-page implementation; runtime activation remains blocked on the
-format, recovery, and demand-hydration implementation and their regression
-evidence.
+crash recovery. `RelationalRowPagePublicationReport.events` maps the runtime
+sequence `CandidateStarted`, `CandidatePagesDurable`, `CandidateRootDurable`,
+`CandidateManifestDurable`, `BaseRevalidated`, and
+`LatestManifestPublished` to `BeginCheckpoint`, `PersistCandidatePages`,
+`PersistCandidateRoot`, `PersistCandidateManifest`, the generation fence, and
+`PublishCheckpoint`. `RelationalRowPagePublisher` writes only dirty page slots,
+streams the complete root directory, rejects stale or reused generations, and
+leaves pre-manifest crash artifacts unreachable. `RelationalRowPageRootReader`
+pins one immutable manifest and resolves cross-generation descriptors after a
+new root is selected. Runtime recovery, physical page demand reads, overflow
+hydration, reclamation integration, and serving activation remain blocked on
+their separate implementation and regression evidence.
 
 ## Durable Projection Cursor and Catch-up
 
