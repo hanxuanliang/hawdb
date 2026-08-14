@@ -24,8 +24,8 @@ use skein_optimizer::{
 };
 use skein_plan::{PhysicalPlan, SortDirection, SortItem, SortKey};
 use skein_storage::{
-    RelationalHydrationBudget, RelationalKey, RelationalRow, RelationalScalarType, RelationalState,
-    RelationalTableSchema, RelationalValue,
+    relational_unique_index_name, RelationalHydrationBudget, RelationalKey, RelationalRow,
+    RelationalScalarType, RelationalState, RelationalTableSchema, RelationalValue,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -622,7 +622,7 @@ fn explain_access_path(
             .join("|")
     };
     format!(
-        "{planned}, runtime_path={}, lookups={}, demand_paged={}, canonical_fallback={}, fallback_reasons={}, base_generation={}, delta_generation={}, base_epoch={}, visible_epoch={}, schema_digest={}, logical_pages={}, logical_bytes={}, physical_pages={}, physical_bytes={}, cache_hits={}, cache_misses={}, cache_admission_rejections={}, delta_entries={}, live_batches={}, live_entries={}, live_matches={}, live_bytes={}, index_rows={}",
+        "{planned}, runtime_path={}, lookups={}, demand_paged={}, canonical_fallback={}, fallback_reasons={}, base_generation={}, delta_generation={}, base_epoch={}, visible_epoch={}, root_set_digest={}, logical_pages={}, logical_bytes={}, physical_pages={}, physical_bytes={}, cache_hits={}, cache_misses={}, cache_admission_rejections={}, delta_entries={}, live_batches={}, live_entries={}, live_matches={}, live_bytes={}, index_rows={}",
         evidence.runtime_path(),
         evidence.lookups,
         evidence.demand_paged_lookups,
@@ -632,7 +632,7 @@ fn explain_access_path(
         optional_u64_text(evidence.delta_generation),
         optional_u64_text(evidence.base_commit_epoch),
         optional_u64_text(evidence.visible_commit_epoch),
-        evidence.schema_digest.as_deref().unwrap_or("none"),
+        evidence.root_set_digest.as_deref().unwrap_or("none"),
         evidence.logical_pages,
         evidence.logical_bytes,
         evidence.file_pages,
@@ -774,7 +774,7 @@ fn choose_base_access(
         if let Some(candidate) = index_access_candidate(
             state,
             table,
-            format!("__unique_{ordinal}"),
+            relational_unique_index_name(ordinal),
             columns,
             true,
             &bound,
@@ -928,7 +928,7 @@ fn choose_join_access(
 
     for (ordinal, columns) in schema.unique_constraints.iter().enumerate() {
         if let Some(candidate) = join_index_access_candidate(
-            format!("__unique_{ordinal}"),
+            relational_unique_index_name(ordinal),
             columns,
             true,
             &bound,

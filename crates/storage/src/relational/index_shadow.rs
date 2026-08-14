@@ -1,7 +1,8 @@
 use super::{
-    RelationalError, RelationalForeignKeySchema, RelationalKey, RelationalKeySetPages,
-    RelationalReferentialAction, RelationalScalarType, RelationalState, RelationalTableSchema,
-    RelationalValue,
+    RelationalError, RelationalForeignKeySchema, RelationalIndexRole, RelationalKey,
+    RelationalKeySetPages, RelationalReferentialAction, RelationalScalarType, RelationalState,
+    RelationalTableSchema, RelationalValue, RELATIONAL_FOREIGN_KEY_INDEX_PREFIX,
+    RELATIONAL_PRIMARY_INDEX_NAME, RELATIONAL_UNIQUE_INDEX_PREFIX,
 };
 use crate::cache::SegmentCacheIdentity;
 use crate::{
@@ -41,8 +42,8 @@ pub use recovery::{
 
 const MANIFEST_MAGIC: &[u8; 8] = b"SKRIDXM1";
 const MANIFEST_VERSION: u16 = 1;
-const MANIFEST_HEADER_BYTES: usize = 92;
-pub const RELATIONAL_PRIMARY_INDEX_NAME: &str = "__primary__";
+const MANIFEST_INTEGRITY_OFFSET: usize = 120;
+const MANIFEST_HEADER_BYTES: usize = 156;
 const RELATIONAL_INDEX_SHADOW_LOCK_FILE: &str = "relational-index-shadow.lock";
 
 pub const RELATIONAL_INDEX_SHADOW_MANIFEST_FILE: &str = "relational-index-shadow.manifest.skein";
@@ -91,6 +92,7 @@ impl Default for RelationalIndexShadowConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationalIndexRootDescriptor {
     pub identity: IndexIdentity,
+    pub role: RelationalIndexRole,
     pub schema_digest: Sha256Digest,
     pub root_page_id: IndexPageId,
     pub height: u32,
@@ -102,10 +104,31 @@ pub struct RelationalIndexShadowManifest {
     pub source_commit_epoch: u64,
     pub page_bytes: u64,
     pub page_count: u64,
+    pub catalog_schema_digest: Sha256Digest,
+    pub root_set_digest: Sha256Digest,
     pub roots: Vec<RelationalIndexRootDescriptor>,
 }
 
 impl RelationalIndexShadowManifest {
+    fn from_roots(
+        generation: u64,
+        source_commit_epoch: u64,
+        page_bytes: u64,
+        page_count: u64,
+        roots: Vec<RelationalIndexRootDescriptor>,
+    ) -> Result<Self, RelationalIndexShadowError> {
+        let logical_roots = logical_roots(&roots);
+        Ok(Self {
+            generation,
+            source_commit_epoch,
+            page_bytes,
+            page_count,
+            catalog_schema_digest: catalog_schema_digest(&logical_roots, ErrorClass::Admission)?,
+            root_set_digest: root_set_digest(&logical_roots),
+            roots,
+        })
+    }
+
     pub fn root(&self, table: &str, index: &str) -> Option<&RelationalIndexRootDescriptor> {
         self.roots
             .binary_search_by(|root| {
@@ -128,6 +151,7 @@ impl RelationalIndexShadowManifest {
         for root in &self.roots {
             encode_bytes(&mut payload, root.identity.namespace.as_bytes())?;
             encode_bytes(&mut payload, root.identity.name.as_bytes())?;
+            payload.push(relational_index_role_tag(root.role));
             payload.extend_from_slice(root.schema_digest.as_bytes());
             payload.extend_from_slice(&root.root_page_id.get().to_le_bytes());
             payload.extend_from_slice(&root.height.to_le_bytes());
@@ -159,6 +183,8 @@ impl RelationalIndexShadowManifest {
         encoded.extend_from_slice(&self.page_count.to_le_bytes());
         encoded.extend_from_slice(&root_count.to_le_bytes());
         encoded.extend_from_slice(&payload_len.to_le_bytes());
+        encoded.extend_from_slice(self.catalog_schema_digest.as_bytes());
+        encoded.extend_from_slice(self.root_set_digest.as_bytes());
         let mut hasher = IntegrityHasher::new();
         hasher.update(&encoded);
         hasher.update(&payload);
@@ -222,14 +248,24 @@ impl RelationalIndexShadowManifest {
                 encoded.len()
             )));
         }
+        let catalog_schema_digest = Sha256Digest::from_bytes(
+            encoded[56..88]
+                .try_into()
+                .expect("catalog schema digest length was checked"),
+        );
+        let root_set_digest = Sha256Digest::from_bytes(
+            encoded[88..120]
+                .try_into()
+                .expect("root-set digest length was checked"),
+        );
         let payload = &encoded[MANIFEST_HEADER_BYTES..];
         let mut hasher = IntegrityHasher::new();
-        hasher.update(&encoded[..56]);
+        hasher.update(&encoded[..MANIFEST_INTEGRITY_OFFSET]);
         hasher.update(payload);
         let digest = hasher.finish();
-        let expected_crc = read_u32(&encoded[56..60]);
+        let expected_crc = read_u32(&encoded[120..124]);
         if digest.crc32c.get() != expected_crc
-            || digest.sha256.as_bytes() != &encoded[60..60 + SHA256_BYTES]
+            || digest.sha256.as_bytes() != &encoded[124..124 + SHA256_BYTES]
         {
             return Err(RelationalIndexShadowError::Corrupt(
                 "relational index manifest checksum mismatch".to_string(),
@@ -252,6 +288,8 @@ impl RelationalIndexShadowManifest {
                 .saturating_sub(namespace.len());
             let (name, next) = decode_bytes(payload, offset, remaining, "index name")?;
             offset = next;
+            let role =
+                decode_relational_index_role(take(payload, &mut offset, 1, "index role")?[0])?;
             let digest_bytes = take(payload, &mut offset, SHA256_BYTES, "schema digest")?;
             let root_id_bytes = take(payload, &mut offset, 8, "root page id")?;
             let height_bytes = take(payload, &mut offset, 4, "root height")?;
@@ -260,6 +298,7 @@ impl RelationalIndexShadowManifest {
                     namespace: decode_utf8(namespace, "index namespace")?,
                     name: decode_utf8(name, "index name")?,
                 },
+                role,
                 schema_digest: Sha256Digest::from_bytes(
                     digest_bytes
                         .try_into()
@@ -279,6 +318,8 @@ impl RelationalIndexShadowManifest {
             source_commit_epoch,
             page_bytes,
             page_count,
+            catalog_schema_digest,
+            root_set_digest,
             roots,
         };
         validate_manifest(&manifest, config, ErrorClass::Corrupt)?;
@@ -431,6 +472,7 @@ impl RelationalIndexShadowWriter {
         expected_previous_generation: Option<Option<u64>>,
         paths: &ShadowPublicationPaths,
     ) -> Result<RelationalIndexShadowBuildReport, RelationalIndexShadowError> {
+        required_root_count(state, self.config.max_roots.get(), ErrorClass::Admission)?;
         let file =
             File::create(&paths.artifact_tmp).map_err(durability("create shadow artifact"))?;
         let mut pages = SlotWriter::new(
@@ -448,42 +490,38 @@ impl RelationalIndexShadowWriter {
                 ))
             })?;
             let schema_digest = relational_schema_digest(schema)?;
-            let identity = IndexIdentity {
-                namespace: table.clone(),
-                name: RELATIONAL_PRIMARY_INDEX_NAME.to_string(),
-            };
-            let mut tree = TreeWriter::new(
-                &mut pages,
-                identity,
-                schema_digest,
-                self.config.max_build_metadata_bytes.get(),
-            );
-            for (primary_key, _) in segment.rows.iter() {
-                let encoded = encode_relational_key(primary_key)?;
-                tree.push(IndexLeafEntry {
-                    key: encoded.clone(),
-                    posting: IndexLeafPosting::Inline(vec![IndexRowId::new(encoded)]),
-                })?;
-            }
-            let (root, peak) = tree.finish()?;
-            peak_build_metadata_bytes = peak_build_metadata_bytes.max(peak);
-            roots.push(root);
-
-            for (name, index) in &segment.indexes {
+            for definition in schema.required_index_definitions() {
                 let identity = IndexIdentity {
                     namespace: table.clone(),
-                    name: name.clone(),
+                    name: definition.name.clone(),
                 };
                 let mut tree = TreeWriter::new(
                     &mut pages,
                     identity,
+                    definition.role,
                     schema_digest,
                     self.config.max_build_metadata_bytes.get(),
                 );
-                for (key, postings) in index.iter() {
-                    let key = encode_relational_key(key)?;
-                    let posting = tree.write_postings(postings)?;
-                    tree.push(IndexLeafEntry { key, posting })?;
+                if definition.role == RelationalIndexRole::Primary {
+                    for (primary_key, _) in segment.rows.iter() {
+                        let encoded = encode_relational_key(primary_key)?;
+                        tree.push(IndexLeafEntry {
+                            key: encoded.clone(),
+                            posting: IndexLeafPosting::Inline(vec![IndexRowId::new(encoded)]),
+                        })?;
+                    }
+                } else {
+                    let index = segment.indexes.get(&definition.name).ok_or_else(|| {
+                        RelationalIndexShadowError::Corrupt(format!(
+                            "table {table} is missing required {:?} index {}",
+                            definition.role, definition.name
+                        ))
+                    })?;
+                    for (key, postings) in index.iter() {
+                        let key = encode_relational_key(key)?;
+                        let posting = tree.write_postings(postings)?;
+                        tree.push(IndexLeafEntry { key, posting })?;
+                    }
                 }
                 let (root, peak) = tree.finish()?;
                 peak_build_metadata_bytes = peak_build_metadata_bytes.max(peak);
@@ -517,13 +555,13 @@ impl RelationalIndexShadowWriter {
         durable_replace_file(&paths.artifact_tmp, &paths.artifact)
             .map_err(durability("publish shadow artifact"))?;
 
-        let manifest = RelationalIndexShadowManifest {
+        let manifest = RelationalIndexShadowManifest::from_roots(
             generation,
             source_commit_epoch,
             page_bytes,
             page_count,
             roots,
-        };
+        )?;
         let encoded_manifest = manifest.encode(self.config)?;
         {
             let mut file = File::create(&paths.manifest_tmp)
@@ -748,6 +786,32 @@ impl RelationalIndexShadowReader {
 
     pub fn manifest(&self) -> &RelationalIndexShadowManifest {
         &self.manifest
+    }
+
+    pub fn validate_required_roots(
+        &self,
+        state: &RelationalState,
+    ) -> Result<(), RelationalIndexShadowError> {
+        let expected =
+            required_logical_roots(state, self.config.max_roots.get(), ErrorClass::Admission)?;
+        let actual = logical_roots(&self.manifest.roots);
+        let expected_catalog = catalog_schema_digest(&expected, ErrorClass::Corrupt)?;
+        let expected_root_set = root_set_digest(&expected);
+        if self.manifest.catalog_schema_digest != expected_catalog
+            || self.manifest.root_set_digest != expected_root_set
+            || actual != expected
+        {
+            return Err(RelationalIndexShadowError::Corrupt(format!(
+                "required relational index roots do not match the pinned schema: expected {} roots with catalog/root-set {}/{}, found {} roots with {}/{}",
+                expected.len(),
+                expected_catalog,
+                expected_root_set,
+                actual.len(),
+                self.manifest.catalog_schema_digest,
+                self.manifest.root_set_digest,
+            )));
+        }
+        Ok(())
     }
 
     pub fn is_poisoned(&self) -> bool {
@@ -1061,6 +1125,7 @@ struct ChildPage {
 struct TreeWriter<'a> {
     pages: &'a mut SlotWriter,
     identity: IndexIdentity,
+    role: RelationalIndexRole,
     schema_digest: Sha256Digest,
     leaf_entries: Vec<IndexLeafEntry>,
     leaf_payload_bytes: usize,
@@ -1075,12 +1140,14 @@ impl<'a> TreeWriter<'a> {
     fn new(
         pages: &'a mut SlotWriter,
         identity: IndexIdentity,
+        role: RelationalIndexRole,
         schema_digest: Sha256Digest,
         max_metadata_bytes: usize,
     ) -> Self {
         Self {
             pages,
             identity,
+            role,
             schema_digest,
             leaf_entries: Vec::new(),
             leaf_payload_bytes: 0,
@@ -1280,6 +1347,7 @@ impl<'a> TreeWriter<'a> {
         Ok((
             RelationalIndexRootDescriptor {
                 identity: self.identity,
+                role: self.role,
                 schema_digest: self.schema_digest,
                 root_page_id,
                 height,
@@ -1548,6 +1616,160 @@ fn relational_schema_digest(
     Ok(integrity_digest(&encoded).sha256)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RelationalIndexLogicalRoot {
+    identity: IndexIdentity,
+    role: RelationalIndexRole,
+    schema_digest: Sha256Digest,
+}
+
+fn logical_roots(roots: &[RelationalIndexRootDescriptor]) -> Vec<RelationalIndexLogicalRoot> {
+    roots
+        .iter()
+        .map(|root| RelationalIndexLogicalRoot {
+            identity: root.identity.clone(),
+            role: root.role,
+            schema_digest: root.schema_digest,
+        })
+        .collect()
+}
+
+fn required_logical_roots(
+    state: &RelationalState,
+    max_roots: usize,
+    error_class: ErrorClass,
+) -> Result<Vec<RelationalIndexLogicalRoot>, RelationalIndexShadowError> {
+    let expected_count = required_root_count(state, max_roots, error_class)?;
+    let mut roots = Vec::with_capacity(expected_count);
+    for (table, schema) in &state.schemas {
+        let schema_digest = relational_schema_digest(schema)?;
+        roots.extend(
+            schema
+                .required_index_definitions()
+                .into_iter()
+                .map(|definition| RelationalIndexLogicalRoot {
+                    identity: IndexIdentity {
+                        namespace: table.clone(),
+                        name: definition.name,
+                    },
+                    role: definition.role,
+                    schema_digest,
+                }),
+        );
+    }
+    roots.sort_by(|left, right| {
+        (&left.identity.namespace, &left.identity.name)
+            .cmp(&(&right.identity.namespace, &right.identity.name))
+    });
+    Ok(roots)
+}
+
+fn required_root_count(
+    state: &RelationalState,
+    max_roots: usize,
+    error_class: ErrorClass,
+) -> Result<usize, RelationalIndexShadowError> {
+    let mut total = 0usize;
+    for schema in state.schemas.values() {
+        let table_roots = 1usize
+            .checked_add(schema.unique_constraints.len())
+            .and_then(|count| count.checked_add(schema.indexes.len()))
+            .and_then(|count| count.checked_add(schema.foreign_keys.len()))
+            .ok_or_else(|| invalid(error_class, "required index root count overflow"))?;
+        total = total
+            .checked_add(table_roots)
+            .ok_or_else(|| invalid(error_class, "required index root count overflow"))?;
+        if total > max_roots {
+            return Err(invalid(
+                error_class,
+                format!("required index root count {total} exceeds limit {max_roots}"),
+            ));
+        }
+    }
+    Ok(total)
+}
+
+fn catalog_schema_digest(
+    roots: &[RelationalIndexLogicalRoot],
+    error_class: ErrorClass,
+) -> Result<Sha256Digest, RelationalIndexShadowError> {
+    let table_count = roots
+        .iter()
+        .enumerate()
+        .filter(|(position, root)| {
+            *position == 0 || roots[*position - 1].identity.namespace != root.identity.namespace
+        })
+        .count();
+    let mut hasher = IntegrityHasher::new();
+    hasher.update(b"skein-relational-index-catalog-schema-v1\0");
+    hasher.update(&(table_count as u64).to_le_bytes());
+    let mut previous: Option<(&str, Sha256Digest)> = None;
+    for root in roots {
+        match previous {
+            Some((table, digest)) if table == root.identity.namespace.as_str() => {
+                if digest != root.schema_digest {
+                    return Err(invalid(
+                        error_class,
+                        format!(
+                            "table {} has inconsistent schema digests across index roots",
+                            root.identity.namespace
+                        ),
+                    ));
+                }
+            }
+            _ => {
+                hash_manifest_bytes(&mut hasher, root.identity.namespace.as_bytes());
+                hasher.update(root.schema_digest.as_bytes());
+            }
+        }
+        previous = Some((root.identity.namespace.as_str(), root.schema_digest));
+    }
+    Ok(hasher.finish().sha256)
+}
+
+fn root_set_digest(roots: &[RelationalIndexLogicalRoot]) -> Sha256Digest {
+    let mut hasher = IntegrityHasher::new();
+    hasher.update(b"skein-relational-index-required-roots-v1\0");
+    hasher.update(&(roots.len() as u64).to_le_bytes());
+    for root in roots {
+        hash_manifest_bytes(&mut hasher, root.identity.namespace.as_bytes());
+        hash_manifest_bytes(&mut hasher, root.identity.name.as_bytes());
+        hasher.update(&[relational_index_role_tag(root.role)]);
+        hasher.update(root.schema_digest.as_bytes());
+    }
+    hasher.finish().sha256
+}
+
+fn hash_manifest_bytes(hasher: &mut IntegrityHasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn relational_index_role_tag(role: RelationalIndexRole) -> u8 {
+    match role {
+        RelationalIndexRole::Primary => 1,
+        RelationalIndexRole::UniqueConstraint => 2,
+        RelationalIndexRole::DeclaredUnique => 3,
+        RelationalIndexRole::Secondary => 4,
+        RelationalIndexRole::ForeignKeySupport => 5,
+    }
+}
+
+fn decode_relational_index_role(
+    tag: u8,
+) -> Result<RelationalIndexRole, RelationalIndexShadowError> {
+    match tag {
+        1 => Ok(RelationalIndexRole::Primary),
+        2 => Ok(RelationalIndexRole::UniqueConstraint),
+        3 => Ok(RelationalIndexRole::DeclaredUnique),
+        4 => Ok(RelationalIndexRole::Secondary),
+        5 => Ok(RelationalIndexRole::ForeignKeySupport),
+        _ => Err(RelationalIndexShadowError::Corrupt(format!(
+            "unknown relational index role tag {tag}"
+        ))),
+    }
+}
+
 fn encode_foreign_key(
     encoded: &mut Vec<u8>,
     foreign_key: &RelationalForeignKeySchema,
@@ -1623,6 +1845,12 @@ fn validate_manifest(
             "manifest root count exceeds its configured limit",
         ));
     }
+    if manifest.roots.is_empty() != (manifest.page_count == 0) {
+        return Err(invalid(
+            error_class,
+            "manifest root and page emptiness must agree",
+        ));
+    }
     let mut previous: Option<(&str, &str)> = None;
     for root in &manifest.roots {
         let identity = (
@@ -1638,6 +1866,7 @@ fn validate_manifest(
         if root.identity.namespace.is_empty()
             || root.identity.name.is_empty()
             || identity_bytes > config.page_limits.max_identity_bytes.get()
+            || !role_matches_identity(root.role, &root.identity.name)
             || root.height == 0
             || root.root_page_id.get() > manifest.page_count
         {
@@ -1654,7 +1883,39 @@ fn validate_manifest(
         }
         previous = Some(identity);
     }
+    let logical_roots = logical_roots(&manifest.roots);
+    if manifest.catalog_schema_digest != catalog_schema_digest(&logical_roots, error_class)?
+        || manifest.root_set_digest != root_set_digest(&logical_roots)
+    {
+        return Err(invalid(
+            error_class,
+            "manifest catalog schema or root-set digest mismatch",
+        ));
+    }
     Ok(())
+}
+
+fn role_matches_identity(role: RelationalIndexRole, name: &str) -> bool {
+    match role {
+        RelationalIndexRole::Primary => name == RELATIONAL_PRIMARY_INDEX_NAME,
+        RelationalIndexRole::UniqueConstraint => {
+            synthetic_index_name_has_ordinal(name, RELATIONAL_UNIQUE_INDEX_PREFIX)
+        }
+        RelationalIndexRole::ForeignKeySupport => {
+            synthetic_index_name_has_ordinal(name, RELATIONAL_FOREIGN_KEY_INDEX_PREFIX)
+        }
+        RelationalIndexRole::DeclaredUnique | RelationalIndexRole::Secondary => {
+            name != RELATIONAL_PRIMARY_INDEX_NAME
+                && !name.starts_with(RELATIONAL_UNIQUE_INDEX_PREFIX)
+                && !name.starts_with(RELATIONAL_FOREIGN_KEY_INDEX_PREFIX)
+        }
+    }
+}
+
+fn synthetic_index_name_has_ordinal(name: &str, prefix: &str) -> bool {
+    name.strip_prefix(prefix).is_some_and(|ordinal| {
+        !ordinal.is_empty() && ordinal.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -1796,21 +2057,23 @@ mod tests {
     #[test]
     fn manifest_checksum_covers_generation_fence() {
         let config = RelationalIndexShadowConfig::default();
-        let manifest = RelationalIndexShadowManifest {
-            generation: 7,
-            source_commit_epoch: 11,
-            page_bytes: config.page_limits.max_page_bytes.get() as u64,
-            page_count: 1,
-            roots: vec![RelationalIndexRootDescriptor {
+        let manifest = RelationalIndexShadowManifest::from_roots(
+            7,
+            11,
+            config.page_limits.max_page_bytes.get() as u64,
+            1,
+            vec![RelationalIndexRootDescriptor {
                 identity: IndexIdentity {
                     namespace: "documents".to_string(),
                     name: RELATIONAL_PRIMARY_INDEX_NAME.to_string(),
                 },
+                role: RelationalIndexRole::Primary,
                 schema_digest: integrity_digest(b"documents schema").sha256,
                 root_page_id: page_id(1, "test root").unwrap(),
                 height: 1,
             }],
-        };
+        )
+        .unwrap();
         let mut encoded = manifest.encode(config).unwrap();
         encoded[12] ^= 1;
 
@@ -1819,6 +2082,102 @@ mod tests {
             Err(RelationalIndexShadowError::Corrupt(message))
                 if message.contains("checksum mismatch")
         ));
+    }
+
+    #[test]
+    fn manifest_round_trip_binds_root_roles_and_logical_digests() {
+        let config = RelationalIndexShadowConfig::default();
+        let schema_digest = integrity_digest(b"documents schema").sha256;
+        let manifest = RelationalIndexShadowManifest::from_roots(
+            9,
+            13,
+            config.page_limits.max_page_bytes.get() as u64,
+            2,
+            vec![
+                RelationalIndexRootDescriptor {
+                    identity: IndexIdentity {
+                        namespace: "documents".to_string(),
+                        name: RELATIONAL_PRIMARY_INDEX_NAME.to_string(),
+                    },
+                    role: RelationalIndexRole::Primary,
+                    schema_digest,
+                    root_page_id: page_id(1, "test primary root").unwrap(),
+                    height: 1,
+                },
+                RelationalIndexRootDescriptor {
+                    identity: IndexIdentity {
+                        namespace: "documents".to_string(),
+                        name: "documents_owner_idx".to_string(),
+                    },
+                    role: RelationalIndexRole::Secondary,
+                    schema_digest,
+                    root_page_id: page_id(2, "test secondary root").unwrap(),
+                    height: 1,
+                },
+            ],
+        )
+        .unwrap();
+
+        let encoded = manifest.encode(config).unwrap();
+        let decoded = RelationalIndexShadowManifest::decode(&encoded, config).unwrap();
+
+        assert_eq!(decoded, manifest);
+        assert_ne!(decoded.catalog_schema_digest, decoded.root_set_digest);
+        assert_eq!(decoded.roots[0].role, RelationalIndexRole::Primary);
+        assert_eq!(decoded.roots[1].role, RelationalIndexRole::Secondary);
+    }
+
+    #[test]
+    fn manifest_rejects_role_and_root_set_identity_drift() {
+        let config = RelationalIndexShadowConfig::default();
+        let mut wrong_role = RelationalIndexShadowManifest::from_roots(
+            1,
+            1,
+            config.page_limits.max_page_bytes.get() as u64,
+            1,
+            vec![RelationalIndexRootDescriptor {
+                identity: IndexIdentity {
+                    namespace: "documents".to_string(),
+                    name: RELATIONAL_PRIMARY_INDEX_NAME.to_string(),
+                },
+                role: RelationalIndexRole::Primary,
+                schema_digest: integrity_digest(b"documents schema").sha256,
+                root_page_id: page_id(1, "test root").unwrap(),
+                height: 1,
+            }],
+        )
+        .unwrap();
+        wrong_role.roots[0].role = RelationalIndexRole::Secondary;
+        assert!(matches!(
+            wrong_role.encode(config),
+            Err(RelationalIndexShadowError::Admission(message))
+                if message.contains("invalid root descriptor")
+        ));
+
+        let mut wrong_digest = RelationalIndexShadowManifest::from_roots(
+            1,
+            1,
+            config.page_limits.max_page_bytes.get() as u64,
+            1,
+            vec![RelationalIndexRootDescriptor {
+                identity: IndexIdentity {
+                    namespace: "documents".to_string(),
+                    name: RELATIONAL_PRIMARY_INDEX_NAME.to_string(),
+                },
+                role: RelationalIndexRole::Primary,
+                schema_digest: integrity_digest(b"documents schema").sha256,
+                root_page_id: page_id(1, "test root").unwrap(),
+                height: 1,
+            }],
+        )
+        .unwrap();
+        wrong_digest.root_set_digest = integrity_digest(b"wrong root set").sha256;
+        assert!(matches!(
+            wrong_digest.encode(config),
+            Err(RelationalIndexShadowError::Admission(message))
+                if message.contains("root-set digest mismatch")
+        ));
+        assert!(decode_relational_index_role(0).is_err());
     }
 
     #[test]

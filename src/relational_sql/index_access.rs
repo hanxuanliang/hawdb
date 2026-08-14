@@ -30,7 +30,7 @@ pub(crate) struct RelationalIndexExecutionEvidence {
     pub delta_generation: Option<u64>,
     pub base_commit_epoch: Option<u64>,
     pub visible_commit_epoch: Option<u64>,
-    pub schema_digest: Option<String>,
+    pub root_set_digest: Option<String>,
     pub logical_pages: usize,
     pub logical_bytes: usize,
     pub file_pages: usize,
@@ -426,14 +426,14 @@ fn ensure_identity(
         report.delta_generation,
         Some(report.base_commit_epoch),
         Some(report.visible_commit_epoch),
-        Some(report.schema_digest.as_str()),
+        Some(report.root_set_digest.as_str()),
     );
     let expected = (
         evidence.base_generation,
         evidence.delta_generation,
         evidence.base_commit_epoch,
         evidence.visible_commit_epoch,
-        evidence.schema_digest.as_deref(),
+        evidence.root_set_digest.as_deref(),
     );
     if evidence.demand_paged_lookups != 0 && expected != observed {
         return Err(SkeinError::StorageIntegrity(
@@ -444,7 +444,7 @@ fn ensure_identity(
     evidence.delta_generation = observed.1;
     evidence.base_commit_epoch = observed.2;
     evidence.visible_commit_epoch = observed.3;
-    evidence.schema_digest = observed.4.map(str::to_string);
+    evidence.root_set_digest = observed.4.map(str::to_string);
     Ok(())
 }
 

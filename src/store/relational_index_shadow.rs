@@ -13,11 +13,11 @@ use skein_storage::{
     RelationalIndexGenerationIdentity, RelationalIndexMode, RelationalIndexReadLimits,
     RelationalIndexReadReport, RelationalIndexRecoveryBuilder, RelationalIndexRecoveryConfig,
     RelationalIndexRecoveryReadReport, RelationalIndexRecoveryReader,
-    RelationalIndexRecoveryReport, RelationalIndexShadowBuildReport, RelationalIndexShadowConfig,
-    RelationalIndexShadowError, RelationalIndexShadowManifest, RelationalIndexShadowReader,
-    RelationalIndexShadowWriter, RelationalKey, RelationalScalarType, RelationalTableSchema,
-    RelationalTransaction, RelationalValue, RELATIONAL_INDEX_SHADOW_MANIFEST_FILE,
-    RELATIONAL_PRIMARY_INDEX_NAME,
+    RelationalIndexRecoveryReport, RelationalIndexRole, RelationalIndexShadowBuildReport,
+    RelationalIndexShadowConfig, RelationalIndexShadowError, RelationalIndexShadowManifest,
+    RelationalIndexShadowReader, RelationalIndexShadowWriter, RelationalKey, RelationalScalarType,
+    RelationalTableSchema, RelationalTransaction, RelationalValue,
+    RELATIONAL_INDEX_SHADOW_MANIFEST_FILE, RELATIONAL_PRIMARY_INDEX_NAME,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -75,7 +75,7 @@ pub struct RelationalIndexReadViewReport {
     pub delta_generation: Option<u64>,
     pub base_commit_epoch: u64,
     pub visible_commit_epoch: u64,
-    pub schema_digest: String,
+    pub root_set_digest: String,
     pub backend: RelationalIndexReadViewBackendReport,
     pub live_batches_visited: usize,
     pub live_entries_visited: usize,
@@ -106,7 +106,7 @@ pub struct RelationalIndexViewQualificationReport {
     pub delta_generation: Option<u64>,
     pub base_commit_epoch: u64,
     pub visible_commit_epoch: u64,
-    pub schema_digest: String,
+    pub root_set_digest: String,
     pub tables_discovered: usize,
     pub tables_sampled: usize,
     pub rows_sampled: usize,
@@ -130,7 +130,7 @@ pub(crate) struct RelationalIndexReadViewIdentity {
     pub delta_generation: Option<u64>,
     pub base_commit_epoch: u64,
     pub visible_commit_epoch: u64,
-    pub schema_digest: Sha256Digest,
+    pub root_set_digest: Sha256Digest,
 }
 
 #[derive(Clone)]
@@ -263,7 +263,7 @@ impl RelationalIndexReadView {
                 delta_generation: None,
                 base_commit_epoch: manifest.source_commit_epoch,
                 visible_commit_epoch: manifest.source_commit_epoch,
-                schema_digest: relational_index_schema_digest(manifest),
+                root_set_digest: manifest.root_set_digest,
             },
             backend: RelationalIndexReadBackend::Base(Arc::new(reader)),
             live: RelationalIndexLiveOverlay::empty(),
@@ -279,7 +279,7 @@ impl RelationalIndexReadView {
                 delta_generation: Some(recovered.delta_generation),
                 base_commit_epoch: base.source_commit_epoch,
                 visible_commit_epoch: recovered.recovered_commit_epoch,
-                schema_digest: relational_index_schema_digest(base),
+                root_set_digest: base.root_set_digest,
             },
             backend: RelationalIndexReadBackend::Recovered(Arc::new(reader)),
             live: RelationalIndexLiveOverlay::empty(),
@@ -571,7 +571,7 @@ impl RelationalIndexReadView {
             delta_generation: self.identity.delta_generation,
             base_commit_epoch: self.identity.base_commit_epoch,
             visible_commit_epoch: self.identity.visible_commit_epoch,
-            schema_digest: self.identity.schema_digest.to_string(),
+            root_set_digest: self.identity.root_set_digest.to_string(),
             backend,
             live_batches_visited: self.live.batch_count(),
             live_entries_visited,
@@ -626,58 +626,9 @@ fn qualification_probe_error(
     }
 }
 
-fn relational_index_schema_digest(manifest: &RelationalIndexShadowManifest) -> Sha256Digest {
-    let mut hasher = IntegrityHasher::new();
-    hasher.update(&(manifest.roots.len() as u64).to_le_bytes());
-    for root in &manifest.roots {
-        hash_bounded_bytes(&mut hasher, root.identity.namespace.as_bytes());
-        hash_bounded_bytes(&mut hasher, root.identity.name.as_bytes());
-        hasher.update(root.schema_digest.as_bytes());
-    }
-    hasher.finish().sha256
-}
-
 fn hash_bounded_bytes(hasher: &mut IntegrityHasher, bytes: &[u8]) {
     hasher.update(&(bytes.len() as u64).to_le_bytes());
     hasher.update(bytes);
-}
-
-struct RelationalIndexDefinition {
-    name: String,
-    columns: Vec<String>,
-    primary: bool,
-}
-
-fn relational_index_definitions(schema: &RelationalTableSchema) -> Vec<RelationalIndexDefinition> {
-    let mut definitions =
-        Vec::with_capacity(1 + schema.unique_constraints.len() + schema.indexes.len());
-    definitions.push(RelationalIndexDefinition {
-        name: RELATIONAL_PRIMARY_INDEX_NAME.to_string(),
-        columns: schema.primary_key.clone(),
-        primary: true,
-    });
-    definitions.extend(
-        schema
-            .unique_constraints
-            .iter()
-            .enumerate()
-            .map(|(ordinal, columns)| RelationalIndexDefinition {
-                name: format!("__unique_{ordinal}"),
-                columns: columns.clone(),
-                primary: false,
-            }),
-    );
-    definitions.extend(
-        schema
-            .indexes
-            .iter()
-            .map(|index| RelationalIndexDefinition {
-                name: index.name.clone(),
-                columns: index.columns.clone(),
-                primary: false,
-            }),
-    );
-    definitions
 }
 
 fn relational_index_key(
@@ -1100,7 +1051,9 @@ impl GraphStore {
                 durable.store_id(),
             ),
         };
-        reader.map(RelationalIndexReadView::from_base).map(Arc::new)
+        let reader = reader?;
+        reader.validate_required_roots(&self.relational_state)?;
+        Ok(Arc::new(RelationalIndexReadView::from_base(reader)))
     }
 
     fn open_recovered_relational_index_read_view(
@@ -1131,9 +1084,9 @@ impl GraphStore {
                 durable.store_id(),
             ),
         };
-        reader
-            .map(RelationalIndexReadView::from_recovered)
-            .map(Arc::new)
+        let reader = reader?;
+        reader.validate_required_roots(&self.relational_state)?;
+        Ok(Arc::new(RelationalIndexReadView::from_recovered(reader)))
     }
 
     pub(super) fn relational_index_live_capture_limits(
@@ -1418,7 +1371,7 @@ impl GraphStore {
         let indexes_discovered = self
             .relational_state
             .table_schemas()
-            .map(|schema| relational_index_definitions(schema).len())
+            .map(|schema| schema.required_index_definitions().len())
             .sum();
         let mut probes = Vec::new();
         let mut unique_probes = BTreeSet::new();
@@ -1430,7 +1383,7 @@ impl GraphStore {
             .table_schemas()
             .take(options.max_tables.get())
         {
-            let definitions = relational_index_definitions(schema);
+            let definitions = schema.required_index_definitions();
             for (primary_key, row) in self
                 .relational_state
                 .rows(&schema.name)
@@ -1442,7 +1395,7 @@ impl GraphStore {
                     )
                 })?;
                 for definition in &definitions {
-                    let key = if definition.primary {
+                    let key = if definition.role == RelationalIndexRole::Primary {
                         primary_key.clone()
                     } else {
                         relational_index_key(schema, row.values(), &definition.columns)
@@ -1461,7 +1414,9 @@ impl GraphStore {
                         truncated = true;
                         break 'tables;
                     }
-                    if !definition.primary && definition.columns.len() > 1 {
+                    if definition.role != RelationalIndexRole::Primary
+                        && definition.columns.len() > 1
+                    {
                         for prefix_len in 1..definition.columns.len() {
                             if !push_qualification_probe(
                                 &mut probes,
@@ -1542,7 +1497,7 @@ impl GraphStore {
             delta_generation: identity.delta_generation,
             base_commit_epoch: identity.base_commit_epoch,
             visible_commit_epoch: identity.visible_commit_epoch,
-            schema_digest: identity.schema_digest.to_string(),
+            root_set_digest: identity.root_set_digest.to_string(),
             tables_discovered,
             tables_sampled,
             rows_sampled,

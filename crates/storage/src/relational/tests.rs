@@ -1223,6 +1223,256 @@ fn relational_index_shadow_publishes_generation_fenced_cold_pages() {
 }
 
 #[test]
+fn required_relational_index_roots_cover_constraints_and_foreign_keys() {
+    let state = RelationalState::default()
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![
+                    RelationalWrite::CreateTable(RelationalTableSchema {
+                        name: "accounts".to_string(),
+                        columns: vec![
+                            text_column("id", false),
+                            text_column("email", false),
+                            text_column("handle", false),
+                            text_column("status", false),
+                        ],
+                        primary_key: vec!["id".to_string()],
+                        unique_constraints: vec![vec!["email".to_string()]],
+                        foreign_keys: Vec::new(),
+                        indexes: vec![
+                            RelationalIndexSchema {
+                                name: "accounts_handle_idx".to_string(),
+                                columns: vec!["handle".to_string()],
+                                unique: true,
+                            },
+                            RelationalIndexSchema {
+                                name: "accounts_status_idx".to_string(),
+                                columns: vec!["status".to_string()],
+                                unique: false,
+                            },
+                        ],
+                    }),
+                    RelationalWrite::CreateTable(RelationalTableSchema {
+                        name: "sessions".to_string(),
+                        columns: vec![text_column("id", false), text_column("account_id", false)],
+                        primary_key: vec!["id".to_string()],
+                        unique_constraints: Vec::new(),
+                        foreign_keys: vec![RelationalForeignKeySchema {
+                            columns: vec!["account_id".to_string()],
+                            referenced_table: "accounts".to_string(),
+                            referenced_columns: vec!["id".to_string()],
+                            on_delete: RelationalReferentialAction::Restrict,
+                            on_update: RelationalReferentialAction::Restrict,
+                        }],
+                        indexes: Vec::new(),
+                    }),
+                    RelationalWrite::Insert {
+                        table: "accounts".to_string(),
+                        rows: vec![
+                            RelationalRow::new(vec![
+                                RelationalValue::Text("account-a".to_string()),
+                                RelationalValue::Text("a@example.test".to_string()),
+                                RelationalValue::Text("alice".to_string()),
+                                RelationalValue::Text("active".to_string()),
+                            ]),
+                            RelationalRow::new(vec![
+                                RelationalValue::Text("account-b".to_string()),
+                                RelationalValue::Text("b@example.test".to_string()),
+                                RelationalValue::Text("bob".to_string()),
+                                RelationalValue::Text("active".to_string()),
+                            ]),
+                        ],
+                        mode: RelationalInsertMode::Error,
+                    },
+                    RelationalWrite::Insert {
+                        table: "sessions".to_string(),
+                        rows: vec![RelationalRow::new(vec![
+                            RelationalValue::Text("session-1".to_string()),
+                            RelationalValue::Text("account-a".to_string()),
+                        ])],
+                        mode: RelationalInsertMode::Error,
+                    },
+                ],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("build required-root source");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "skein-relational-required-roots-{}-{nonce}",
+        std::process::id()
+    ));
+    let shadow_config = RelationalIndexShadowConfig::default();
+    let report = RelationalIndexShadowWriter::new(shadow_config)
+        .publish(&directory, &state, 1, 1, None)
+        .expect("publish all required roots");
+    assert_eq!(report.index_roots, 6);
+
+    let reader = RelationalIndexShadowReader::open(&directory, 1, 1, shadow_config)
+        .expect("open required-root fixture");
+    reader
+        .validate_required_roots(&state)
+        .expect("manifest exactly covers the source schema");
+    let roles = reader
+        .manifest()
+        .roots
+        .iter()
+        .map(|root| {
+            (
+                (root.identity.namespace.clone(), root.identity.name.clone()),
+                root.role,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        roles.get(&(
+            "accounts".to_string(),
+            RELATIONAL_PRIMARY_INDEX_NAME.to_string()
+        )),
+        Some(&RelationalIndexRole::Primary)
+    );
+    assert_eq!(
+        roles.get(&("accounts".to_string(), relational_unique_index_name(0))),
+        Some(&RelationalIndexRole::UniqueConstraint)
+    );
+    assert_eq!(
+        roles.get(&("accounts".to_string(), "accounts_handle_idx".to_string())),
+        Some(&RelationalIndexRole::DeclaredUnique)
+    );
+    assert_eq!(
+        roles.get(&("accounts".to_string(), "accounts_status_idx".to_string())),
+        Some(&RelationalIndexRole::Secondary)
+    );
+    let foreign_key_index = relational_foreign_key_index_name(0);
+    assert_eq!(
+        roles.get(&("sessions".to_string(), foreign_key_index.clone())),
+        Some(&RelationalIndexRole::ForeignKeySupport)
+    );
+
+    let limited_config = RelationalIndexShadowConfig {
+        max_roots: std::num::NonZeroUsize::new(5).unwrap(),
+        ..shadow_config
+    };
+    assert!(matches!(
+        RelationalIndexShadowWriter::new(limited_config)
+            .publish_generation(&directory, &state, 2, 1),
+        Err(RelationalIndexShadowError::Admission(message))
+            if message.contains("required index root count 6 exceeds limit 5")
+    ));
+    assert!(!directory
+        .join(relational_index_shadow_artifact_file(2))
+        .exists());
+
+    let account_a = RelationalKey(vec![RelationalValue::Text("account-a".to_string())]);
+    let session_1 = RelationalKey(vec![RelationalValue::Text("session-1".to_string())]);
+    let mut base_sessions = Vec::new();
+    reader
+        .visit_exact_postings(
+            "sessions",
+            &foreign_key_index,
+            &account_a,
+            RelationalIndexReadLimits::default(),
+            |key| {
+                base_sessions.push(key.clone());
+                true
+            },
+        )
+        .expect("read foreign-key support root");
+    assert_eq!(base_sessions, vec![session_1.clone()]);
+
+    let (next, capture) = state
+        .stage_transaction_with_index_changes(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::UpdateWhere {
+                    table: "sessions".to_string(),
+                    assignments: vec![RelationalUpdateAssignment {
+                        column: "account_id".to_string(),
+                        value: RelationalUpdateValue::Value(RelationalValue::Text(
+                            "account-b".to_string(),
+                        )),
+                    }],
+                    predicate: RelationalPredicate::Compare {
+                        column: "id".to_string(),
+                        op: RelationalComparisonOp::Eq,
+                        value: RelationalValue::Text("session-1".to_string()),
+                    },
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            RelationalIndexChangeCaptureLimits::default(),
+        )
+        .expect("capture a foreign-key support update");
+    let RelationalIndexChangeCapture::Captured { changes, .. } = &capture else {
+        panic!("foreign-key update must remain incrementally capturable");
+    };
+    assert_eq!(
+        changes
+            .iter()
+            .filter(|change| change.index == foreign_key_index)
+            .count(),
+        2
+    );
+
+    let recovery_config = RelationalIndexRecoveryConfig::default();
+    let mut builder = RelationalIndexRecoveryBuilder::new(&directory, 1, 1, recovery_config)
+        .expect("create foreign-key recovery delta");
+    builder
+        .record(2, capture)
+        .expect("record foreign-key recovery delta");
+    builder.finish(2).expect("publish recovery delta");
+    let recovered =
+        RelationalIndexRecoveryReader::open_latest(&directory, 2, shadow_config, recovery_config)
+            .expect("open recovered foreign-key root");
+    recovered
+        .validate_required_roots(&next)
+        .expect("recovered root identity remains schema-complete");
+    let account_b = RelationalKey(vec![RelationalValue::Text("account-b".to_string())]);
+    let mut recovered_sessions = Vec::new();
+    recovered
+        .visit_exact_postings(
+            "sessions",
+            &foreign_key_index,
+            &account_b,
+            RelationalIndexReadLimits::default(),
+            |key| {
+                recovered_sessions.push(key.clone());
+                true
+            },
+        )
+        .expect("read recovered foreign-key support root");
+    assert_eq!(recovered_sessions, vec![session_1]);
+
+    let changed_schema = next
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::CreateIndex {
+                    table: "accounts".to_string(),
+                    index: RelationalIndexSchema {
+                        name: "accounts_email_lookup_idx".to_string(),
+                        columns: vec!["email".to_string()],
+                        unique: false,
+                    },
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("build a different schema root set");
+    assert!(matches!(
+        reader.validate_required_roots(&changed_schema),
+        Err(RelationalIndexShadowError::Corrupt(message))
+            if message.contains("required relational index roots")
+    ));
+
+    std::fs::remove_dir_all(directory).expect("remove required-root fixture");
+}
+
+#[test]
 fn relational_index_shadow_demand_reads_match_materialized_oracle() {
     let state = RelationalState::default()
         .stage_transaction(
@@ -2013,6 +2263,67 @@ fn schema_changing_relational_wal_invalidates_incremental_index_capture() {
         RelationalIndexChangeCapture::Invalidated { reason }
             if reason.contains("schema-changing WAL")
     ));
+}
+
+#[test]
+fn relational_schema_rejects_reserved_and_duplicate_index_names() {
+    for name in [
+        "",
+        RELATIONAL_PRIMARY_INDEX_NAME,
+        "__unique_0",
+        "__foreign_key_0",
+    ] {
+        let error = RelationalState::default()
+            .stage_transaction(
+                RelationalTransaction {
+                    writes: vec![RelationalWrite::CreateTable(RelationalTableSchema {
+                        name: "documents".to_string(),
+                        columns: vec![text_column("id", false)],
+                        primary_key: vec!["id".to_string()],
+                        unique_constraints: Vec::new(),
+                        foreign_keys: Vec::new(),
+                        indexes: vec![RelationalIndexSchema {
+                            name: name.to_string(),
+                            columns: vec!["id".to_string()],
+                            unique: false,
+                        }],
+                    })],
+                },
+                RelationalMutationLimits::default(),
+                RelationalOverflowConfig::default(),
+            )
+            .expect_err("reserved index identity must be rejected");
+        assert!(matches!(error, RelationalError::Schema(_)));
+    }
+
+    let error = RelationalState::default()
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::CreateTable(RelationalTableSchema {
+                    name: "documents".to_string(),
+                    columns: vec![text_column("id", false)],
+                    primary_key: vec!["id".to_string()],
+                    unique_constraints: Vec::new(),
+                    foreign_keys: Vec::new(),
+                    indexes: vec![
+                        RelationalIndexSchema {
+                            name: "documents_id_idx".to_string(),
+                            columns: vec!["id".to_string()],
+                            unique: false,
+                        },
+                        RelationalIndexSchema {
+                            name: "documents_id_idx".to_string(),
+                            columns: vec!["id".to_string()],
+                            unique: true,
+                        },
+                    ],
+                })],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect_err("duplicate declared index identities must be rejected");
+    assert!(matches!(error, RelationalError::Schema(_)));
 }
 
 fn recovery_document_row(id: &str, owner: &str, rank: i64) -> RelationalRow {

@@ -3,7 +3,10 @@ EXTENDS Integers, Naturals, FiniteSets
 
 (***************************************************************************)
 (* Relational index candidates are generation-specific, rebuildable files. *)
-(* Candidate pages and their root manifest become durable before a matching *)
+(* A candidate root set is selectable only when it exactly covers every     *)
+(* primary, unique, secondary, and foreign-key-support role required by the *)
+(* pinned catalog/schema digest. Candidate pages and their root manifest     *)
+(* become durable before a matching                                          *)
 (* canonical checkpoint may select that generation. The canonical checkpoint *)
 (* does not reverse-reference a non-authoritative candidate, so candidate    *)
 (* admission failure, corruption, or a crash orphan never prevents canonical *)
@@ -21,7 +24,14 @@ Generations == 0..MaxGeneration
 Epochs == 0..MaxEpoch
 Pages == 1..MaxPage
 CandidateIds == [generation : Generations, epoch : Epochs]
-BuildPhases == {"idle", "building", "pages_durable", "candidate_durable"}
+BuildPhases == {
+    "idle",
+    "building_incomplete",
+    "building_complete",
+    "pages_durable_incomplete",
+    "pages_durable_complete",
+    "candidate_durable"
+}
 SelectionModes == {"none", "shadow", "demand"}
 ReadStates == {"idle", "reading", "succeeded", "failed"}
 
@@ -37,6 +47,7 @@ VARIABLES
     buildEpoch,
     durableArtifacts,
     durableCandidateManifests,
+    exactRootSetManifests,
     abandonedCandidates,
     corruptCandidateManifests,
     canonicalOpen,
@@ -62,6 +73,7 @@ vars == <<
     buildEpoch,
     durableArtifacts,
     durableCandidateManifests,
+    exactRootSetManifests,
     abandonedCandidates,
     corruptCandidateManifests,
     canonicalOpen,
@@ -88,6 +100,7 @@ Init ==
     /\ buildEpoch = 0
     /\ durableArtifacts = {}
     /\ durableCandidateManifests = {}
+    /\ exactRootSetManifests = {}
     /\ abandonedCandidates = {}
     /\ corruptCandidateManifests = {}
     /\ canonicalOpen = FALSE
@@ -111,13 +124,76 @@ BeginCandidate ==
           epoch \in canonicalEpoch..MaxEpoch:
         /\ buildGeneration' = generation
         /\ buildEpoch' = epoch
-    /\ buildPhase' = "building"
+    /\ buildPhase' = "building_incomplete"
     /\ UNCHANGED <<
         canonicalGeneration,
         canonicalEpoch,
         canonicalHistory,
         durableArtifacts,
         durableCandidateManifests,
+        exactRootSetManifests,
+        abandonedCandidates,
+        corruptCandidateManifests,
+        canonicalOpen,
+        candidateUnavailable,
+        demandReadFailed,
+        handleOpen,
+        selectionMode,
+        handleGeneration,
+        handleEpoch,
+        queriesStarted,
+        loadedPages,
+        corruptPages,
+        readState,
+        requiredPage,
+        poisoned
+        >>
+
+CompleteRequiredRootSet ==
+    /\ buildPhase = "building_incomplete"
+    /\ buildPhase' = "building_complete"
+    /\ UNCHANGED <<
+        canonicalGeneration,
+        canonicalEpoch,
+        canonicalHistory,
+        buildGeneration,
+        buildEpoch,
+        durableArtifacts,
+        durableCandidateManifests,
+        exactRootSetManifests,
+        abandonedCandidates,
+        corruptCandidateManifests,
+        canonicalOpen,
+        candidateUnavailable,
+        demandReadFailed,
+        handleOpen,
+        selectionMode,
+        handleGeneration,
+        handleEpoch,
+        queriesStarted,
+        loadedPages,
+        corruptPages,
+        readState,
+        requiredPage,
+        poisoned
+        >>
+
+(***************************************************************************)
+(* A missing role, an extra root, a role/identity mismatch, or a schema     *)
+(* digest change all collapse to an incomplete logical root-set predicate.  *)
+(***************************************************************************)
+InvalidateRequiredRootSet ==
+    /\ buildPhase = "building_complete"
+    /\ buildPhase' = "building_incomplete"
+    /\ UNCHANGED <<
+        canonicalGeneration,
+        canonicalEpoch,
+        canonicalHistory,
+        buildGeneration,
+        buildEpoch,
+        durableArtifacts,
+        durableCandidateManifests,
+        exactRootSetManifests,
         abandonedCandidates,
         corruptCandidateManifests,
         canonicalOpen,
@@ -136,8 +212,10 @@ BeginCandidate ==
         >>
 
 PersistCandidatePages ==
-    /\ buildPhase = "building"
-    /\ buildPhase' = "pages_durable"
+    /\ buildPhase \in {"building_incomplete", "building_complete"}
+    /\ buildPhase' = IF buildPhase = "building_complete"
+                     THEN "pages_durable_complete"
+                     ELSE "pages_durable_incomplete"
     /\ durableArtifacts' = durableArtifacts \cup {buildGeneration}
     /\ UNCHANGED <<
         canonicalGeneration,
@@ -146,6 +224,7 @@ PersistCandidatePages ==
         buildGeneration,
         buildEpoch,
         durableCandidateManifests,
+        exactRootSetManifests,
         abandonedCandidates,
         corruptCandidateManifests,
         canonicalOpen,
@@ -164,11 +243,19 @@ PersistCandidatePages ==
         >>
 
 PersistCandidateManifest ==
-    /\ buildPhase = "pages_durable"
+    /\ buildPhase \in {"pages_durable_incomplete", "pages_durable_complete"}
     /\ buildGeneration \in durableArtifacts
     /\ buildPhase' = "candidate_durable"
     /\ durableCandidateManifests' =
         durableCandidateManifests \cup {Candidate(buildGeneration, buildEpoch)}
+    /\ exactRootSetManifests' =
+        IF buildPhase = "pages_durable_complete"
+        THEN exactRootSetManifests \cup {Candidate(buildGeneration, buildEpoch)}
+        ELSE exactRootSetManifests
+    /\ corruptCandidateManifests' =
+        IF buildPhase = "pages_durable_complete"
+        THEN corruptCandidateManifests
+        ELSE corruptCandidateManifests \cup {Candidate(buildGeneration, buildEpoch)}
     /\ UNCHANGED <<
         canonicalGeneration,
         canonicalEpoch,
@@ -177,7 +264,6 @@ PersistCandidateManifest ==
         buildEpoch,
         durableArtifacts,
         abandonedCandidates,
-        corruptCandidateManifests,
         canonicalOpen,
         candidateUnavailable,
         demandReadFailed,
@@ -208,6 +294,7 @@ PublishCheckpointWithCandidate ==
     /\ UNCHANGED <<
         durableArtifacts,
         durableCandidateManifests,
+        exactRootSetManifests,
         abandonedCandidates,
         corruptCandidateManifests,
         canonicalOpen,
@@ -244,6 +331,7 @@ PublishCheckpointWithoutCandidate ==
         buildEpoch,
         durableArtifacts,
         durableCandidateManifests,
+        exactRootSetManifests,
         abandonedCandidates,
         corruptCandidateManifests,
         canonicalOpen,
@@ -274,6 +362,7 @@ CrashBeforeCheckpoint ==
         canonicalHistory,
         durableArtifacts,
         durableCandidateManifests,
+        exactRootSetManifests,
         corruptCandidateManifests,
         canonicalOpen,
         candidateUnavailable,
@@ -304,6 +393,7 @@ OpenCanonical ==
         buildEpoch,
         durableArtifacts,
         durableCandidateManifests,
+        exactRootSetManifests,
         abandonedCandidates,
         corruptCandidateManifests,
         handleOpen,
@@ -323,6 +413,7 @@ OpenExactCandidate ==
     /\ ~handleOpen
     /\ Candidate(canonicalGeneration, canonicalEpoch)
         \in durableCandidateManifests \ corruptCandidateManifests
+    /\ Candidate(canonicalGeneration, canonicalEpoch) \in exactRootSetManifests
     /\ \E mode \in {"shadow", "demand"}: selectionMode' = mode
     /\ handleOpen' = TRUE
     /\ handleGeneration' = canonicalGeneration
@@ -343,6 +434,7 @@ OpenExactCandidate ==
         buildEpoch,
         durableArtifacts,
         durableCandidateManifests,
+        exactRootSetManifests,
         abandonedCandidates,
         corruptCandidateManifests,
         canonicalOpen,
@@ -366,6 +458,7 @@ ObserveMissingCandidate ==
         buildEpoch,
         durableArtifacts,
         durableCandidateManifests,
+        exactRootSetManifests,
         abandonedCandidates,
         corruptCandidateManifests,
         canonicalOpen,
@@ -392,6 +485,7 @@ CorruptCandidateManifest ==
         buildEpoch,
         durableArtifacts,
         durableCandidateManifests,
+        exactRootSetManifests,
         abandonedCandidates,
         canonicalOpen,
         candidateUnavailable,
@@ -425,6 +519,7 @@ RejectCorruptShadowCandidate ==
         buildEpoch,
         durableArtifacts,
         durableCandidateManifests,
+        exactRootSetManifests,
         abandonedCandidates,
         corruptCandidateManifests,
         canonicalOpen,
@@ -456,6 +551,7 @@ RejectCorruptDemandCandidate ==
         buildEpoch,
         durableArtifacts,
         durableCandidateManifests,
+        exactRootSetManifests,
         abandonedCandidates,
         corruptCandidateManifests,
         canonicalOpen,
@@ -486,6 +582,7 @@ BeginPageRead ==
         buildEpoch,
         durableArtifacts,
         durableCandidateManifests,
+        exactRootSetManifests,
         abandonedCandidates,
         corruptCandidateManifests,
         canonicalOpen,
@@ -514,6 +611,7 @@ ReadHealthyPage ==
         buildEpoch,
         durableArtifacts,
         durableCandidateManifests,
+        exactRootSetManifests,
         abandonedCandidates,
         corruptCandidateManifests,
         canonicalOpen,
@@ -544,6 +642,7 @@ ReadCorruptPage ==
         buildEpoch,
         durableArtifacts,
         durableCandidateManifests,
+        exactRootSetManifests,
         abandonedCandidates,
         corruptCandidateManifests,
         canonicalOpen,
@@ -571,6 +670,7 @@ FinishRead ==
         buildEpoch,
         durableArtifacts,
         durableCandidateManifests,
+        exactRootSetManifests,
         abandonedCandidates,
         corruptCandidateManifests,
         canonicalOpen,
@@ -598,6 +698,7 @@ CorruptColdPage ==
         buildEpoch,
         durableArtifacts,
         durableCandidateManifests,
+        exactRootSetManifests,
         abandonedCandidates,
         corruptCandidateManifests,
         canonicalOpen,
@@ -637,6 +738,7 @@ CrashDatabase ==
         buildEpoch,
         durableArtifacts,
         durableCandidateManifests,
+        exactRootSetManifests,
         abandonedCandidates,
         corruptCandidateManifests,
         corruptPages
@@ -644,6 +746,8 @@ CrashDatabase ==
 
 Next ==
     \/ BeginCandidate
+    \/ CompleteRequiredRootSet
+    \/ InvalidateRequiredRootSet
     \/ PersistCandidatePages
     \/ PersistCandidateManifest
     \/ PublishCheckpointWithCandidate
@@ -671,6 +775,7 @@ TypeOK ==
     /\ buildEpoch \in Epochs
     /\ durableArtifacts \subseteq (1..MaxGeneration)
     /\ durableCandidateManifests \subseteq CandidateIds
+    /\ exactRootSetManifests \subseteq durableCandidateManifests
     /\ abandonedCandidates \subseteq CandidateIds
     /\ corruptCandidateManifests \subseteq durableCandidateManifests
     /\ canonicalOpen \in BOOLEAN
@@ -702,6 +807,10 @@ OpenHandlePinsSelectedCandidate ==
         /\ Candidate(handleGeneration, handleEpoch) \in canonicalHistory
         /\ Candidate(handleGeneration, handleEpoch) \in durableCandidateManifests
         /\ handleGeneration <= canonicalGeneration
+
+SelectableCandidateHasExactRequiredRoots ==
+    handleOpen =>
+        Candidate(handleGeneration, handleEpoch) \in exactRootSetManifests
 
 OpenDoesNotWarmPages ==
     handleOpen /\ ~queriesStarted => loadedPages = {}

@@ -34,7 +34,6 @@ pub use index_shadow::{
     DEFAULT_RELATIONAL_INDEX_SHADOW_BUILD_METADATA_BYTES,
     DEFAULT_RELATIONAL_INDEX_SHADOW_MANIFEST_BYTES, DEFAULT_RELATIONAL_INDEX_SHADOW_ROOTS,
     RELATIONAL_INDEX_RECOVERY_MANIFEST_FILE, RELATIONAL_INDEX_SHADOW_MANIFEST_FILE,
-    RELATIONAL_PRIMARY_INDEX_NAME,
 };
 pub use overflow::{
     RelationalHydrationBudget, RelationalOverflowConfig, RelationalOverflowRef,
@@ -45,6 +44,9 @@ pub const DEFAULT_MAX_RELATIONAL_MUTATION_ROWS: usize = 100_000;
 pub const DEFAULT_MAX_RELATIONAL_MUTATION_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_RELATIONAL_INDEX_CHANGES: usize = 100_000;
 pub const DEFAULT_MAX_RELATIONAL_INDEX_CHANGE_BYTES: usize = 8 * 1024 * 1024;
+pub const RELATIONAL_PRIMARY_INDEX_NAME: &str = "__primary__";
+const RELATIONAL_UNIQUE_INDEX_PREFIX: &str = "__unique_";
+const RELATIONAL_FOREIGN_KEY_INDEX_PREFIX: &str = "__foreign_key_";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelationalMutationLimits {
@@ -225,10 +227,84 @@ pub struct RelationalTableSchema {
     pub indexes: Vec<RelationalIndexSchema>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RelationalIndexRole {
+    Primary,
+    UniqueConstraint,
+    DeclaredUnique,
+    Secondary,
+    ForeignKeySupport,
+}
+
+impl RelationalIndexRole {
+    pub const fn is_unique(self) -> bool {
+        matches!(
+            self,
+            Self::Primary | Self::UniqueConstraint | Self::DeclaredUnique
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationalIndexDefinition {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub role: RelationalIndexRole,
+}
+
 impl RelationalTableSchema {
     pub fn column_position(&self, name: &str) -> Option<usize> {
         self.columns.iter().position(|column| column.name == name)
     }
+
+    pub fn required_index_definitions(&self) -> Vec<RelationalIndexDefinition> {
+        let mut definitions = Vec::with_capacity(
+            1 + self.unique_constraints.len() + self.indexes.len() + self.foreign_keys.len(),
+        );
+        definitions.push(RelationalIndexDefinition {
+            name: RELATIONAL_PRIMARY_INDEX_NAME.to_string(),
+            columns: self.primary_key.clone(),
+            role: RelationalIndexRole::Primary,
+        });
+        definitions.extend(
+            self.unique_constraints
+                .iter()
+                .enumerate()
+                .map(|(ordinal, columns)| RelationalIndexDefinition {
+                    name: relational_unique_index_name(ordinal),
+                    columns: columns.clone(),
+                    role: RelationalIndexRole::UniqueConstraint,
+                }),
+        );
+        definitions.extend(self.indexes.iter().map(|index| RelationalIndexDefinition {
+            name: index.name.clone(),
+            columns: index.columns.clone(),
+            role: if index.unique {
+                RelationalIndexRole::DeclaredUnique
+            } else {
+                RelationalIndexRole::Secondary
+            },
+        }));
+        definitions.extend(
+            self.foreign_keys
+                .iter()
+                .enumerate()
+                .map(|(ordinal, foreign_key)| RelationalIndexDefinition {
+                    name: relational_foreign_key_index_name(ordinal),
+                    columns: foreign_key.columns.clone(),
+                    role: RelationalIndexRole::ForeignKeySupport,
+                }),
+        );
+        definitions
+    }
+}
+
+pub fn relational_unique_index_name(ordinal: usize) -> String {
+    format!("{RELATIONAL_UNIQUE_INDEX_PREFIX}{ordinal}")
+}
+
+pub fn relational_foreign_key_index_name(ordinal: usize) -> String {
+    format!("{RELATIONAL_FOREIGN_KEY_INDEX_PREFIX}{ordinal}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1405,7 +1481,8 @@ fn apply_transaction_inner(
                     .ok_or_else(|| RelationalError::Schema(format!("unknown table {table}")))?;
                 let schema = Arc::make_mut(schema);
                 validate_column_list(schema, &index.columns, "index")?;
-                if index.columns.is_empty()
+                if index.name.is_empty()
+                    || is_reserved_relational_index_name(&index.name)
                     || schema.indexes.iter().any(|item| item.name == index.name)
                 {
                     return Err(RelationalError::Schema(format!(
@@ -1695,7 +1772,7 @@ fn conflict_primary_key(
         .iter()
         .position(|columns| columns == conflict_columns)
     {
-        format!("__unique_{ordinal}")
+        relational_unique_index_name(ordinal)
     } else if let Some(index) = schema
         .indexes
         .iter()
@@ -1967,10 +2044,26 @@ fn validate_table_schema(schema: &RelationalTableSchema) -> Result<(), Relationa
             ));
         }
     }
+    let mut index_names = BTreeSet::new();
     for index in &schema.indexes {
+        if index.name.is_empty()
+            || is_reserved_relational_index_name(&index.name)
+            || !index_names.insert(index.name.as_str())
+        {
+            return Err(RelationalError::Schema(format!(
+                "invalid, duplicate, or reserved index name {}",
+                index.name
+            )));
+        }
         validate_column_list(schema, &index.columns, "index")?;
     }
     Ok(())
+}
+
+fn is_reserved_relational_index_name(name: &str) -> bool {
+    name == RELATIONAL_PRIMARY_INDEX_NAME
+        || name.starts_with(RELATIONAL_UNIQUE_INDEX_PREFIX)
+        || name.starts_with(RELATIONAL_FOREIGN_KEY_INDEX_PREFIX)
 }
 
 fn validate_column_list(
@@ -1978,6 +2071,11 @@ fn validate_column_list(
     columns: &[String],
     kind: &str,
 ) -> Result<(), RelationalError> {
+    if columns.is_empty() {
+        return Err(RelationalError::Schema(format!(
+            "{kind} must contain at least one column"
+        )));
+    }
     let mut unique = BTreeSet::new();
     for column in columns {
         if schema.column_position(column).is_none() || !unique.insert(column) {
@@ -2036,26 +2134,22 @@ fn rebuild_indexes(state: &mut RelationalState, table: &str) -> Result<(), Relat
         .schemas
         .get(table)
         .ok_or_else(|| RelationalError::Schema(format!("unknown table {table}")))?;
-    let mut index_schemas = schema.indexes.clone();
-    for (ordinal, columns) in schema.unique_constraints.iter().enumerate() {
-        index_schemas.push(RelationalIndexSchema {
-            name: format!("__unique_{ordinal}"),
-            columns: columns.clone(),
-            unique: true,
-        });
-    }
+    let index_definitions = schema.required_index_definitions();
     let segment = state
         .segments
         .get_mut(table)
         .ok_or_else(|| RelationalError::Schema(format!("unknown table {table}")))?;
     let segment = Arc::make_mut(segment);
     segment.indexes.clear();
-    for index in index_schemas {
+    for index in index_definitions
+        .into_iter()
+        .filter(|index| index.role != RelationalIndexRole::Primary)
+    {
         let positions = column_positions(schema, &index.columns)?;
         let mut postings = RelationalIndexPages::default();
         for (primary_key, row) in segment.rows.iter() {
             let key = row_key(row, &positions);
-            if index.unique
+            if index.role.is_unique()
                 && key
                     .0
                     .iter()
@@ -2063,7 +2157,7 @@ fn rebuild_indexes(state: &mut RelationalState, table: &str) -> Result<(), Relat
             {
                 continue;
             }
-            if index.unique && postings.get(&key).is_some_and(|keys| !keys.is_empty()) {
+            if index.role.is_unique() && postings.get(&key).is_some_and(|keys| !keys.is_empty()) {
                 return Err(RelationalError::Constraint(format!(
                     "unique index {} on table {table} has a duplicate key",
                     index.name
@@ -2087,14 +2181,7 @@ fn refresh_indexes_for_keys(
             .get(table)
             .ok_or_else(|| RelationalError::Schema(format!("unknown table {table}")))?,
     );
-    let mut index_schemas = schema.indexes.clone();
-    for (ordinal, columns) in schema.unique_constraints.iter().enumerate() {
-        index_schemas.push(RelationalIndexSchema {
-            name: format!("__unique_{ordinal}"),
-            columns: columns.clone(),
-            unique: true,
-        });
-    }
+    let index_definitions = schema.required_index_definitions();
     let previous_segment = previous.segments.get(table);
     let next_segment = next
         .segments
@@ -2102,7 +2189,10 @@ fn refresh_indexes_for_keys(
         .ok_or_else(|| RelationalError::Schema(format!("unknown table {table}")))?;
     let next_segment = Arc::make_mut(next_segment);
 
-    for index in index_schemas {
+    for index in index_definitions
+        .into_iter()
+        .filter(|index| index.role != RelationalIndexRole::Primary)
+    {
         let positions = column_positions(&schema, &index.columns)?;
         let postings = next_segment.indexes.get_mut(&index.name).ok_or_else(|| {
             RelationalError::Corruption(format!(
@@ -2123,7 +2213,7 @@ fn refresh_indexes_for_keys(
                 continue;
             };
             let index_key = row_key(row, &positions);
-            if index.unique
+            if index.role.is_unique()
                 && index_key
                     .0
                     .iter()
@@ -2131,7 +2221,7 @@ fn refresh_indexes_for_keys(
             {
                 continue;
             }
-            if index.unique
+            if index.role.is_unique()
                 && postings
                     .get(&index_key)
                     .into_iter()
@@ -2183,14 +2273,7 @@ fn capture_relational_index_changes(
         };
         let previous_segment = previous.segments.get(table);
         let next_segment = next.segments.get(table);
-        let mut indexes = schema.indexes.clone();
-        for (ordinal, columns) in schema.unique_constraints.iter().enumerate() {
-            indexes.push(RelationalIndexSchema {
-                name: format!("__unique_{ordinal}"),
-                columns: columns.clone(),
-                unique: true,
-            });
-        }
+        let indexes = schema.required_index_definitions();
 
         for primary_key in keys {
             let previous_row = previous_segment.and_then(|segment| segment.rows.get(primary_key));
@@ -2202,7 +2285,7 @@ fn capture_relational_index_changes(
                     limits,
                     RelationalIndexChange {
                         table: table.clone(),
-                        index: index_shadow::RELATIONAL_PRIMARY_INDEX_NAME.to_string(),
+                        index: RELATIONAL_PRIMARY_INDEX_NAME.to_string(),
                         index_key: primary_key.clone(),
                         primary_key: primary_key.clone(),
                         kind: if next_row.is_some() {
@@ -2216,7 +2299,10 @@ fn capture_relational_index_changes(
                 return capture_limit_invalidated(limits);
             }
 
-            for index in &indexes {
+            for index in indexes
+                .iter()
+                .filter(|index| index.role != RelationalIndexRole::Primary)
+            {
                 let positions = match column_positions(schema, &index.columns) {
                     Ok(positions) => positions,
                     Err(error) => {
@@ -2275,8 +2361,8 @@ fn capture_relational_index_changes(
     }
 }
 
-fn index_includes_key(index: &RelationalIndexSchema, key: &RelationalKey) -> bool {
-    !index.unique
+fn index_includes_key(index: &RelationalIndexDefinition, key: &RelationalKey) -> bool {
+    !index.role.is_unique()
         || !key
             .0
             .iter()
@@ -2571,7 +2657,7 @@ fn foreign_key_target_exists(
         return Ok(state
             .index_lookup(
                 &foreign_key.referenced_table,
-                &format!("__unique_{ordinal}"),
+                &relational_unique_index_name(ordinal),
                 key,
             )
             .is_some_and(|postings| !postings.is_empty()));

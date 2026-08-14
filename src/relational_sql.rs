@@ -742,7 +742,7 @@ mod tests {
                 .expect("read the demand-paged primary index");
             let primary_info = relational_explain_operator_info(&primary, "TablePointGetExec");
             assert!(primary_info.contains("runtime_path=demand_paged"));
-            assert!(primary_info.contains("schema_digest="));
+            assert!(primary_info.contains("root_set_digest="));
             {
                 let mut transaction = database.begin_transaction();
                 transaction

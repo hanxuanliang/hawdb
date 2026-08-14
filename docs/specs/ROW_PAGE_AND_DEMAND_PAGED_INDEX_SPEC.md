@@ -85,11 +85,20 @@ checksum mismatches fail closed. The codec is not selected by the durable
 manifest and does not change query or recovery behavior yet.
 
 The relational index shadow publisher is the first implementation of step 2.
-It builds primary, unique, and secondary trees from the current relational
-oracle into generation-specific fixed-size slots, so a `PageId` determines its
-offset without a cardinality-sized in-memory directory. Default slots are 64
-KiB, with 16 KiB admission limits for encoded keys and logical row locators, to
+It builds one exact required root set from the current relational oracle. Each
+table contributes a primary root, one root per table-level unique constraint,
+one root per declared unique or secondary index, and one foreign-key-support
+root per referencing constraint. Every root descriptor records its semantic
+role and the table schema digest. The manifest separately binds the catalog
+schema digest and the ordered logical root-set digest, including table, index,
+role, and table schema identity. Reserved synthetic names are engine-owned so a
+declared index cannot impersonate a constraint root. Trees use
+generation-specific fixed-size slots, so a `PageId` determines its offset
+without a cardinality-sized in-memory directory. Default slots are 64 KiB,
+with 16 KiB admission limits for encoded keys and logical row locators, to
 bound desktop random I/O and avoid one-megabyte amplification for sparse pages.
+The total required-root count is admitted before a candidate file is created,
+so an oversized catalog cannot first build an unselectable artifact.
 Every checkpoint attempt writes a generation-specific page artifact and then a
 generation-specific root manifest after every slot is synced. Only after both
 candidate files are durable may the canonical checkpoint with the same
@@ -103,16 +112,17 @@ through generation cleanup while recovering the selected checkpoint plus WAL.
 These candidates remain non-authoritative. The canonical checkpoint does not
 contain a reverse reference to their manifest and therefore remains
 self-contained when a candidate is missing or corrupt. Open considers a
-generation-specific candidate only when both its filename generation and its
-internal generation/source-epoch fence match the selected canonical
-checkpoint. A corrupt selected candidate does not prevent canonical open in
-`Shadow` mode. In `DemandPaged` mode, an integrity failure for the explicitly
-selected candidate fails the indexed statement closed instead of silently
-using materialized postings; missing or admission-unavailable candidates may
-still take the observable materialized fallback while that oracle exists.
-Binding manifest length, CRC32C, SHA-256, schema identity, and the complete
-required root set into the canonical checkpoint is a later authoritative
-publication stage.
+generation-specific candidate only when its filename generation, internal
+generation/source-epoch fence, catalog schema digest, and exact required root
+set match the selected canonical checkpoint and pinned relational schema. A
+missing, extra, renamed, re-roled, or schema-drifted root rejects the candidate.
+A corrupt selected candidate does not prevent canonical open in `Shadow` mode.
+In `DemandPaged` mode, an integrity failure for the explicitly selected
+candidate fails the indexed statement closed instead of silently using
+materialized postings; missing or admission-unavailable candidates may still
+take the observable materialized fallback while that oracle exists. Binding
+the candidate manifest length, CRC32C, SHA-256, and root-set digest into the
+canonical checkpoint is the later authoritative publication stage.
 
 Relational primary keys are encoded as bounded, order-preserving logical row
 locators, including composite keys. Opening a valid candidate verifies only its
@@ -159,8 +169,8 @@ normal open continues from canonical checkpoint plus WAL and records
 After a base or recovered reader is pinned, normal commits maintain one
 immutable in-process relational index read view. Its identity binds the base
 generation, optional recovery-delta generation, base and visible commit epochs,
-and schema digest. Relational DML appends transaction-apply change evidence as
-immutable `Arc`-shared live batches; publishing a newer view clones only the
+and root-set digest. Relational DML appends transaction-apply change evidence
+as immutable `Arc`-shared live batches; publishing a newer view clones only the
 batch-pointer directory and retains the prior view for already pinned
 snapshots. The total live overlay is admitted by both raw change count and
 encoded bytes. Graph-only commits advance the view's visible epoch without
@@ -172,10 +182,11 @@ selected only by the bounded SQL activation described below.
 
 `GraphStore::qualify_relational_index_read_view` is the bounded typed evidence
 path for that activation boundary. It samples a configured maximum number of
-tables and rows, generates exact probes for every sampled primary, unique, and
-secondary index, and generates every leading prefix for sampled composite
-indexes. Each probe merges the pinned base, recovery-delta, and live batches
-under the production page, byte, row, and tree-height read limits, then compares
+tables and rows, generates exact probes for every required primary,
+table-unique, declared-unique, secondary, and foreign-key-support index, and
+generates every leading prefix for sampled composite indexes. Each probe merges
+the pinned base, recovery-delta, and live batches under the production page,
+byte, row, and tree-height read limits, then compares
 the ordered logical row locators with the current materialized relational
 oracle. Reports expose immutable view identity, physical read evidence, live
 work, row counts, and SHA-256 result digests without exposing sampled key
@@ -201,7 +212,7 @@ canonical transaction workspace so read-your-own-writes cannot consult a
 pre-transaction index view; this fallback is also observable.
 
 `EXPLAIN ANALYZE` reports the runtime path, fallback reason, base and delta
-generations, commit epochs, schema digest, logical and physical page bytes,
+generations, commit epochs, root-set digest, logical and physical page bytes,
 cache outcomes, recovery-delta work, live-overlay work, and index rows. Plain
 `EXPLAIN` remains history-independent. Persistent relational indexes are still
 derived in this phase: materialized postings remain the constraint oracle and

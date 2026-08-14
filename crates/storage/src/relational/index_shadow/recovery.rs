@@ -5,7 +5,7 @@
 
 use super::super::{
     RelationalIndexChange, RelationalIndexChangeCapture, RelationalIndexChangeCaptureLimits,
-    RelationalIndexChangeKind, RelationalKey,
+    RelationalIndexChangeKind, RelationalKey, RelationalState,
 };
 use super::{
     decode_bytes, decode_utf8, encode_relational_key, read_bounded_file, read_u16, read_u32,
@@ -700,6 +700,13 @@ impl RelationalIndexRecoveryReader {
 
     pub fn base_manifest(&self) -> &super::RelationalIndexShadowManifest {
         self.base.manifest()
+    }
+
+    pub fn validate_required_roots(
+        &self,
+        state: &RelationalState,
+    ) -> Result<(), RelationalIndexShadowError> {
+        self.base.validate_required_roots(state)
     }
 
     pub fn is_poisoned(&self) -> bool {

@@ -95,11 +95,17 @@ remaining work below makes those derived foundations canonical without
 allowing a stale index or a database-sized resident set to become a correctness
 dependency.
 
+- [ ] Qualify persistent constraint reads before authoritative activation.
+  - Differentially validate primary-key identity, uniqueness, UPSERT conflict,
+    and foreign-key checks through the pinned base-plus-recovery-plus-live view.
+  - Cover absent keys, nullable unique keys, composite prefixes, concurrent
+    pinned readers, DML changes, recovery deltas, corrupt pages, and exhausted
+    admission. Keep materialized postings as the oracle in this phase.
+
 - [ ] Make persistent relational indexes authoritative.
-  - Publish row identity, primary, unique, secondary, and foreign-key support
-    roots with one schema epoch and manifest generation.
-  - Validate uniqueness, UPSERT conflicts, and foreign keys through the pinned
-    base-plus-delta view before removing materialized postings.
+  - Bind row identity and the exact required relational root-set digest to one
+    canonical manifest generation, including candidate length, CRC32C, and
+    SHA-256.
   - Extend `SkeinIndexPublication.tla` for canonical uniqueness and row/index
     epoch agreement.
   - Remove normal-open `rebuild_indexes()` only after required constraint roots
