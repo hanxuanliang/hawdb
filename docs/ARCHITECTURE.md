@@ -715,8 +715,9 @@ and metadata repair as `Projection` work and then execute them through QoS
 admission or scheduler wrappers; explicit foreground rebuilds continue to use
 the direct APIs. The embedded `Database` facade can also collect rankable
 background maintenance candidates across schema maintenance, property-index
-projection rebuilds, search projection rebuild/repair, graph-derived search
-deltas, and external content artifact jobs; this facade only reports candidate
+projection rebuilds, missing or stale out-of-core optimizer statistics, search
+projection rebuild/repair, graph-derived search deltas, and external content
+artifact jobs; this facade only reports candidate
 plans and QoS decisions, leaving worker ownership and execution timing to the
 caller. The embedded `Database` facade exposes the same metadata-only repair
 over canonical graph evidence, preserving projection text and embeddings while

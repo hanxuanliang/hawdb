@@ -116,6 +116,7 @@ pub struct BackgroundMaintenanceOptions {
     pub include_storage_checkpoint: bool,
     pub include_schema_maintenance: bool,
     pub include_property_index_projection: bool,
+    pub include_optimizer_statistics_refresh: bool,
     pub include_search_projection_graph_delta_freshness: bool,
     pub include_search_projection_rebuild: bool,
     pub include_search_projection_metadata_repair: bool,
@@ -132,6 +133,7 @@ impl Default for BackgroundMaintenanceOptions {
             include_storage_checkpoint: true,
             include_schema_maintenance: true,
             include_property_index_projection: true,
+            include_optimizer_statistics_refresh: true,
             include_search_projection_graph_delta_freshness: true,
             include_search_projection_rebuild: true,
             include_search_projection_metadata_repair: true,
@@ -222,6 +224,7 @@ pub enum BackgroundMaintenanceKind {
     StorageCheckpoint,
     SchemaMaintenance,
     PropertyIndexProjection,
+    OptimizerStatisticsRefresh,
     SearchProjectionGraphDelta,
     SearchProjectionRebuild,
     SearchProjectionMetadataRepair,
@@ -235,6 +238,7 @@ impl BackgroundMaintenanceKind {
             BackgroundMaintenanceKind::StorageCheckpoint => "storage_checkpoint",
             BackgroundMaintenanceKind::SchemaMaintenance => "schema_maintenance",
             BackgroundMaintenanceKind::PropertyIndexProjection => "property_index_projection",
+            BackgroundMaintenanceKind::OptimizerStatisticsRefresh => "optimizer_statistics_refresh",
             BackgroundMaintenanceKind::SearchProjectionGraphDelta => {
                 "search_projection_graph_delta"
             }
@@ -260,6 +264,9 @@ impl FromStr for BackgroundMaintenanceKind {
             "storage_checkpoint" => Ok(BackgroundMaintenanceKind::StorageCheckpoint),
             "schema_maintenance" => Ok(BackgroundMaintenanceKind::SchemaMaintenance),
             "property_index_projection" => Ok(BackgroundMaintenanceKind::PropertyIndexProjection),
+            "optimizer_statistics_refresh" => {
+                Ok(BackgroundMaintenanceKind::OptimizerStatisticsRefresh)
+            }
             "search_projection_graph_delta" => {
                 Ok(BackgroundMaintenanceKind::SearchProjectionGraphDelta)
             }

@@ -465,7 +465,14 @@ still current; a mutation during the scan forces candidate discard and leaves
 the prior sample unchanged. The model checks that sample size and unique-value
 counters remain valid, zero-churn samples equal the canonical index,
 recovery-equivalent churn equals sample age, no future state is published, and
-the optimizer never uses a sample beyond the configured update budget.
+the optimizer never uses a sample beyond the configured update budget. The
+model also separates explicit direct refresh from caller-owned background
+refresh: direct refresh starts without a background permit, background scanning
+requires an admitted permit, and publication or source-epoch abort releases
+that permit. A budget, decode, or I/O failure follows the same release path
+without replacing the prior sample. QoS policy decisions remain modeled
+generically by `SkeinRuntimeAdmission.tla`; this model owns the index-refresh
+refinement at the scan and publication boundary.
 
 ## Derived Source Segment Publication
 

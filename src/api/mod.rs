@@ -34,12 +34,12 @@ use crate::store::{
     BasicStatisticsConsistencyReport, DegreeStatisticsConsistencyReport,
     DistinctValueStatisticsConsistencyReport, DurabilityPolicy, GraphMutationLockFootprint,
     GraphMutationSavepoint, GraphMutationTransaction, GraphSnapshotNodeImport,
-    GraphSnapshotRelationshipImport, GraphStore, NodeId, NodeRecord, PreparedCheckpoint,
-    PropertyIndexConsistencyReport, PropertyIndexProjectionRebuildAction, PublishedReadView,
-    RecoveryMode, RelId, RelRecord, SchemaMaintenanceAction, SegmentCacheSnapshot,
-    SkeinSnapshotRowsImport, StorageBackupReport, StoragePressureSnapshot,
-    StorageReclamationWatermark, StorageRecoveryReport, StorageRestoreReport, StorageScrubReport,
-    StoreStableIdMapping, WalReplayConfig,
+    GraphSnapshotRelationshipImport, GraphStore, NodeId, NodeRecord,
+    OptimizerStatisticsRefreshWork, PreparedCheckpoint, PropertyIndexConsistencyReport,
+    PropertyIndexProjectionRebuildAction, PublishedReadView, RecoveryMode, RelId, RelRecord,
+    SchemaMaintenanceAction, SegmentCacheSnapshot, SkeinSnapshotRowsImport, StorageBackupReport,
+    StoragePressureSnapshot, StorageReclamationWatermark, StorageRecoveryReport,
+    StorageRestoreReport, StorageScrubReport, StoreStableIdMapping, WalReplayConfig,
 };
 use crate::telemetry::{
     operations_telemetry_readiness, qos_telemetry_sink, KernelTelemetry, KernelTelemetryOperation,
@@ -1765,6 +1765,86 @@ impl Database {
         Ok(report)
     }
 
+    fn optimizer_statistics_refresh_work(&self) -> Option<OptimizerStatisticsRefreshWork> {
+        if self.config.read_only {
+            return None;
+        }
+        self.store.optimizer_statistics_refresh_work(&self.catalog)
+    }
+
+    pub fn optimizer_statistics_refresh_background_work_plan(
+        &self,
+        mut hint: BackgroundWorkHint,
+    ) -> Option<BackgroundWorkPlan> {
+        let work = self.optimizer_statistics_refresh_work()?;
+        hint.recent_delta_operations = hint
+            .recent_delta_operations
+            .max(work.recent_delta_operations);
+        hint.source_graph_commit_lag = hint.source_graph_commit_lag.max(work.source_commit_lag);
+        Some(BackgroundWorkPlan::background(
+            WorkClass::Projection,
+            work.estimated_operations,
+            hint,
+        ))
+    }
+
+    pub fn refresh_background_optimizer_statistics(
+        &mut self,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        options: &crate::store::OptimizerStatisticsRefreshOptions,
+        hint: BackgroundWorkHint,
+    ) -> Result<Option<crate::store::OptimizerStatisticsRefreshReport>> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
+        let Some(plan) = self.optimizer_statistics_refresh_background_work_plan(hint) else {
+            return Ok(None);
+        };
+        match policy.admit(state, &plan.request) {
+            QosAdmission::Admit => self
+                .refresh_optimizer_statistics_external(options)
+                .map(Some),
+            QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
+                "background optimizer statistics refresh deferred: {reason}"
+            ))),
+            QosAdmission::Reject { reason, .. } => Err(SkeinError::Storage(format!(
+                "background optimizer statistics refresh rejected: {reason}"
+            ))),
+        }
+    }
+
+    pub fn refresh_scheduled_background_optimizer_statistics(
+        &mut self,
+        scheduler: &mut LocalQosScheduler,
+        options: &crate::store::OptimizerStatisticsRefreshOptions,
+        hint: BackgroundWorkHint,
+    ) -> Result<Option<crate::store::OptimizerStatisticsRefreshReport>> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
+        let Some(plan) = self.optimizer_statistics_refresh_background_work_plan(hint) else {
+            return Ok(None);
+        };
+        self.configure_qos_scheduler_telemetry(scheduler);
+        let permit = match scheduler.try_start(plan.request) {
+            Ok(permit) => permit,
+            Err(QosAdmission::Defer { reason, .. }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background optimizer statistics refresh deferred: {reason}"
+                )));
+            }
+            Err(QosAdmission::Reject { reason, .. }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background optimizer statistics refresh rejected: {reason}"
+                )));
+            }
+            Err(QosAdmission::Admit) => unreachable!("admitted work returns a permit"),
+        };
+
+        let result = self
+            .refresh_optimizer_statistics_external(options)
+            .map(Some);
+        scheduler.finish_with_outcome(permit, result.is_ok());
+        result
+    }
+
     #[cfg(test)]
     pub(crate) fn basic_statistics(&self) -> crate::schema::BasicGraphStatistics {
         self.store.basic_statistics()
@@ -2621,6 +2701,16 @@ impl Database {
         {
             candidates.push(BackgroundMaintenanceCandidate::new(
                 BackgroundMaintenanceKind::PropertyIndexProjection,
+                plan,
+            ));
+        }
+
+        if options.include_optimizer_statistics_refresh
+            && let Some(plan) =
+                self.optimizer_statistics_refresh_background_work_plan(options.hint.clone())
+        {
+            candidates.push(BackgroundMaintenanceCandidate::new(
+                BackgroundMaintenanceKind::OptimizerStatisticsRefresh,
                 plan,
             ));
         }

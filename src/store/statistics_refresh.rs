@@ -65,6 +65,13 @@ pub struct OptimizerStatisticsRefreshReport {
     pub checkpoint_persisted: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OptimizerStatisticsRefreshWork {
+    pub(crate) estimated_operations: usize,
+    pub(crate) recent_delta_operations: usize,
+    pub(crate) source_commit_lag: u64,
+}
+
 impl OptimizerStatisticsRefreshReport {
     pub fn json(&self) -> serde_json::Value {
         serde_json::json!({
@@ -92,6 +99,49 @@ impl OptimizerStatisticsRefreshReport {
 }
 
 impl GraphStore {
+    pub(crate) fn optimizer_statistics_refresh_work(
+        &self,
+        catalog: &Catalog,
+    ) -> Option<OptimizerStatisticsRefreshWork> {
+        if !self.canonical_base_out_of_core || self.durable.is_none() {
+            return None;
+        }
+
+        let mut missing_sample_count = 0usize;
+        let mut stale_updates = 0u64;
+        let supported_index_ids = catalog
+            .property_indexes()
+            .map(|index| index.id)
+            .chain(catalog.composite_property_indexes().map(|index| index.id))
+            .filter(|index_id| catalog.supports_index_statistics(*index_id));
+        for index_id in supported_index_ids {
+            match self.checkpoint_statistics.index_samples.get(&index_id) {
+                None => missing_sample_count = missing_sample_count.saturating_add(1),
+                Some(sample) if sample.is_stale() => {
+                    stale_updates = stale_updates.saturating_add(sample.updates_since_sample);
+                }
+                Some(_) => {}
+            }
+        }
+        if missing_sample_count == 0 && stale_updates == 0 {
+            return None;
+        }
+
+        let record_count = self
+            .basic_statistics
+            .node_count
+            .saturating_add(self.basic_statistics.relationship_count);
+        Some(OptimizerStatisticsRefreshWork {
+            estimated_operations: usize::try_from(record_count).unwrap_or(usize::MAX).max(1),
+            recent_delta_operations: usize::try_from(stale_updates)
+                .unwrap_or(usize::MAX)
+                .saturating_add(missing_sample_count),
+            source_commit_lag: self
+                .commit_epoch
+                .saturating_sub(self.checkpoint_statistics.computed_at_commit_epoch),
+        })
+    }
+
     pub fn refresh_optimizer_statistics_external(
         &mut self,
         catalog: &Catalog,

@@ -139,6 +139,10 @@ fn background_maintenance_kinds_have_stable_string_encodings() {
             "property_index_projection",
         ),
         (
+            BackgroundMaintenanceKind::OptimizerStatisticsRefresh,
+            "optimizer_statistics_refresh",
+        ),
+        (
             BackgroundMaintenanceKind::SearchProjectionGraphDelta,
             "search_projection_graph_delta",
         ),
@@ -167,6 +171,194 @@ fn background_maintenance_kinds_have_stable_string_encodings() {
     assert!("unknown_background_work"
         .parse::<BackgroundMaintenanceKind>()
         .is_err());
+}
+
+#[test]
+fn stale_optimizer_statistics_are_caller_owned_background_work() {
+    let path = unique_test_dir("optimizer_statistics_background_work");
+    let spill_root = path.join("statistics-spill");
+    let config = DatabaseConfig {
+        storage_residency_mode: crate::StorageResidencyMode::OutOfCore,
+        segment_cache_capacity_bytes: 1024 * 1024,
+        ..DatabaseConfig::default()
+    };
+    let index_id = {
+        let mut db = Database::open_with_config(&path, config.clone()).unwrap();
+        db.query("CREATE NODE TABLE Memory").unwrap();
+        db.query("CREATE PROPERTY ON NODE TABLE Memory(kind) TYPE TEXT")
+            .unwrap();
+        let mut transaction = db.begin_transaction();
+        for id in 0..10 {
+            transaction
+                .query_with_params(
+                    "CREATE (:Memory {id: $id, kind: $kind})",
+                    &BTreeMap::from([
+                        ("id".to_string(), Value::Int(id)),
+                        (
+                            "kind".to_string(),
+                            Value::String(if id % 2 == 0 { "note" } else { "task" }.to_string()),
+                        ),
+                    ]),
+                )
+                .unwrap();
+        }
+        transaction.commit().unwrap();
+        db.checkpoint().unwrap();
+
+        db.query("CREATE INDEX ON :Memory(kind)").unwrap();
+        let index_id = db.property_indexes()[0].id;
+        assert!(!db.statistics().index_samples.contains_key(&index_id));
+
+        let plan = db
+            .optimizer_statistics_refresh_background_work_plan(BackgroundWorkHint::default())
+            .unwrap();
+        assert_eq!(
+            plan.request,
+            WorkRequest::background(WorkClass::Projection, 10)
+        );
+        assert_eq!(plan.hint.recent_delta_operations, 1);
+        assert!(plan.hint.source_graph_commit_lag > 0);
+
+        let mut candidate_options = BackgroundMaintenanceOptions {
+            include_storage_checkpoint: false,
+            include_schema_maintenance: false,
+            include_property_index_projection: false,
+            include_search_projection_graph_delta_freshness: false,
+            include_search_projection_rebuild: false,
+            include_search_projection_metadata_repair: false,
+            include_skein_lightning_bootstrap_export: false,
+            include_external_content_artifact_jobs: false,
+            ..BackgroundMaintenanceOptions::default()
+        };
+        let candidates = db.background_maintenance_candidates(None, candidate_options.clone());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].kind,
+            BackgroundMaintenanceKind::OptimizerStatisticsRefresh
+        );
+        candidate_options.include_optimizer_statistics_refresh = false;
+        assert!(db
+            .background_maintenance_candidates(None, candidate_options)
+            .is_empty());
+
+        let generation = db.storage_residency_report().canonical_generation;
+        let options = crate::OptimizerStatisticsRefreshOptions {
+            memory_budget_bytes: 4096,
+            max_spill_bytes: 1024 * 1024,
+            max_spill_runs: 64,
+            max_input_records: 1_000,
+            max_generated_facts: 10_000,
+            max_path_expansions: 1_000,
+            spill_directory: spill_root.clone(),
+        };
+        let disabled = LocalQosPolicy {
+            background_enabled: false,
+            ..LocalQosPolicy::default()
+        };
+        let error = db
+            .refresh_background_optimizer_statistics(
+                &disabled,
+                &LocalQosState::default(),
+                &options,
+                BackgroundWorkHint::default(),
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("background optimizer statistics refresh deferred"));
+        assert!(!db.statistics().index_samples.contains_key(&index_id));
+        assert_eq!(
+            db.storage_residency_report().canonical_generation,
+            generation
+        );
+
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy::default());
+        let bounded_options = crate::OptimizerStatisticsRefreshOptions {
+            max_input_records: 1,
+            ..options.clone()
+        };
+        let error = db
+            .refresh_scheduled_background_optimizer_statistics(
+                &mut scheduler,
+                &bounded_options,
+                BackgroundWorkHint::default(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("max_input_records 1"));
+        assert_eq!(scheduler.state().running_background_operations, 0);
+        assert!(!db.statistics().index_samples.contains_key(&index_id));
+        assert_eq!(
+            db.storage_residency_report().canonical_generation,
+            generation
+        );
+        assert_eq!(std::fs::read_dir(&spill_root).unwrap().count(), 0);
+
+        let report = db
+            .refresh_scheduled_background_optimizer_statistics(
+                &mut scheduler,
+                &options,
+                BackgroundWorkHint::default(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(report.checkpoint_persisted);
+        assert_eq!(report.index_sample_count, 1);
+        assert_eq!(scheduler.state().running_background_operations, 0);
+        assert_eq!(
+            scheduler.state().running_background_operations_by_class
+                [WorkClass::Projection.as_index()],
+            0
+        );
+        assert_eq!(
+            db.statistics().index_samples.get(&index_id),
+            Some(&crate::schema::IndexStatisticsSample::exact(10, 2))
+        );
+        assert!(db
+            .optimizer_statistics_refresh_background_work_plan(BackgroundWorkHint::default())
+            .is_none());
+
+        db.query("MATCH (m:Memory) WHERE m.id = 0 SET m.kind = 'archive'")
+            .unwrap();
+        db.query("MATCH (m:Memory) WHERE m.id = 1 SET m.kind = 'reminder'")
+            .unwrap();
+        assert!(db
+            .statistics()
+            .index_samples
+            .get(&index_id)
+            .unwrap()
+            .is_stale());
+        let stale_plan = db
+            .optimizer_statistics_refresh_background_work_plan(BackgroundWorkHint::default())
+            .unwrap();
+        assert_eq!(stale_plan.hint.recent_delta_operations, 2);
+        let report = db
+            .refresh_scheduled_background_optimizer_statistics(
+                &mut scheduler,
+                &options,
+                BackgroundWorkHint::default(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(report.checkpoint_persisted);
+        assert_eq!(scheduler.state().running_background_operations, 0);
+        assert_eq!(
+            db.statistics().index_samples.get(&index_id),
+            Some(&crate::schema::IndexStatisticsSample::exact(10, 4))
+        );
+        assert!(db
+            .optimizer_statistics_refresh_background_work_plan(BackgroundWorkHint::default())
+            .is_none());
+        assert_eq!(std::fs::read_dir(&spill_root).unwrap().count(), 0);
+        index_id
+    };
+
+    let db = Database::open_with_config(&path, config).unwrap();
+    assert_eq!(
+        db.statistics().index_samples.get(&index_id),
+        Some(&crate::schema::IndexStatisticsSample::exact(10, 4))
+    );
+    drop(db);
+    std::fs::remove_dir_all(path).unwrap();
 }
 
 #[test]

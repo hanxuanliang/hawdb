@@ -136,6 +136,7 @@ pub use skein_storage::{
 };
 pub(crate) use skein_storage::{WalSyncGroupFlush, WalSyncGroupProgress};
 pub use source_scan::SourceScanRow;
+pub(crate) use statistics_refresh::OptimizerStatisticsRefreshWork;
 pub use statistics_refresh::{OptimizerStatisticsRefreshOptions, OptimizerStatisticsRefreshReport};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};

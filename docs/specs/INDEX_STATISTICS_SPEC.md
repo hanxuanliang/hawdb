@@ -80,6 +80,31 @@ budget, I/O, decode, or source-epoch failure leaves the prior sample and churn
 counters unchanged. Successful publication atomically replaces every supported
 sample with an exact current sample and resets `updates_since_sample` to zero.
 
+## Background maintenance
+
+The embedded facade exposes optimizer-statistics refresh as caller-owned
+background work without spawning an internal worker. Candidate detection reads
+only catalog and resident sample metadata. A candidate exists only for a
+writable, durable, out-of-core store with at least one supported index whose
+sample is missing or stale. Full-text descriptors remain excluded.
+
+The candidate uses the `Projection` QoS lane. Its estimated operation count is
+the current canonical node plus relationship count, clamped to at least one so
+an empty indexed database still publishes an exact zero sample. Missing sample
+count and stale `updates_since_sample` contribute to the recent-delta hint; the
+gap between the current commit epoch and published statistics epoch contributes
+to the source-commit-lag hint. This estimate does not replace the refresh's hard
+input-record, generated-fact, path-expansion, memory, spill-byte, and spill-run
+budgets.
+
+`background_maintenance_candidates` includes this work by default. Execution
+still requires the caller to provide explicit `OptimizerStatisticsRefreshOptions`,
+including a spill directory, and to drive either policy admission or the
+scheduler permit lifecycle. A deferred or rejected candidate MUST NOT start a
+canonical scan or create spill state. Scheduled execution MUST release its
+permit after success or failure. The explicit direct refresh API remains
+ungated for foreground administrative use.
+
 ## Optimizer admission
 
 The optimizer admits a valid non-empty sample while:
@@ -130,6 +155,10 @@ Required regressions cover:
   stale sample
 - bounded external refresh creates samples for live out-of-core DDL and resets
   stale sample churn without publishing partial state on failure
+- metadata-only background detection surfaces only missing or stale
+  out-of-core samples; QoS defer performs no scan, scheduled failure releases
+  its permit, and successful refresh removes the candidate
 - checkpoint text and `system.graph_statistics` expose the sample fields
 - `SkeinIndexStatistics.tla` checks coherent resampling, exact zero-churn
-  samples, update-age accounting, and the bounded optimizer admission rule
+  samples, update-age accounting, the bounded optimizer admission rule, and
+  background permit ownership while direct refresh remains ungated
