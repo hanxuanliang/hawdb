@@ -13,7 +13,9 @@ use crate::{
     SegmentCache, SegmentCacheError, SegmentCacheKey, StoreId,
 };
 use fs2::FileExt;
-use skein_integrity::{integrity_digest, IntegrityHasher, Sha256Digest, SHA256_BYTES};
+use skein_integrity::{
+    integrity_digest, IntegrityDigest, IntegrityHasher, Sha256Digest, SHA256_BYTES,
+};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
@@ -63,6 +65,33 @@ pub fn relational_index_shadow_manifest_generation_file(generation: u64) -> Stri
 pub struct RelationalIndexGenerationIdentity {
     pub generation: u64,
     pub source_commit_epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelationalIndexArtifactMetadata {
+    pub encoded_len: u64,
+    pub encoded_crc32c: u64,
+    pub encoded_sha256: Sha256Digest,
+}
+
+impl RelationalIndexArtifactMetadata {
+    fn from_digest(encoded_len: u64, digest: IntegrityDigest) -> Self {
+        Self {
+            encoded_len,
+            encoded_crc32c: digest.crc32c.as_u64(),
+            encoded_sha256: digest.sha256,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelationalIndexGenerationArtifacts {
+    pub generation: u64,
+    pub source_commit_epoch: u64,
+    pub catalog_schema_digest: Sha256Digest,
+    pub root_set_digest: Sha256Digest,
+    pub page_artifact: RelationalIndexArtifactMetadata,
+    pub manifest_artifact: RelationalIndexArtifactMetadata,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -336,6 +365,7 @@ pub struct RelationalIndexShadowBuildReport {
     pub artifact_bytes: u64,
     pub manifest_bytes: u64,
     pub peak_build_metadata_bytes: usize,
+    pub generation_artifacts: RelationalIndexGenerationArtifacts,
 }
 
 #[derive(Debug)]
@@ -547,11 +577,9 @@ impl RelationalIndexShadowWriter {
                 "relational index shadow contains duplicate index identities".to_string(),
             ));
         }
-        let page_count = pages.finish()?;
+        let (page_count, page_artifact) = pages.finish()?;
         let page_bytes = self.config.page_limits.max_page_bytes.get() as u64;
-        let artifact_bytes = page_count.checked_mul(page_bytes).ok_or_else(|| {
-            RelationalIndexShadowError::Admission("shadow artifact size overflow".to_string())
-        })?;
+        let artifact_bytes = page_artifact.encoded_len;
         durable_replace_file(&paths.artifact_tmp, &paths.artifact)
             .map_err(durability("publish shadow artifact"))?;
 
@@ -563,6 +591,10 @@ impl RelationalIndexShadowWriter {
             roots,
         )?;
         let encoded_manifest = manifest.encode(self.config)?;
+        let manifest_artifact = RelationalIndexArtifactMetadata::from_digest(
+            encoded_manifest.len() as u64,
+            integrity_digest(&encoded_manifest),
+        );
         {
             let mut file = File::create(&paths.manifest_tmp)
                 .map_err(durability("create shadow manifest candidate"))?;
@@ -590,6 +622,14 @@ impl RelationalIndexShadowWriter {
             artifact_bytes,
             manifest_bytes: encoded_manifest.len() as u64,
             peak_build_metadata_bytes,
+            generation_artifacts: RelationalIndexGenerationArtifacts {
+                generation,
+                source_commit_epoch,
+                catalog_schema_digest: manifest.catalog_schema_digest,
+                root_set_digest: manifest.root_set_digest,
+                page_artifact,
+                manifest_artifact,
+            },
         })
     }
 }
@@ -1023,6 +1063,7 @@ struct SlotWriter {
     limits: ImmutableIndexPageLimits,
     next_page_id: u64,
     written_pages: u64,
+    artifact_hasher: IntegrityHasher,
 }
 
 impl SlotWriter {
@@ -1039,6 +1080,7 @@ impl SlotWriter {
             limits,
             next_page_id: 1,
             written_pages: 0,
+            artifact_hasher: IntegrityHasher::new(),
         }
     }
 
@@ -1097,11 +1139,12 @@ impl SlotWriter {
         self.file
             .write_all(&slot)
             .map_err(durability("write shadow page slot"))?;
+        self.artifact_hasher.update(&slot);
         self.written_pages = expected_page_id;
         Ok(())
     }
 
-    fn finish(self) -> Result<u64, RelationalIndexShadowError> {
+    fn finish(self) -> Result<(u64, RelationalIndexArtifactMetadata), RelationalIndexShadowError> {
         let page_count = self.next_page_id.saturating_sub(1);
         if self.written_pages != page_count {
             return Err(RelationalIndexShadowError::Corrupt(format!(
@@ -1112,7 +1155,20 @@ impl SlotWriter {
         self.file
             .sync_all()
             .map_err(durability("sync shadow page artifact"))?;
-        Ok(page_count)
+        let encoded_len = page_count
+            .checked_mul(self.limits.max_page_bytes.get() as u64)
+            .ok_or_else(|| {
+                RelationalIndexShadowError::Admission(
+                    "relational index artifact length overflow".to_string(),
+                )
+            })?;
+        Ok((
+            page_count,
+            RelationalIndexArtifactMetadata::from_digest(
+                encoded_len,
+                self.artifact_hasher.finish(),
+            ),
+        ))
     }
 }
 

@@ -109,6 +109,16 @@ replace the canonical checkpoint. A crash before canonical publication may
 leave a future candidate orphaned; normal writable open ignores and reclaims it
 through generation cleanup while recovering the selected checkpoint plus WAL.
 
+Successful construction also returns one typed
+`RelationalIndexGenerationArtifacts` identity. It binds generation, source
+commit epoch, catalog schema digest, exact root-set digest, and the length,
+CRC32C, and SHA-256 of both the page artifact and generation manifest. Page-file
+integrity is accumulated while fixed slots are emitted, so producing this
+identity does not reread an index-sized file or add index-cardinality-sized
+metadata. Manifest integrity is computed from the already bounded encoded
+manifest. The identity is exposed in checkpoint publication evidence, but in
+this phase it is deliberately not written into the canonical manifest.
+
 These candidates remain non-authoritative. The canonical checkpoint does not
 contain a reverse reference to their manifest and therefore remains
 self-contained when a candidate is missing or corrupt. Open considers a

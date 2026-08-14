@@ -1160,6 +1160,34 @@ fn relational_index_shadow_publishes_generation_fenced_cold_pages() {
     assert_eq!(first.index_roots, 2);
     assert!(first.pages_written > first.index_roots as u64);
     assert_eq!(first.artifact_bytes, first.pages_written * 4096);
+    assert_eq!(first.generation_artifacts.generation, 1);
+    assert_eq!(first.generation_artifacts.source_commit_epoch, 40);
+    assert_eq!(
+        first.generation_artifacts.page_artifact.encoded_len,
+        first.artifact_bytes
+    );
+    assert_eq!(
+        first.generation_artifacts.manifest_artifact.encoded_len,
+        first.manifest_bytes
+    );
+    assert_relational_index_artifact_metadata(
+        &directory.join(relational_index_shadow_artifact_file(1)),
+        first.generation_artifacts.page_artifact,
+    );
+    assert_relational_index_artifact_metadata(
+        &directory.join(RELATIONAL_INDEX_SHADOW_MANIFEST_FILE),
+        first.generation_artifacts.manifest_artifact,
+    );
+    let first_reader = RelationalIndexShadowReader::open(&directory, 1, 40, config)
+        .expect("open the first bound generation");
+    assert_eq!(
+        first.generation_artifacts.catalog_schema_digest,
+        first_reader.manifest().catalog_schema_digest
+    );
+    assert_eq!(
+        first.generation_artifacts.root_set_digest,
+        first_reader.manifest().root_set_digest
+    );
 
     let stale = writer
         .publish(&directory, &state, 2, 41, None)
@@ -2422,4 +2450,15 @@ fn upsert_row(id: &str, owner: &str, payload: &str) -> RelationalRow {
         RelationalValue::Text(owner.to_string()),
         RelationalValue::Text(payload.to_string()),
     ])
+}
+
+fn assert_relational_index_artifact_metadata(
+    path: &std::path::Path,
+    expected: RelationalIndexArtifactMetadata,
+) {
+    let encoded = std::fs::read(path).expect("read relational index generation artifact");
+    let actual = skein_integrity::integrity_digest(&encoded);
+    assert_eq!(expected.encoded_len, encoded.len() as u64);
+    assert_eq!(expected.encoded_crc32c, actual.crc32c.as_u64());
+    assert_eq!(expected.encoded_sha256, actual.sha256);
 }

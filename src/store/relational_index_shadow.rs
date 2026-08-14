@@ -18,14 +18,14 @@ use skein_integrity::{IntegrityHasher, Sha256Digest};
 use skein_storage::{
     relational_index_shadow_manifest_generation_file, RelationalIndexChange,
     RelationalIndexChangeCapture, RelationalIndexChangeCaptureLimits, RelationalIndexChangeKind,
-    RelationalIndexGenerationIdentity, RelationalIndexMode, RelationalIndexReadLimits,
-    RelationalIndexReadReport, RelationalIndexRecoveryBuilder, RelationalIndexRecoveryConfig,
-    RelationalIndexRecoveryReadReport, RelationalIndexRecoveryReader,
-    RelationalIndexRecoveryReport, RelationalIndexRole, RelationalIndexShadowBuildReport,
-    RelationalIndexShadowConfig, RelationalIndexShadowError, RelationalIndexShadowManifest,
-    RelationalIndexShadowReader, RelationalIndexShadowWriter, RelationalKey, RelationalScalarType,
-    RelationalTableSchema, RelationalTransaction, RelationalValue,
-    RELATIONAL_INDEX_SHADOW_MANIFEST_FILE, RELATIONAL_PRIMARY_INDEX_NAME,
+    RelationalIndexGenerationArtifacts, RelationalIndexGenerationIdentity, RelationalIndexMode,
+    RelationalIndexReadLimits, RelationalIndexReadReport, RelationalIndexRecoveryBuilder,
+    RelationalIndexRecoveryConfig, RelationalIndexRecoveryReadReport,
+    RelationalIndexRecoveryReader, RelationalIndexRecoveryReport, RelationalIndexRole,
+    RelationalIndexShadowBuildReport, RelationalIndexShadowConfig, RelationalIndexShadowError,
+    RelationalIndexShadowManifest, RelationalIndexShadowReader, RelationalIndexShadowWriter,
+    RelationalKey, RelationalScalarType, RelationalTableSchema, RelationalTransaction,
+    RelationalValue, RELATIONAL_INDEX_SHADOW_MANIFEST_FILE, RELATIONAL_PRIMARY_INDEX_NAME,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -742,6 +742,7 @@ pub struct RelationalIndexShadowCheckpointReport {
     pub artifact_bytes: u64,
     pub manifest_bytes: u64,
     pub peak_build_metadata_bytes: usize,
+    pub generation_artifacts: Option<RelationalIndexGenerationArtifacts>,
     pub error: Option<String>,
 }
 
@@ -762,6 +763,7 @@ impl RelationalIndexShadowCheckpointReport {
             artifact_bytes: report.artifact_bytes,
             manifest_bytes: report.manifest_bytes,
             peak_build_metadata_bytes: report.peak_build_metadata_bytes,
+            generation_artifacts: Some(report.generation_artifacts),
             error: None,
         }
     }
@@ -776,6 +778,7 @@ impl RelationalIndexShadowCheckpointReport {
             artifact_bytes: 0,
             manifest_bytes: 0,
             peak_build_metadata_bytes: 0,
+            generation_artifacts: None,
             error: Some(error),
         }
     }
@@ -1801,6 +1804,22 @@ mod tests {
                 RelationalIndexShadowCheckpointStatus::Published
             );
             assert_eq!(report.index_roots, 2);
+            let generation_artifacts = report
+                .generation_artifacts
+                .expect("published generation artifact identity");
+            assert_eq!(generation_artifacts.generation, report.generation);
+            assert_eq!(
+                generation_artifacts.source_commit_epoch,
+                report.source_commit_epoch
+            );
+            assert_eq!(
+                generation_artifacts.page_artifact.encoded_len,
+                report.artifact_bytes
+            );
+            assert_eq!(
+                generation_artifacts.manifest_artifact.encoded_len,
+                report.manifest_bytes
+            );
             assert!(path
                 .join(relational_index_shadow_manifest_generation_file(
                     report.generation
@@ -1936,6 +1955,7 @@ mod tests {
                 .relational_index_shadow_checkpoint_report()
                 .expect("candidate failure report");
             assert_eq!(report.status, RelationalIndexShadowCheckpointStatus::Failed);
+            assert_eq!(report.generation_artifacts, None);
             assert!(matches!(
                 store.relational_index_shadow_recovery_status(),
                 RelationalIndexShadowRecoveryStatus::CandidateUnavailable { .. }

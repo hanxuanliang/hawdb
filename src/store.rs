@@ -140,6 +140,7 @@ pub use skein_storage::{
     StorageRestoreReport, StorageScrubReport, StoreId, StoreStableIdMapping, WalReplayConfig,
     STORAGE_PRESSURE_DELAY_RATIO_PER_MILLION, STORAGE_PRESSURE_SOFT_RATIO_PER_MILLION,
 };
+pub use skein_storage::{RelationalIndexArtifactMetadata, RelationalIndexGenerationArtifacts};
 pub(crate) use skein_storage::{WalSyncGroupFlush, WalSyncGroupProgress};
 pub use source_scan::SourceScanRow;
 pub(crate) use statistics_refresh::OptimizerStatisticsRefreshWork;
