@@ -98,7 +98,7 @@ pub(super) fn index_seek_from_filter(
             }
             let label_count = catalog.label_count(label);
             let distinct_count = catalog.distinct_count(label, property).max(1);
-            let estimated_rows = label_count.div_ceil(distinct_count).max(1);
+            let estimated_rows = catalog.estimate_property_index_eq_rows(label, property);
             let scan_cost = estimate_node_full_scan_cost(label_count);
             let seek_cost =
                 estimate_node_index_seek_cost(estimated_rows, NODE_INDEX_EQ_STARTUP_COST);
@@ -143,11 +143,8 @@ pub(super) fn index_seek_from_filter(
             }
             let label_count = catalog.label_count(label);
             let distinct_count = catalog.distinct_count(label, property).max(1);
-            let rows_per_value = label_count.div_ceil(distinct_count).max(1);
-            let estimated_rows = rows_per_value
-                .saturating_mul(values.len() as u64)
-                .min(label_count)
-                .max(1);
+            let estimated_rows =
+                catalog.estimate_property_index_in_rows(label, property, values.len() as u64);
             let scan_cost = estimate_node_full_scan_cost(label_count);
             let seek_cost = estimate_node_index_seek_cost(estimated_rows, values.len() as u64);
             if node_index_seek_is_cheaper(label_count, seek_cost) {
@@ -566,12 +563,9 @@ impl OptimizerRule<GraphRuleExpr> for NodeInSeekRule<'_> {
             return RulePromise::NEVER;
         }
         let label_count = self.catalog.label_count(label);
-        let distinct_count = self.catalog.distinct_count(label, property).max(1);
-        let rows_per_value = label_count.div_ceil(distinct_count).max(1);
-        let estimated_rows = rows_per_value
-            .saturating_mul(values.len() as u64)
-            .min(label_count)
-            .max(1);
+        let estimated_rows =
+            self.catalog
+                .estimate_property_index_in_rows(label, property, values.len() as u64);
         let seek_cost = estimate_node_index_seek_cost(estimated_rows, values.len() as u64);
         if node_index_seek_is_cheaper(label_count, seek_cost) {
             RulePromise::new(95)
@@ -604,11 +598,9 @@ impl OptimizerRule<GraphRuleExpr> for NodeInSeekRule<'_> {
         }
         let label_count = self.catalog.label_count(label);
         let distinct_count = self.catalog.distinct_count(label, property).max(1);
-        let rows_per_value = label_count.div_ceil(distinct_count).max(1);
-        let estimated_rows = rows_per_value
-            .saturating_mul(values.len() as u64)
-            .min(label_count)
-            .max(1);
+        let estimated_rows =
+            self.catalog
+                .estimate_property_index_in_rows(label, property, values.len() as u64);
         let scan_cost = estimate_node_full_scan_cost(label_count);
         let seek_cost = estimate_node_index_seek_cost(estimated_rows, values.len() as u64);
         if !node_index_seek_is_cheaper(label_count, seek_cost) {
@@ -655,8 +647,9 @@ impl OptimizerRule<GraphRuleExpr> for NodeEqualitySeekRule<'_> {
             return RulePromise::NEVER;
         }
         let label_count = self.catalog.label_count(label);
-        let distinct_count = self.catalog.distinct_count(label, property).max(1);
-        let estimated_rows = label_count.div_ceil(distinct_count).max(1);
+        let estimated_rows = self
+            .catalog
+            .estimate_property_index_eq_rows(label, property);
         let seek_cost = estimate_node_index_seek_cost(estimated_rows, NODE_INDEX_EQ_STARTUP_COST);
         if node_index_seek_is_cheaper(label_count, seek_cost) {
             RulePromise::new(100)
@@ -689,7 +682,9 @@ impl OptimizerRule<GraphRuleExpr> for NodeEqualitySeekRule<'_> {
         }
         let label_count = self.catalog.label_count(label);
         let distinct_count = self.catalog.distinct_count(label, property).max(1);
-        let estimated_rows = label_count.div_ceil(distinct_count).max(1);
+        let estimated_rows = self
+            .catalog
+            .estimate_property_index_eq_rows(label, property);
         let scan_cost = estimate_node_full_scan_cost(label_count);
         let seek_cost = estimate_node_index_seek_cost(estimated_rows, NODE_INDEX_EQ_STARTUP_COST);
         if !node_index_seek_is_cheaper(label_count, seek_cost) {

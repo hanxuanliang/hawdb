@@ -85,7 +85,7 @@ impl GraphStore {
             self.add_node_to_basic_statistics(&node);
             for label_id in &node.labels {
                 for (property, value) in &node.properties {
-                    if catalog.property_index_id(*label_id, property).is_none() {
+                    if !catalog.has_scalar_property_index(*label_id, property) {
                         continue;
                     }
                     self.property_index
@@ -309,7 +309,7 @@ impl GraphStore {
                     }
                 }
             }
-            if catalog.property_index_id(label_id, &property).is_some() {
+            if catalog.has_scalar_property_index(label_id, &property) {
                 self.property_index
                     .entry_or_default((label_id, property.clone(), value.clone()))
                     .insert(id);
@@ -441,6 +441,14 @@ impl GraphStore {
         Ok(true)
     }
 
+    fn record_node_index_sample_updates(&mut self, affected_indexes: Vec<IndexId>) {
+        for index_id in affected_indexes {
+            if let Some(sample) = self.checkpoint_statistics.index_samples.get_mut(&index_id) {
+                sample.updates_since_sample = sample.updates_since_sample.saturating_add(1);
+            }
+        }
+    }
+
     pub(super) fn apply_wal_op(&mut self, catalog: &mut Catalog, op: WalOp) -> Result<()> {
         let result = self.apply_wal_op_inner(catalog, op);
         if result.is_err() && self.durable.is_some() {
@@ -524,8 +532,13 @@ impl GraphStore {
             }
             WalOp::CreateCompositeIndex { label, properties } => {
                 let label_id = catalog.get_or_create_label(&label);
-                catalog.get_or_create_composite_property_index(label_id, &properties);
-                self.rebuild_composite_property_index_for_descriptor(label_id, &properties);
+                let index_id =
+                    catalog.get_or_create_composite_property_index(label_id, &properties);
+                self.rebuild_composite_property_index_for_descriptor(
+                    index_id,
+                    label_id,
+                    &properties,
+                );
             }
             WalOp::CreateRangeIndex { label, property } => {
                 let label_id = catalog.get_or_create_label(&label);
@@ -534,6 +547,7 @@ impl GraphStore {
                     &property,
                     IndexKind::Range,
                 );
+                self.backfill_property_index(catalog, label_id, &property);
             }
             WalOp::CreateFullTextIndex { label, property } => {
                 let label_id = catalog.get_or_create_label(&label);
@@ -567,7 +581,14 @@ impl GraphStore {
                 properties,
             } => {
                 let label_id = catalog.get_or_create_label(&label);
+                let affected_indexes = node_create_index_sample_updates(
+                    catalog,
+                    self.nodes.get(&id),
+                    label_id,
+                    &properties,
+                );
                 self.apply_create_node(catalog, id, label_id, properties);
+                self.record_node_index_sample_updates(affected_indexes);
             }
             WalOp::CreateRelationship {
                 id,
@@ -585,7 +606,11 @@ impl GraphStore {
                 value,
             } => {
                 self.materialize_node_for_write(id)?;
+                let affected_indexes = self.nodes.get(&id).map_or_else(Vec::new, |node| {
+                    node_property_index_sample_updates(catalog, node, &property, &value)
+                });
                 self.apply_set_node_property(catalog, id, property, value);
+                self.record_node_index_sample_updates(affected_indexes);
             }
             WalOp::SetRelationshipProperty {
                 id,
@@ -604,7 +629,11 @@ impl GraphStore {
                     .flatten()
                     .is_some();
                 self.materialize_node_for_write(id)?;
+                let affected_indexes = self.nodes.get(&id).map_or_else(Vec::new, |node| {
+                    node_delete_index_sample_updates(catalog, node)
+                });
                 self.apply_delete_node(catalog, id);
+                self.record_node_index_sample_updates(affected_indexes);
                 if base_exists {
                     self.node_tombstones.insert(id);
                 }
@@ -676,5 +705,139 @@ impl GraphStore {
             }
         }
         Ok(())
+    }
+}
+
+fn node_create_index_sample_updates(
+    catalog: &Catalog,
+    old_node: Option<&NodeRecord>,
+    new_label_id: LabelId,
+    new_properties: &BTreeMap<String, Value>,
+) -> Vec<IndexId> {
+    let mut affected = Vec::new();
+    for index in catalog
+        .property_indexes()
+        .filter(|index| index.kind != IndexKind::FullText)
+    {
+        let old_value = old_node
+            .filter(|node| node.labels.contains(&index.label_id))
+            .and_then(|node| node.properties.get(&index.property));
+        let new_value = (index.label_id == new_label_id)
+            .then(|| new_properties.get(&index.property))
+            .flatten();
+        if old_value != new_value {
+            affected.push(index.id);
+        }
+    }
+    for index in catalog.composite_property_indexes() {
+        if !composite_create_values_equal(old_node, new_label_id, new_properties, index) {
+            affected.push(index.id);
+        }
+    }
+    affected
+}
+
+fn node_property_index_sample_updates(
+    catalog: &Catalog,
+    node: &NodeRecord,
+    property: &str,
+    value: &Value,
+) -> Vec<IndexId> {
+    let mut affected = catalog
+        .property_indexes()
+        .filter(|index| {
+            index.kind != IndexKind::FullText
+                && index.property == property
+                && node.labels.contains(&index.label_id)
+                && node.properties.get(property) != Some(value)
+        })
+        .map(|index| index.id)
+        .collect::<Vec<_>>();
+    affected.extend(
+        catalog
+            .composite_property_indexes()
+            .filter(|index| {
+                node.labels.contains(&index.label_id)
+                    && index
+                        .properties
+                        .iter()
+                        .any(|candidate| candidate == property)
+                    && composite_property_update_changes_key(node, property, value, index)
+            })
+            .map(|index| index.id),
+    );
+    affected
+}
+
+fn node_delete_index_sample_updates(catalog: &Catalog, node: &NodeRecord) -> Vec<IndexId> {
+    let mut affected = catalog
+        .property_indexes()
+        .filter(|index| {
+            index.kind != IndexKind::FullText
+                && node.labels.contains(&index.label_id)
+                && node.properties.contains_key(&index.property)
+        })
+        .map(|index| index.id)
+        .collect::<Vec<_>>();
+    affected.extend(
+        catalog
+            .composite_property_indexes()
+            .filter(|index| {
+                node.labels.contains(&index.label_id)
+                    && index
+                        .properties
+                        .iter()
+                        .all(|property| node.properties.contains_key(property))
+            })
+            .map(|index| index.id),
+    );
+    affected
+}
+
+fn composite_create_values_equal(
+    old_node: Option<&NodeRecord>,
+    new_label_id: LabelId,
+    new_properties: &BTreeMap<String, Value>,
+    index: &CompositeIndexDescriptor,
+) -> bool {
+    let old_indexed = old_node.is_some_and(|node| {
+        node.labels.contains(&index.label_id)
+            && index
+                .properties
+                .iter()
+                .all(|property| node.properties.contains_key(property))
+    });
+    let new_indexed = new_label_id == index.label_id
+        && index
+            .properties
+            .iter()
+            .all(|property| new_properties.contains_key(property));
+    match (old_indexed, new_indexed) {
+        (false, false) => true,
+        (true, true) => index.properties.iter().all(|property| {
+            old_node.and_then(|node| node.properties.get(property)) == new_properties.get(property)
+        }),
+        _ => false,
+    }
+}
+
+fn composite_property_update_changes_key(
+    node: &NodeRecord,
+    property: &str,
+    value: &Value,
+    index: &CompositeIndexDescriptor,
+) -> bool {
+    let old_indexed = index
+        .properties
+        .iter()
+        .all(|candidate| node.properties.contains_key(candidate));
+    let new_indexed = index
+        .properties
+        .iter()
+        .all(|candidate| candidate == property || node.properties.contains_key(candidate));
+    match (old_indexed, new_indexed) {
+        (false, false) => false,
+        (true, true) => node.properties.get(property) != Some(value),
+        _ => true,
     }
 }

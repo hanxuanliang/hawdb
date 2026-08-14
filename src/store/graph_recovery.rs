@@ -598,6 +598,27 @@ impl GraphStore {
                             parse_u64(raw_count, "statistics bounded path target distinct count")?,
                         );
                 }
+                ["stat_index_sample", raw_index_id, raw_index_size, raw_unique_values, raw_sample_size, raw_updates] =>
+                {
+                    self.checkpoint_statistics.index_samples.insert(
+                        IndexId(parse_u32(raw_index_id, "statistics index id")?),
+                        IndexStatisticsSample {
+                            index_size: parse_u64(raw_index_size, "statistics index size")?,
+                            unique_values: parse_u64(
+                                raw_unique_values,
+                                "statistics index unique values",
+                            )?,
+                            sample_size: parse_u64(
+                                raw_sample_size,
+                                "statistics index sample size",
+                            )?,
+                            updates_since_sample: parse_u64(
+                                raw_updates,
+                                "statistics index updates",
+                            )?,
+                        },
+                    );
+                }
                 ["stat_property_distinct_count", raw_label_id, raw_property, raw_count] => {
                     self.checkpoint_statistics.property_distinct_counts.insert(
                         (
@@ -712,6 +733,7 @@ impl GraphStore {
             self.checkpoint_statistics.advanced_statistics_complete =
                 loaded_statistics_complete.unwrap_or(true);
             retain_supported_property_statistics(&mut self.checkpoint_statistics, Some(catalog));
+            retain_valid_index_statistics_samples(&mut self.checkpoint_statistics, catalog);
         }
         if loaded_generation != Some(expected_generation) {
             return Err(SkeinError::Storage(format!(

@@ -93,10 +93,7 @@ pub(super) fn estimate_physical_plan_cost(
         PhysicalPlan::IndexNodeSeek {
             label, property, ..
         } => {
-            let rows = catalog
-                .label_count(label)
-                .div_ceil(catalog.distinct_count(label, property).max(1))
-                .max(1);
+            let rows = catalog.estimate_property_index_eq_rows(label, property);
             PlanCost {
                 estimated_rows: rows,
                 cost: estimate_node_index_seek_cost(rows, NODE_INDEX_EQ_STARTUP_COST),
@@ -108,12 +105,8 @@ pub(super) fn estimate_physical_plan_cost(
             values,
             ..
         } => {
-            let distinct_count = catalog.distinct_count(label, property).max(1);
-            let rows_per_value = catalog.label_count(label).div_ceil(distinct_count).max(1);
-            let rows = rows_per_value
-                .saturating_mul(values.len() as u64)
-                .min(catalog.label_count(label))
-                .max(1);
+            let rows =
+                catalog.estimate_property_index_in_rows(label, property, values.len() as u64);
             PlanCost {
                 estimated_rows: rows,
                 cost: estimate_node_index_seek_cost(rows, values.len() as u64),
@@ -122,12 +115,11 @@ pub(super) fn estimate_physical_plan_cost(
         PhysicalPlan::IndexNodeCompositeSeek {
             label, predicates, ..
         } => {
-            let distinct_product = predicates
+            let properties = predicates
                 .iter()
-                .map(|(property, _)| catalog.distinct_count(label, property).max(1))
-                .fold(1_u64, |acc, value| acc.saturating_mul(value))
-                .max(1);
-            let rows = catalog.label_count(label).div_ceil(distinct_product).max(1);
+                .map(|(property, _)| property.clone())
+                .collect::<Vec<_>>();
+            let rows = catalog.estimate_composite_property_index_rows(label, &properties);
             PlanCost {
                 estimated_rows: rows,
                 cost: estimate_node_index_seek_cost(rows, predicates.len() as u64),
@@ -388,10 +380,7 @@ pub(super) fn estimate_physical_plan_cost_breakdown(
         PhysicalPlan::IndexNodeSeek {
             label, property, ..
         } => {
-            let rows = catalog
-                .label_count(label)
-                .div_ceil(catalog.distinct_count(label, property).max(1))
-                .max(1);
+            let rows = catalog.estimate_property_index_eq_rows(label, property);
             PlanCostBreakdown::new(
                 rows,
                 0,
@@ -406,12 +395,8 @@ pub(super) fn estimate_physical_plan_cost_breakdown(
             values,
             ..
         } => {
-            let distinct_count = catalog.distinct_count(label, property).max(1);
-            let rows_per_value = catalog.label_count(label).div_ceil(distinct_count).max(1);
-            let rows = rows_per_value
-                .saturating_mul(values.len() as u64)
-                .min(catalog.label_count(label))
-                .max(1);
+            let rows =
+                catalog.estimate_property_index_in_rows(label, property, values.len() as u64);
             PlanCostBreakdown::new(
                 rows,
                 0,
@@ -423,12 +408,11 @@ pub(super) fn estimate_physical_plan_cost_breakdown(
         PhysicalPlan::IndexNodeCompositeSeek {
             label, predicates, ..
         } => {
-            let distinct_product = predicates
+            let properties = predicates
                 .iter()
-                .map(|(property, _)| catalog.distinct_count(label, property).max(1))
-                .fold(1_u64, |acc, value| acc.saturating_mul(value))
-                .max(1);
-            let rows = catalog.label_count(label).div_ceil(distinct_product).max(1);
+                .map(|(property, _)| property.clone())
+                .collect::<Vec<_>>();
+            let rows = catalog.estimate_composite_property_index_rows(label, &properties);
             PlanCostBreakdown::new(
                 rows,
                 0,

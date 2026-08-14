@@ -422,8 +422,8 @@ pub use route_ownership::{
 pub use schema::{
     BasicGraphStatistics, CompositeIndexDescriptor, ConstraintDescriptor, ConstraintId,
     ConstraintKind, ConstraintSubject, GraphStatistics, IndexDescriptor, IndexId, IndexKind,
-    PropertyDescriptor, PropertyId, PropertyType, SchemaObjectState, TableDescriptor, TableId,
-    TableKind,
+    IndexStatisticsSample, PropertyDescriptor, PropertyId, PropertyType, SchemaObjectState,
+    TableDescriptor, TableId, TableKind,
 };
 #[cfg(feature = "vector-search")]
 pub use search::turboquant_projection::{

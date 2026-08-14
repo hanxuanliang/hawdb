@@ -96,6 +96,61 @@ pub struct CompositeIndexDescriptor {
     pub properties: Vec<String>,
 }
 
+/// A compact, payload-free sample for one explicit property index.
+///
+/// `index_size`, `unique_values`, and `sample_size` describe one coherent
+/// sampling epoch. Mutations after that epoch only advance
+/// `updates_since_sample`; they never rewrite the sampled counters in place.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct IndexStatisticsSample {
+    pub index_size: u64,
+    pub unique_values: u64,
+    pub sample_size: u64,
+    pub updates_since_sample: u64,
+}
+
+impl IndexStatisticsSample {
+    pub const STALE_UPDATE_PERCENT: u64 = 5;
+
+    pub fn exact(index_size: u64, unique_values: u64) -> Self {
+        Self {
+            index_size,
+            unique_values,
+            sample_size: index_size,
+            updates_since_sample: 0,
+        }
+    }
+
+    pub fn is_valid(self) -> bool {
+        self.sample_size <= self.index_size
+            && self.unique_values <= self.sample_size
+            && (self.sample_size != 0 || self.unique_values == 0)
+    }
+
+    pub fn max_fresh_updates(self) -> u64 {
+        self.index_size
+            .saturating_mul(Self::STALE_UPDATE_PERCENT)
+            .div_ceil(100)
+            .max(1)
+    }
+
+    pub fn is_stale(self) -> bool {
+        self.updates_since_sample > self.max_fresh_updates()
+    }
+
+    pub fn estimated_unique_values(self) -> Option<u64> {
+        if !self.is_valid() || self.is_stale() || self.sample_size == 0 {
+            return None;
+        }
+        Some(
+            self.unique_values
+                .saturating_mul(self.index_size)
+                .div_ceil(self.sample_size)
+                .clamp(1, self.index_size.max(1)),
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstraintDescriptor {
     pub id: ConstraintId,
@@ -148,6 +203,7 @@ pub struct GraphStatistics {
     pub bounded_path_counts: BTreeMap<(LabelId, RelTypeId, LabelId, usize), u64>,
     pub bounded_path_source_distinct_counts: BTreeMap<(LabelId, RelTypeId, LabelId, usize), u64>,
     pub bounded_path_target_distinct_counts: BTreeMap<(LabelId, RelTypeId, LabelId, usize), u64>,
+    pub index_samples: BTreeMap<IndexId, IndexStatisticsSample>,
     pub property_distinct_counts: BTreeMap<(LabelId, String), u64>,
     pub rel_property_distinct_counts: BTreeMap<(RelTypeId, String), u64>,
     pub property_histograms: BTreeMap<(LabelId, String), Vec<Value>>,
@@ -442,7 +498,7 @@ impl Catalog {
         if let Some(id) = self.property_indexes_by_key.get(&key) {
             return *id;
         }
-        let id = IndexId(self.property_indexes.len() as u32);
+        let id = self.next_index_id();
         self.property_indexes.push(IndexDescriptor {
             id,
             label_id,
@@ -505,6 +561,10 @@ impl Catalog {
             .filter(|index| !index.property.is_empty())
     }
 
+    pub fn property_index_descriptor(&self, id: IndexId) -> Option<&IndexDescriptor> {
+        self.property_indexes().find(|index| index.id == id)
+    }
+
     pub fn get_or_create_composite_property_index(
         &mut self,
         label_id: LabelId,
@@ -514,8 +574,7 @@ impl Catalog {
         if let Some(id) = self.composite_property_indexes_by_key.get(&key) {
             return *id;
         }
-        let id =
-            IndexId((self.property_indexes.len() + self.composite_property_indexes.len()) as u32);
+        let id = self.next_index_id();
         self.composite_property_indexes
             .push(CompositeIndexDescriptor {
                 id,
@@ -556,6 +615,47 @@ impl Catalog {
         self.composite_property_indexes
             .iter()
             .filter(|index| !index.properties.is_empty())
+    }
+
+    pub fn composite_property_index_descriptor(
+        &self,
+        id: IndexId,
+    ) -> Option<&CompositeIndexDescriptor> {
+        self.composite_property_indexes()
+            .find(|index| index.id == id)
+    }
+
+    pub fn has_scalar_property_index(&self, label_id: LabelId, property: &str) -> bool {
+        [IndexKind::Equality, IndexKind::Range]
+            .into_iter()
+            .any(|kind| {
+                self.property_index_id_with_kind(label_id, property, kind)
+                    .is_some()
+            })
+    }
+
+    pub fn supports_index_statistics(&self, id: IndexId) -> bool {
+        match (
+            self.property_index_descriptor(id),
+            self.composite_property_index_descriptor(id),
+        ) {
+            (Some(index), None) => index.kind != IndexKind::FullText,
+            (None, Some(_)) => true,
+            _ => false,
+        }
+    }
+
+    fn next_index_id(&self) -> IndexId {
+        let next = self
+            .property_indexes()
+            .map(|index| index.id.0)
+            .chain(self.composite_property_indexes().map(|index| index.id.0))
+            .max()
+            .map_or(0, |id| {
+                id.checked_add(1)
+                    .expect("schema index identifier space is exhausted")
+            });
+        IndexId(next)
     }
 
     pub fn get_or_create_unique_constraint(
@@ -823,5 +923,68 @@ impl Catalog {
             name: name.clone(),
         };
         self.rel_types_by_name.insert(name, id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_identifiers_are_unique_across_descriptor_kinds() {
+        let mut catalog = Catalog::default();
+        let label = catalog.get_or_create_label("Memory");
+        let composite = catalog.get_or_create_composite_property_index(
+            label,
+            &["space_id".to_string(), "external_id".to_string()],
+        );
+        let equality = catalog.get_or_create_property_index(label, "id");
+        let range =
+            catalog.get_or_create_property_index_with_kind(label, "created_at", IndexKind::Range);
+
+        assert_ne!(composite, equality);
+        assert_ne!(composite, range);
+        assert_ne!(equality, range);
+    }
+
+    #[test]
+    fn imported_identifier_collision_disables_ambiguous_statistics() {
+        let mut catalog = Catalog::default();
+        let label = catalog.get_or_create_label("Memory");
+        let id = catalog.get_or_create_property_index(label, "id");
+        catalog.import_composite_property_index(
+            id,
+            label,
+            vec!["space_id".to_string(), "external_id".to_string()],
+        );
+
+        assert!(!catalog.supports_index_statistics(id));
+    }
+
+    #[test]
+    fn index_sample_estimate_is_bounded_and_rejects_stale_churn() {
+        let sampled = IndexStatisticsSample {
+            index_size: 1_000,
+            unique_values: 40,
+            sample_size: 100,
+            updates_since_sample: 50,
+        };
+        assert_eq!(sampled.estimated_unique_values(), Some(400));
+
+        let stale = IndexStatisticsSample {
+            updates_since_sample: 51,
+            ..sampled
+        };
+        assert!(stale.is_stale());
+        assert_eq!(stale.estimated_unique_values(), None);
+
+        let invalid = IndexStatisticsSample {
+            index_size: 10,
+            unique_values: 11,
+            sample_size: 10,
+            updates_since_sample: 0,
+        };
+        assert!(!invalid.is_valid());
+        assert_eq!(invalid.estimated_unique_values(), None);
     }
 }

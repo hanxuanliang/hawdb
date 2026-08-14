@@ -259,15 +259,22 @@ impl GraphStore {
 
     pub fn statistics(&self, catalog: &Catalog) -> GraphStatistics {
         if !self.canonical_base_out_of_core {
-            return compute_statistics_with_basic(
+            let mut statistics = compute_statistics_with_basic(
                 &self.nodes,
                 &self.relationships,
                 Some(catalog),
                 self.basic_statistics(),
             );
+            statistics.index_samples = compute_index_statistics_samples(
+                catalog,
+                &self.property_index,
+                &self.composite_property_index,
+            );
+            return statistics;
         }
         let mut statistics = self.checkpoint_statistics.clone();
         retain_supported_property_statistics(&mut statistics, Some(catalog));
+        retain_valid_index_statistics_samples(&mut statistics, catalog);
         let basic = self.basic_statistics();
         statistics.node_count = basic.node_count;
         statistics.relationship_count = basic.relationship_count;
@@ -324,7 +331,7 @@ impl GraphStore {
             .property_distinct_counts
             .into_iter()
             .filter(|((label_id, property), _)| {
-                catalog.property_index_id(*label_id, property).is_some()
+                catalog.has_scalar_property_index(*label_id, property)
             })
             .collect();
         DistinctValueStatisticsConsistencyReport::new(

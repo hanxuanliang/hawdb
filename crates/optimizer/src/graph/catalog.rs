@@ -21,6 +21,12 @@ pub(super) struct HopEstimate {
     pub(super) exact: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OptimizerIndexStatistics {
+    pub index_size: u64,
+    pub distinct_count: u64,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct OptimizerCatalog {
     pub(super) assume_all_indexes: bool,
@@ -38,6 +44,9 @@ pub struct OptimizerCatalog {
     pub(super) bounded_path_counts: BTreeMap<(String, String, String, usize), u64>,
     pub(super) bounded_path_source_distinct_counts: BTreeMap<(String, String, String, usize), u64>,
     pub(super) bounded_path_target_distinct_counts: BTreeMap<(String, String, String, usize), u64>,
+    pub(super) property_index_statistics: BTreeMap<(String, String), OptimizerIndexStatistics>,
+    pub(super) composite_index_statistics:
+        BTreeMap<(String, Vec<String>), OptimizerIndexStatistics>,
     pub(super) property_distinct_counts: BTreeMap<(String, String), u64>,
     pub(super) rel_property_distinct_counts: BTreeMap<(String, String), u64>,
     pub(super) property_histograms: BTreeMap<(String, String), Vec<Value>>,
@@ -64,6 +73,9 @@ pub struct OptimizerCatalogStatistics {
     pub(super) bounded_path_counts: BTreeMap<(String, String, String, usize), u64>,
     pub(super) bounded_path_source_distinct_counts: BTreeMap<(String, String, String, usize), u64>,
     pub(super) bounded_path_target_distinct_counts: BTreeMap<(String, String, String, usize), u64>,
+    pub(super) property_index_statistics: BTreeMap<(String, String), OptimizerIndexStatistics>,
+    pub(super) composite_index_statistics:
+        BTreeMap<(String, Vec<String>), OptimizerIndexStatistics>,
     pub(super) property_distinct_counts: BTreeMap<(String, String), u64>,
     pub(super) rel_property_distinct_counts: BTreeMap<(String, String), u64>,
     pub(super) property_histograms: BTreeMap<(String, String), Vec<Value>>,
@@ -88,6 +100,8 @@ impl OptimizerCatalog {
             bounded_path_counts: statistics.bounded_path_counts,
             bounded_path_source_distinct_counts: statistics.bounded_path_source_distinct_counts,
             bounded_path_target_distinct_counts: statistics.bounded_path_target_distinct_counts,
+            property_index_statistics: statistics.property_index_statistics,
+            composite_index_statistics: statistics.composite_index_statistics,
             property_distinct_counts: statistics.property_distinct_counts,
             rel_property_distinct_counts: statistics.rel_property_distinct_counts,
             property_histograms: statistics.property_histograms,
@@ -246,16 +260,96 @@ impl OptimizerCatalog {
     }
 
     pub(super) fn distinct_count(&self, label: &str, property: &str) -> u64 {
-        self.property_distinct_counts
+        self.property_index_statistics
             .get(&(label.to_string(), property.to_string()))
-            .copied()
+            .map(|statistics| statistics.distinct_count)
+            .or_else(|| {
+                self.property_distinct_counts
+                    .get(&(label.to_string(), property.to_string()))
+                    .copied()
+            })
             .unwrap_or_else(|| self.label_count(label).max(1))
     }
 
-    pub(super) fn known_distinct_count(&self, label: &str, property: &str) -> Option<u64> {
-        self.property_distinct_counts
+    pub(super) fn estimate_property_index_eq_rows(&self, label: &str, property: &str) -> u64 {
+        self.property_index_statistics
             .get(&(label.to_string(), property.to_string()))
-            .copied()
+            .map(|statistics| {
+                statistics
+                    .index_size
+                    .div_ceil(statistics.distinct_count.max(1))
+                    .min(self.label_count(label))
+                    .max(1)
+            })
+            .unwrap_or_else(|| {
+                self.label_count(label)
+                    .div_ceil(self.distinct_count(label, property).max(1))
+                    .max(1)
+            })
+    }
+
+    pub(super) fn estimate_property_index_in_rows(
+        &self,
+        label: &str,
+        property: &str,
+        value_count: u64,
+    ) -> u64 {
+        let upper_bound = self
+            .property_index_statistics
+            .get(&(label.to_string(), property.to_string()))
+            .map_or_else(
+                || self.label_count(label),
+                |statistics| statistics.index_size.min(self.label_count(label)),
+            );
+        self.estimate_property_index_eq_rows(label, property)
+            .saturating_mul(value_count)
+            .min(upper_bound)
+            .max(1)
+    }
+
+    pub(super) fn composite_distinct_count(&self, label: &str, properties: &[String]) -> u64 {
+        self.composite_index_statistics
+            .get(&(label.to_string(), properties.to_vec()))
+            .map(|statistics| statistics.distinct_count)
+            .unwrap_or_else(|| {
+                properties
+                    .iter()
+                    .map(|property| self.distinct_count(label, property).max(1))
+                    .fold(1_u64, |product, distinct| product.saturating_mul(distinct))
+                    .max(1)
+            })
+    }
+
+    pub(super) fn estimate_composite_property_index_rows(
+        &self,
+        label: &str,
+        properties: &[String],
+    ) -> u64 {
+        self.composite_index_statistics
+            .get(&(label.to_string(), properties.to_vec()))
+            .map(|statistics| {
+                statistics
+                    .index_size
+                    .div_ceil(statistics.distinct_count.max(1))
+                    .min(self.label_count(label))
+                    .max(1)
+            })
+            .unwrap_or_else(|| {
+                self.label_count(label)
+                    .div_ceil(self.composite_distinct_count(label, properties))
+                    .max(1)
+            })
+    }
+
+    pub(super) fn known_distinct_count(&self, label: &str, property: &str) -> Option<u64> {
+        self.property_index_statistics
+            .get(&(label.to_string(), property.to_string()))
+            .map(|statistics| statistics.distinct_count)
+            .or_else(|| {
+                self.property_distinct_counts
+                    .get(&(label.to_string(), property.to_string()))
+                    .copied()
+            })
     }
 
     pub(super) fn known_rel_property_distinct_count(
@@ -652,11 +746,29 @@ impl OptimizerCatalogStatistics {
             bounded_path_counts: bounded_path_counts.into_iter().collect(),
             bounded_path_source_distinct_counts: BTreeMap::new(),
             bounded_path_target_distinct_counts: BTreeMap::new(),
+            property_index_statistics: BTreeMap::new(),
+            composite_index_statistics: BTreeMap::new(),
             property_distinct_counts: property_distinct_counts.into_iter().collect(),
             rel_property_distinct_counts: BTreeMap::new(),
             property_histograms: property_histograms.into_iter().collect(),
             rel_property_histograms: BTreeMap::new(),
         }
+    }
+
+    pub fn with_property_index_statistics(
+        mut self,
+        statistics: impl IntoIterator<Item = ((String, String), OptimizerIndexStatistics)>,
+    ) -> Self {
+        self.property_index_statistics = statistics.into_iter().collect();
+        self
+    }
+
+    pub fn with_composite_index_statistics(
+        mut self,
+        statistics: impl IntoIterator<Item = ((String, Vec<String>), OptimizerIndexStatistics)>,
+    ) -> Self {
+        self.composite_index_statistics = statistics.into_iter().collect();
+        self
     }
 
     pub fn with_relationship_property_distinct_counts(
@@ -719,5 +831,49 @@ impl OptimizerCatalogStatistics {
     ) -> Self {
         self.rel_property_histograms = rel_property_histograms.into_iter().collect();
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_cardinality_uses_sparse_index_size_and_joint_ndv() {
+        let statistics = OptimizerCatalogStatistics {
+            label_counts: BTreeMap::from([("Memory".to_string(), 100)]),
+            property_index_statistics: BTreeMap::from([(
+                ("Memory".to_string(), "kind".to_string()),
+                OptimizerIndexStatistics {
+                    index_size: 10,
+                    distinct_count: 2,
+                },
+            )]),
+            composite_index_statistics: BTreeMap::from([(
+                (
+                    "Memory".to_string(),
+                    vec!["kind".to_string(), "source_id".to_string()],
+                ),
+                OptimizerIndexStatistics {
+                    index_size: 8,
+                    distinct_count: 4,
+                },
+            )]),
+            ..OptimizerCatalogStatistics::default()
+        };
+        let catalog = OptimizerCatalog::new(OptimizerCatalogIndexes::default(), statistics);
+
+        assert_eq!(catalog.estimate_property_index_eq_rows("Memory", "kind"), 5);
+        assert_eq!(
+            catalog.estimate_property_index_in_rows("Memory", "kind", 10),
+            10
+        );
+        assert_eq!(
+            catalog.estimate_composite_property_index_rows(
+                "Memory",
+                &["kind".to_string(), "source_id".to_string()],
+            ),
+            2
+        );
     }
 }

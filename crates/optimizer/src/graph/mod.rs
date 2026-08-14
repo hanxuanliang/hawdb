@@ -16,7 +16,9 @@ mod selected_trace;
 mod stages;
 mod value_range;
 
-pub use catalog::{OptimizerCatalog, OptimizerCatalogIndexes, OptimizerCatalogStatistics};
+pub use catalog::{
+    OptimizerCatalog, OptimizerCatalogIndexes, OptimizerCatalogStatistics, OptimizerIndexStatistics,
+};
 pub use lowering::CascadesOptimizer;
 pub use roots::{
     FastPathPhysicalPhase, FastPathPhysicalPlanRoot, LogicalPhase, LogicalPlanRoot,

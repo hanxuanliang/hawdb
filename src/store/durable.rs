@@ -1616,6 +1616,16 @@ impl DurableStore {
                 source_label_id.0, rel_type_id.0, target_label_id.0, hops, count
             ));
         }
+        for (index_id, sample) in &statistics.index_samples {
+            body.push_str(&format!(
+                "stat_index_sample\t{}\t{}\t{}\t{}\t{}\n",
+                index_id.0,
+                sample.index_size,
+                sample.unique_values,
+                sample.sample_size,
+                sample.updates_since_sample
+            ));
+        }
         for ((label_id, property), count) in &statistics.property_distinct_counts {
             body.push_str(&format!(
                 "stat_property_distinct_count\t{}\t{}\t{}\n",

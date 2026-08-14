@@ -74,6 +74,161 @@ fn exposes_property_index_descriptors_and_statistics() {
 }
 
 #[test]
+fn explicit_text_index_publishes_payload_free_selectivity() {
+    let mut db = Database::new();
+    db.query("CREATE NODE TABLE Memory").unwrap();
+    db.query("CREATE PROPERTY ON NODE TABLE Memory(body) TYPE TEXT")
+        .unwrap();
+    for id in 0..20 {
+        let body = if id % 2 == 0 { "even" } else { "odd" };
+        db.query(&format!("CREATE (:Memory {{id: {id}, body: '{body}'}})"))
+            .unwrap();
+    }
+    db.query("CREATE INDEX ON :Memory(body)").unwrap();
+
+    let statistics = db.statistics();
+    assert!(statistics
+        .property_distinct_counts
+        .keys()
+        .all(|(_, property)| property != "body"));
+    let index = db
+        .property_indexes()
+        .into_iter()
+        .find(|index| index.property == "body" && index.kind == IndexKind::Equality)
+        .unwrap();
+    assert_eq!(
+        statistics.index_samples.get(&index.id),
+        Some(&crate::schema::IndexStatisticsSample::exact(20, 2))
+    );
+
+    let explain = db
+        .explain_query("MATCH (m:Memory) WHERE m.body = 'even' RETURN m.id AS id")
+        .unwrap();
+    assert!(explain.trace.decisions.iter().any(|decision| {
+        decision.contains("Memory.body")
+            && decision.contains("seek_cost=21")
+            && decision.contains("distinct_count=2")
+    }));
+}
+
+#[test]
+fn out_of_core_index_sample_tracks_wal_churn_and_becomes_stale() {
+    let path = unique_test_dir("out_of_core_index_sample_churn");
+    let config = DatabaseConfig {
+        storage_residency_mode: skein_storage::StorageResidencyMode::OutOfCore,
+        ..DatabaseConfig::default()
+    };
+    let (index_id, composite_index_id) = {
+        let mut db = Database::open_with_config(&path, config.clone()).unwrap();
+        db.query("CREATE INDEX ON :Memory(kind)").unwrap();
+        db.query("CREATE INDEX ON :Memory(kind, id)").unwrap();
+        for id in 0..100 {
+            let kind = if id % 2 == 0 { "note" } else { "decision" };
+            db.query(&format!("CREATE (:Memory {{id: {id}, kind: '{kind}'}})"))
+                .unwrap();
+        }
+        let index_id = db
+            .property_indexes()
+            .into_iter()
+            .find(|index| index.property == "kind")
+            .unwrap()
+            .id;
+        let composite_index_id = db
+            .composite_property_indexes()
+            .into_iter()
+            .find(|index| index.properties == ["kind", "id"])
+            .unwrap()
+            .id;
+        db.checkpoint().unwrap();
+        (index_id, composite_index_id)
+    };
+
+    {
+        let mut db = Database::open_with_config(&path, config).unwrap();
+        let statistics = db.statistics();
+        assert_eq!(
+            statistics.index_samples.get(&index_id),
+            Some(&crate::schema::IndexStatisticsSample::exact(100, 2))
+        );
+        assert_eq!(
+            statistics.index_samples.get(&composite_index_id),
+            Some(&crate::schema::IndexStatisticsSample::exact(100, 100))
+        );
+
+        db.query("MATCH (m:Memory) WHERE m.id = 0 SET m.kind = 'note'")
+            .unwrap();
+        db.query("MATCH (m:Memory) WHERE m.id = 0 SET m.payload = 'not indexed'")
+            .unwrap();
+        assert_eq!(
+            db.statistics()
+                .index_samples
+                .get(&index_id)
+                .unwrap()
+                .updates_since_sample,
+            0
+        );
+
+        db.query("MATCH (m:Memory) WHERE m.id = 0 SET m.kind = 'changed'")
+            .unwrap();
+        db.query("MATCH (m:Memory) WHERE m.id = 1 DETACH DELETE m")
+            .unwrap();
+        for id in 100..104 {
+            db.query(&format!("CREATE (:Memory {{id: {id}, kind: 'new-{id}'}})"))
+                .unwrap();
+        }
+        let statistics = db.statistics();
+        let sample = *statistics.index_samples.get(&index_id).unwrap();
+        assert_eq!(sample.updates_since_sample, 6);
+        assert!(sample.is_stale());
+        assert_eq!(sample.estimated_unique_values(), None);
+        let composite_sample = *statistics.index_samples.get(&composite_index_id).unwrap();
+        assert_eq!(composite_sample.updates_since_sample, 6);
+        assert!(composite_sample.is_stale());
+        let explain = db
+            .explain_query("MATCH (m:Memory) WHERE m.kind = 'note' RETURN m.id AS id")
+            .unwrap();
+        assert!(explain.trace.decisions.iter().any(|decision| {
+            decision.contains("Memory.kind") && decision.contains("distinct_count=103")
+        }));
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn range_and_composite_samples_use_complete_index_keys() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {kind: 'note', source_id: 1, rank: 1})")
+        .unwrap();
+    db.query("CREATE (:Memory {kind: 'note', source_id: 1, rank: 2})")
+        .unwrap();
+    db.query("CREATE (:Memory {kind: 'decision', source_id: 2, rank: 3})")
+        .unwrap();
+    db.query("CREATE RANGE INDEX ON :Memory(rank)").unwrap();
+    db.query("CREATE INDEX ON :Memory(kind, source_id)")
+        .unwrap();
+
+    let statistics = db.statistics();
+    let indexes = db.property_indexes();
+    let range = indexes
+        .iter()
+        .find(|index| index.property == "rank" && index.kind == IndexKind::Range)
+        .unwrap();
+    assert_eq!(
+        statistics.index_samples.get(&range.id),
+        Some(&crate::schema::IndexStatisticsSample::exact(3, 3))
+    );
+    let composite = db
+        .composite_property_indexes()
+        .into_iter()
+        .find(|index| index.properties == ["kind", "source_id"])
+        .unwrap();
+    assert_eq!(
+        statistics.index_samples.get(&composite.id),
+        Some(&crate::schema::IndexStatisticsSample::exact(3, 2))
+    );
+}
+
+#[test]
 fn basic_statistics_are_incremental_across_deletes_and_replay() {
     let path = unique_test_dir("basic_statistics_incremental");
     {
@@ -173,6 +328,7 @@ fn checkpoint_persists_index_descriptors_and_statistics() {
     assert!(checkpoint.contains("stat_bounded_path_count"));
     assert!(checkpoint.contains("stat_bounded_path_source_distinct_count"));
     assert!(checkpoint.contains("stat_bounded_path_target_distinct_count"));
+    assert!(checkpoint.contains("stat_index_sample"));
     assert!(checkpoint.contains("stat_property_distinct_count"));
     assert!(checkpoint.contains("stat_rel_property_distinct_count"));
     assert!(checkpoint.contains("stat_rel_property_histogram"));

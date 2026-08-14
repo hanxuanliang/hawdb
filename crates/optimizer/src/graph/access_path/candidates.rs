@@ -96,7 +96,7 @@ pub(super) fn equality_index_seek_candidate(
             continue;
         }
         let distinct_count = catalog.distinct_count(label, property).max(1);
-        let estimated_rows = label_count.div_ceil(distinct_count).max(1);
+        let estimated_rows = catalog.estimate_property_index_eq_rows(label, property);
         let seek_cost = estimate_node_index_seek_cost(estimated_rows, NODE_INDEX_EQ_STARTUP_COST);
         if node_index_seek_is_cheaper(label_count, seek_cost) {
             let decision = format!(
@@ -132,11 +132,8 @@ pub(super) fn equality_index_seek_candidate(
             continue;
         }
         let distinct_count = catalog.distinct_count(label, property).max(1);
-        let rows_per_value = label_count.div_ceil(distinct_count).max(1);
-        let estimated_rows = rows_per_value
-            .saturating_mul(values.len() as u64)
-            .min(label_count)
-            .max(1);
+        let estimated_rows =
+            catalog.estimate_property_index_in_rows(label, property, values.len() as u64);
         let seek_cost = estimate_node_index_seek_cost(estimated_rows, values.len() as u64);
         if node_index_seek_is_cheaper(label_count, seek_cost) {
             let decision = format!(
@@ -231,12 +228,8 @@ pub(super) fn composite_index_seek_candidate(
             continue;
         }
         let label_count = catalog.label_count(label);
-        let distinct_product = properties
-            .iter()
-            .map(|property| catalog.distinct_count(label, property).max(1))
-            .fold(1_u64, |acc, value| acc.saturating_mul(value))
-            .max(1);
-        let estimated_rows = label_count.div_ceil(distinct_product).max(1);
+        let distinct_product = catalog.composite_distinct_count(label, &properties);
+        let estimated_rows = catalog.estimate_composite_property_index_rows(label, &properties);
         let scan_cost = estimate_node_full_scan_cost(label_count);
         let seek_cost = estimate_node_index_seek_cost(estimated_rows, properties.len() as u64);
         if node_index_seek_is_cheaper(label_count, seek_cost) {

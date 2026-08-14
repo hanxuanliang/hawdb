@@ -1311,6 +1311,7 @@ fn graph_statistics_rows(catalog: &Catalog, statistics: &GraphStatistics) -> Vec
             .saturating_add(statistics.bounded_path_counts.len())
             .saturating_add(statistics.bounded_path_source_distinct_counts.len())
             .saturating_add(statistics.bounded_path_target_distinct_counts.len())
+            .saturating_add(statistics.index_samples.len())
             .saturating_add(statistics.property_distinct_counts.len())
             .saturating_add(statistics.rel_property_distinct_counts.len())
             .saturating_add(statistics.property_histograms.len())
@@ -1361,6 +1362,55 @@ fn graph_statistics_rows(catalog: &Catalog, statistics: &GraphStatistics) -> Vec
             );
             rows.push(row);
         }
+    }
+    for index in catalog.property_indexes() {
+        let Some(sample) = statistics.index_samples.get(&index.id) else {
+            continue;
+        };
+        let mut row = graph_statistic_base_row(statistics, "index_sample");
+        row.insert("index_id".to_string(), u32_value(index.id.0));
+        row.insert(
+            "index_kind".to_string(),
+            Value::String(index_kind_name(index.kind).to_string()),
+        );
+        row.insert(
+            "label_name".to_string(),
+            optional_string_value(catalog.label_name(index.label_id)),
+        );
+        row.insert(
+            "property_name".to_string(),
+            Value::String(index.property.clone()),
+        );
+        populate_index_sample(&mut row, *sample);
+        rows.push(row);
+    }
+    for index in catalog.composite_property_indexes() {
+        let Some(sample) = statistics.index_samples.get(&index.id) else {
+            continue;
+        };
+        let mut row = graph_statistic_base_row(statistics, "index_sample");
+        row.insert("index_id".to_string(), u32_value(index.id.0));
+        row.insert(
+            "index_kind".to_string(),
+            Value::String("composite".to_string()),
+        );
+        row.insert(
+            "label_name".to_string(),
+            optional_string_value(catalog.label_name(index.label_id)),
+        );
+        row.insert(
+            "index_properties".to_string(),
+            Value::List(
+                index
+                    .properties
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
+        populate_index_sample(&mut row, *sample);
+        rows.push(row);
     }
     for (kind, counts) in [
         ("path_count", &statistics.path_counts),
@@ -1489,6 +1539,17 @@ fn graph_statistic_count_row(statistics: &GraphStatistics, kind: &str, count: u6
     row
 }
 
+fn populate_index_sample(row: &mut Row, sample: crate::schema::IndexStatisticsSample) {
+    row.insert("index_size".to_string(), u64_value(sample.index_size));
+    row.insert("unique_values".to_string(), u64_value(sample.unique_values));
+    row.insert("sample_size".to_string(), u64_value(sample.sample_size));
+    row.insert(
+        "updates_since_sample".to_string(),
+        u64_value(sample.updates_since_sample),
+    );
+    row.insert("stale".to_string(), Value::Bool(sample.is_stale()));
+}
+
 fn graph_statistic_base_row(statistics: &GraphStatistics, kind: &str) -> Row {
     BTreeMap::from([
         (
@@ -1513,6 +1574,14 @@ fn graph_statistic_base_row(statistics: &GraphStatistics, kind: &str) -> Row {
         ("target_label_name".to_string(), Value::Null),
         ("depth".to_string(), Value::Null),
         ("property_name".to_string(), Value::Null),
+        ("index_id".to_string(), Value::Null),
+        ("index_kind".to_string(), Value::Null),
+        ("index_properties".to_string(), Value::Null),
+        ("index_size".to_string(), Value::Null),
+        ("unique_values".to_string(), Value::Null),
+        ("sample_size".to_string(), Value::Null),
+        ("updates_since_sample".to_string(), Value::Null),
+        ("stale".to_string(), Value::Null),
         ("count".to_string(), Value::Null),
         ("histogram".to_string(), Value::Null),
         ("sampled".to_string(), Value::Null),
@@ -2062,6 +2131,14 @@ fn table_columns(table: SystemTable) -> &'static [&'static str] {
             "target_label_name",
             "depth",
             "property_name",
+            "index_id",
+            "index_kind",
+            "index_properties",
+            "index_size",
+            "unique_values",
+            "sample_size",
+            "updates_since_sample",
+            "stale",
             "count",
             "histogram",
             "sampled",

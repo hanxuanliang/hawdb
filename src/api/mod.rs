@@ -4,7 +4,8 @@ use crate::error::{Result, SkeinError};
 use crate::executor::{self, Row};
 use crate::optimizer::{
     CascadesOptimizer, OptimizerCatalog, OptimizerCatalogIndexes, OptimizerCatalogStatistics,
-    OptimizerConfig, OptimizerSearchDirective, OptimizerTrace, PhysicalPlan,
+    OptimizerConfig, OptimizerIndexStatistics, OptimizerSearchDirective, OptimizerTrace,
+    PhysicalPlan,
 };
 use crate::qos::{
     BackgroundWorkDecision, BackgroundWorkHint, BackgroundWorkPlan, LocalQosPolicy,
@@ -17729,6 +17730,33 @@ fn optimizer_catalog(catalog: &Catalog, statistics: &GraphStatistics) -> Optimiz
                 .map(|rel_type| ((rel_type.to_string(), property.clone()), values.clone()))
         },
     );
+    let property_index_statistics = catalog.property_indexes().filter_map(|index| {
+        if index.kind == IndexKind::FullText {
+            return None;
+        }
+        let sample = statistics.index_samples.get(&index.id)?;
+        let distinct_count = sample.estimated_unique_values()?;
+        let label = catalog.label_name(index.label_id)?;
+        Some((
+            (label.to_string(), index.property.clone()),
+            OptimizerIndexStatistics {
+                index_size: sample.index_size,
+                distinct_count,
+            },
+        ))
+    });
+    let composite_index_statistics = catalog.composite_property_indexes().filter_map(|index| {
+        let sample = statistics.index_samples.get(&index.id)?;
+        let distinct_count = sample.estimated_unique_values()?;
+        let label = catalog.label_name(index.label_id)?;
+        Some((
+            (label.to_string(), index.properties.clone()),
+            OptimizerIndexStatistics {
+                index_size: sample.index_size,
+                distinct_count,
+            },
+        ))
+    });
     OptimizerCatalog::new(
         OptimizerCatalogIndexes::new(
             equality_property_indexes,
@@ -17745,6 +17773,8 @@ fn optimizer_catalog(catalog: &Catalog, statistics: &GraphStatistics) -> Optimiz
             property_distinct_counts,
             property_histograms,
         )
+        .with_property_index_statistics(property_index_statistics)
+        .with_composite_index_statistics(composite_index_statistics)
         .with_relationship_type_target_counts(rel_type_target_counts)
         .with_path_source_distinct_counts(path_source_distinct_counts)
         .with_path_target_distinct_counts(path_target_distinct_counts)

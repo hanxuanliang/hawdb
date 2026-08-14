@@ -199,12 +199,15 @@ impl GraphStore {
         })?;
 
         let basic = self.basic_statistics();
-        let (statistics, merge_report) = writer.finish(graph_statistics_from_basic(basic, true))?;
+        let (mut statistics, merge_report) =
+            writer.finish(graph_statistics_from_basic(basic, true))?;
         if source_commit_epoch != self.commit_epoch {
             return Err(SkeinError::Execution(
                 "optimizer statistics refresh source epoch changed before publication".to_string(),
             ));
         }
+        statistics.index_samples = self.checkpoint_statistics.index_samples.clone();
+        retain_valid_index_statistics_samples(&mut statistics, catalog);
         self.checkpoint_statistics = statistics;
 
         Ok(OptimizerStatisticsRefreshReport {

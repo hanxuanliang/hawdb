@@ -148,7 +148,13 @@ impl GraphStore {
         });
         let commit_epoch = self.commit_epoch;
         let checkpoint_statistics = if checkpoint_out_of_core && !self.canonical_base_out_of_core {
-            graph_statistics_from_basic(self.basic_statistics(), false)
+            let mut statistics = graph_statistics_from_basic(self.basic_statistics(), false);
+            statistics.index_samples = compute_index_statistics_samples(
+                catalog,
+                &self.property_index,
+                &self.composite_property_index,
+            );
+            statistics
         } else {
             self.statistics(catalog)
         };

@@ -114,6 +114,38 @@ fn system_graph_statistics_are_parameterized_and_snapshot_pinned() {
 }
 
 #[test]
+fn system_graph_statistics_exposes_index_samples() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {kind: 'note'})").unwrap();
+    db.query("CREATE (:Memory {kind: 'note'})").unwrap();
+    db.query("CREATE (:Memory {kind: 'decision'})").unwrap();
+    db.query("CREATE INDEX ON :Memory(kind)").unwrap();
+
+    let output = db
+        .query_sql(
+            "SELECT index_kind, index_size, unique_values, sample_size, \
+             updates_since_sample, stale \
+             FROM system.graph_statistics \
+             WHERE statistic_kind = 'index_sample' AND property_name = 'kind'",
+        )
+        .unwrap();
+    assert_eq!(
+        output.rows,
+        vec![BTreeMap::from([
+            (
+                "index_kind".to_string(),
+                Value::String("equality".to_string())
+            ),
+            ("index_size".to_string(), Value::Int(3)),
+            ("unique_values".to_string(), Value::Int(2)),
+            ("sample_size".to_string(), Value::Int(3)),
+            ("updates_since_sample".to_string(), Value::Int(0)),
+            ("stale".to_string(), Value::Bool(false)),
+        ])]
+    );
+}
+
+#[test]
 fn system_sql_exposes_projected_graph_and_changefeed_state() {
     let path = unique_test_dir("system_projection_introspection");
     {

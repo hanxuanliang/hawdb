@@ -20,8 +20,8 @@ pub use cost::{PlanCost, PlanCostBreakdown};
 pub use graph::{
     CascadesOptimizer, FastPathPhysicalPhase, FastPathPhysicalPlanRoot, LogicalPhase,
     LogicalPlanRoot, OptimizedLogicalPhase, OptimizedLogicalPlanRoot, OptimizerCatalog,
-    OptimizerCatalogIndexes, OptimizerCatalogStatistics, PhysicalPhase, PhysicalPlanRoot,
-    PlanPhase, PlanPhaseKind,
+    OptimizerCatalogIndexes, OptimizerCatalogStatistics, OptimizerIndexStatistics, PhysicalPhase,
+    PhysicalPlanRoot, PlanPhase, PlanPhaseKind,
 };
 pub use logical::{LogicalPlanClass, LogicalPlanKind, LogicalPlanNode};
 pub use memo::{GroupId, Memo, MemoGroup};

@@ -612,7 +612,7 @@ impl GraphStore {
             }])?;
         }
         let id = catalog.get_or_create_composite_property_index(label_id, properties);
-        self.rebuild_composite_property_index_for_descriptor(label_id, properties);
+        self.rebuild_composite_property_index_for_descriptor(id, label_id, properties);
         self.commit_epoch += 1;
         Ok(id)
     }
@@ -636,6 +636,7 @@ impl GraphStore {
         }
         let id =
             catalog.get_or_create_property_index_with_kind(label_id, property, IndexKind::Range);
+        self.backfill_property_index(catalog, label_id, property);
         self.commit_epoch += 1;
         Ok(id)
     }
@@ -688,6 +689,19 @@ impl GraphStore {
             }
             let indexed_entries =
                 self.rebuild_composite_property_index_projection(index.label_id, &index.properties);
+            if self.canonical_base_out_of_core {
+                self.checkpoint_statistics.index_samples.remove(&index.id);
+            } else {
+                let unique_values = composite_property_index_unique_values(
+                    &self.composite_property_index,
+                    index.label_id,
+                    &index.properties,
+                );
+                self.checkpoint_statistics.index_samples.insert(
+                    index.id,
+                    IndexStatisticsSample::exact(indexed_entries as u64, unique_values),
+                );
+            }
             actions.push(PropertyIndexProjectionRebuildAction {
                 index_kind: "composite".to_string(),
                 label: catalog
@@ -933,7 +947,6 @@ impl GraphStore {
         property: &str,
     ) {
         let nodes = self.nodes.values().cloned().collect::<Vec<_>>();
-        let mut distinct = BTreeSet::new();
         let mut statistics_eligible = true;
         for node in nodes {
             if !node.labels.contains(&label_id) {
@@ -942,45 +955,82 @@ impl GraphStore {
             let Some(value) = node.properties.get(property) else {
                 continue;
             };
-            if statistics_eligible {
-                if node_property_supports_optimizer_statistics(
+            if statistics_eligible
+                && !node_property_supports_optimizer_statistics(
                     Some(catalog),
                     label_id,
                     property,
                     value,
-                ) {
-                    distinct.insert(value.clone());
-                } else {
-                    statistics_eligible = false;
-                    distinct.clear();
-                }
+                )
+            {
+                statistics_eligible = false;
             }
             self.property_index
                 .entry_or_default((label_id, property.to_string(), value.clone()))
                 .insert(node.id);
+        }
+        if self.canonical_base_out_of_core {
+            self.checkpoint_statistics
+                .property_distinct_counts
+                .remove(&(label_id, property.to_string()));
+            for index in catalog.property_indexes().filter(|index| {
+                index.label_id == label_id
+                    && index.property == property
+                    && index.kind != IndexKind::FullText
+            }) {
+                self.checkpoint_statistics.index_samples.remove(&index.id);
+            }
+            return;
         }
         // The backfill already walked every node, so the distinct count costs
         // nothing extra here. Deferring it to the next checkpoint would leave
         // the optimizer on its no-statistics fallback for a property the user
         // just asked to index, which is the case where a good estimate is
         // most likely to be wanted.
-        if !statistics_eligible || distinct.is_empty() {
+        let (index_size, unique_values) =
+            scalar_property_index_cardinality(&self.property_index, label_id, property);
+        if !statistics_eligible || unique_values == 0 {
             self.checkpoint_statistics
                 .property_distinct_counts
                 .remove(&(label_id, property.to_string()));
         } else {
             self.checkpoint_statistics
                 .property_distinct_counts
-                .insert((label_id, property.to_string()), distinct.len() as u64);
+                .insert((label_id, property.to_string()), unique_values);
+        }
+        for index in catalog.property_indexes().filter(|index| {
+            index.label_id == label_id
+                && index.property == property
+                && index.kind != IndexKind::FullText
+        }) {
+            self.checkpoint_statistics.index_samples.insert(
+                index.id,
+                IndexStatisticsSample::exact(index_size, unique_values),
+            );
         }
     }
 
     pub(super) fn rebuild_composite_property_index_for_descriptor(
         &mut self,
+        index_id: IndexId,
         label_id: LabelId,
         properties: &[String],
     ) {
-        self.rebuild_composite_property_index_projection(label_id, properties);
+        let indexed_entries =
+            self.rebuild_composite_property_index_projection(label_id, properties) as u64;
+        if self.canonical_base_out_of_core {
+            self.checkpoint_statistics.index_samples.remove(&index_id);
+            return;
+        }
+        let unique_values = composite_property_index_unique_values(
+            &self.composite_property_index,
+            label_id,
+            properties,
+        );
+        self.checkpoint_statistics.index_samples.insert(
+            index_id,
+            IndexStatisticsSample::exact(indexed_entries, unique_values),
+        );
     }
 
     fn rebuild_composite_property_index_projection(

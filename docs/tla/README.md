@@ -456,6 +456,15 @@ publishable, text, large, and mixed groups never enter published NDV or
 histogram state, and a fair complete scan eventually publishes its derived
 snapshot.
 
+`SkeinIndexStatistics.tla` models the payload-free sample maintained for each
+explicit equality, range, or composite node index. A sample is one coherent
+prior index state; canonical key mutations advance both the source epoch and
+`updates_since_sample` without rewriting its counters. Resampling atomically
+publishes the current index state and resets churn. The model checks that sample
+size and unique-value counters remain valid, zero-churn samples equal the
+canonical index, recovery-equivalent churn equals sample age, and the optimizer
+never uses a sample beyond the configured update budget.
+
 ## Derived Source Segment Publication
 
 `SkeinSourceSegmentPublication.tla` models Source scan sidecars, including the

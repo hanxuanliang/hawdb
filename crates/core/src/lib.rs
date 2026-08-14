@@ -26,8 +26,8 @@ pub use graph_rag::{
 pub use regex::ValidatedRegex;
 pub use schema::{
     BasicGraphStatistics, Catalog, CompositeIndexDescriptor, ConstraintDescriptor, ConstraintId,
-    ConstraintKind, ConstraintSubject, GraphStatistics, IndexDescriptor, IndexId, IndexKind, Label,
-    LabelId, PropertyDescriptor, PropertyId, PropertyType, RelType, RelTypeId, SchemaObjectState,
-    TableDescriptor, TableId, TableKind,
+    ConstraintKind, ConstraintSubject, GraphStatistics, IndexDescriptor, IndexId, IndexKind,
+    IndexStatisticsSample, Label, LabelId, PropertyDescriptor, PropertyId, PropertyType, RelType,
+    RelTypeId, SchemaObjectState, TableDescriptor, TableId, TableKind,
 };
 pub use value::Value;
