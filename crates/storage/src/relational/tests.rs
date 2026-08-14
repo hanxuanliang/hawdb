@@ -1,4 +1,96 @@
 use super::*;
+use std::cell::RefCell;
+
+#[derive(Default)]
+struct TestConstraintIndex {
+    postings: BTreeMap<(String, String, RelationalKey), Vec<RelationalKey>>,
+    failure: Option<RelationalError>,
+    lookups: RefCell<Vec<(String, String, RelationalKey)>>,
+    visited: RefCell<BTreeMap<(String, String, RelationalKey), usize>>,
+}
+
+impl TestConstraintIndex {
+    fn from_state(state: &RelationalState) -> Self {
+        let mut postings = BTreeMap::<_, Vec<_>>::new();
+        for schema in state.table_schemas() {
+            for definition in schema.required_index_definitions() {
+                let positions = column_positions(schema, &definition.columns)
+                    .expect("fixture index columns must exist");
+                for (primary_key, row) in state.rows(&schema.name) {
+                    let index_key = row_key(row, &positions);
+                    if !index_includes_key(&definition, &index_key) {
+                        continue;
+                    }
+                    postings
+                        .entry((schema.name.clone(), definition.name.clone(), index_key))
+                        .or_default()
+                        .push(primary_key.clone());
+                }
+            }
+        }
+        Self {
+            postings,
+            failure: None,
+            lookups: RefCell::new(Vec::new()),
+            visited: RefCell::new(BTreeMap::new()),
+        }
+    }
+
+    fn failing(error: RelationalError) -> Self {
+        Self {
+            failure: Some(error),
+            ..Self::default()
+        }
+    }
+
+    fn looked_up(&self, table: &str, index: &str, key: &RelationalKey) -> bool {
+        self.lookups
+            .borrow()
+            .iter()
+            .any(|lookup| lookup.0 == table && lookup.1 == index && lookup.2 == *key)
+    }
+
+    fn visited(&self, table: &str, index: &str, key: &RelationalKey) -> usize {
+        self.visited
+            .borrow()
+            .get(&(table.to_string(), index.to_string(), key.clone()))
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+impl RelationalConstraintIndex for TestConstraintIndex {
+    fn visit_exact_primary_keys(
+        &self,
+        table: &str,
+        index: &str,
+        key: &RelationalKey,
+        visit: &mut dyn FnMut(&RelationalKey) -> bool,
+    ) -> Result<(), RelationalError> {
+        self.lookups
+            .borrow_mut()
+            .push((table.to_string(), index.to_string(), key.clone()));
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
+        if let Some(postings) =
+            self.postings
+                .get(&(table.to_string(), index.to_string(), key.clone()))
+        {
+            for primary_key in postings {
+                *self
+                    .visited
+                    .borrow_mut()
+                    .entry((table.to_string(), index.to_string(), key.clone()))
+                    .or_default() += 1;
+                if !visit(primary_key) {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 #[test]
 fn snapshots_share_untouched_segments_and_keep_old_rows_visible() {
@@ -222,6 +314,432 @@ fn unique_constraint_rejects_complete_batch() {
             .row_count("content_documents"),
         0
     );
+}
+
+#[test]
+fn authoritative_constraint_staging_uses_persistent_lookup_for_upsert() {
+    let base = RelationalState::default()
+        .stage_transaction(
+            create_upsert_table(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("create upsert table")
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::Insert {
+                    table: "documents".to_string(),
+                    rows: vec![upsert_row("id-1", "owner-1", "old")],
+                    mode: RelationalInsertMode::Error,
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("seed upsert row");
+    let index = TestConstraintIndex::from_state(&base);
+    let owner = RelationalKey(vec![RelationalValue::Text("owner-1".to_string())]);
+
+    let (next, capture) = base
+        .stage_transaction_with_authoritative_index(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::Upsert {
+                    table: "documents".to_string(),
+                    rows: vec![upsert_row("id-2", "owner-1", "new")],
+                    conflict_columns: vec!["owner".to_string()],
+                    action: RelationalConflictAction::Update(vec![RelationalUpsertAssignment {
+                        column: "payload".to_string(),
+                        value: RelationalUpsertValue::ExcludedColumn("payload".to_string()),
+                    }]),
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            RelationalIndexChangeCaptureLimits::default(),
+            &index,
+        )
+        .expect("persistent unique lookup resolves the upsert target");
+
+    let id_1 = RelationalKey(vec![RelationalValue::Text("id-1".to_string())]);
+    let id_2 = RelationalKey(vec![RelationalValue::Text("id-2".to_string())]);
+    assert_eq!(next.row_count("documents"), 1);
+    assert_eq!(
+        next.row("documents", &id_1)
+            .expect("upsert preserves the conflicting primary key")
+            .values()[2],
+        RelationalValue::Text("new".to_string())
+    );
+    assert!(next.row("documents", &id_2).is_none());
+    assert!(index.looked_up("documents", &relational_unique_index_name(0), &owner));
+    assert!(matches!(
+        capture,
+        RelationalIndexChangeCapture::Captured { .. }
+    ));
+}
+
+#[test]
+fn authoritative_constraint_staging_merges_transaction_local_unique_changes() {
+    let empty = RelationalState::default()
+        .stage_transaction(
+            create_upsert_table(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("create upsert table");
+    let empty_index = TestConstraintIndex::from_state(&empty);
+    let duplicate = empty.stage_transaction_with_authoritative_index(
+        RelationalTransaction {
+            writes: vec![RelationalWrite::Insert {
+                table: "documents".to_string(),
+                rows: vec![
+                    upsert_row("id-1", "owner-1", "first"),
+                    upsert_row("id-2", "owner-1", "second"),
+                ],
+                mode: RelationalInsertMode::Error,
+            }],
+        },
+        RelationalMutationLimits::default(),
+        RelationalOverflowConfig::default(),
+        RelationalIndexChangeCaptureLimits::default(),
+        &empty_index,
+    );
+    assert!(matches!(duplicate, Err(RelationalError::Constraint(_))));
+
+    let (upserted, _) = empty
+        .stage_transaction_with_authoritative_index(
+            RelationalTransaction {
+                writes: vec![
+                    RelationalWrite::Insert {
+                        table: "documents".to_string(),
+                        rows: vec![upsert_row("id-1", "owner-1", "old")],
+                        mode: RelationalInsertMode::Error,
+                    },
+                    RelationalWrite::Upsert {
+                        table: "documents".to_string(),
+                        rows: vec![upsert_row("id-2", "owner-1", "new")],
+                        conflict_columns: vec!["owner".to_string()],
+                        action: RelationalConflictAction::Update(vec![
+                            RelationalUpsertAssignment {
+                                column: "payload".to_string(),
+                                value: RelationalUpsertValue::ExcludedColumn("payload".to_string()),
+                            },
+                        ]),
+                    },
+                ],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            RelationalIndexChangeCaptureLimits::default(),
+            &empty_index,
+        )
+        .expect("upsert sees a row inserted earlier in the transaction");
+    let upserted_key = RelationalKey(vec![RelationalValue::Text("id-1".to_string())]);
+    assert_eq!(upserted.row_count("documents"), 1);
+    assert_eq!(
+        upserted
+            .row("documents", &upserted_key)
+            .expect("transaction-local upsert target")
+            .values()[2],
+        RelationalValue::Text("new".to_string())
+    );
+
+    let seeded = empty
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::Insert {
+                    table: "documents".to_string(),
+                    rows: vec![upsert_row("id-1", "owner-1", "old")],
+                    mode: RelationalInsertMode::Error,
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("seed unique row");
+    let seeded_index = TestConstraintIndex::from_state(&seeded);
+    let id_1 = RelationalKey(vec![RelationalValue::Text("id-1".to_string())]);
+    let (replaced, _) = seeded
+        .stage_transaction_with_authoritative_index(
+            RelationalTransaction {
+                writes: vec![
+                    RelationalWrite::DeleteByPrimaryKey {
+                        table: "documents".to_string(),
+                        keys: vec![id_1],
+                    },
+                    RelationalWrite::Insert {
+                        table: "documents".to_string(),
+                        rows: vec![upsert_row("id-2", "owner-1", "new")],
+                        mode: RelationalInsertMode::Error,
+                    },
+                ],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            RelationalIndexChangeCaptureLimits::default(),
+            &seeded_index,
+        )
+        .expect("delete plus insert reuses one unique key atomically");
+    let id_2 = RelationalKey(vec![RelationalValue::Text("id-2".to_string())]);
+    assert_eq!(replaced.row_count("documents"), 1);
+    assert!(replaced.row("documents", &id_2).is_some());
+}
+
+#[test]
+fn authoritative_constraint_staging_merges_foreign_key_changes() {
+    let base = RelationalState::default()
+        .stage_transaction(
+            create_content_tables(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("create foreign-key tables")
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![
+                    RelationalWrite::Insert {
+                        table: "content_documents".to_string(),
+                        rows: vec![document_row("doc-1")],
+                        mode: RelationalInsertMode::Error,
+                    },
+                    RelationalWrite::Insert {
+                        table: "content_anchors".to_string(),
+                        rows: vec![anchor_row("anchor-1", "doc-1")],
+                        mode: RelationalInsertMode::Error,
+                    },
+                ],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("seed foreign-key rows");
+    let index = TestConstraintIndex::from_state(&base);
+    let document_1 = RelationalKey(vec![RelationalValue::Text("doc-1".to_string())]);
+    let restricted = base.stage_transaction_with_authoritative_index(
+        RelationalTransaction {
+            writes: vec![RelationalWrite::DeleteByPrimaryKey {
+                table: "content_documents".to_string(),
+                keys: vec![document_1.clone()],
+            }],
+        },
+        RelationalMutationLimits::default(),
+        RelationalOverflowConfig::default(),
+        RelationalIndexChangeCaptureLimits::default(),
+        &index,
+    );
+    assert!(matches!(restricted, Err(RelationalError::Constraint(_))));
+
+    let anchor_1 = RelationalKey(vec![RelationalValue::Text("anchor-1".to_string())]);
+    let (removed, _) = base
+        .stage_transaction_with_authoritative_index(
+            RelationalTransaction {
+                writes: vec![
+                    RelationalWrite::DeleteByPrimaryKey {
+                        table: "content_documents".to_string(),
+                        keys: vec![document_1],
+                    },
+                    RelationalWrite::DeleteByPrimaryKey {
+                        table: "content_anchors".to_string(),
+                        keys: vec![anchor_1],
+                    },
+                ],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            RelationalIndexChangeCaptureLimits::default(),
+            &index,
+        )
+        .expect("parent and child deletion is atomic");
+    assert_eq!(removed.row_count("content_documents"), 0);
+    assert_eq!(removed.row_count("content_anchors"), 0);
+
+    let (inserted, _) = base
+        .stage_transaction_with_authoritative_index(
+            RelationalTransaction {
+                writes: vec![
+                    RelationalWrite::Insert {
+                        table: "content_anchors".to_string(),
+                        rows: vec![anchor_row("anchor-2", "doc-2")],
+                        mode: RelationalInsertMode::Error,
+                    },
+                    RelationalWrite::Insert {
+                        table: "content_documents".to_string(),
+                        rows: vec![document_row("doc-2")],
+                        mode: RelationalInsertMode::Error,
+                    },
+                ],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            RelationalIndexChangeCaptureLimits::default(),
+            &index,
+        )
+        .expect("same-transaction target is visible to the foreign key");
+    assert_eq!(inserted.row_count("content_documents"), 2);
+    assert_eq!(inserted.row_count("content_anchors"), 2);
+}
+
+#[test]
+fn authoritative_foreign_key_restriction_stops_after_one_visible_referrer() {
+    let base = RelationalState::default()
+        .stage_transaction(
+            create_content_tables(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("create foreign-key tables")
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![
+                    RelationalWrite::Insert {
+                        table: "content_documents".to_string(),
+                        rows: vec![document_row("doc-1")],
+                        mode: RelationalInsertMode::Error,
+                    },
+                    RelationalWrite::Insert {
+                        table: "content_anchors".to_string(),
+                        rows: (0..128)
+                            .map(|ordinal| anchor_row(&format!("anchor-{ordinal:03}"), "doc-1"))
+                            .collect(),
+                        mode: RelationalInsertMode::Error,
+                    },
+                ],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("seed high-fanout foreign-key rows");
+    let index = TestConstraintIndex::from_state(&base);
+    let document = RelationalKey(vec![RelationalValue::Text("doc-1".to_string())]);
+
+    let result = base.stage_transaction_with_authoritative_index(
+        RelationalTransaction {
+            writes: vec![RelationalWrite::DeleteByPrimaryKey {
+                table: "content_documents".to_string(),
+                keys: vec![document.clone()],
+            }],
+        },
+        RelationalMutationLimits::default(),
+        RelationalOverflowConfig::default(),
+        RelationalIndexChangeCaptureLimits::default(),
+        &index,
+    );
+
+    assert!(matches!(result, Err(RelationalError::Constraint(_))));
+    assert_eq!(
+        index.visited(
+            "content_anchors",
+            &relational_foreign_key_index_name(0),
+            &document,
+        ),
+        1
+    );
+}
+
+#[test]
+fn authoritative_constraint_staging_fails_closed_before_publication() {
+    let state = RelationalState::default()
+        .stage_transaction(
+            create_upsert_table(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("create authoritative fixture");
+    let insert = || RelationalTransaction {
+        writes: vec![RelationalWrite::Insert {
+            table: "documents".to_string(),
+            rows: vec![upsert_row("id-1", "owner-1", "payload")],
+            mode: RelationalInsertMode::Error,
+        }],
+    };
+
+    let lookup_failure = state.stage_transaction_with_authoritative_index(
+        insert(),
+        RelationalMutationLimits::default(),
+        RelationalOverflowConfig::default(),
+        RelationalIndexChangeCaptureLimits::default(),
+        &TestConstraintIndex::failing(RelationalError::Corruption(
+            "persistent constraint view is poisoned".to_string(),
+        )),
+    );
+    assert!(matches!(
+        lookup_failure,
+        Err(RelationalError::Corruption(message)) if message.contains("poisoned")
+    ));
+
+    let capture_failure = state.stage_transaction_with_authoritative_index(
+        insert(),
+        RelationalMutationLimits::default(),
+        RelationalOverflowConfig::default(),
+        RelationalIndexChangeCaptureLimits {
+            max_entries: NonZeroUsize::new(1).unwrap(),
+            max_bytes: NonZeroUsize::new(1024).unwrap(),
+        },
+        &TestConstraintIndex::from_state(&state),
+    );
+    assert!(matches!(
+        capture_failure,
+        Err(RelationalError::Admission(message)) if message.contains("capture limits")
+    ));
+
+    let ddl_failure = state.stage_transaction_with_authoritative_index(
+        RelationalTransaction {
+            writes: vec![RelationalWrite::CreateIndex {
+                table: "documents".to_string(),
+                index: RelationalIndexSchema {
+                    name: "documents_payload_idx".to_string(),
+                    columns: vec!["payload".to_string()],
+                    unique: false,
+                },
+            }],
+        },
+        RelationalMutationLimits::default(),
+        RelationalOverflowConfig::default(),
+        RelationalIndexChangeCaptureLimits::default(),
+        &TestConstraintIndex::from_state(&state),
+    );
+    assert!(matches!(
+        ddl_failure,
+        Err(RelationalError::Admission(message)) if message.contains("schema-changing")
+    ));
+
+    let seeded = state
+        .stage_transaction(
+            insert(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("seed malformed lookup fixture");
+    let owner = RelationalKey(vec![RelationalValue::Text("owner-1".to_string())]);
+    let primary_key = RelationalKey(vec![RelationalValue::Text("id-1".to_string())]);
+    let mut malformed = TestConstraintIndex::from_state(&seeded);
+    malformed
+        .postings
+        .get_mut(&(
+            "documents".to_string(),
+            relational_unique_index_name(0),
+            owner,
+        ))
+        .expect("seeded unique posting")
+        .push(primary_key);
+    let malformed_failure = seeded.stage_transaction_with_authoritative_index(
+        RelationalTransaction {
+            writes: vec![RelationalWrite::Upsert {
+                table: "documents".to_string(),
+                rows: vec![upsert_row("id-2", "owner-1", "new")],
+                conflict_columns: vec!["owner".to_string()],
+                action: RelationalConflictAction::DoNothing,
+            }],
+        },
+        RelationalMutationLimits::default(),
+        RelationalOverflowConfig::default(),
+        RelationalIndexChangeCaptureLimits::default(),
+        &malformed,
+    );
+    assert!(matches!(
+        malformed_failure,
+        Err(RelationalError::Corruption(message))
+            if message.contains("unordered or duplicate")
+    ));
 }
 
 #[test]

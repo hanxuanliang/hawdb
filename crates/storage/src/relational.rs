@@ -10,6 +10,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 mod codec;
+mod constraints;
 mod index_shadow;
 mod overflow;
 
@@ -18,6 +19,7 @@ pub use codec::{
     encode_relational_checkpoint, encode_relational_checkpoint_to_writer,
     encode_relational_wal_batch, RelationalCheckpoint, RelationalDecodeLimits, RelationalWalBatch,
 };
+pub use constraints::RelationalConstraintIndex;
 pub use index_shadow::{
     relational_index_recovery_delta_file, relational_index_shadow_artifact_file,
     relational_index_shadow_manifest_generation_file, RelationalIndexArtifactMetadata,
@@ -370,6 +372,17 @@ pub enum RelationalIndexChangeCapture {
     Invalidated {
         reason: String,
     },
+}
+
+impl RelationalIndexChangeCapture {
+    fn changes(&self) -> Result<&[RelationalIndexChange], RelationalError> {
+        match self {
+            Self::Captured { changes, .. } => Ok(changes),
+            Self::Invalidated { reason } => Err(RelationalError::Admission(format!(
+                "authoritative relational index change capture is unavailable: {reason}"
+            ))),
+        }
+    }
 }
 
 impl RelationalRow {
@@ -876,6 +889,35 @@ impl RelationalState {
             limits,
             overflow_config,
             capture_limits,
+            None,
+        )
+    }
+
+    /// Stages one transaction against a constraint index pinned to this
+    /// state's visibility epoch. This method does not publish the state or
+    /// activate persistent indexes; the caller still owns the WAL boundary.
+    pub fn stage_transaction_with_authoritative_index(
+        &self,
+        transaction: RelationalTransaction,
+        limits: RelationalMutationLimits,
+        overflow_config: RelationalOverflowConfig,
+        capture_limits: RelationalIndexChangeCaptureLimits,
+        constraint_index: &dyn RelationalConstraintIndex,
+    ) -> Result<(Self, RelationalIndexChangeCapture), RelationalError> {
+        admit_transaction(&transaction, limits)?;
+        if transaction.changes_index_schema() {
+            return Err(RelationalError::Admission(
+                "authoritative relational indexes reject schema-changing transactions until a new canonical index generation is published"
+                    .to_string(),
+            ));
+        }
+        apply_transaction_with_index_changes(
+            self,
+            transaction,
+            limits,
+            overflow_config,
+            capture_limits,
+            Some(constraint_index),
         )
     }
 
@@ -1169,6 +1211,17 @@ pub struct RelationalTransaction {
 }
 
 impl RelationalTransaction {
+    fn changes_index_schema(&self) -> bool {
+        self.writes.iter().any(|write| {
+            matches!(
+                write,
+                RelationalWrite::CreateTable(_)
+                    | RelationalWrite::AddColumn { .. }
+                    | RelationalWrite::CreateIndex { .. }
+            )
+        })
+    }
+
     pub fn estimated_mutation_rows(&self) -> usize {
         self.writes
             .iter()
@@ -1387,7 +1440,7 @@ fn apply_transaction(
     limits: RelationalMutationLimits,
     overflow_config: RelationalOverflowConfig,
 ) -> Result<RelationalState, RelationalError> {
-    apply_transaction_inner(state, transaction, limits, overflow_config, None)
+    apply_transaction_inner(state, transaction, limits, overflow_config, None, None)
         .map(|(state, _)| state)
 }
 
@@ -1397,6 +1450,7 @@ fn apply_transaction_with_index_changes(
     limits: RelationalMutationLimits,
     overflow_config: RelationalOverflowConfig,
     capture_limits: RelationalIndexChangeCaptureLimits,
+    constraint_index: Option<&dyn RelationalConstraintIndex>,
 ) -> Result<(RelationalState, RelationalIndexChangeCapture), RelationalError> {
     let (state, capture) = apply_transaction_inner(
         state,
@@ -1404,6 +1458,7 @@ fn apply_transaction_with_index_changes(
         limits,
         overflow_config,
         Some(capture_limits),
+        constraint_index,
     )?;
     Ok((
         state,
@@ -1417,6 +1472,7 @@ fn apply_transaction_inner(
     limits: RelationalMutationLimits,
     overflow_config: RelationalOverflowConfig,
     capture_limits: Option<RelationalIndexChangeCaptureLimits>,
+    constraint_index: Option<&dyn RelationalConstraintIndex>,
 ) -> Result<(RelationalState, Option<RelationalIndexChangeCapture>), RelationalError> {
     let mut next = state.clone();
     let mut touched = BTreeSet::new();
@@ -1566,7 +1622,10 @@ fn apply_transaction_inner(
                     &conflict_columns,
                     &action,
                     overflow_config,
-                    changed_keys.entry(table.clone()).or_default(),
+                    UpsertIndexContext {
+                        changed_keys: changed_keys.entry(table.clone()).or_default(),
+                        constraint_index,
+                    },
                 )?;
                 touched.insert(table);
             }
@@ -1643,10 +1702,9 @@ fn apply_transaction_inner(
         if full_index_rebuild.contains(table) {
             rebuild_indexes(&mut next, table)?;
         } else if let Some(keys) = changed_keys.get(table) {
-            refresh_indexes_for_keys(state, &mut next, table, keys)?;
+            refresh_indexes_for_keys(state, &mut next, table, keys, constraint_index.is_none())?;
         }
     }
-    validate_foreign_keys_incremental(state, &next, &changed_keys, &full_index_rebuild)?;
     let capture = capture_limits.map(|capture_limits| {
         capture_relational_index_changes(
             state,
@@ -1656,7 +1714,26 @@ fn apply_transaction_inner(
             capture_limits,
         )
     });
+    if let Some(constraint_index) = constraint_index {
+        let changes = capture
+            .as_ref()
+            .expect("authoritative constraints require index change capture")
+            .changes()?;
+        constraints::validate_authoritative_constraints(
+            &next,
+            &changed_keys,
+            changes,
+            constraint_index,
+        )?;
+    } else {
+        validate_foreign_keys_incremental(state, &next, &changed_keys, &full_index_rebuild)?;
+    }
     Ok((next, capture))
+}
+
+struct UpsertIndexContext<'a> {
+    changed_keys: &'a mut BTreeSet<RelationalKey>,
+    constraint_index: Option<&'a dyn RelationalConstraintIndex>,
 }
 
 fn apply_upsert(
@@ -1666,8 +1743,12 @@ fn apply_upsert(
     conflict_columns: &[String],
     action: &RelationalConflictAction,
     overflow_config: RelationalOverflowConfig,
-    changed_keys: &mut BTreeSet<RelationalKey>,
+    index_context: UpsertIndexContext<'_>,
 ) -> Result<(), RelationalError> {
+    let UpsertIndexContext {
+        changed_keys,
+        constraint_index,
+    } = index_context;
     let schema = Arc::clone(
         state
             .schemas
@@ -1711,6 +1792,23 @@ fn apply_upsert(
             .collect::<Result<Vec<_>, RelationalError>>()?,
     };
     let mut staged_conflicts = BTreeMap::<RelationalKey, Option<RelationalKey>>::new();
+    for primary_key in changed_keys.iter() {
+        let Some(row) = state.row(table, primary_key) else {
+            continue;
+        };
+        let conflict_key = row_key(row, &conflict_positions);
+        if key_contains_null(&conflict_key) {
+            continue;
+        }
+        if staged_conflicts
+            .insert(conflict_key, Some(primary_key.clone()))
+            .is_some()
+        {
+            return Err(RelationalError::Constraint(format!(
+                "UPSERT conflict target on table {table} is not unique within the transaction"
+            )));
+        }
+    }
 
     for mut excluded in rows {
         validate_row(&schema, &excluded)?;
@@ -1725,7 +1823,15 @@ fn apply_upsert(
         } else if let Some(staged) = staged_conflicts.get(&conflict_key) {
             staged.clone()
         } else {
-            conflict_primary_key(state, table, &schema, conflict_columns, &conflict_key)?
+            conflict_primary_key(
+                state,
+                table,
+                &schema,
+                conflict_columns,
+                &conflict_key,
+                changed_keys,
+                constraint_index,
+            )?
         };
 
         let segment = state
@@ -1785,6 +1891,8 @@ fn conflict_primary_key(
     schema: &RelationalTableSchema,
     conflict_columns: &[String],
     conflict_key: &RelationalKey,
+    changed_keys: &BTreeSet<RelationalKey>,
+    constraint_index: Option<&dyn RelationalConstraintIndex>,
 ) -> Result<Option<RelationalKey>, RelationalError> {
     let definition = schema
         .unique_index_definition(conflict_columns)
@@ -1795,6 +1903,17 @@ fn conflict_primary_key(
         })?;
     if definition.role == RelationalIndexRole::Primary {
         return Ok(state.row(table, conflict_key).map(|_| conflict_key.clone()));
+    }
+    if let Some(constraint_index) = constraint_index {
+        return constraints::authoritative_conflict_primary_key(
+            state,
+            table,
+            &definition,
+            conflict_columns,
+            conflict_key,
+            changed_keys,
+            constraint_index,
+        );
     }
     let Some(postings) = state.index_lookup(table, &definition.name, conflict_key) else {
         return Ok(None);
@@ -2188,6 +2307,7 @@ fn refresh_indexes_for_keys(
     next: &mut RelationalState,
     table: &str,
     keys: &BTreeSet<RelationalKey>,
+    enforce_unique: bool,
 ) -> Result<(), RelationalError> {
     let schema = Arc::clone(
         next.schemas
@@ -2234,7 +2354,8 @@ fn refresh_indexes_for_keys(
             {
                 continue;
             }
-            if index.role.is_unique()
+            if enforce_unique
+                && index.role.is_unique()
                 && postings
                     .get(&index_key)
                     .into_iter()
