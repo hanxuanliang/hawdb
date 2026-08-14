@@ -3,8 +3,10 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::io::{BufWriter, Lines};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Arc;
 
 static NEXT_REFRESH_ID: AtomicU64 = AtomicU64::new(1);
+const INDEX_SAMPLE_OUTPUT_BYTES: usize = 96;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptimizerStatisticsRefreshOptions {
@@ -57,6 +59,7 @@ pub struct OptimizerStatisticsRefreshReport {
     pub relationship_property_group_count: usize,
     pub excluded_property_group_count: usize,
     pub excluded_relationship_property_group_count: usize,
+    pub index_sample_count: usize,
     pub path_group_count: usize,
     pub bounded_path_group_count: usize,
     pub checkpoint_persisted: bool,
@@ -80,6 +83,7 @@ impl OptimizerStatisticsRefreshReport {
             "relationship_property_group_count": self.relationship_property_group_count,
             "excluded_property_group_count": self.excluded_property_group_count,
             "excluded_relationship_property_group_count": self.excluded_relationship_property_group_count,
+            "index_sample_count": self.index_sample_count,
             "path_group_count": self.path_group_count,
             "bounded_path_group_count": self.bounded_path_group_count,
             "checkpoint_persisted": self.checkpoint_persisted,
@@ -117,6 +121,7 @@ impl GraphStore {
                     writer.push_node_property(*label, property, value)?;
                 }
             }
+            writer.push_node_index_entries(&node)?;
             Ok(GraphScanControl::Continue)
         })?;
 
@@ -199,15 +204,12 @@ impl GraphStore {
         })?;
 
         let basic = self.basic_statistics();
-        let (mut statistics, merge_report) =
-            writer.finish(graph_statistics_from_basic(basic, true))?;
+        let (statistics, merge_report) = writer.finish(graph_statistics_from_basic(basic, true))?;
         if source_commit_epoch != self.commit_epoch {
             return Err(SkeinError::Execution(
                 "optimizer statistics refresh source epoch changed before publication".to_string(),
             ));
         }
-        statistics.index_samples = self.checkpoint_statistics.index_samples.clone();
-        retain_valid_index_statistics_samples(&mut statistics, catalog);
         self.checkpoint_statistics = statistics;
 
         Ok(OptimizerStatisticsRefreshReport {
@@ -228,6 +230,7 @@ impl GraphStore {
             excluded_property_group_count: merge_report.excluded_property_group_count,
             excluded_relationship_property_group_count: merge_report
                 .excluded_relationship_property_group_count,
+            index_sample_count: self.checkpoint_statistics.index_samples.len(),
             path_group_count: self.checkpoint_statistics.path_counts.len(),
             bounded_path_group_count: self.checkpoint_statistics.bounded_path_counts.len(),
             checkpoint_persisted: false,
@@ -371,6 +374,10 @@ enum StatsRecord {
         property: String,
         value: Value,
     },
+    IndexEntry {
+        index: IndexId,
+        key: String,
+    },
     RelSource {
         rel_type: RelTypeId,
         node: NodeId,
@@ -430,6 +437,7 @@ impl StatsRecord {
             } => fixed
                 .saturating_add(property.len())
                 .saturating_add(encode_value(value).len()),
+            Self::IndexEntry { key, .. } => fixed.saturating_add(key.len()),
             _ => fixed,
         }
     }
@@ -456,6 +464,9 @@ impl StatsRecord {
                 encode_string(property),
                 encode_string(&encode_value(value))
             ),
+            Self::IndexEntry { index, key } => {
+                format!("ix\t{}\t{}", index.0, encode_string(key))
+            }
             Self::RelSource { rel_type, node } => {
                 format!("rs\t{}\t{}", rel_type.0, node.0)
             }
@@ -530,6 +541,10 @@ impl StatsRecord {
                 property: decode_string(property)?,
                 value: decode_value(&decode_string(value)?)?,
             }),
+            ["ix", index, key] => Ok(Self::IndexEntry {
+                index: IndexId(parse_u32_field(index, "index id")?),
+                key: decode_string(key)?,
+            }),
             ["rs", rel_type, node] => Ok(Self::RelSource {
                 rel_type: RelTypeId(parse_u32_field(rel_type, "relationship type id")?),
                 node: NodeId(parse_u64_field(node, "node id")?),
@@ -601,10 +616,121 @@ fn parse_usize_field(raw: &str, name: &str) -> Result<usize> {
         .map_err(|error| SkeinError::Storage(format!("invalid statistics {name}: {error}")))
 }
 
+// Refresh keys are transient and outer spill framing already escapes them. A
+// length-prefixed encoding avoids the durable codec's hex expansion and lets
+// admission reject an oversized key before allocating its buffer.
+fn index_statistics_value_bytes(value: &Value) -> usize {
+    match value {
+        Value::Null => 1,
+        Value::Bool(_) => 2,
+        Value::Int(value) => 2usize.saturating_add(value.to_string().len()),
+        Value::Float(value) => 2usize.saturating_add(value.to_bits().to_string().len()),
+        Value::String(value) => 2usize
+            .saturating_add(value.len().to_string().len())
+            .saturating_add(value.len()),
+        Value::List(values) => values.iter().fold(
+            2usize.saturating_add(values.len().to_string().len()),
+            |bytes, value| {
+                let value_bytes = index_statistics_value_bytes(value);
+                bytes
+                    .saturating_add(value_bytes.to_string().len())
+                    .saturating_add(1)
+                    .saturating_add(value_bytes)
+            },
+        ),
+        Value::Map(values) => values.iter().fold(
+            2usize.saturating_add(values.len().to_string().len()),
+            |bytes, (key, value)| {
+                let value_bytes = index_statistics_value_bytes(value);
+                bytes
+                    .saturating_add(key.len().to_string().len())
+                    .saturating_add(1)
+                    .saturating_add(key.len())
+                    .saturating_add(value_bytes.to_string().len())
+                    .saturating_add(1)
+                    .saturating_add(value_bytes)
+            },
+        ),
+    }
+}
+
+fn append_index_statistics_value(encoded: &mut String, value: &Value) {
+    match value {
+        Value::Null => encoded.push('n'),
+        Value::Bool(value) => encoded.push_str(if *value { "b1" } else { "b0" }),
+        Value::Int(value) => {
+            encoded.push('i');
+            encoded.push_str(&value.to_string());
+            encoded.push(';');
+        }
+        Value::Float(value) => {
+            encoded.push('f');
+            encoded.push_str(&value.to_bits().to_string());
+            encoded.push(';');
+        }
+        Value::String(value) => {
+            encoded.push('s');
+            encoded.push_str(&value.len().to_string());
+            encoded.push(':');
+            encoded.push_str(value);
+        }
+        Value::List(values) => {
+            encoded.push('l');
+            encoded.push_str(&values.len().to_string());
+            encoded.push(':');
+            for value in values {
+                let value_bytes = index_statistics_value_bytes(value);
+                encoded.push_str(&value_bytes.to_string());
+                encoded.push(':');
+                append_index_statistics_value(encoded, value);
+            }
+        }
+        Value::Map(values) => {
+            encoded.push('m');
+            encoded.push_str(&values.len().to_string());
+            encoded.push(':');
+            for (key, value) in values {
+                encoded.push_str(&key.len().to_string());
+                encoded.push(':');
+                encoded.push_str(key);
+                let value_bytes = index_statistics_value_bytes(value);
+                encoded.push_str(&value_bytes.to_string());
+                encoded.push(':');
+                append_index_statistics_value(encoded, value);
+            }
+        }
+    }
+}
+
+fn index_statistics_key_bytes(values: &[&Value]) -> usize {
+    values.iter().fold(0usize, |bytes, value| {
+        let value_bytes = index_statistics_value_bytes(value);
+        bytes
+            .saturating_add(value_bytes.to_string().len())
+            .saturating_add(1)
+            .saturating_add(value_bytes)
+    })
+}
+
+fn encode_index_statistics_key(values: &[&Value], key_bytes: usize) -> String {
+    let mut key = String::with_capacity(key_bytes);
+    for value in values {
+        let value_bytes = index_statistics_value_bytes(value);
+        key.push_str(&value_bytes.to_string());
+        key.push(':');
+        append_index_statistics_value(&mut key, value);
+    }
+    debug_assert_eq!(key.len(), key_bytes);
+    key
+}
+
 struct StatsRunWriter<'a> {
     directory: &'a Path,
     catalog: &'a Catalog,
     options: &'a OptimizerStatisticsRefreshOptions,
+    scalar_indexes_by_label: ScalarIndexesByLabel,
+    composite_indexes_by_label: CompositeIndexesByLabel,
+    index_ids: Vec<IndexId>,
     chunk: Vec<StatsRecord>,
     chunk_bytes: usize,
     excluded_property_groups: BTreeSet<PropertyGroupKey>,
@@ -615,16 +741,55 @@ struct StatsRunWriter<'a> {
     runs: Vec<PathBuf>,
 }
 
+type ScalarIndexesByLabel = BTreeMap<LabelId, Arc<[(IndexId, String)]>>;
+type CompositeIndexesByLabel = BTreeMap<LabelId, Arc<[(IndexId, Vec<String>)]>>;
+
 impl<'a> StatsRunWriter<'a> {
     fn new(
         directory: &'a Path,
         catalog: &'a Catalog,
         options: &'a OptimizerStatisticsRefreshOptions,
     ) -> Self {
+        let mut scalar_indexes_by_label = BTreeMap::<LabelId, Vec<(IndexId, String)>>::new();
+        let mut composite_indexes_by_label =
+            BTreeMap::<LabelId, Vec<(IndexId, Vec<String>)>>::new();
+        let mut index_ids = Vec::new();
+        for index in catalog
+            .property_indexes()
+            .filter(|index| catalog.supports_index_statistics(index.id))
+        {
+            scalar_indexes_by_label
+                .entry(index.label_id)
+                .or_default()
+                .push((index.id, index.property.clone()));
+            index_ids.push(index.id);
+        }
+        for index in catalog
+            .composite_property_indexes()
+            .filter(|index| catalog.supports_index_statistics(index.id))
+        {
+            composite_indexes_by_label
+                .entry(index.label_id)
+                .or_default()
+                .push((index.id, index.properties.clone()));
+            index_ids.push(index.id);
+        }
+        let scalar_indexes_by_label = scalar_indexes_by_label
+            .into_iter()
+            .map(|(label, indexes)| (label, Arc::from(indexes)))
+            .collect();
+        let composite_indexes_by_label = composite_indexes_by_label
+            .into_iter()
+            .map(|(label, indexes)| (label, Arc::from(indexes)))
+            .collect();
+        index_ids.sort_unstable();
         Self {
             directory,
             catalog,
             options,
+            scalar_indexes_by_label,
+            composite_indexes_by_label,
+            index_ids,
             chunk: Vec::new(),
             chunk_bytes: 0,
             excluded_property_groups: BTreeSet::new(),
@@ -681,6 +846,52 @@ impl<'a> StatsRunWriter<'a> {
             property,
             value: value.clone(),
         })
+    }
+
+    fn push_node_index_entries(&mut self, node: &NodeRecord) -> Result<()> {
+        for label in &node.labels {
+            if let Some(indexes) = self.scalar_indexes_by_label.get(label).cloned() {
+                for (index, property) in indexes.iter() {
+                    let Some(value) = node.properties.get(property) else {
+                        continue;
+                    };
+                    self.push(StatsRecord::IndexEntry {
+                        index: *index,
+                        key: self.admit_and_encode_index_key(&[value])?,
+                    })?;
+                }
+            }
+            if let Some(indexes) = self.composite_indexes_by_label.get(label).cloned() {
+                for (index, properties) in indexes.iter() {
+                    let Some(values) = properties
+                        .iter()
+                        .map(|property| node.properties.get(property))
+                        .collect::<Option<Vec<_>>>()
+                    else {
+                        continue;
+                    };
+                    self.push(StatsRecord::IndexEntry {
+                        index: *index,
+                        key: self.admit_and_encode_index_key(&values)?,
+                    })?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn admit_and_encode_index_key(&self, values: &[&Value]) -> Result<String> {
+        let key_bytes = index_statistics_key_bytes(values);
+        let record_bytes = 64usize.saturating_add(key_bytes);
+        if record_bytes.saturating_add(self.excluded_property_group_bytes)
+            > self.options.memory_budget_bytes
+        {
+            return Err(SkeinError::Execution(format!(
+                "optimizer statistics fact uses {record_bytes} bytes, exceeding memory_budget_bytes {}",
+                self.options.memory_budget_bytes
+            )));
+        }
+        Ok(encode_index_statistics_key(values, key_bytes))
     }
 
     fn exclude_property_group(&mut self, key: PropertyGroupKey) -> Result<()> {
@@ -808,7 +1019,7 @@ impl<'a> StatsRunWriter<'a> {
 
     fn finish(
         mut self,
-        statistics: GraphStatistics,
+        mut statistics: GraphStatistics,
     ) -> Result<(GraphStatistics, StatsMergeReport)> {
         self.flush()?;
         let mut readers = Vec::with_capacity(self.runs.len());
@@ -839,9 +1050,25 @@ impl<'a> StatsRunWriter<'a> {
             .options
             .memory_budget_bytes
             .saturating_sub(self.excluded_property_group_bytes);
+        let index_sample_output_bytes = self
+            .index_ids
+            .len()
+            .saturating_mul(INDEX_SAMPLE_OUTPUT_BYTES);
+        if index_sample_output_bytes > accumulator_memory_budget {
+            return Err(SkeinError::Execution(format!(
+                "optimizer index statistics output state exceeds memory_budget_bytes {}",
+                self.options.memory_budget_bytes
+            )));
+        }
+        for index_id in &self.index_ids {
+            statistics
+                .index_samples
+                .insert(*index_id, IndexStatisticsSample::exact(0, 0));
+        }
         let mut accumulator = StatsAccumulator::new(
             statistics,
             accumulator_memory_budget,
+            index_sample_output_bytes,
             self.excluded_property_groups,
         );
         while let Some(Reverse((record, run))) = heap.pop() {
@@ -918,12 +1145,20 @@ struct PropertyGroup {
     sample_bytes: usize,
 }
 
+struct IndexGroup {
+    index: IndexId,
+    last_key: Option<String>,
+    index_size: u64,
+    unique_values: u64,
+}
+
 struct StatsAccumulator {
     statistics: GraphStatistics,
     memory_budget_bytes: usize,
     output_statistics_bytes: usize,
     excluded_property_groups: BTreeSet<PropertyGroupKey>,
     current_property: Option<PropertyGroup>,
+    current_index: Option<IndexGroup>,
     last_distinct_record: Option<StatsRecord>,
 }
 
@@ -931,14 +1166,16 @@ impl StatsAccumulator {
     fn new(
         statistics: GraphStatistics,
         memory_budget_bytes: usize,
+        output_statistics_bytes: usize,
         excluded_property_groups: BTreeSet<PropertyGroupKey>,
     ) -> Self {
         Self {
             statistics,
             memory_budget_bytes,
-            output_statistics_bytes: 0,
+            output_statistics_bytes,
             excluded_property_groups,
             current_property: None,
+            current_index: None,
             last_distinct_record: None,
         }
     }
@@ -955,8 +1192,13 @@ impl StatsAccumulator {
                 property,
                 value,
             } => self.consume_property(PropertyGroupKey::Relationship(rel_type, property), value),
+            StatsRecord::IndexEntry { index, key } => {
+                self.finish_property_group()?;
+                self.consume_index(index, key)
+            }
             record => {
                 self.finish_property_group()?;
+                self.finish_index_group();
                 self.consume_non_property(record)
             }
         }
@@ -1018,6 +1260,39 @@ impl StatsAccumulator {
             group.sample_bytes = next_sample_bytes;
         }
         Ok(())
+    }
+
+    fn consume_index(&mut self, index: IndexId, key: String) -> Result<()> {
+        if self
+            .current_index
+            .as_ref()
+            .is_some_and(|group| group.index != index)
+        {
+            self.finish_index_group();
+        }
+        self.ensure_memory(key.len().saturating_add(64))?;
+        let group = self.current_index.get_or_insert(IndexGroup {
+            index,
+            last_key: None,
+            index_size: 0,
+            unique_values: 0,
+        });
+        group.index_size = group.index_size.saturating_add(1);
+        if group.last_key.as_ref() != Some(&key) {
+            group.last_key = Some(key);
+            group.unique_values = group.unique_values.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    fn finish_index_group(&mut self) {
+        let Some(group) = self.current_index.take() else {
+            return;
+        };
+        self.statistics.index_samples.insert(
+            group.index,
+            IndexStatisticsSample::exact(group.index_size, group.unique_values),
+        );
     }
 
     fn consume_non_property(&mut self, record: StatsRecord) -> Result<()> {
@@ -1186,6 +1461,7 @@ impl StatsAccumulator {
 
     fn finish(mut self) -> Result<(GraphStatistics, usize)> {
         self.finish_property_group()?;
+        self.finish_index_group();
         Ok((self.statistics, self.output_statistics_bytes))
     }
 
@@ -1281,5 +1557,44 @@ impl RefreshSpillDirectory {
 impl Drop for RefreshSpillDirectory {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_statistics_keys_are_self_delimiting_and_spill_safe() {
+        let left_values = [
+            Value::String("a".to_string()),
+            Value::String("bc".to_string()),
+        ];
+        let right_values = [
+            Value::String("ab".to_string()),
+            Value::String("c".to_string()),
+        ];
+        let left_refs = left_values.iter().collect::<Vec<_>>();
+        let right_refs = right_values.iter().collect::<Vec<_>>();
+        let left_bytes = index_statistics_key_bytes(&left_refs);
+        let right_bytes = index_statistics_key_bytes(&right_refs);
+        let left = encode_index_statistics_key(&left_refs, left_bytes);
+        let right = encode_index_statistics_key(&right_refs, right_bytes);
+        assert_ne!(left, right);
+
+        let nested = Value::Map(BTreeMap::from([(
+            "key:with-delimiters".to_string(),
+            Value::List(vec![Value::Null, Value::String("line\nvalue".to_string())]),
+        )]));
+        let nested_refs = [&nested];
+        let nested_bytes = index_statistics_key_bytes(&nested_refs);
+        let nested_key = encode_index_statistics_key(&nested_refs, nested_bytes);
+        assert_eq!(nested_key.len(), nested_bytes);
+
+        let record = StatsRecord::IndexEntry {
+            index: IndexId(7),
+            key: nested_key,
+        };
+        assert_eq!(StatsRecord::decode(&record.encode()).unwrap(), record);
     }
 }

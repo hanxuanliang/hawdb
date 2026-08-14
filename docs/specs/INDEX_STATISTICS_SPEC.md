@@ -56,7 +56,7 @@ data.
 Live index DDL against an already out-of-core canonical base does not publish a
 sample from the resident WAL delta alone. The descriptor remains usable through
 the executor's authoritative fallback, but sample publication waits for a
-complete rebuild or a future bounded external index sampler.
+complete rebuild or the bounded external statistics refresh.
 
 An out-of-core checkpoint publishes exact index samples before releasing the
 materialized index payload. WAL replay and live mutations do not rewrite the
@@ -66,9 +66,19 @@ when its complete joint key changes or enters/leaves the index.
 Mutation accounting computes only the affected `IndexId` values before applying
 the write; it MUST NOT clone the old or new canonical row to compare keys.
 
-External advanced-statistics refresh preserves index samples and their churn
-counters. It does not silently reset them because that refresh excludes text
-payload facts and does not rescan every physical index.
+External advanced-statistics refresh rebuilds every supported scalar and
+composite sample from its pinned canonical scan. Index keys use the same
+byte-bounded external sort as other statistics facts, including keys for
+declared `TEXT` that remain excluded from generic histograms. Index sampling is
+charged to `memory_budget_bytes`, `max_generated_facts`, `max_spill_bytes`, and
+`max_spill_runs`; one key that cannot fit the memory budget rejects the refresh
+before publication. Resident descriptor lookup state and published samples stay
+proportional to the number of explicit indexes.
+
+The refresh publishes only if its source commit epoch is still current. A
+budget, I/O, decode, or source-epoch failure leaves the prior sample and churn
+counters unchanged. Successful publication atomically replaces every supported
+sample with an exact current sample and resets `updates_since_sample` to zero.
 
 ## Optimizer admission
 
@@ -118,6 +128,8 @@ Required regressions cover:
 - composite samples use joint-key NDV
 - out-of-core checkpoint plus WAL replay reconstructs churn and rejects a
   stale sample
+- bounded external refresh creates samples for live out-of-core DDL and resets
+  stale sample churn without publishing partial state on failure
 - checkpoint text and `system.graph_statistics` expose the sample fields
 - `SkeinIndexStatistics.tla` checks coherent resampling, exact zero-churn
   samples, update-age accounting, and the bounded optimizer admission rule

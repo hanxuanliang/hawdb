@@ -917,6 +917,187 @@ fn external_optimizer_statistics_refresh_spills_and_persists_exact_stats() {
 }
 
 #[test]
+fn external_optimizer_statistics_refresh_resamples_live_out_of_core_indexes() {
+    let path = unique_test_dir("external_optimizer_index_statistics");
+    let spill_root = path.join("statistics-spill");
+    let config = DatabaseConfig {
+        storage_residency_mode: StorageResidencyMode::OutOfCore,
+        segment_cache_capacity_bytes: 1024 * 1024,
+        ..DatabaseConfig::default()
+    };
+    let (body_index_id, composite_index_id, refreshed_statistics) = {
+        let mut db = Database::open_with_config(&path, config.clone()).unwrap();
+        db.query("CREATE NODE TABLE Memory").unwrap();
+        db.query("CREATE PROPERTY ON NODE TABLE Memory(body) TYPE TEXT")
+            .unwrap();
+        let mut transaction = db.begin_transaction();
+        for id in 0..20 {
+            transaction
+                .query_with_params(
+                    "CREATE (:Memory {id: $id, body: $body})",
+                    &BTreeMap::from([
+                        ("id".to_string(), Value::Int(id)),
+                        (
+                            "body".to_string(),
+                            Value::String(if id % 2 == 0 { "even" } else { "odd" }.to_string()),
+                        ),
+                    ]),
+                )
+                .unwrap();
+        }
+        transaction.commit().unwrap();
+        db.checkpoint().unwrap();
+
+        db.query("CREATE INDEX ON :Memory(body)").unwrap();
+        db.query("CREATE INDEX ON :Memory(body, id)").unwrap();
+        let body_index_id = db
+            .property_indexes()
+            .into_iter()
+            .find(|index| index.property == "body")
+            .unwrap()
+            .id;
+        let composite_index_id = db
+            .composite_property_indexes()
+            .into_iter()
+            .find(|index| index.properties == ["body", "id"])
+            .unwrap()
+            .id;
+        assert!(!db.statistics().index_samples.contains_key(&body_index_id));
+        assert!(!db
+            .statistics()
+            .index_samples
+            .contains_key(&composite_index_id));
+
+        let options = crate::OptimizerStatisticsRefreshOptions {
+            memory_budget_bytes: 4 * 1024,
+            max_spill_bytes: 1024 * 1024,
+            max_spill_runs: 64,
+            max_input_records: 1_000,
+            max_generated_facts: 10_000,
+            max_path_expansions: 1_000,
+            spill_directory: spill_root.clone(),
+        };
+        let report = db.refresh_optimizer_statistics_external(&options).unwrap();
+        assert!(report.checkpoint_persisted);
+        assert_eq!(report.index_sample_count, 2);
+        assert!(report.spill_run_count > 1);
+        assert_eq!(
+            db.statistics().index_samples.get(&body_index_id),
+            Some(&crate::schema::IndexStatisticsSample::exact(20, 2))
+        );
+        assert_eq!(
+            db.statistics().index_samples.get(&composite_index_id),
+            Some(&crate::schema::IndexStatisticsSample::exact(20, 20))
+        );
+        assert!(db
+            .statistics()
+            .property_distinct_counts
+            .keys()
+            .all(|(_, property)| property != "body"));
+        let explain = db
+            .explain_query("MATCH (m:Memory) WHERE m.body = 'even' RETURN m.id AS id")
+            .unwrap();
+        assert!(explain.trace.decisions.iter().any(|decision| {
+            decision.contains("Memory.body") && decision.contains("distinct_count=2")
+        }));
+
+        db.query("MATCH (m:Memory) WHERE m.id = 0 SET m.body = 'third'")
+            .unwrap();
+        db.query("MATCH (m:Memory) WHERE m.id = 1 SET m.body = 'fourth'")
+            .unwrap();
+        let stale_statistics = db.statistics();
+        assert!(stale_statistics
+            .index_samples
+            .get(&body_index_id)
+            .unwrap()
+            .is_stale());
+        assert!(stale_statistics
+            .index_samples
+            .get(&composite_index_id)
+            .unwrap()
+            .is_stale());
+
+        let report = db.refresh_optimizer_statistics_external(&options).unwrap();
+        assert_eq!(report.index_sample_count, 2);
+        assert_eq!(
+            db.statistics().index_samples.get(&body_index_id),
+            Some(&crate::schema::IndexStatisticsSample::exact(20, 4))
+        );
+        assert_eq!(
+            db.statistics().index_samples.get(&composite_index_id),
+            Some(&crate::schema::IndexStatisticsSample::exact(20, 20))
+        );
+        assert_eq!(std::fs::read_dir(&spill_root).unwrap().count(), 0);
+        (body_index_id, composite_index_id, db.statistics())
+    };
+
+    let db = Database::open_with_config(&path, config).unwrap();
+    assert_eq!(db.statistics(), refreshed_statistics);
+    assert_eq!(
+        db.statistics().index_samples.get(&body_index_id),
+        Some(&crate::schema::IndexStatisticsSample::exact(20, 4))
+    );
+    assert_eq!(
+        db.statistics().index_samples.get(&composite_index_id),
+        Some(&crate::schema::IndexStatisticsSample::exact(20, 20))
+    );
+    drop(db);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn external_optimizer_statistics_refresh_rejects_oversized_index_key_before_publication() {
+    let path = unique_test_dir("external_optimizer_oversized_index_key");
+    let spill_root = path.join("statistics-spill");
+    let mut db = Database::open_with_config(
+        &path,
+        DatabaseConfig {
+            storage_residency_mode: StorageResidencyMode::OutOfCore,
+            ..DatabaseConfig::default()
+        },
+    )
+    .unwrap();
+    db.query("CREATE NODE TABLE Memory").unwrap();
+    db.query("CREATE PROPERTY ON NODE TABLE Memory(body) TYPE TEXT")
+        .unwrap();
+    db.query_with_params(
+        "CREATE (:Memory {id: 1, body: $body})",
+        &BTreeMap::from([("body".to_string(), Value::String("x".repeat(8 * 1024)))]),
+    )
+    .unwrap();
+    db.checkpoint().unwrap();
+    db.query("CREATE INDEX ON :Memory(body)").unwrap();
+    let index_id = db.property_indexes()[0].id;
+    assert!(!db.statistics().index_samples.contains_key(&index_id));
+    let generation = db.storage_residency_report().canonical_generation;
+
+    let error = db
+        .refresh_optimizer_statistics_external(&crate::OptimizerStatisticsRefreshOptions {
+            memory_budget_bytes: 4096,
+            max_spill_bytes: 1024 * 1024,
+            max_spill_runs: 8,
+            max_input_records: 100,
+            max_generated_facts: 100,
+            max_path_expansions: 100,
+            spill_directory: spill_root.clone(),
+        })
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("optimizer statistics fact uses"),
+        "unexpected refresh error: {error}"
+    );
+    assert!(!db.statistics().index_samples.contains_key(&index_id));
+    assert_eq!(
+        db.storage_residency_report().canonical_generation,
+        generation
+    );
+    assert_eq!(std::fs::read_dir(&spill_root).unwrap().count(), 0);
+
+    drop(db);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn external_optimizer_statistics_refresh_fails_before_publication_on_work_budget() {
     let path = unique_test_dir("external_optimizer_statistics_budget");
     let spill_root = path.join("statistics-spill");
@@ -930,8 +1111,11 @@ fn external_optimizer_statistics_refresh_fails_before_publication_on_work_budget
     .unwrap();
     db.query("CREATE (:Memory {id: 'memory:one', kind: 'note'})")
         .unwrap();
+    db.query("CREATE INDEX ON :Memory(kind)").unwrap();
     db.checkpoint().unwrap();
     let generation = db.storage_residency_report().canonical_generation;
+    let statistics = db.statistics();
+    assert_eq!(statistics.index_samples.len(), 1);
 
     let error = db
         .refresh_optimizer_statistics_external(&crate::OptimizerStatisticsRefreshOptions {
@@ -949,6 +1133,7 @@ fn external_optimizer_statistics_refresh_fails_before_publication_on_work_budget
         "unexpected refresh error: {error}"
     );
     assert!(!db.statistics().advanced_statistics_complete);
+    assert_eq!(db.statistics(), statistics);
     assert_eq!(
         db.storage_residency_report().canonical_generation,
         generation

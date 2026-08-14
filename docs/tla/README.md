@@ -459,11 +459,13 @@ snapshot.
 `SkeinIndexStatistics.tla` models the payload-free sample maintained for each
 explicit equality, range, or composite node index. A sample is one coherent
 prior index state; canonical key mutations advance both the source epoch and
-`updates_since_sample` without rewriting its counters. Resampling atomically
-publishes the current index state and resets churn. The model checks that sample
-size and unique-value counters remain valid, zero-churn samples equal the
-canonical index, recovery-equivalent churn equals sample age, and the optimizer
-never uses a sample beyond the configured update budget.
+`updates_since_sample` without rewriting its counters. External resampling pins
+a complete candidate and publishes it atomically only while its source epoch is
+still current; a mutation during the scan forces candidate discard and leaves
+the prior sample unchanged. The model checks that sample size and unique-value
+counters remain valid, zero-churn samples equal the canonical index,
+recovery-equivalent churn equals sample age, no future state is published, and
+the optimizer never uses a sample beyond the configured update budget.
 
 ## Derived Source Segment Publication
 
