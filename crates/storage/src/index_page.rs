@@ -410,6 +410,9 @@ fn validate_page(
             if root.height == 0 {
                 return Err(invalid(error_class, "root height must be non-zero"));
             }
+            if root.child == page.page_id {
+                return Err(invalid(error_class, "root page must not reference itself"));
+            }
         }
         ImmutableIndexPageBody::Interior(interior) => {
             validate_entry_count(interior.entries.len(), limits, error_class)?;
@@ -421,6 +424,20 @@ fn validate_page(
                 limits,
                 error_class,
             )?;
+            if interior
+                .entries
+                .iter()
+                .any(|entry| entry.child == page.page_id)
+                || interior
+                    .entries
+                    .windows(2)
+                    .any(|pair| pair[0].child >= pair[1].child)
+            {
+                return Err(invalid(
+                    error_class,
+                    "interior child page ids must be strictly ordered and non-self-referential",
+                ));
+            }
         }
         ImmutableIndexPageBody::Leaf(leaf) => {
             validate_max_entry_count(leaf.entries.len(), limits, error_class)?;
@@ -458,10 +475,10 @@ fn validate_page(
         ImmutableIndexPageBody::Posting(posting) => {
             validate_entry_count(posting.row_ids.len(), limits, error_class)?;
             validate_sorted_row_ids(&posting.row_ids, limits, error_class)?;
-            if posting.next == Some(page.page_id) {
+            if posting.next.is_some_and(|next| next <= page.page_id) {
                 return Err(invalid(
                     error_class,
-                    "posting page must not reference itself",
+                    "posting page must reference only a later page",
                 ));
             }
         }
@@ -1298,6 +1315,42 @@ mod tests {
         };
         assert!(matches!(
             invalid_generation.encode(ImmutableIndexPageLimits::default()),
+            Err(ImmutableIndexPageError::Admission(_))
+        ));
+
+        let duplicate_child = ImmutableIndexPage {
+            generation: 4,
+            source_commit_epoch: 5,
+            page_id: page_id(10),
+            body: ImmutableIndexPageBody::Interior(IndexInteriorPage {
+                entries: vec![
+                    IndexInteriorEntry {
+                        upper_bound: b"a".to_vec(),
+                        child: page_id(2),
+                    },
+                    IndexInteriorEntry {
+                        upper_bound: b"z".to_vec(),
+                        child: page_id(2),
+                    },
+                ],
+            }),
+        };
+        assert!(matches!(
+            duplicate_child.encode(ImmutableIndexPageLimits::default()),
+            Err(ImmutableIndexPageError::Admission(_))
+        ));
+
+        let backward_posting_link = ImmutableIndexPage {
+            generation: 4,
+            source_commit_epoch: 5,
+            page_id: page_id(10),
+            body: ImmutableIndexPageBody::Posting(IndexPostingPage {
+                next: Some(page_id(9)),
+                row_ids: vec![row_id(1)],
+            }),
+        };
+        assert!(matches!(
+            backward_posting_link.encode(ImmutableIndexPageLimits::default()),
             Err(ImmutableIndexPageError::Admission(_))
         ));
     }

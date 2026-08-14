@@ -1222,6 +1222,305 @@ fn relational_index_shadow_publishes_generation_fenced_cold_pages() {
     std::fs::remove_dir_all(directory).expect("remove relational index shadow fixture");
 }
 
+#[test]
+fn relational_index_shadow_demand_reads_match_materialized_oracle() {
+    let state = RelationalState::default()
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![
+                    RelationalWrite::CreateTable(RelationalTableSchema {
+                        name: "documents".to_string(),
+                        columns: vec![
+                            text_column("id", false),
+                            text_column("owner", false),
+                            RelationalColumnSchema {
+                                name: "rank".to_string(),
+                                scalar_type: RelationalScalarType::BigInt,
+                                nullable: false,
+                                default: None,
+                            },
+                        ],
+                        primary_key: vec!["id".to_string()],
+                        unique_constraints: Vec::new(),
+                        foreign_keys: Vec::new(),
+                        indexes: vec![
+                            RelationalIndexSchema {
+                                name: "documents_owner_idx".to_string(),
+                                columns: vec!["owner".to_string()],
+                                unique: false,
+                            },
+                            RelationalIndexSchema {
+                                name: "documents_owner_rank_idx".to_string(),
+                                columns: vec!["owner".to_string(), "rank".to_string()],
+                                unique: false,
+                            },
+                        ],
+                    }),
+                    RelationalWrite::Insert {
+                        table: "documents".to_string(),
+                        rows: (0..60)
+                            .map(|ordinal| {
+                                RelationalRow::new(vec![
+                                    RelationalValue::Text(format!("doc-{ordinal:03}")),
+                                    RelationalValue::Text(format!("owner-{}", ordinal % 3)),
+                                    RelationalValue::BigInt(ordinal),
+                                ])
+                            })
+                            .collect(),
+                        mode: RelationalInsertMode::Error,
+                    },
+                ],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("build demand-read source");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "skein-relational-index-demand-read-{}-{nonce}",
+        std::process::id()
+    ));
+    let config = RelationalIndexShadowConfig {
+        page_limits: crate::ImmutableIndexPageLimits {
+            max_page_bytes: std::num::NonZeroUsize::new(1024).unwrap(),
+            max_entries: std::num::NonZeroUsize::new(2).unwrap(),
+            max_inline_postings: std::num::NonZeroUsize::new(2).unwrap(),
+            ..crate::ImmutableIndexPageLimits::default()
+        },
+        ..RelationalIndexShadowConfig::default()
+    };
+    RelationalIndexShadowWriter::new(config)
+        .publish(&directory, &state, 1, 80, None)
+        .expect("publish demand-read fixture");
+    let reader = RelationalIndexShadowReader::open(&directory, 1, 80, config)
+        .expect("open demand-read fixture cold");
+    let owner = RelationalKey(vec![RelationalValue::Text("owner-1".to_string())]);
+
+    let expected_exact = state
+        .index_lookup("documents", "documents_owner_idx", &owner)
+        .expect("materialized exact posting")
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut exact = Vec::new();
+    let exact_report = reader
+        .visit_exact_postings(
+            "documents",
+            "documents_owner_idx",
+            &owner,
+            RelationalIndexReadLimits::default(),
+            |key| {
+                exact.push(key.clone());
+                true
+            },
+        )
+        .expect("demand-read exact posting");
+    assert_eq!(exact, expected_exact);
+    assert_eq!(exact_report.rows_visited, expected_exact.len());
+    assert!(exact_report.pages_read < reader.manifest().page_count as usize);
+
+    let expected_prefix = state
+        .index_prefix_lookup("documents", "documents_owner_rank_idx", &owner, usize::MAX)
+        .expect("materialized prefix posting")
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut prefix = Vec::new();
+    let prefix_report = reader
+        .visit_prefix_postings(
+            "documents",
+            "documents_owner_rank_idx",
+            &owner,
+            RelationalIndexReadLimits::default(),
+            |key| {
+                prefix.push(key.clone());
+                true
+            },
+        )
+        .expect("demand-read composite prefix");
+    assert_eq!(prefix, expected_prefix);
+    assert_eq!(prefix_report.matched_index_keys, expected_prefix.len());
+    assert!(prefix_report.pages_read < reader.manifest().page_count as usize);
+
+    let primary_key = RelationalKey(vec![RelationalValue::Text("doc-031".to_string())]);
+    let mut primary = Vec::new();
+    let primary_report = reader
+        .visit_exact_postings(
+            "documents",
+            RELATIONAL_PRIMARY_INDEX_NAME,
+            &primary_key,
+            RelationalIndexReadLimits::default(),
+            |key| {
+                primary.push(key.clone());
+                true
+            },
+        )
+        .expect("demand-read primary key");
+    assert_eq!(primary, vec![primary_key]);
+    assert_eq!(primary_report.rows_visited, 1);
+
+    let mut early = Vec::new();
+    let early_report = reader
+        .visit_exact_postings(
+            "documents",
+            "documents_owner_idx",
+            &owner,
+            RelationalIndexReadLimits::default(),
+            |key| {
+                early.push(key.clone());
+                early.len() < 2
+            },
+        )
+        .expect("bounded early posting stop");
+    assert_eq!(early.len(), 2);
+    assert!(early_report.stopped_early);
+    assert_eq!(early_report.rows_visited, 2);
+    assert!(early_report.pages_read < exact_report.pages_read);
+
+    let low_page_limit = RelationalIndexReadLimits {
+        max_pages: std::num::NonZeroUsize::new(1).unwrap(),
+        ..RelationalIndexReadLimits::default()
+    };
+    let mut provisional_rows = 0usize;
+    assert!(matches!(
+        reader.visit_exact_postings(
+            "documents",
+            "documents_owner_idx",
+            &owner,
+            low_page_limit,
+            |_| {
+                provisional_rows += 1;
+                true
+            },
+        ),
+        Err(RelationalIndexShadowError::Admission(_))
+    ));
+    assert_eq!(provisional_rows, 0);
+    assert!(!reader.is_poisoned());
+
+    let low_byte_limit = RelationalIndexReadLimits {
+        max_bytes: std::num::NonZeroUsize::new(512).unwrap(),
+        ..RelationalIndexReadLimits::default()
+    };
+    assert!(matches!(
+        reader.visit_exact_postings(
+            "documents",
+            "documents_owner_idx",
+            &owner,
+            low_byte_limit,
+            |_| true,
+        ),
+        Err(RelationalIndexShadowError::Admission(_))
+    ));
+
+    let low_row_limit = RelationalIndexReadLimits {
+        max_rows: std::num::NonZeroUsize::new(3).unwrap(),
+        ..RelationalIndexReadLimits::default()
+    };
+    let mut provisional_rows = 0usize;
+    assert!(matches!(
+        reader.visit_exact_postings(
+            "documents",
+            "documents_owner_idx",
+            &owner,
+            low_row_limit,
+            |_| {
+                provisional_rows += 1;
+                true
+            },
+        ),
+        Err(RelationalIndexShadowError::Admission(_))
+    ));
+    assert_eq!(provisional_rows, 3);
+
+    let low_height_limit = RelationalIndexReadLimits {
+        max_tree_height: std::num::NonZeroU32::new(1).unwrap(),
+        ..RelationalIndexReadLimits::default()
+    };
+    assert!(matches!(
+        reader.visit_exact_postings(
+            "documents",
+            "documents_owner_idx",
+            &owner,
+            low_height_limit,
+            |_| true,
+        ),
+        Err(RelationalIndexShadowError::Admission(_))
+    ));
+    assert!(!reader.is_poisoned());
+
+    assert!(matches!(
+        reader.visit_exact_postings(
+            "documents",
+            "missing_idx",
+            &owner,
+            RelationalIndexReadLimits::default(),
+            |_| true,
+        ),
+        Err(RelationalIndexShadowError::MissingIndex { .. })
+    ));
+    assert!(!reader.is_poisoned());
+
+    let root_descriptor = reader
+        .manifest()
+        .root("documents", "documents_owner_idx")
+        .expect("owner root descriptor");
+    let root = reader
+        .read_root(root_descriptor)
+        .expect("read owner root before semantic corruption");
+    let mut interior_page = reader
+        .read_page(root.child)
+        .expect("read owner interior before semantic corruption");
+    let crate::ImmutableIndexPageBody::Interior(interior) = &mut interior_page.body else {
+        panic!("small-page fixture must build an interior owner page");
+    };
+    interior
+        .entries
+        .first_mut()
+        .expect("owner interior entry")
+        .upper_bound
+        .push(0);
+    let corrupt_slot = interior_page
+        .encode_slot(config.page_limits)
+        .expect("re-encode checksummed but inconsistent separator");
+    let artifact = directory.join(relational_index_shadow_artifact_file(1));
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&artifact)
+        .expect("open demand-read artifact");
+    use std::io::{Seek, Write};
+    let corrupt_offset = root
+        .child
+        .get()
+        .checked_sub(1)
+        .and_then(|ordinal| ordinal.checked_mul(1024))
+        .expect("interior page offset");
+    file.seek(std::io::SeekFrom::Start(corrupt_offset))
+        .expect("seek owner interior");
+    file.write_all(&corrupt_slot)
+        .expect("replace owner interior with inconsistent separator");
+    file.sync_all().expect("sync semantic corruption");
+    let corrupt_reader = RelationalIndexShadowReader::open(&directory, 1, 80, config)
+        .expect("cold open must not traverse the inconsistent separator");
+    assert!(matches!(
+        corrupt_reader.visit_exact_postings(
+            "documents",
+            "documents_owner_idx",
+            &owner,
+            RelationalIndexReadLimits::default(),
+            |_| true,
+        ),
+        Err(RelationalIndexShadowError::Corrupt(_))
+    ));
+    assert!(corrupt_reader.is_poisoned());
+
+    std::fs::remove_dir_all(directory).expect("remove demand-read fixture");
+}
+
 fn create_content_tables() -> RelationalTransaction {
     RelationalTransaction {
         writes: vec![

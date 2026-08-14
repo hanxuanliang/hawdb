@@ -19,12 +19,15 @@ pub use codec::{
     encode_relational_wal_batch, RelationalCheckpoint, RelationalDecodeLimits, RelationalWalBatch,
 };
 pub use index_shadow::{
-    relational_index_shadow_artifact_file, RelationalIndexRootDescriptor,
-    RelationalIndexShadowBuildReport, RelationalIndexShadowConfig, RelationalIndexShadowError,
-    RelationalIndexShadowManifest, RelationalIndexShadowReader, RelationalIndexShadowWriter,
+    relational_index_shadow_artifact_file, RelationalIndexReadLimits, RelationalIndexReadReport,
+    RelationalIndexRootDescriptor, RelationalIndexShadowBuildReport, RelationalIndexShadowConfig,
+    RelationalIndexShadowError, RelationalIndexShadowManifest, RelationalIndexShadowReader,
+    RelationalIndexShadowWriter, DEFAULT_RELATIONAL_INDEX_READ_BYTES,
+    DEFAULT_RELATIONAL_INDEX_READ_PAGES, DEFAULT_RELATIONAL_INDEX_READ_ROWS,
+    DEFAULT_RELATIONAL_INDEX_READ_TREE_HEIGHT,
     DEFAULT_RELATIONAL_INDEX_SHADOW_BUILD_METADATA_BYTES,
     DEFAULT_RELATIONAL_INDEX_SHADOW_MANIFEST_BYTES, DEFAULT_RELATIONAL_INDEX_SHADOW_ROOTS,
-    RELATIONAL_INDEX_SHADOW_MANIFEST_FILE,
+    RELATIONAL_INDEX_SHADOW_MANIFEST_FILE, RELATIONAL_PRIMARY_INDEX_NAME,
 };
 pub use overflow::{
     RelationalHydrationBudget, RelationalOverflowConfig, RelationalOverflowRef,

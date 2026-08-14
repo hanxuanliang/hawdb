@@ -100,6 +100,19 @@ access. The sequential slot writer uses constant page-accounting metadata; it
 does not retain a page-id set or offset directory proportional to index size.
 SQL still uses the existing materialized indexes in this stage.
 
+The relational demand reader implements step 3 without changing SQL routing.
+Exact-key traversal reads one root-to-leaf path; leading composite-key prefix
+traversal skips subtrees whose upper bound precedes the encoded prefix and
+stops after the contiguous prefix range. Oversized postings are streamed from
+their page chain and decoded back into logical composite primary keys. Every
+lookup enforces page, byte, row, and tree-height limits and reports the pages,
+bytes, leaf entries, matched keys, and rows it consumed. A callback may stop a
+large posting early; values observed before an eventual error are provisional
+and must be discarded. Admission or a missing root does not poison the reader,
+while structural, checksum, generation, and row-locator corruption does. The
+shadow remains non-serving until WAL delta recovery and production activation
+land separately.
+
 ## Identities and terminology
 
 - **Commit epoch**: monotonically increasing visibility identity; one atomic

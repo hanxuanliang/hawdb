@@ -21,6 +21,7 @@ readonly specifications=(
   SkeinPropertyIndexPruning
   SkeinIndexPublication
   SkeinRelationalIndexShadowPublication
+  SkeinRelationalIndexDemandRead
   SkeinProjectionDurability
   SkeinCompactionVisibility
   SkeinColumnGroupManifest

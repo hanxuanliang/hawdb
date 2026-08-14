@@ -415,6 +415,16 @@ The model deliberately does not allow SQL execution to consume the shadow;
 production activation still requires WAL delta recovery and differential read
 evidence.
 
+`SkeinRelationalIndexDemandRead.tla` models the non-serving demand-reader
+stage. Opening a reader keeps every page cold. A lookup loads only its ordered
+root/leaf/posting path while independently enforcing page, byte, and row
+budgets. Emitted row locators are always an ordered prefix of the materialized
+oracle; only a complete successful traversal equals the complete oracle, and
+an early-stop success is explicitly marked. Admission failure may leave
+provisional rows that the caller must discard, while page corruption poisons
+only the shadow reader. SQL shadow selection remains false in every modeled
+state.
+
 ## Derived Source Segment Publication
 
 `SkeinSourceSegmentPublication.tla` models Source scan sidecars, including the

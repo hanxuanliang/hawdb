@@ -17,10 +17,18 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod demand_read;
+
+pub use demand_read::{
+    RelationalIndexReadLimits, RelationalIndexReadReport, DEFAULT_RELATIONAL_INDEX_READ_BYTES,
+    DEFAULT_RELATIONAL_INDEX_READ_PAGES, DEFAULT_RELATIONAL_INDEX_READ_ROWS,
+    DEFAULT_RELATIONAL_INDEX_READ_TREE_HEIGHT,
+};
+
 const MANIFEST_MAGIC: &[u8; 8] = b"SKRIDXM1";
 const MANIFEST_VERSION: u16 = 1;
 const MANIFEST_HEADER_BYTES: usize = 92;
-const PRIMARY_INDEX_NAME: &str = "__primary__";
+pub const RELATIONAL_PRIMARY_INDEX_NAME: &str = "__primary__";
 const RELATIONAL_INDEX_SHADOW_LOCK_FILE: &str = "relational-index-shadow.lock";
 
 pub const RELATIONAL_INDEX_SHADOW_MANIFEST_FILE: &str = "relational-index-shadow.manifest.skein";
@@ -270,6 +278,10 @@ pub enum RelationalIndexShadowError {
     Admission(String),
     Corrupt(String),
     Durability(String),
+    MissingIndex {
+        table: String,
+        index: String,
+    },
     StaleGeneration {
         expected_previous: Option<u64>,
         actual_previous: Option<u64>,
@@ -285,6 +297,9 @@ impl fmt::Display for RelationalIndexShadowError {
             Self::Corrupt(message) => write!(formatter, "corrupt relational index shadow: {message}"),
             Self::Durability(message) => {
                 write!(formatter, "relational index shadow durability failed: {message}")
+            }
+            Self::MissingIndex { table, index } => {
+                write!(formatter, "relational index shadow has no root for {table}.{index}")
             }
             Self::StaleGeneration {
                 expected_previous,
@@ -395,7 +410,7 @@ impl RelationalIndexShadowWriter {
             let schema_digest = relational_schema_digest(schema)?;
             let identity = IndexIdentity {
                 namespace: table.clone(),
-                name: PRIMARY_INDEX_NAME.to_string(),
+                name: RELATIONAL_PRIMARY_INDEX_NAME.to_string(),
             };
             let mut tree = TreeWriter::new(
                 &mut pages,
@@ -598,6 +613,10 @@ impl RelationalIndexShadowReader {
         self.poisoned.load(Ordering::Acquire)
     }
 
+    pub(super) fn poison(&self) {
+        self.poisoned.store(true, Ordering::Release);
+    }
+
     pub fn read_page(
         &self,
         page_id: IndexPageId,
@@ -616,7 +635,7 @@ impl RelationalIndexShadowReader {
         }
         let result = self.read_page_inner(page_id);
         if result.is_err() {
-            self.poisoned.store(true, Ordering::Release);
+            self.poison();
         }
         result
     }
@@ -670,7 +689,7 @@ impl RelationalIndexShadowReader {
         }
         let page = self.read_page(descriptor.root_page_id)?;
         let ImmutableIndexPageBody::Root(root) = page.body else {
-            self.poisoned.store(true, Ordering::Release);
+            self.poison();
             return Err(RelationalIndexShadowError::Corrupt(format!(
                 "root descriptor {}.{} references a non-root page",
                 descriptor.identity.namespace, descriptor.identity.name
@@ -680,7 +699,7 @@ impl RelationalIndexShadowReader {
             || root.schema_digest != descriptor.schema_digest
             || root.height != descriptor.height
         {
-            self.poisoned.store(true, Ordering::Release);
+            self.poison();
             return Err(RelationalIndexShadowError::Corrupt(format!(
                 "root page {} disagrees with its manifest descriptor",
                 descriptor.root_page_id.get()
@@ -1542,7 +1561,7 @@ mod tests {
             roots: vec![RelationalIndexRootDescriptor {
                 identity: IndexIdentity {
                     namespace: "documents".to_string(),
-                    name: PRIMARY_INDEX_NAME.to_string(),
+                    name: RELATIONAL_PRIMARY_INDEX_NAME.to_string(),
                 },
                 schema_digest: integrity_digest(b"documents schema").sha256,
                 root_page_id: page_id(1, "test root").unwrap(),
