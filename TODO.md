@@ -101,9 +101,9 @@ dependency.
     primary-key, unique, UPSERT, and foreign-key decisions before WAL. The
     default remains `Materialized`; `Shadow` and `DemandPaged` keep their prior
     isolation and fallback semantics.
-  - Stop normal-open `rebuild_indexes()` in `Authoritative` mode. Derive live
-    change capture from before/after rows, and stream checkpoint index builds
-    without retaining database-sized postings.
+  - Generation publication already streams bounded index builds directly from
+    canonical rows. Stop normal-open `rebuild_indexes()` in `Authoritative`
+    mode and derive live change capture only from before/after rows.
   - Prove index-open I/O and mandatory residency remain independent of leaf and
     posting counts while preserving the materialized oracle in non-authoritative
     modes for differential rollback evidence.

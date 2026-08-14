@@ -1,8 +1,8 @@
 use super::{
     RelationalError, RelationalForeignKeySchema, RelationalIndexRole, RelationalKey,
-    RelationalKeySetPages, RelationalReferentialAction, RelationalScalarType, RelationalState,
-    RelationalTableSchema, RelationalValue, RELATIONAL_FOREIGN_KEY_INDEX_PREFIX,
-    RELATIONAL_PRIMARY_INDEX_NAME, RELATIONAL_UNIQUE_INDEX_PREFIX,
+    RelationalReferentialAction, RelationalScalarType, RelationalState, RelationalTableSchema,
+    RelationalValue, RELATIONAL_FOREIGN_KEY_INDEX_PREFIX, RELATIONAL_PRIMARY_INDEX_NAME,
+    RELATIONAL_UNIQUE_INDEX_PREFIX,
 };
 use crate::cache::SegmentCacheIdentity;
 use crate::{
@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
+mod build;
 mod demand_read;
 mod recovery;
 
@@ -52,6 +53,10 @@ pub const RELATIONAL_INDEX_SHADOW_MANIFEST_FILE: &str = "relational-index-shadow
 pub const DEFAULT_RELATIONAL_INDEX_SHADOW_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
 pub const DEFAULT_RELATIONAL_INDEX_SHADOW_ROOTS: usize = 4096;
 pub const DEFAULT_RELATIONAL_INDEX_SHADOW_BUILD_METADATA_BYTES: usize = 64 * 1024 * 1024;
+pub const DEFAULT_RELATIONAL_INDEX_SORT_MEMORY_BYTES: usize = 16 * 1024 * 1024;
+pub const DEFAULT_RELATIONAL_INDEX_SORT_SPILL_BYTES: u64 = 4 * 1024 * 1024 * 1024 * 1024;
+pub const DEFAULT_RELATIONAL_INDEX_SORT_RUNS: usize = 4096;
+pub const DEFAULT_RELATIONAL_INDEX_SORT_MERGE_FAN_IN: usize = 32;
 
 pub fn relational_index_shadow_artifact_file(generation: u64) -> String {
     format!("relational-index-shadow-{generation}.pages.skein")
@@ -100,6 +105,10 @@ pub struct RelationalIndexShadowConfig {
     pub max_manifest_bytes: NonZeroUsize,
     pub max_roots: NonZeroUsize,
     pub max_build_metadata_bytes: NonZeroUsize,
+    pub max_sort_memory_bytes: NonZeroUsize,
+    pub max_sort_spill_bytes: NonZeroU64,
+    pub max_sort_runs: NonZeroUsize,
+    pub max_sort_merge_fan_in: NonZeroUsize,
 }
 
 impl Default for RelationalIndexShadowConfig {
@@ -114,6 +123,14 @@ impl Default for RelationalIndexShadowConfig {
                 DEFAULT_RELATIONAL_INDEX_SHADOW_BUILD_METADATA_BYTES,
             )
             .expect("default relational index build metadata limit is non-zero"),
+            max_sort_memory_bytes: NonZeroUsize::new(DEFAULT_RELATIONAL_INDEX_SORT_MEMORY_BYTES)
+                .expect("default relational index sort memory limit is non-zero"),
+            max_sort_spill_bytes: NonZeroU64::new(DEFAULT_RELATIONAL_INDEX_SORT_SPILL_BYTES)
+                .expect("default relational index sort spill limit is non-zero"),
+            max_sort_runs: NonZeroUsize::new(DEFAULT_RELATIONAL_INDEX_SORT_RUNS)
+                .expect("default relational index sort run limit is non-zero"),
+            max_sort_merge_fan_in: NonZeroUsize::new(DEFAULT_RELATIONAL_INDEX_SORT_MERGE_FAN_IN)
+                .expect("default relational index sort merge fan-in is non-zero"),
         }
     }
 }
@@ -365,6 +382,9 @@ pub struct RelationalIndexShadowBuildReport {
     pub artifact_bytes: u64,
     pub manifest_bytes: u64,
     pub peak_build_metadata_bytes: usize,
+    pub sort_spill_run_count: usize,
+    pub sort_spill_bytes: u64,
+    pub peak_sort_memory_bytes: usize,
     pub generation_artifacts: RelationalIndexGenerationArtifacts,
 }
 
@@ -441,6 +461,7 @@ impl RelationalIndexShadowWriter {
             ));
         }
         let _lock = acquire_publication_lock(directory)?;
+        cleanup_stale_sort_runs(directory)?;
         let paths = ShadowPublicationPaths::new(directory, generation);
         let actual_previous = current_generation(&paths.manifest, self.config)?;
         if actual_previous != expected_previous_generation {
@@ -485,6 +506,7 @@ impl RelationalIndexShadowWriter {
             ));
         }
         let _lock = acquire_publication_lock(directory)?;
+        cleanup_stale_sort_runs(directory)?;
         let paths = ShadowPublicationPaths::for_generation(directory, generation);
         let result = self.build_and_publish(state, generation, source_commit_epoch, None, &paths);
         if result.is_err() {
@@ -502,6 +524,11 @@ impl RelationalIndexShadowWriter {
         expected_previous_generation: Option<Option<u64>>,
         paths: &ShadowPublicationPaths,
     ) -> Result<RelationalIndexShadowBuildReport, RelationalIndexShadowError> {
+        if self.config.max_sort_merge_fan_in.get() < 2 {
+            return Err(RelationalIndexShadowError::Admission(
+                "relational index sort merge fan-in must be at least two".to_string(),
+            ));
+        }
         required_root_count(state, self.config.max_roots.get(), ErrorClass::Admission)?;
         let file =
             File::create(&paths.artifact_tmp).map_err(durability("create shadow artifact"))?;
@@ -513,6 +540,9 @@ impl RelationalIndexShadowWriter {
         );
         let mut roots = Vec::new();
         let mut peak_build_metadata_bytes = 0usize;
+        let mut sort_spill_run_count = 0usize;
+        let mut sort_spill_bytes = 0u64;
+        let mut peak_sort_memory_bytes = 0usize;
         for (table, schema) in &state.schemas {
             let segment = state.segments.get(table).ok_or_else(|| {
                 RelationalIndexShadowError::Corrupt(format!(
@@ -541,17 +571,47 @@ impl RelationalIndexShadowWriter {
                         })?;
                     }
                 } else {
-                    let index = segment.indexes.get(&definition.name).ok_or_else(|| {
-                        RelationalIndexShadowError::Corrupt(format!(
-                            "table {table} is missing required {:?} index {}",
-                            definition.role, definition.name
-                        ))
-                    })?;
-                    for (key, postings) in index.iter() {
-                        let key = encode_relational_key(key)?;
-                        let posting = tree.write_postings(postings)?;
-                        tree.push(IndexLeafEntry { key, posting })?;
-                    }
+                    let remaining_spill_bytes = self
+                        .config
+                        .max_sort_spill_bytes
+                        .get()
+                        .checked_sub(sort_spill_bytes)
+                        .ok_or_else(|| {
+                            RelationalIndexShadowError::Admission(
+                                "relational index build exhausted its spill byte budget"
+                                    .to_string(),
+                            )
+                        })?;
+                    let sort_report = build::write_index_from_rows(
+                        &mut tree,
+                        build::IndexBuildInput {
+                            state,
+                            table,
+                            schema,
+                            definition: &definition,
+                            spill_prefix: &paths.artifact_tmp,
+                            generation,
+                            root_ordinal: roots.len(),
+                            config: self.config,
+                            max_spill_bytes: remaining_spill_bytes,
+                        },
+                    )?;
+                    sort_spill_run_count = sort_spill_run_count
+                        .checked_add(sort_report.spill_run_count)
+                        .ok_or_else(|| {
+                            RelationalIndexShadowError::Admission(
+                                "relational index spill run count overflow".to_string(),
+                            )
+                        })?;
+                    sort_spill_bytes = sort_spill_bytes
+                        .checked_add(sort_report.spill_bytes)
+                        .ok_or_else(|| {
+                            RelationalIndexShadowError::Admission(
+                                "relational index spill byte count overflow".to_string(),
+                            )
+                        })?;
+                    peak_sort_memory_bytes =
+                        peak_sort_memory_bytes.max(sort_report.peak_memory_bytes);
                 }
                 let (root, peak) = tree.finish()?;
                 peak_build_metadata_bytes = peak_build_metadata_bytes.max(peak);
@@ -622,6 +682,9 @@ impl RelationalIndexShadowWriter {
             artifact_bytes,
             manifest_bytes: encoded_manifest.len() as u64,
             peak_build_metadata_bytes,
+            sort_spill_run_count,
+            sort_spill_bytes,
+            peak_sort_memory_bytes,
             generation_artifacts: RelationalIndexGenerationArtifacts {
                 generation,
                 source_commit_epoch,
@@ -646,6 +709,21 @@ fn acquire_publication_lock(directory: &Path) -> Result<File, RelationalIndexSha
     lock.lock_exclusive()
         .map_err(durability("lock relational index publication"))?;
     Ok(lock)
+}
+
+fn cleanup_stale_sort_runs(directory: &Path) -> Result<(), RelationalIndexShadowError> {
+    for entry in fs::read_dir(directory).map_err(durability("list relational index directory"))? {
+        let entry = entry.map_err(durability("read relational index directory entry"))?;
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if file_name.starts_with(".relational-index.")
+            && file_name.contains(".run.")
+            && file_name.ends_with(".tmp")
+        {
+            fs::remove_file(entry.path()).map_err(durability("remove stale index sort run"))?;
+        }
+    }
+    Ok(())
 }
 
 struct ShadowPublicationPaths {
@@ -1105,19 +1183,6 @@ impl SlotWriter {
         Ok(page_id)
     }
 
-    fn reserve(&mut self, count: usize) -> Result<IndexPageId, RelationalIndexShadowError> {
-        if count == 0 {
-            return Err(RelationalIndexShadowError::Admission(
-                "cannot reserve zero index pages".to_string(),
-            ));
-        }
-        let first = page_id(self.next_page_id, "reserved page id")?;
-        self.next_page_id = self.next_page_id.checked_add(count as u64).ok_or_else(|| {
-            RelationalIndexShadowError::Admission("index page id overflow".to_string())
-        })?;
-        Ok(first)
-    }
-
     fn write(
         &mut self,
         page_id: IndexPageId,
@@ -1259,81 +1324,86 @@ impl<'a> TreeWriter<'a> {
         Ok(())
     }
 
-    fn write_postings(
+    fn write_encoded_postings<I>(
         &mut self,
-        postings: &RelationalKeySetPages,
-    ) -> Result<IndexLeafPosting, RelationalIndexShadowError> {
-        if postings.len <= self.pages.limits.max_inline_postings.get() {
-            let inline_bytes = postings.iter().try_fold(0usize, |bytes, key| {
-                let encoded = encode_relational_key(key)?;
-                bytes.checked_add(4 + encoded.len()).ok_or_else(|| {
-                    RelationalIndexShadowError::Admission(
-                        "inline posting size overflow".to_string(),
-                    )
-                })
-            })?;
-            if inline_bytes <= max_page_payload(self.pages.limits)? / 2 {
-                let row_ids = postings
-                    .iter()
-                    .map(|key| encode_relational_key(key).map(IndexRowId::new))
-                    .collect::<Result<Vec<_>, _>>()?;
-                return Ok(IndexLeafPosting::Inline(row_ids));
+        row_ids: I,
+        unique: bool,
+    ) -> Result<IndexLeafPosting, RelationalIndexShadowError>
+    where
+        I: IntoIterator<Item = Result<Vec<u8>, RelationalIndexShadowError>>,
+    {
+        let limits = self.pages.limits;
+        let max_inline_postings = limits.max_inline_postings.get();
+        let max_inline_bytes = max_page_payload(limits)? / 2;
+        let identity = (self.identity.namespace.clone(), self.identity.name.clone());
+        let mut inline = Vec::new();
+        let mut inline_bytes = 0usize;
+        let mut paged = None;
+        let mut previous = None;
+        let mut total_rows = 0u64;
+        for row_id in row_ids {
+            let row_id = row_id?;
+            if row_id.is_empty() || row_id.len() > limits.max_row_id_bytes.get() {
+                return Err(RelationalIndexShadowError::Admission(format!(
+                    "encoded relational row id contains {} bytes, exceeding limit {}",
+                    row_id.len(),
+                    limits.max_row_id_bytes
+                )));
             }
-        }
-
-        let chunk_count = posting_chunk_count(postings, self.pages.limits)?;
-        let first = self.pages.reserve(chunk_count)?;
-        let max_payload = max_page_payload(self.pages.limits)?;
-        let next_field_bytes = 6usize + 8;
-        let mut chunk = Vec::new();
-        let mut chunk_bytes = next_field_bytes;
-        let mut ordinal = 0usize;
-        for key in postings.iter() {
-            let row_id = IndexRowId::new(encode_relational_key(key)?);
-            let entry_bytes = 6usize.checked_add(row_id.as_bytes().len()).ok_or_else(|| {
-                RelationalIndexShadowError::Admission("posting entry size overflow".to_string())
-            })?;
-            if !chunk.is_empty()
-                && (chunk.len() >= self.pages.limits.max_entries.get()
-                    || chunk_bytes.saturating_add(entry_bytes) > max_payload)
+            if previous
+                .as_ref()
+                .is_some_and(|previous: &Vec<u8>| previous.as_slice() >= row_id.as_slice())
             {
-                self.write_posting_chunk(first, ordinal, chunk_count, std::mem::take(&mut chunk))?;
-                ordinal += 1;
-                chunk_bytes = next_field_bytes;
+                return Err(RelationalIndexShadowError::Corrupt(
+                    "relational index posting row ids are not strictly ordered".to_string(),
+                ));
             }
-            chunk_bytes = chunk_bytes.saturating_add(entry_bytes);
-            chunk.push(row_id);
+            total_rows = total_rows.checked_add(1).ok_or_else(|| {
+                RelationalIndexShadowError::Admission(
+                    "relational index posting row count overflow".to_string(),
+                )
+            })?;
+            if unique && total_rows > 1 {
+                return Err(RelationalIndexShadowError::Corrupt(format!(
+                    "unique relational index {}.{} contains duplicate keys",
+                    identity.0, identity.1
+                )));
+            }
+            let row_id = IndexRowId::new(row_id);
+            let entry_bytes = 4usize.checked_add(row_id.as_bytes().len()).ok_or_else(|| {
+                RelationalIndexShadowError::Admission("inline posting size overflow".to_string())
+            })?;
+            if paged.is_none()
+                && inline.len() < max_inline_postings
+                && inline_bytes.saturating_add(entry_bytes) <= max_inline_bytes
+            {
+                previous = Some(row_id.as_bytes().to_vec());
+                inline_bytes = inline_bytes.saturating_add(entry_bytes);
+                inline.push(row_id);
+                continue;
+            }
+            if paged.is_none() {
+                let mut stream = PostingPageStream::new(self.pages)?;
+                for buffered in std::mem::take(&mut inline) {
+                    stream.push(buffered)?;
+                }
+                paged = Some(stream);
+            }
+            previous = Some(row_id.as_bytes().to_vec());
+            paged
+                .as_mut()
+                .expect("posting page stream was initialized")
+                .push(row_id)?;
         }
-        if !chunk.is_empty() {
-            self.write_posting_chunk(first, ordinal, chunk_count, chunk)?;
-            ordinal += 1;
+        if total_rows == 0 {
+            return Err(RelationalIndexShadowError::Corrupt(
+                "relational index contains an empty posting list".to_string(),
+            ));
         }
-        if ordinal != chunk_count {
-            return Err(RelationalIndexShadowError::Corrupt(format!(
-                "posting chunk count changed between sizing and write: expected {chunk_count}, wrote {ordinal}"
-            )));
+        match paged {
+            Some(stream) => stream.finish(total_rows),
+            None => Ok(IndexLeafPosting::Inline(inline)),
         }
-        Ok(IndexLeafPosting::Page {
-            first,
-            total_rows: postings.len as u64,
-        })
-    }
-
-    fn write_posting_chunk(
-        &mut self,
-        first: IndexPageId,
-        ordinal: usize,
-        chunk_count: usize,
-        row_ids: Vec<IndexRowId>,
-    ) -> Result<(), RelationalIndexShadowError> {
-        let current = page_id(first.get() + ordinal as u64, "posting page id")?;
-        let next = (ordinal + 1 < chunk_count)
-            .then(|| page_id(current.get() + 1, "next posting page id"))
-            .transpose()?;
-        self.pages.write(
-            current,
-            ImmutableIndexPageBody::Posting(IndexPostingPage { next, row_ids }),
-        )
     }
 
     fn flush_leaf(&mut self) -> Result<(), RelationalIndexShadowError> {
@@ -1426,6 +1496,72 @@ impl<'a> TreeWriter<'a> {
     }
 }
 
+struct PostingPageStream<'a> {
+    pages: &'a mut SlotWriter,
+    first: IndexPageId,
+    current: IndexPageId,
+    row_ids: Vec<IndexRowId>,
+    payload_bytes: usize,
+}
+
+impl<'a> PostingPageStream<'a> {
+    fn new(pages: &'a mut SlotWriter) -> Result<Self, RelationalIndexShadowError> {
+        let first = pages.allocate()?;
+        Ok(Self {
+            pages,
+            first,
+            current: first,
+            row_ids: Vec::new(),
+            payload_bytes: 6 + 8,
+        })
+    }
+
+    fn push(&mut self, row_id: IndexRowId) -> Result<(), RelationalIndexShadowError> {
+        let entry_bytes = 6usize.checked_add(row_id.as_bytes().len()).ok_or_else(|| {
+            RelationalIndexShadowError::Admission("posting entry size overflow".to_string())
+        })?;
+        let max_payload = max_page_payload(self.pages.limits)?;
+        if entry_bytes.saturating_add(6 + 8) > max_payload {
+            return Err(RelationalIndexShadowError::Admission(
+                "one posting row id exceeds the page payload limit".to_string(),
+            ));
+        }
+        if !self.row_ids.is_empty()
+            && (self.row_ids.len() >= self.pages.limits.max_entries.get()
+                || self.payload_bytes.saturating_add(entry_bytes) > max_payload)
+        {
+            let next = self.pages.allocate()?;
+            self.flush(Some(next))?;
+            self.current = next;
+        }
+        self.payload_bytes = self.payload_bytes.saturating_add(entry_bytes);
+        self.row_ids.push(row_id);
+        Ok(())
+    }
+
+    fn finish(mut self, total_rows: u64) -> Result<IndexLeafPosting, RelationalIndexShadowError> {
+        if self.row_ids.is_empty() {
+            return Err(RelationalIndexShadowError::Corrupt(
+                "relational index posting page stream is empty".to_string(),
+            ));
+        }
+        self.flush(None)?;
+        Ok(IndexLeafPosting::Page {
+            first: self.first,
+            total_rows,
+        })
+    }
+
+    fn flush(&mut self, next: Option<IndexPageId>) -> Result<(), RelationalIndexShadowError> {
+        let row_ids = std::mem::take(&mut self.row_ids);
+        self.payload_bytes = 6 + 8;
+        self.pages.write(
+            self.current,
+            ImmutableIndexPageBody::Posting(IndexPostingPage { next, row_ids }),
+        )
+    }
+}
+
 fn write_interior_level(
     pages: &mut SlotWriter,
     children: Vec<ChildPage>,
@@ -1506,53 +1642,6 @@ fn flush_interior(
         page_id,
     });
     Ok(())
-}
-
-fn posting_chunk_count(
-    postings: &RelationalKeySetPages,
-    limits: ImmutableIndexPageLimits,
-) -> Result<usize, RelationalIndexShadowError> {
-    let max_payload = max_page_payload(limits)?;
-    let mut chunks = 0usize;
-    let mut entries = 0usize;
-    let mut payload_bytes = 6usize + 8;
-    for key in postings.iter() {
-        let row_id = encode_relational_key(key)?;
-        if row_id.len() > limits.max_row_id_bytes.get() {
-            return Err(RelationalIndexShadowError::Admission(format!(
-                "encoded primary key contains {} bytes, exceeding row-id limit {}",
-                row_id.len(),
-                limits.max_row_id_bytes
-            )));
-        }
-        let entry_bytes = 6usize.checked_add(row_id.len()).ok_or_else(|| {
-            RelationalIndexShadowError::Admission("posting entry size overflow".to_string())
-        })?;
-        if entry_bytes + 6 + 8 > max_payload {
-            return Err(RelationalIndexShadowError::Admission(
-                "one posting row id exceeds the page payload limit".to_string(),
-            ));
-        }
-        if entries > 0
-            && (entries >= limits.max_entries.get()
-                || payload_bytes.saturating_add(entry_bytes) > max_payload)
-        {
-            chunks = chunks.saturating_add(1);
-            entries = 0;
-            payload_bytes = 6 + 8;
-        }
-        entries += 1;
-        payload_bytes = payload_bytes.saturating_add(entry_bytes);
-    }
-    if entries > 0 {
-        chunks = chunks.saturating_add(1);
-    }
-    if chunks == 0 {
-        return Err(RelationalIndexShadowError::Corrupt(
-            "materialized index contains an empty posting list".to_string(),
-        ));
-    }
-    Ok(chunks)
 }
 
 fn leaf_entry_payload_bytes(entry: &IndexLeafEntry) -> Result<usize, RelationalIndexShadowError> {

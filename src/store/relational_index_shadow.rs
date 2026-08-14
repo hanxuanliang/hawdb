@@ -754,6 +754,9 @@ pub struct RelationalIndexShadowCheckpointReport {
     pub artifact_bytes: u64,
     pub manifest_bytes: u64,
     pub peak_build_metadata_bytes: usize,
+    pub sort_spill_run_count: usize,
+    pub sort_spill_bytes: u64,
+    pub peak_sort_memory_bytes: usize,
     pub generation_artifacts: Option<RelationalIndexGenerationArtifacts>,
     pub error: Option<String>,
 }
@@ -775,6 +778,9 @@ impl RelationalIndexShadowCheckpointReport {
             artifact_bytes: report.artifact_bytes,
             manifest_bytes: report.manifest_bytes,
             peak_build_metadata_bytes: report.peak_build_metadata_bytes,
+            sort_spill_run_count: report.sort_spill_run_count,
+            sort_spill_bytes: report.sort_spill_bytes,
+            peak_sort_memory_bytes: report.peak_sort_memory_bytes,
             generation_artifacts: Some(report.generation_artifacts),
             error: None,
         }
@@ -790,6 +796,9 @@ impl RelationalIndexShadowCheckpointReport {
             artifact_bytes: 0,
             manifest_bytes: 0,
             peak_build_metadata_bytes: 0,
+            sort_spill_run_count: 0,
+            sort_spill_bytes: 0,
+            peak_sort_memory_bytes: 0,
             generation_artifacts: None,
             error: Some(error),
         }

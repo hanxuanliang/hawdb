@@ -246,7 +246,27 @@ corruption returns an error and provisional rows are discarded. A ready report
 is evidence for sampled constraint semantics only. It does not itself change
 routing. Selecting `Authoritative` is the separate explicit activation step;
 materialized postings remain available only as a transitional differential
-oracle and checkpoint-build input.
+oracle for non-authoritative modes.
+
+Relational index generation builds derive every non-primary entry directly
+from the canonical rows rather than reading the materialized posting maps. A
+root that fits its configured sort-memory budget remains in memory. A larger
+root uses bounded external-sort runs with explicit aggregate spill-byte,
+per-root run-count, and merge-fan-in limits. The final merge groups one ordered
+index key at a time and streams row identifiers into bounded posting pages;
+neither one high-cardinality posting nor the complete index is retained during
+page encoding. A merge derives its exact output length from admitted source
+runs and reserves that cumulative spill budget before creating the destination
+run. Sort admission reserves I/O buffers and charges two-times
+headroom for growable entry and merge-heap allocations. Every temporary entry
+has a CRC32C so a corrupted spill cannot be re-encoded as a self-consistent
+published index. Temporary runs are not durable state and are removed after
+success or failure; a later publisher removes stale runs under the exclusive
+publication lock after a process crash. A stale run that cannot be removed
+fails the build instead of silently accumulating disk use. Build reports expose
+cumulative run and spill bytes plus peak sort-memory bytes. This changes
+checkpoint construction only: ordinary open still materializes postings until
+the separate authoritative-residency stage removes that dependency.
 
 PostgreSQL SQL activation is controlled by
 `DatabaseConfig::relational_index_mode`. `Materialized` is the default rollback
@@ -417,7 +437,8 @@ Index startup has a stronger bound:
   dirty-recovery state, not index entry or leaf-page count.
 
 The current unconditional `rebuild_indexes()` behavior is a migration oracle,
-not the target open path.
+not the target open path. Generation publication no longer consumes that
+oracle; only non-authoritative runtime and differential paths retain it.
 
 ### WAL index recovery
 

@@ -36,6 +36,8 @@ pub use index_shadow::{
     DEFAULT_RELATIONAL_INDEX_RECOVERY_MANIFEST_BYTES, DEFAULT_RELATIONAL_INDEX_RECOVERY_PAGES,
     DEFAULT_RELATIONAL_INDEX_SHADOW_BUILD_METADATA_BYTES,
     DEFAULT_RELATIONAL_INDEX_SHADOW_MANIFEST_BYTES, DEFAULT_RELATIONAL_INDEX_SHADOW_ROOTS,
+    DEFAULT_RELATIONAL_INDEX_SORT_MEMORY_BYTES, DEFAULT_RELATIONAL_INDEX_SORT_MERGE_FAN_IN,
+    DEFAULT_RELATIONAL_INDEX_SORT_RUNS, DEFAULT_RELATIONAL_INDEX_SORT_SPILL_BYTES,
     RELATIONAL_INDEX_RECOVERY_MANIFEST_FILE, RELATIONAL_INDEX_SHADOW_MANIFEST_FILE,
 };
 pub use overflow::{
@@ -675,10 +677,6 @@ struct RelationalIndexPages {
 }
 
 impl RelationalIndexPages {
-    fn iter(&self) -> impl DoubleEndedIterator<Item = (&RelationalKey, &RelationalKeySetPages)> {
-        self.pages.iter().flat_map(|page| page.iter())
-    }
-
     fn page_index(&self, key: &RelationalKey) -> Option<usize> {
         if self.pages.is_empty() {
             return None;

@@ -1769,6 +1769,204 @@ fn relational_index_shadow_publishes_generation_fenced_cold_pages() {
 }
 
 #[test]
+fn relational_index_shadow_streams_rows_without_materialized_postings() {
+    let mut state = RelationalState::default()
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![
+                    RelationalWrite::CreateTable(RelationalTableSchema {
+                        name: "documents".to_string(),
+                        columns: vec![text_column("id", false), text_column("owner", false)],
+                        primary_key: vec!["id".to_string()],
+                        unique_constraints: Vec::new(),
+                        foreign_keys: Vec::new(),
+                        indexes: vec![RelationalIndexSchema {
+                            name: "documents_owner_idx".to_string(),
+                            columns: vec!["owner".to_string()],
+                            unique: false,
+                        }],
+                    }),
+                    RelationalWrite::Insert {
+                        table: "documents".to_string(),
+                        rows: (0..1024)
+                            .map(|ordinal| {
+                                RelationalRow::new(vec![
+                                    RelationalValue::Text(format!("doc-{ordinal:03}")),
+                                    RelationalValue::Text(format!("owner-{}", ordinal % 4)),
+                                ])
+                            })
+                            .collect(),
+                        mode: RelationalInsertMode::Error,
+                    },
+                ],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("build row-stream index source");
+    let owner = RelationalKey(vec![RelationalValue::Text("owner-1".to_string())]);
+    let expected = state
+        .index_lookup("documents", "documents_owner_idx", &owner)
+        .expect("materialized differential oracle")
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    for segment in state.segments.values_mut() {
+        Arc::make_mut(segment).indexes.clear();
+    }
+    assert!(state
+        .index_lookup("documents", "documents_owner_idx", &owner)
+        .is_none());
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "skein-relational-index-row-stream-{}-{nonce}",
+        std::process::id()
+    ));
+    let config = RelationalIndexShadowConfig {
+        page_limits: crate::ImmutableIndexPageLimits {
+            max_page_bytes: std::num::NonZeroUsize::new(1024).unwrap(),
+            max_entries: std::num::NonZeroUsize::new(2).unwrap(),
+            max_inline_postings: std::num::NonZeroUsize::new(2).unwrap(),
+            ..crate::ImmutableIndexPageLimits::default()
+        },
+        max_sort_memory_bytes: std::num::NonZeroUsize::new(32 * 1024).unwrap(),
+        max_sort_runs: std::num::NonZeroUsize::new(128).unwrap(),
+        max_sort_merge_fan_in: std::num::NonZeroUsize::new(2).unwrap(),
+        ..RelationalIndexShadowConfig::default()
+    };
+    std::fs::create_dir_all(&directory).expect("create row-stream index directory");
+    let stale_run = directory.join(".relational-index.0.0.run.0.tmp");
+    std::fs::write(&stale_run, b"stale").expect("write stale relational index sort run");
+    let report = RelationalIndexShadowWriter::new(config)
+        .publish(&directory, &state, 1, 9, None)
+        .expect("stream index generation from canonical rows");
+    assert!(!stale_run.exists());
+    assert!(report.sort_spill_run_count > 1);
+    assert!(report.sort_spill_bytes > 0);
+    assert!(report.peak_sort_memory_bytes <= config.max_sort_memory_bytes.get());
+
+    let reader = RelationalIndexShadowReader::open(&directory, 1, 9, config)
+        .expect("open row-stream index generation");
+    let mut actual = Vec::new();
+    reader
+        .visit_exact_postings(
+            "documents",
+            "documents_owner_idx",
+            &owner,
+            RelationalIndexReadLimits::default(),
+            |key| {
+                actual.push(key.clone());
+                true
+            },
+        )
+        .expect("read externally sorted postings");
+    assert_eq!(actual, expected);
+    assert!(std::fs::read_dir(&directory)
+        .expect("list relational index directory")
+        .all(|entry| !entry
+            .expect("read relational index directory entry")
+            .file_name()
+            .to_string_lossy()
+            .contains(".run.")));
+    std::fs::remove_dir_all(directory).expect("remove row-stream index fixture");
+}
+
+#[test]
+fn relational_index_shadow_rejects_and_cleans_excess_spill_runs() {
+    let state = RelationalState::default()
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![
+                    RelationalWrite::CreateTable(RelationalTableSchema {
+                        name: "documents".to_string(),
+                        columns: vec![text_column("id", false), text_column("owner", false)],
+                        primary_key: vec!["id".to_string()],
+                        unique_constraints: Vec::new(),
+                        foreign_keys: Vec::new(),
+                        indexes: vec![RelationalIndexSchema {
+                            name: "documents_owner_idx".to_string(),
+                            columns: vec!["owner".to_string()],
+                            unique: false,
+                        }],
+                    }),
+                    RelationalWrite::Insert {
+                        table: "documents".to_string(),
+                        rows: (0..32)
+                            .map(|ordinal| {
+                                RelationalRow::new(vec![
+                                    RelationalValue::Text(format!("doc-{ordinal:03}")),
+                                    RelationalValue::Text(format!("owner-{ordinal:03}")),
+                                ])
+                            })
+                            .collect(),
+                        mode: RelationalInsertMode::Error,
+                    },
+                ],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("build spill rejection source");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "skein-relational-index-spill-rejection-{}-{nonce}",
+        std::process::id()
+    ));
+    let config = RelationalIndexShadowConfig {
+        max_sort_memory_bytes: std::num::NonZeroUsize::new(1024).unwrap(),
+        max_sort_runs: std::num::NonZeroUsize::new(1).unwrap(),
+        ..RelationalIndexShadowConfig::default()
+    };
+    let error = RelationalIndexShadowWriter::new(config)
+        .publish(&directory, &state, 1, 1, None)
+        .expect_err("spill run budget must reject the build");
+    assert!(matches!(
+        error,
+        RelationalIndexShadowError::Admission(message)
+            if message.contains("spill runs") && message.contains("exceeding limit 1")
+    ));
+    assert!(!directory
+        .join(relational_index_shadow_artifact_file(1))
+        .exists());
+    assert!(std::fs::read_dir(&directory)
+        .expect("list rejected relational index directory")
+        .all(|entry| !entry
+            .expect("read rejected relational index directory entry")
+            .file_name()
+            .to_string_lossy()
+            .contains(".run.")));
+
+    let spill_byte_config = RelationalIndexShadowConfig {
+        max_sort_memory_bytes: std::num::NonZeroUsize::new(1024).unwrap(),
+        max_sort_spill_bytes: std::num::NonZeroU64::new(1).unwrap(),
+        ..RelationalIndexShadowConfig::default()
+    };
+    let error = RelationalIndexShadowWriter::new(spill_byte_config)
+        .publish(&directory, &state, 1, 1, None)
+        .expect_err("spill byte budget must reject the build");
+    assert!(matches!(
+        error,
+        RelationalIndexShadowError::Admission(message)
+            if message.contains("spill bytes") && message.contains("exceeding limit 1")
+    ));
+    assert!(std::fs::read_dir(&directory)
+        .expect("list spill-byte rejection directory")
+        .all(|entry| !entry
+            .expect("read spill-byte rejection directory entry")
+            .file_name()
+            .to_string_lossy()
+            .contains(".run.")));
+    std::fs::remove_dir_all(directory).expect("remove spill rejection fixture");
+}
+
+#[test]
 fn required_relational_index_roots_cover_constraints_and_foreign_keys() {
     let state = RelationalState::default()
         .stage_transaction(
