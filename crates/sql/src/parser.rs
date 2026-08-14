@@ -2,8 +2,8 @@ use crate::ast::*;
 use skein_core::{Result, SkeinError, Value};
 use sqlparser::ast::{
     BinaryOperator, Distinct, DuplicateTreatment, Expr, FunctionArg, FunctionArgExpr,
-    FunctionArguments, GroupByExpr, Ident, JoinConstraint, JoinOperator, LimitClause, ObjectName,
-    ObjectNamePart, OrderByKind, SelectItem as ParserSelectItem, SetExpr,
+    FunctionArguments, GroupByExpr, Ident, JoinConstraint, JoinOperator, LimitClause, LockClause,
+    LockType, ObjectName, ObjectNamePart, OrderByKind, SelectItem as ParserSelectItem, SetExpr,
     Statement as ParserStatement, TableAlias, TableFactor, Value as ParserValue, ValueWithSpan,
 };
 use sqlparser::dialect::PostgreSqlDialect;
@@ -79,7 +79,6 @@ fn lower_statement(statement: &ParserStatement) -> Result<SqlStatement> {
 fn lower_select_statement(query: &sqlparser::ast::Query) -> Result<SqlStatement> {
     if query.with.is_some()
         || query.fetch.is_some()
-        || !query.locks.is_empty()
         || query.for_clause.is_some()
         || query.settings.is_some()
         || query.format_clause.is_some()
@@ -130,6 +129,27 @@ fn lower_select_statement(query: &sqlparser::ast::Query) -> Result<SqlStatement>
         order_by: lower_order_by(query.order_by.as_ref())?,
         limit: lower_limit(query.limit_clause.as_ref())?,
         offset: lower_offset(query.limit_clause.as_ref())?,
+        lock_strength: lower_lock_strength(&query.locks)?,
+    }))
+}
+
+fn lower_lock_strength(locks: &[LockClause]) -> Result<Option<SqlLockStrength>> {
+    let ([] | [_]) = locks else {
+        return Err(SkeinError::Semantic(
+            "PostgreSQL SELECT supports at most one locking clause".to_string(),
+        ));
+    };
+    let Some(lock) = locks.first() else {
+        return Ok(None);
+    };
+    if lock.of.is_some() || lock.nonblock.is_some() {
+        return Err(SkeinError::Semantic(
+            "FOR UPDATE/SHARE OF, NOWAIT, and SKIP LOCKED are not supported".to_string(),
+        ));
+    }
+    Ok(Some(match lock.lock_type {
+        LockType::Share => SqlLockStrength::Share,
+        LockType::Update => SqlLockStrength::Update,
     }))
 }
 

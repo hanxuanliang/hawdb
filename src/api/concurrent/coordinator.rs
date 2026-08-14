@@ -648,18 +648,28 @@ impl LockManager {
         timeout: Duration,
     ) -> Result<()> {
         let mut state = self.lock_state()?;
-        let mut unique_requests = Vec::with_capacity(requests.len());
-        for request in requests {
-            if !unique_requests.contains(request) {
-                unique_requests.push(request.clone());
-            }
-        }
+        let mut unique_requests = requests.to_vec();
+        unique_requests.sort_by(LockRequest::acquisition_cmp);
+        unique_requests.dedup();
         for request in unique_requests {
+            if state
+                .locks
+                .covers_all(transaction_id, std::slice::from_ref(&request))
+            {
+                continue;
+            }
+            let request = state.locks.normalized_request(transaction_id, request);
+            if state
+                .locks
+                .covers_all(transaction_id, std::slice::from_ref(&request))
+            {
+                continue;
+            }
             loop {
                 let blockers = state.locks.blockers(transaction_id, &request);
                 if blockers.is_empty() {
                     state.wait_for.clear_waiter(transaction_id);
-                    state.locks.grant(transaction_id, request);
+                    state.locks.grant(transaction_id, request)?;
                     break;
                 }
                 state.wait_for.register(transaction_id, &blockers)?;

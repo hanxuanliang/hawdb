@@ -550,9 +550,11 @@ fn validate_system_select_shape(select: &SelectStatement) -> Result<()> {
         || select.from_alias.is_some()
         || !select.joins.is_empty()
         || !select.group_by.is_empty()
+        || select.lock_strength.is_some()
     {
         return Err(SkeinError::Semantic(
-            "system SQL does not support DISTINCT, table aliases, joins, or GROUP BY".to_string(),
+            "system SQL does not support DISTINCT, table aliases, joins, GROUP BY, or locking clauses"
+                .to_string(),
         ));
     }
     if select

@@ -1,15 +1,21 @@
 use crate::error::{Result, SkeinError};
 use skein_storage::RelationalKey;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+use std::mem::size_of;
 use std::ops::Bound;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) const DEFAULT_LOCK_ESCALATION_ENTRIES_PER_TABLE: usize = 64;
+pub(crate) const DEFAULT_MAX_LOCK_TABLE_ENTRIES: usize = 65_536;
+pub(crate) const DEFAULT_MAX_LOCK_TABLE_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum LockMode {
     Shared,
     Exclusive,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum LockNamespace {
     RelationalIndex { table: String, columns: Vec<String> },
 }
@@ -17,6 +23,9 @@ pub(crate) enum LockNamespace {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LockTarget {
     Database,
+    RelationalTable {
+        table: String,
+    },
     RelationalRange {
         namespace: LockNamespace,
         lower: Bound<RelationalKey>,
@@ -53,6 +62,15 @@ impl LockRequest {
         )
     }
 
+    pub(crate) fn relational_table(mode: LockMode, table: impl Into<String>) -> Self {
+        Self {
+            mode,
+            target: LockTarget::RelationalTable {
+                table: table.into(),
+            },
+        }
+    }
+
     pub(crate) fn relational_range(
         mode: LockMode,
         table: impl Into<String>,
@@ -72,6 +90,10 @@ impl LockRequest {
             },
         }
     }
+
+    pub(crate) fn acquisition_cmp(&self, other: &Self) -> Ordering {
+        lock_target_cmp(&self.target, &other.target).then(other.mode.cmp(&self.mode))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,9 +102,28 @@ struct HeldLock {
     request: LockRequest,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LockTableLimits {
+    max_entries: usize,
+    max_bytes: usize,
+    escalation_entries_per_table: usize,
+}
+
+impl Default for LockTableLimits {
+    fn default() -> Self {
+        Self {
+            max_entries: DEFAULT_MAX_LOCK_TABLE_ENTRIES,
+            max_bytes: DEFAULT_MAX_LOCK_TABLE_BYTES,
+            escalation_entries_per_table: DEFAULT_LOCK_ESCALATION_ENTRIES_PER_TABLE,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct LockTable {
     locks: Vec<HeldLock>,
+    estimated_bytes: usize,
+    limits: LockTableLimits,
 }
 
 impl LockTable {
@@ -108,29 +149,160 @@ impl LockTable {
             .collect()
     }
 
-    pub(crate) fn grant(&mut self, transaction_id: u64, request: LockRequest) {
-        if self
+    pub(crate) fn normalized_request(
+        &self,
+        transaction_id: u64,
+        request: LockRequest,
+    ) -> LockRequest {
+        let LockTarget::RelationalRange { namespace, .. } = &request.target else {
+            return request;
+        };
+        let table = relational_namespace_table(namespace);
+        let narrow_locks = self
             .locks
             .iter()
-            .any(|held| held.transaction_id == transaction_id && held.request == request)
-        {
-            return;
+            .filter(|held| {
+                held.transaction_id == transaction_id
+                    && matches!(
+                        &held.request.target,
+                        LockTarget::RelationalRange { namespace, .. }
+                            if relational_namespace_table(namespace) == table
+                    )
+            })
+            .collect::<Vec<_>>();
+        if narrow_locks.len().saturating_add(1) <= self.limits.escalation_entries_per_table {
+            return request;
         }
+        let mode = if request.mode == LockMode::Exclusive
+            || narrow_locks
+                .iter()
+                .any(|held| held.request.mode == LockMode::Exclusive)
+        {
+            LockMode::Exclusive
+        } else {
+            LockMode::Shared
+        };
+        LockRequest::relational_table(mode, table.to_string())
+    }
+
+    pub(crate) fn grant(&mut self, transaction_id: u64, request: LockRequest) -> Result<()> {
+        if self.locks.iter().any(|held| {
+            held.transaction_id == transaction_id
+                && mode_covers(held.request.mode, request.mode)
+                && target_covers(&held.request.target, &request.target)
+        }) {
+            return Ok(());
+        }
+        let removed_bytes = self
+            .locks
+            .iter()
+            .filter(|held| {
+                held.transaction_id == transaction_id
+                    && mode_covers(request.mode, held.request.mode)
+                    && target_covers(&request.target, &held.request.target)
+            })
+            .map(held_lock_estimated_bytes)
+            .sum::<usize>();
+        let removed_entries = self
+            .locks
+            .iter()
+            .filter(|held| {
+                held.transaction_id == transaction_id
+                    && mode_covers(request.mode, held.request.mode)
+                    && target_covers(&request.target, &held.request.target)
+            })
+            .count();
+        let added_bytes = lock_request_estimated_bytes(&request);
+        let next_entries = self
+            .locks
+            .len()
+            .saturating_sub(removed_entries)
+            .saturating_add(1);
+        let next_bytes = self
+            .estimated_bytes
+            .saturating_sub(removed_bytes)
+            .saturating_add(added_bytes);
+        if next_entries > self.limits.max_entries || next_bytes > self.limits.max_bytes {
+            return Err(SkeinError::Execution(format!(
+                "lock table resource budget exceeded: required_entries={next_entries} max_entries={} required_bytes={next_bytes} max_bytes={}; retry after competing transactions finish",
+                self.limits.max_entries, self.limits.max_bytes
+            )));
+        }
+        self.locks.retain(|held| {
+            held.transaction_id != transaction_id
+                || !mode_covers(request.mode, held.request.mode)
+                || !target_covers(&request.target, &held.request.target)
+        });
         self.locks.push(HeldLock {
             transaction_id,
             request,
         });
+        self.estimated_bytes = next_bytes;
+        Ok(())
     }
 
     pub(crate) fn release_transaction(&mut self, transaction_id: u64) {
         self.locks
             .retain(|held| held.transaction_id != transaction_id);
+        self.estimated_bytes = self.locks.iter().map(held_lock_estimated_bytes).sum();
     }
 
     #[cfg(test)]
     fn lock_count(&self) -> usize {
         self.locks.len()
     }
+
+    #[cfg(test)]
+    fn with_limits(limits: LockTableLimits) -> Self {
+        Self {
+            limits,
+            ..Self::default()
+        }
+    }
+}
+
+fn held_lock_estimated_bytes(held: &HeldLock) -> usize {
+    lock_request_estimated_bytes(&held.request)
+}
+
+fn lock_request_estimated_bytes(request: &LockRequest) -> usize {
+    size_of::<HeldLock>().saturating_add(match &request.target {
+        LockTarget::Database => 0,
+        LockTarget::RelationalTable { table } => table.len(),
+        LockTarget::RelationalRange {
+            namespace,
+            lower,
+            upper,
+        } => lock_namespace_estimated_bytes(namespace)
+            .saturating_add(bound_estimated_bytes(lower))
+            .saturating_add(bound_estimated_bytes(upper)),
+    })
+}
+
+fn lock_namespace_estimated_bytes(namespace: &LockNamespace) -> usize {
+    match namespace {
+        LockNamespace::RelationalIndex { table, columns } => table.len().saturating_add(
+            columns
+                .iter()
+                .map(|column| size_of::<String>().saturating_add(column.len()))
+                .sum(),
+        ),
+    }
+}
+
+fn bound_estimated_bytes(bound: &Bound<RelationalKey>) -> usize {
+    let (Bound::Included(key) | Bound::Excluded(key)) = bound else {
+        return 0;
+    };
+    size_of::<RelationalKey>().saturating_add(
+        key.0
+            .iter()
+            .map(|value| {
+                size_of::<skein_storage::RelationalValue>()
+                    .saturating_add(value.estimated_payload_bytes())
+            })
+            .sum(),
+    )
 }
 
 #[derive(Debug, Default)]
@@ -207,6 +379,14 @@ fn target_covers(held: &LockTarget, requested: &LockTarget) -> bool {
         (LockTarget::Database, _) => true,
         (_, LockTarget::Database) => false,
         (
+            LockTarget::RelationalTable { table: held },
+            LockTarget::RelationalTable { table: requested },
+        ) => held == requested,
+        (LockTarget::RelationalTable { table }, LockTarget::RelationalRange { namespace, .. }) => {
+            relational_namespace_table(namespace) == table
+        }
+        (LockTarget::RelationalRange { .. }, LockTarget::RelationalTable { .. }) => false,
+        (
             LockTarget::RelationalRange {
                 namespace: held_namespace,
                 lower: held_lower,
@@ -251,6 +431,14 @@ fn targets_overlap(left: &LockTarget, right: &LockTarget) -> bool {
     match (left, right) {
         (LockTarget::Database, _) | (_, LockTarget::Database) => true,
         (
+            LockTarget::RelationalTable { table: left },
+            LockTarget::RelationalTable { table: right },
+        ) => left == right,
+        (LockTarget::RelationalTable { table }, LockTarget::RelationalRange { namespace, .. })
+        | (LockTarget::RelationalRange { namespace, .. }, LockTarget::RelationalTable { table }) => {
+            relational_namespace_table(namespace) == table
+        }
+        (
             LockTarget::RelationalRange {
                 namespace: left_namespace,
                 lower: left_lower,
@@ -266,6 +454,55 @@ fn targets_overlap(left: &LockTarget, right: &LockTarget) -> bool {
                 && !upper_is_before_lower(left_upper, right_lower)
                 && !upper_is_before_lower(right_upper, left_lower)
         }
+    }
+}
+
+fn relational_namespace_table(namespace: &LockNamespace) -> &str {
+    match namespace {
+        LockNamespace::RelationalIndex { table, .. } => table,
+    }
+}
+
+fn lock_target_cmp(left: &LockTarget, right: &LockTarget) -> Ordering {
+    match (left, right) {
+        (LockTarget::Database, LockTarget::Database) => Ordering::Equal,
+        (LockTarget::Database, _) => Ordering::Less,
+        (_, LockTarget::Database) => Ordering::Greater,
+        (
+            LockTarget::RelationalTable { table: left },
+            LockTarget::RelationalTable { table: right },
+        ) => left.cmp(right),
+        (LockTarget::RelationalTable { .. }, LockTarget::RelationalRange { .. }) => Ordering::Less,
+        (LockTarget::RelationalRange { .. }, LockTarget::RelationalTable { .. }) => {
+            Ordering::Greater
+        }
+        (
+            LockTarget::RelationalRange {
+                namespace: left_namespace,
+                lower: left_lower,
+                upper: left_upper,
+            },
+            LockTarget::RelationalRange {
+                namespace: right_namespace,
+                lower: right_lower,
+                upper: right_upper,
+            },
+        ) => left_namespace
+            .cmp(right_namespace)
+            .then_with(|| bound_cmp(left_lower, right_lower))
+            .then_with(|| bound_cmp(left_upper, right_upper)),
+    }
+}
+
+fn bound_cmp(left: &Bound<RelationalKey>, right: &Bound<RelationalKey>) -> Ordering {
+    match (left, right) {
+        (Bound::Unbounded, Bound::Unbounded) => Ordering::Equal,
+        (Bound::Unbounded, _) => Ordering::Less,
+        (_, Bound::Unbounded) => Ordering::Greater,
+        (Bound::Included(left), Bound::Included(right))
+        | (Bound::Excluded(left), Bound::Excluded(right)) => left.cmp(right),
+        (Bound::Included(left), Bound::Excluded(right)) => left.cmp(right).then(Ordering::Less),
+        (Bound::Excluded(left), Bound::Included(right)) => left.cmp(right).then(Ordering::Greater),
     }
 }
 
@@ -310,15 +547,17 @@ mod tests {
     #[test]
     fn point_locks_conflict_only_on_the_same_key() {
         let mut table = LockTable::default();
-        table.grant(
-            1,
-            LockRequest::relational_point(
-                LockMode::Exclusive,
-                "messages",
-                vec!["id".to_string()],
-                key(7),
-            ),
-        );
+        table
+            .grant(
+                1,
+                LockRequest::relational_point(
+                    LockMode::Exclusive,
+                    "messages",
+                    vec!["id".to_string()],
+                    key(7),
+                ),
+            )
+            .unwrap();
 
         assert_eq!(
             table.blockers(
@@ -348,14 +587,16 @@ mod tests {
     #[test]
     fn half_open_ranges_have_no_boundary_conflict() {
         let mut table = LockTable::default();
-        table.grant(
-            1,
-            range(
-                LockMode::Exclusive,
-                Bound::Included(key(10)),
-                Bound::Excluded(key(20)),
-            ),
-        );
+        table
+            .grant(
+                1,
+                range(
+                    LockMode::Exclusive,
+                    Bound::Included(key(10)),
+                    Bound::Excluded(key(20)),
+                ),
+            )
+            .unwrap();
 
         assert!(table
             .blockers(
@@ -384,10 +625,12 @@ mod tests {
     #[test]
     fn shared_ranges_are_compatible_and_database_exclusive_is_universal() {
         let mut table = LockTable::default();
-        table.grant(
-            1,
-            range(LockMode::Shared, Bound::Unbounded, Bound::Unbounded),
-        );
+        table
+            .grant(
+                1,
+                range(LockMode::Shared, Bound::Unbounded, Bound::Unbounded),
+            )
+            .unwrap();
         assert!(table
             .blockers(
                 2,
@@ -407,16 +650,83 @@ mod tests {
     }
 
     #[test]
+    fn relational_table_lock_conflicts_with_every_index_namespace_on_that_table() {
+        let mut table = LockTable::default();
+        table
+            .grant(
+                1,
+                LockRequest::relational_table(LockMode::Exclusive, "messages"),
+            )
+            .unwrap();
+
+        assert_eq!(
+            table.blockers(
+                2,
+                &LockRequest::relational_point(
+                    LockMode::Shared,
+                    "messages",
+                    vec!["owner_id".to_string()],
+                    key(7),
+                )
+            ),
+            BTreeSet::from([1])
+        );
+        assert!(table
+            .blockers(
+                2,
+                &LockRequest::relational_point(
+                    LockMode::Exclusive,
+                    "threads",
+                    vec!["id".to_string()],
+                    key(7),
+                )
+            )
+            .is_empty());
+    }
+
+    #[test]
+    fn relational_table_lock_covers_narrower_index_requests() {
+        let mut table = LockTable::default();
+        table
+            .grant(
+                1,
+                LockRequest::relational_table(LockMode::Exclusive, "messages"),
+            )
+            .unwrap();
+
+        assert!(table.covers_all(
+            1,
+            &[LockRequest::relational_point(
+                LockMode::Exclusive,
+                "messages",
+                vec!["id".to_string()],
+                key(7),
+            )]
+        ));
+        assert!(!table.covers_all(
+            1,
+            &[LockRequest::relational_point(
+                LockMode::Exclusive,
+                "threads",
+                vec!["id".to_string()],
+                key(7),
+            )]
+        ));
+    }
+
+    #[test]
     fn a_held_range_covers_narrower_repeated_requests() {
         let mut table = LockTable::default();
-        table.grant(
-            1,
-            range(
-                LockMode::Shared,
-                Bound::Included(key(10)),
-                Bound::Excluded(key(20)),
-            ),
-        );
+        table
+            .grant(
+                1,
+                range(
+                    LockMode::Shared,
+                    Bound::Included(key(10)),
+                    Bound::Excluded(key(20)),
+                ),
+            )
+            .unwrap();
 
         assert!(table.covers_all(
             1,
@@ -445,6 +755,85 @@ mod tests {
                 key(15),
             )]
         ));
+    }
+
+    #[test]
+    fn narrow_locks_escalate_before_the_next_entry_is_granted() {
+        let mut table = LockTable::with_limits(LockTableLimits {
+            escalation_entries_per_table: 1,
+            ..LockTableLimits::default()
+        });
+        table
+            .grant(
+                1,
+                LockRequest::relational_point(
+                    LockMode::Shared,
+                    "messages",
+                    vec!["id".to_string()],
+                    key(1),
+                ),
+            )
+            .unwrap();
+        let normalized = table.normalized_request(
+            1,
+            LockRequest::relational_point(
+                LockMode::Exclusive,
+                "messages",
+                vec!["id".to_string()],
+                key(2),
+            ),
+        );
+        assert_eq!(
+            normalized,
+            LockRequest::relational_table(LockMode::Exclusive, "messages")
+        );
+        table.grant(1, normalized).unwrap();
+
+        assert_eq!(table.lock_count(), 1);
+        assert_eq!(
+            table.blockers(
+                2,
+                &LockRequest::relational_point(
+                    LockMode::Shared,
+                    "messages",
+                    vec!["owner_id".to_string()],
+                    key(9),
+                )
+            ),
+            BTreeSet::from([1])
+        );
+    }
+
+    #[test]
+    fn lock_table_hard_cap_rejects_without_growing_residency() {
+        let probe = LockRequest::relational_point(
+            LockMode::Exclusive,
+            "messages",
+            vec!["id".to_string()],
+            key(1),
+        );
+        let mut table = LockTable::with_limits(LockTableLimits {
+            max_entries: 1,
+            max_bytes: lock_request_estimated_bytes(&probe),
+            escalation_entries_per_table: usize::MAX,
+        });
+        table.grant(1, probe).unwrap();
+
+        let error = table
+            .grant(
+                2,
+                LockRequest::relational_point(
+                    LockMode::Exclusive,
+                    "threads",
+                    vec!["id".to_string()],
+                    key(2),
+                ),
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("lock table resource budget exceeded"));
+        assert_eq!(table.lock_count(), 1);
     }
 
     #[test]

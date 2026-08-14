@@ -10,7 +10,10 @@ pub use self::group_commit::{
     DEFAULT_WAL_GROUP_COMMIT_MAX_BYTES, DEFAULT_WAL_GROUP_COMMIT_MAX_DELAY,
     DEFAULT_WAL_GROUP_COMMIT_MAX_ENTRIES,
 };
-use super::transaction_locks::{LockMode, LockRequest};
+use super::system_sql;
+use super::transaction_locks::{
+    LockMode, LockRequest, LockTarget, DEFAULT_LOCK_ESCALATION_ENTRIES_PER_TABLE,
+};
 use super::{
     commit_database_transaction_state, execute_database_transaction_query,
     execute_database_transaction_sql, statement_body, Database, DatabaseConfig,
@@ -18,7 +21,8 @@ use super::{
 };
 use crate::error::{Result, SkeinError};
 use crate::sql::{
-    SelectStatement, SqlComparisonOp, SqlPredicate, SqlStatement, SqlTableName, SqlValue,
+    SelectStatement, SqlComparisonOp, SqlLockStrength, SqlPredicate, SqlStatement, SqlTableName,
+    SqlValue, UpdateStatement,
 };
 use crate::store::DurabilityPolicy;
 use crate::value::Value;
@@ -295,7 +299,11 @@ impl ConcurrentDatabaseTransaction {
         self.ensure_active()?;
         if self.options.mode == ConcurrentTransactionMode::Pessimistic {
             let requests = sql_lock_requests(sql_text, parameters, &self.state.relational_state)?;
-            self.acquire_locks(&requests)?;
+            if !requests.is_empty() {
+                self.acquire_locks(&requests)?;
+            }
+        } else {
+            reject_optimistic_locking_select(sql_text)?;
         }
         let result = execute_database_transaction_sql(
             &self.runtime,
@@ -303,6 +311,7 @@ impl ConcurrentDatabaseTransaction {
             sql_text,
             parameters,
             false,
+            true,
         );
         if result.is_ok() {
             self.successful_statements = self.successful_statements.saturating_add(1);
@@ -429,6 +438,23 @@ impl ConcurrentDatabaseTransaction {
     }
 }
 
+fn reject_optimistic_locking_select(sql_text: &str) -> Result<()> {
+    let prepared = skein_sql::prepare_postgres_sql(sql_text)?;
+    let locking_select = match prepared.statement {
+        SqlStatement::Select(select) => select.lock_strength.is_some(),
+        SqlStatement::Explain(explain) => {
+            matches!(*explain.statement, SqlStatement::Select(select) if select.lock_strength.is_some())
+        }
+        _ => false,
+    };
+    if locking_select {
+        return Err(SkeinError::Semantic(
+            "FOR UPDATE/SHARE requires a pessimistic concurrent transaction".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 impl Drop for ConcurrentDatabaseTransaction {
     fn drop(&mut self) {
         if !self.finished {
@@ -452,9 +478,23 @@ fn sql_lock_requests(
         )));
     }
     match prepared.statement {
-        SqlStatement::Select(select) => Ok(select_lock_requests(&select, parameters, state)
-            .unwrap_or_else(|| vec![LockRequest::database(LockMode::Shared)])),
-        SqlStatement::Explain(_) => Ok(vec![LockRequest::database(LockMode::Shared)]),
+        SqlStatement::Select(select) => {
+            if select.lock_strength.is_some() && system_sql::is_virtual_catalog_select(&select) {
+                return Err(SkeinError::Semantic(
+                    "system SQL does not support locking clauses".to_string(),
+                ));
+            }
+            Ok(select_lock_requests(&select, parameters, state))
+        }
+        SqlStatement::Explain(explain) => {
+            if !explain.analyze {
+                return Ok(Vec::new());
+            }
+            let SqlStatement::Select(select) = *explain.statement else {
+                return Ok(Vec::new());
+            };
+            Ok(select_lock_requests(&select, parameters, state))
+        }
         SqlStatement::Insert(_) => {
             let transaction = crate::relational_sql::compile_relational_statement_sql(
                 sql_text, parameters, state,
@@ -462,9 +502,15 @@ fn sql_lock_requests(
             Ok(insert_lock_requests(&transaction, state)
                 .unwrap_or_else(|| vec![LockRequest::database(LockMode::Exclusive)]))
         }
-        SqlStatement::Update(_)
-        | SqlStatement::Delete(_)
-        | SqlStatement::CreateTable(_)
+        SqlStatement::Update(update) => {
+            crate::relational_sql::compile_relational_statement_sql(sql_text, parameters, state)?;
+            Ok(update_lock_requests(&update, parameters, state))
+        }
+        SqlStatement::Delete(delete) => {
+            crate::relational_sql::compile_relational_statement_sql(sql_text, parameters, state)?;
+            Ok(delete_lock_requests(&delete, parameters, state))
+        }
+        SqlStatement::CreateTable(_)
         | SqlStatement::CreateIndex(_)
         | SqlStatement::AlterTableAddColumn(_) => {
             Ok(vec![LockRequest::database(LockMode::Exclusive)])
@@ -472,46 +518,227 @@ fn sql_lock_requests(
     }
 }
 
+fn delete_lock_requests(
+    delete: &crate::sql::DeleteStatement,
+    parameters: &[Value],
+    state: &RelationalState,
+) -> Vec<LockRequest> {
+    let mut requests = mutation_target_lock_requests(
+        &delete.table,
+        delete.alias.as_deref(),
+        delete.selection.as_ref(),
+        parameters,
+        state,
+    );
+    if requests.len() > DEFAULT_LOCK_ESCALATION_ENTRIES_PER_TABLE {
+        return vec![LockRequest::relational_table(
+            LockMode::Exclusive,
+            delete.table.name.clone(),
+        )];
+    }
+    let Some(schema) = state.table_schema(&delete.table.name) else {
+        return requests;
+    };
+    let point_keys = requests
+        .iter()
+        .map(lock_request_point_key)
+        .collect::<Option<Vec<_>>>();
+    let Some(point_keys) = point_keys else {
+        return vec![LockRequest::relational_table(
+            LockMode::Exclusive,
+            delete.table.name.clone(),
+        )];
+    };
+    let mut unique_columns = schema.unique_constraints.clone();
+    unique_columns.extend(
+        schema
+            .indexes
+            .iter()
+            .filter(|index| index.unique)
+            .map(|index| index.columns.clone()),
+    );
+    for primary_key in point_keys {
+        let Some(row) = state.row(&delete.table.name, &primary_key) else {
+            continue;
+        };
+        for columns in &unique_columns {
+            let Some(key) = relational_row_key(schema, row, columns) else {
+                continue;
+            };
+            if key.0.iter().any(|value| value == &RelationalValue::Null) {
+                continue;
+            }
+            push_unique_lock_request(
+                &mut requests,
+                LockRequest::relational_point(
+                    LockMode::Exclusive,
+                    delete.table.name.clone(),
+                    columns.clone(),
+                    key,
+                ),
+            );
+        }
+    }
+    requests
+}
+
+fn lock_request_point_key(request: &LockRequest) -> Option<RelationalKey> {
+    let LockTarget::RelationalRange { lower, upper, .. } = &request.target else {
+        return None;
+    };
+    match (lower, upper) {
+        (Bound::Included(lower), Bound::Included(upper)) if lower == upper => Some(lower.clone()),
+        _ => None,
+    }
+}
+
 fn select_lock_requests(
     select: &SelectStatement,
     parameters: &[Value],
     state: &RelationalState,
-) -> Option<Vec<LockRequest>> {
-    if !select.joins.is_empty() || !is_public_table(&select.from) {
-        return None;
+) -> Vec<LockRequest> {
+    let Some(strength) = select.lock_strength else {
+        return Vec::new();
+    };
+    let mode = match strength {
+        SqlLockStrength::Share => LockMode::Shared,
+        SqlLockStrength::Update => LockMode::Exclusive,
+    };
+    if !select.joins.is_empty() {
+        let mut requests = vec![LockRequest::relational_table(
+            mode,
+            select.from.name.clone(),
+        )];
+        requests.extend(
+            select
+                .joins
+                .iter()
+                .map(|join| LockRequest::relational_table(mode, join.table.name.clone())),
+        );
+        return requests;
     }
-    let schema = state.table_schema(&select.from.name)?;
+    if !is_public_table(&select.from) {
+        return vec![LockRequest::database(mode)];
+    }
+    let Some(schema) = state.table_schema(&select.from.name) else {
+        return vec![LockRequest::database(mode)];
+    };
     let ranges = match &select.selection {
-        None => vec![(Bound::Unbounded, Bound::Unbounded)],
+        None => Some(vec![(Bound::Unbounded, Bound::Unbounded)]),
         Some(predicate) if schema.primary_key.len() == 1 => single_key_ranges(
             predicate,
             &schema.primary_key[0],
             &select.from,
             select.from_alias.as_deref(),
             parameters,
-        )?,
-        Some(predicate) => vec![composite_key_point(
+        ),
+        Some(predicate) => composite_key_point(
             predicate,
             &schema.primary_key,
             &select.from,
             select.from_alias.as_deref(),
             parameters,
-        )?],
+        )
+        .map(|range| vec![range]),
     };
-    Some(
-        ranges
-            .into_iter()
-            .map(|(lower, upper)| {
-                LockRequest::relational_range(
-                    LockMode::Shared,
-                    select.from.name.clone(),
-                    schema.primary_key.clone(),
-                    lower,
-                    upper,
-                )
-            })
-            .collect(),
+    let Some(ranges) = ranges else {
+        return vec![LockRequest::relational_table(
+            mode,
+            select.from.name.clone(),
+        )];
+    };
+    ranges
+        .into_iter()
+        .map(|(lower, upper)| {
+            LockRequest::relational_range(
+                mode,
+                select.from.name.clone(),
+                schema.primary_key.clone(),
+                lower,
+                upper,
+            )
+        })
+        .collect()
+}
+
+fn update_lock_requests(
+    update: &UpdateStatement,
+    parameters: &[Value],
+    state: &RelationalState,
+) -> Vec<LockRequest> {
+    let Some(schema) = state.table_schema(&update.table.name) else {
+        return vec![LockRequest::database(LockMode::Exclusive)];
+    };
+    let assignment_changes_constraint_key = update.assignments.iter().any(|assignment| {
+        schema.primary_key.contains(&assignment.column)
+            || schema
+                .unique_constraints
+                .iter()
+                .any(|columns| columns.contains(&assignment.column))
+            || schema
+                .indexes
+                .iter()
+                .any(|index| index.unique && index.columns.contains(&assignment.column))
+            || schema
+                .foreign_keys
+                .iter()
+                .any(|foreign_key| foreign_key.columns.contains(&assignment.column))
+    });
+    if assignment_changes_constraint_key {
+        return vec![LockRequest::database(LockMode::Exclusive)];
+    }
+    mutation_target_lock_requests(
+        &update.table,
+        update.alias.as_deref(),
+        update.selection.as_ref(),
+        parameters,
+        state,
     )
+}
+
+fn mutation_target_lock_requests(
+    table: &SqlTableName,
+    alias: Option<&str>,
+    selection: Option<&SqlPredicate>,
+    parameters: &[Value],
+    state: &RelationalState,
+) -> Vec<LockRequest> {
+    if !is_public_table(table) {
+        return vec![LockRequest::database(LockMode::Exclusive)];
+    }
+    let Some(schema) = state.table_schema(&table.name) else {
+        return vec![LockRequest::database(LockMode::Exclusive)];
+    };
+    let Some(selection) = selection else {
+        return vec![LockRequest::relational_table(
+            LockMode::Exclusive,
+            table.name.clone(),
+        )];
+    };
+    let ranges = if schema.primary_key.len() == 1 {
+        single_key_ranges(selection, &schema.primary_key[0], table, alias, parameters)
+    } else {
+        composite_key_point(selection, &schema.primary_key, table, alias, parameters)
+            .map(|range| vec![range])
+    };
+    let Some(ranges) = ranges else {
+        return vec![LockRequest::relational_table(
+            LockMode::Exclusive,
+            table.name.clone(),
+        )];
+    };
+    ranges
+        .into_iter()
+        .map(|(lower, upper)| {
+            LockRequest::relational_range(
+                LockMode::Exclusive,
+                table.name.clone(),
+                schema.primary_key.clone(),
+                lower,
+                upper,
+            )
+        })
+        .collect()
 }
 
 fn insert_lock_requests(

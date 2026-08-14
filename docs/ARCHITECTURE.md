@@ -573,9 +573,12 @@ The embedded runtime uses immutable snapshot/COW MVCC under one active root
 handle. `Database` retains a single mutable owner, while `ConcurrentDatabase`
 allows optimistic or pessimistic transactions to prepare concurrently and
 serializes the durable commit/publication decision. Optimistic validation is
-currently coarse first-committer-wins by commit epoch. Pessimistic relational
-statements use point/range locks when their access span is known and a
-database-wide fallback otherwise; Cypher currently uses the fallback. This is
+currently coarse first-committer-wins by commit epoch. Ordinary relational
+SELECT statements remain snapshot reads. Explicit `FOR SHARE`/`FOR UPDATE`
+and DML use primary-key point/range locks when their access span is known and
+a bounded table-lock fallback otherwise; lock acquisition is deterministic,
+memory-bounded, and may escalate narrow locks. Cypher currently uses the
+database fallback. This is
 an in-process concurrency contract, not tuple-version MVCC, arbitrary
 time-travel, general serializable isolation, or multi-process writing.
 

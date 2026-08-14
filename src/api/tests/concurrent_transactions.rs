@@ -801,7 +801,7 @@ fn shared_primary_key_range_blocks_phantoms_but_not_the_excluded_boundary() {
         ))
         .unwrap();
     assert!(reader
-        .query_sql("SELECT id FROM public.messages WHERE id >= 10 AND id < 20")
+        .query_sql("SELECT id FROM public.messages WHERE id >= 10 AND id < 20 FOR SHARE")
         .unwrap()
         .rows
         .is_empty());
@@ -839,6 +839,172 @@ fn shared_primary_key_range_blocks_phantoms_but_not_the_excluded_boundary() {
 }
 
 #[test]
+fn ordinary_snapshot_select_does_not_block_an_exact_update() {
+    let db = Database::new().into_concurrent();
+    db.query_sql("CREATE TABLE public.messages (id BIGINT PRIMARY KEY, body TEXT NOT NULL)")
+        .unwrap();
+    db.query_sql("INSERT INTO public.messages (id, body) VALUES (1, 'before')")
+        .unwrap();
+    let mut reader = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_secs(1),
+        ))
+        .unwrap();
+    assert_eq!(
+        reader
+            .query_sql("SELECT body FROM public.messages WHERE id = 1")
+            .unwrap()
+            .rows
+            .len(),
+        1
+    );
+
+    let mut writer = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_millis(25),
+        ))
+        .unwrap();
+    writer
+        .query_sql("UPDATE public.messages SET body = 'after' WHERE id = 1")
+        .unwrap();
+    writer.commit().unwrap();
+    reader.rollback();
+
+    assert_eq!(
+        db.query_sql("SELECT body FROM public.messages WHERE id = 1")
+            .unwrap()
+            .rows[0]
+            .get("body"),
+        Some(&Value::String("after".to_string()))
+    );
+}
+
+#[test]
+fn for_update_point_lock_blocks_exact_update_until_owner_finishes() {
+    let db = Database::new().into_concurrent();
+    db.query_sql("CREATE TABLE public.messages (id BIGINT PRIMARY KEY, body TEXT NOT NULL)")
+        .unwrap();
+    db.query_sql("INSERT INTO public.messages (id, body) VALUES (1, 'before')")
+        .unwrap();
+    let mut owner = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_secs(1),
+        ))
+        .unwrap();
+    owner
+        .query_sql("SELECT id FROM public.messages WHERE id = 1 FOR UPDATE")
+        .unwrap();
+
+    let mut waiter = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_millis(25),
+        ))
+        .unwrap();
+    let error = waiter
+        .query_sql("UPDATE public.messages SET body = 'after' WHERE id = 1")
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("transaction lock wait timed out"));
+    owner.rollback();
+}
+
+#[test]
+fn optimistic_transaction_rejects_locking_selects() {
+    let db = Database::new().into_concurrent();
+    db.query_sql("CREATE TABLE public.messages (id BIGINT PRIMARY KEY)")
+        .unwrap();
+    let mut transaction = db
+        .begin_transaction(ConcurrentTransactionOptions::optimistic())
+        .unwrap();
+
+    let error = transaction
+        .query_sql("SELECT id FROM public.messages WHERE id = 1 FOR UPDATE")
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("requires a pessimistic concurrent transaction"));
+    transaction.rollback();
+}
+
+#[test]
+fn database_without_lock_manager_rejects_locking_selects() {
+    let mut database = Database::new();
+    database
+        .query_sql("CREATE TABLE public.messages (id BIGINT PRIMARY KEY)")
+        .unwrap();
+
+    let error = database
+        .query_sql("SELECT id FROM public.messages WHERE id = 1 FOR SHARE")
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("requires a pessimistic concurrent transaction"));
+}
+
+#[test]
+fn non_primary_key_mutation_falls_back_to_a_table_lock() {
+    let db = Database::new().into_concurrent();
+    db.query_sql("CREATE TABLE public.messages (id BIGINT PRIMARY KEY, body TEXT NOT NULL)")
+        .unwrap();
+    let mut owner = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_secs(1),
+        ))
+        .unwrap();
+    owner
+        .query_sql("UPDATE public.messages SET body = 'after' WHERE body = 'before'")
+        .unwrap();
+
+    let mut waiter = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_millis(25),
+        ))
+        .unwrap();
+    let error = waiter
+        .query_sql("INSERT INTO public.messages (id, body) VALUES (1, 'new')")
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("transaction lock wait timed out"));
+    owner.rollback();
+}
+
+#[test]
+fn exact_parent_delete_conflicts_with_foreign_key_validation_on_a_unique_key() {
+    let db = Database::new().into_concurrent();
+    db.query_sql("CREATE TABLE public.parents (id BIGINT PRIMARY KEY, code TEXT UNIQUE NOT NULL)")
+        .unwrap();
+    db.query_sql(
+        "CREATE TABLE public.children (id BIGINT PRIMARY KEY, parent_code TEXT REFERENCES public.parents(code))",
+    )
+    .unwrap();
+    db.query_sql("INSERT INTO public.parents (id, code) VALUES (1, 'parent-1')")
+        .unwrap();
+    let mut owner = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_secs(1),
+        ))
+        .unwrap();
+    owner
+        .query_sql("DELETE FROM public.parents WHERE id = 1")
+        .unwrap();
+
+    let mut waiter = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_millis(25),
+        ))
+        .unwrap();
+    let error = waiter
+        .query_sql("INSERT INTO public.children (id, parent_code) VALUES (1, 'parent-1')")
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("transaction lock wait timed out"));
+    owner.rollback();
+}
+
+#[test]
 fn repeated_covered_point_read_keeps_its_snapshot_after_a_disjoint_commit() {
     let db = Database::new().into_concurrent();
     db.query_sql("CREATE TABLE public.messages (id BIGINT PRIMARY KEY)")
@@ -852,7 +1018,7 @@ fn repeated_covered_point_read_keeps_its_snapshot_after_a_disjoint_commit() {
         .unwrap();
     assert_eq!(
         reader
-            .query_sql("SELECT id FROM public.messages WHERE id = 1")
+            .query_sql("SELECT id FROM public.messages WHERE id = 1 FOR SHARE")
             .unwrap()
             .rows
             .len(),
@@ -871,14 +1037,14 @@ fn repeated_covered_point_read_keeps_its_snapshot_after_a_disjoint_commit() {
 
     assert_eq!(
         reader
-            .query_sql("SELECT id FROM public.messages WHERE id = 1")
+            .query_sql("SELECT id FROM public.messages WHERE id = 1 FOR SHARE")
             .unwrap()
             .rows
             .len(),
         1
     );
     assert!(reader
-        .query_sql("SELECT id FROM public.messages WHERE id = 2")
+        .query_sql("SELECT id FROM public.messages WHERE id = 2 FOR SHARE")
         .unwrap_err()
         .to_string()
         .contains("cannot acquire a new lock after its snapshot changed"));
@@ -900,10 +1066,10 @@ fn point_lock_upgrade_cycle_selects_one_deadlock_victim() {
         ))
         .unwrap();
     first
-        .query_sql("SELECT id FROM public.messages WHERE id = 1")
+        .query_sql("SELECT id FROM public.messages WHERE id = 1 FOR SHARE")
         .unwrap();
     second
-        .query_sql("SELECT id FROM public.messages WHERE id = 2")
+        .query_sql("SELECT id FROM public.messages WHERE id = 2 FOR SHARE")
         .unwrap();
 
     let barrier = Arc::new(Barrier::new(2));

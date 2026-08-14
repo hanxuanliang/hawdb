@@ -340,7 +340,7 @@ They are implementation evidence, not a machine-checked refinement proof.
 | Checkpoint publication selects one complete generation | checkpoint failpoints and manifest replacement | `checkpoint_publish_failpoints_recover_one_complete_generation`, `subprocess_crash_matrix_recovers_whole_batches_and_artifact_generations` |
 | Reader pins prevent generation reclamation | `ReaderPins`, `reclaim_old_generations` | `read_transaction_pins_checkpoint_manifest_until_drop`, `out_of_core_reader_pin_retains_its_canonical_generation_until_drop` |
 | Canonical path aliases share one ownership boundary | `DatabaseDirectoryLease::acquire` | `durable_database_open_is_exclusive_until_owner_drops`, `durable_database_rejects_path_alias_until_owner_drops` |
-| Stale optimistic commits fail before publication and fine-grained locks preserve compatibility | `commit_mutation_transaction_and_relational`, `LockTable` | `optimistic_transactions_prepare_in_parallel_and_reject_the_stale_committer`, `disjoint_primary_key_point_locks_allow_both_pessimistic_writers_to_commit`, `shared_primary_key_range_blocks_phantoms_but_not_the_excluded_boundary` |
+| Stale optimistic commits fail before publication; fine-grained locks preserve compatibility and stay within a hard budget through covering escalation or rejection | `commit_mutation_transaction_and_relational`, `LockTable` | `optimistic_transactions_prepare_in_parallel_and_reject_the_stale_committer`, `ordinary_snapshot_select_does_not_block_an_exact_update`, `for_update_point_lock_blocks_exact_update_until_owner_finishes`, `shared_primary_key_range_blocks_phantoms_but_not_the_excluded_boundary`, `narrow_locks_escalate_before_the_next_entry_is_granted`, `lock_table_hard_cap_rejects_without_growing_residency` |
 | A deadlock-closing multi-owner wait edge selects one victim and releases its dependencies | `WaitForGraph::register`, `ConcurrentDatabaseTransaction::abort_after_lock_failure` | `point_lock_upgrade_cycle_selects_one_deadlock_victim`, `wait_for_graph_detects_a_cycle_with_multiple_blockers` |
 | A stale, mixed, missing, or corrupt Source scan sidecar falls back to the canonical graph | `source_scan::load`, `ScanSegmentManifest::plan_scan` | `checkpoint_publishes_source_scan_and_wal_mutation_invalidates_it`, `corrupted_source_scan_artifact_never_blocks_canonical_graph_recovery` |
 | A column-group catalog publishes artifacts and changed table directories before one generation-CAS manifest; reopen ignores orphan candidates and fails closed on referenced corruption | `ColumnGroupTableDirectory::write_immutable`, `ColumnGroupManifest::{publish,open}`, `PublishedColumnGroupCatalog::scrub_artifacts` | `publishes_reopens_and_reuses_untouched_table_directory`, `stale_publishers_are_serialized_and_one_fails_closed`, `orphan_candidate_is_ignored_and_corrupt_published_metadata_fails_closed`, `deep_scrub_detects_payload_corruption_not_read_by_reopen` |
@@ -360,8 +360,11 @@ published pointer changes only after the durability callback succeeds.
 publication boundary. Optimistic transactions prepare on independent immutable
 COW snapshots, acquire the database-exclusive target before publication, and
 use first-committer-wins epoch validation. Pessimistic transactions acquire
-shared or exclusive point/range spans. Database locks are represented by the
-full key set; a point is a singleton and a bounded range is a finite key subset.
+shared or exclusive point/range spans. Database and covering table locks are
+represented by the full key set; a point is a singleton and a bounded range is
+a finite key subset. Lock tokens abstract the implementation's entry/byte
+budget: each acquisition consumes a finite token, escalation replaces multiple
+tokens with one covering lock, and budget exhaustion terminates the requester.
 The finite-set abstraction deliberately over-approximates interval shapes while
 preserving overlap and compatibility safety. Both modes serialize the durable
 WAL decision and snapshot publication while readers continue to pin the last
@@ -373,7 +376,8 @@ remain compatible, an optimistic publisher owns the full exclusive span,
 commit epochs are unique, uncommitted work is not exposed to snapshot readers,
 a deadlock-closing multi-owner dependency selects the current waiter as victim,
 the victim releases its locks and dependencies, the wait-for graph stays
-acyclic, and a crash after WAL durability recovers the committed epoch.
+acyclic, lock tokens never have multiple owners or exceed the configured set,
+and a crash after WAL durability recovers the committed epoch.
 
 ## Derived Source Segment Publication
 

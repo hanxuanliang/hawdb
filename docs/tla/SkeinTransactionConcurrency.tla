@@ -1,7 +1,7 @@
 -------------------- MODULE SkeinTransactionConcurrency --------------------
 EXTENDS FiniteSets, Integers, Naturals, Sequences
 
-CONSTANT Transactions, Readers, Keys, MaxEpoch
+CONSTANT Transactions, Readers, Keys, LockTokens, MaxEpoch
 
 VARIABLES publishedEpoch,
           durableEpoch,
@@ -12,6 +12,7 @@ VARIABLES publishedEpoch,
           publisher,
           heldShared,
           heldExclusive,
+          lockTokens,
           waitFor,
           readerEpoch
 
@@ -24,6 +25,7 @@ vars == <<publishedEpoch,
           publisher,
           heldShared,
           heldExclusive,
+          lockTokens,
           waitFor,
           readerEpoch>>
 
@@ -76,6 +78,7 @@ Init ==
     /\ publisher = "none"
     /\ heldShared = [tx \in Transactions |-> {}]
     /\ heldExclusive = [tx \in Transactions |-> {}]
+    /\ lockTokens = [tx \in Transactions |-> {}]
     /\ waitFor = [tx \in Transactions |-> {}]
     /\ readerEpoch = [reader \in Readers |-> -1]
 
@@ -88,21 +91,61 @@ Begin(tx, mode) ==
     /\ txMode' = [txMode EXCEPT ![tx] = mode]
     /\ baseEpoch' = [baseEpoch EXCEPT ![tx] = publishedEpoch]
     /\ UNCHANGED <<publishedEpoch, durableEpoch, commitEpoch, publisher,
-                    heldShared, heldExclusive, waitFor, readerEpoch>>
+                    heldShared, heldExclusive, lockTokens, waitFor, readerEpoch>>
 
 AcquireLock(tx, span, lockMode) ==
+    LET usedTokens == UNION {lockTokens[owner] : owner \in Transactions}
+        freeTokens == LockTokens \ usedTokens IN
     /\ txPhase[tx] = "active"
     /\ span \in LockSpans
     /\ lockMode \in LockModes
     /\ waitFor[tx] = {}
     /\ Blockers(tx, span, lockMode) = {}
+    /\ freeTokens # {}
+    /\ IF lockMode = "shared"
+          THEN ~(span \subseteq (heldShared[tx] \union heldExclusive[tx]))
+          ELSE ~(span \subseteq heldExclusive[tx])
     /\ IF lockMode = "shared"
           THEN /\ heldShared' = [heldShared EXCEPT ![tx] = @ \union span]
                /\ UNCHANGED heldExclusive
           ELSE /\ heldExclusive' = [heldExclusive EXCEPT ![tx] = @ \union span]
                /\ UNCHANGED heldShared
+    /\ lockTokens' =
+        [lockTokens EXCEPT ![tx] = @ \union {CHOOSE token \in freeTokens : TRUE}]
     /\ UNCHANGED <<publishedEpoch, durableEpoch, txPhase, txMode, baseEpoch,
                     commitEpoch, publisher, waitFor, readerEpoch>>
+
+EscalateLock(tx, lockMode) ==
+    LET spans == heldShared[tx] \union heldExclusive[tx] IN
+    /\ txPhase[tx] = "active"
+    /\ lockTokens[tx] # {}
+    /\ spans # {}
+    /\ spans # Keys
+    /\ lockMode \in LockModes
+    /\ IF lockMode = "shared"
+          THEN /\ heldExclusive[tx] = {}
+               /\ ExclusiveBlockers(tx, Keys) = {}
+               /\ heldShared' = [heldShared EXCEPT ![tx] = Keys]
+               /\ UNCHANGED heldExclusive
+          ELSE /\ AllBlockers(tx, Keys) = {}
+               /\ heldShared' = [heldShared EXCEPT ![tx] = {}]
+               /\ heldExclusive' = [heldExclusive EXCEPT ![tx] = Keys]
+    /\ lockTokens' =
+        [lockTokens EXCEPT ![tx] = {CHOOSE token \in @ : TRUE}]
+    /\ UNCHANGED <<publishedEpoch, durableEpoch, txPhase, txMode, baseEpoch,
+                    commitEpoch, publisher, waitFor, readerEpoch>>
+
+RejectLockBudget(tx) ==
+    LET usedTokens == UNION {lockTokens[owner] : owner \in Transactions} IN
+    /\ txPhase[tx] = "active"
+    /\ usedTokens = LockTokens
+    /\ txPhase' = [txPhase EXCEPT ![tx] = "aborted"]
+    /\ heldShared' = [heldShared EXCEPT ![tx] = {}]
+    /\ heldExclusive' = [heldExclusive EXCEPT ![tx] = {}]
+    /\ lockTokens' = [lockTokens EXCEPT ![tx] = {}]
+    /\ waitFor' = RemoveDependency(waitFor, tx)
+    /\ UNCHANGED <<publishedEpoch, durableEpoch, txMode, baseEpoch,
+                    commitEpoch, publisher, readerEpoch>>
 
 RegisterWait(waiter, span, lockMode) ==
     LET owners == Blockers(waiter, span, lockMode) IN
@@ -114,13 +157,13 @@ RegisterWait(waiter, span, lockMode) ==
     /\ ~WouldDeadlock(waiter, owners)
     /\ waitFor' = [waitFor EXCEPT ![waiter] = owners]
     /\ UNCHANGED <<publishedEpoch, durableEpoch, txPhase, txMode, baseEpoch,
-                    commitEpoch, publisher, heldShared, heldExclusive, readerEpoch>>
+                    commitEpoch, publisher, heldShared, heldExclusive, lockTokens, readerEpoch>>
 
 ReleaseWait(waiter) ==
     /\ waitFor[waiter] # {}
     /\ waitFor' = [waitFor EXCEPT ![waiter] = {}]
     /\ UNCHANGED <<publishedEpoch, durableEpoch, txPhase, txMode, baseEpoch,
-                    commitEpoch, publisher, heldShared, heldExclusive, readerEpoch>>
+                    commitEpoch, publisher, heldShared, heldExclusive, lockTokens, readerEpoch>>
 
 RejectDeadlock(waiter, span, lockMode) ==
     LET owners == Blockers(waiter, span, lockMode) IN
@@ -133,6 +176,7 @@ RejectDeadlock(waiter, span, lockMode) ==
     /\ txPhase' = [txPhase EXCEPT ![waiter] = "deadlock"]
     /\ heldShared' = [heldShared EXCEPT ![waiter] = {}]
     /\ heldExclusive' = [heldExclusive EXCEPT ![waiter] = {}]
+    /\ lockTokens' = [lockTokens EXCEPT ![waiter] = {}]
     /\ waitFor' = RemoveDependency(waitFor, waiter)
     /\ UNCHANGED <<publishedEpoch, durableEpoch, txMode, baseEpoch,
                     commitEpoch, publisher, readerEpoch>>
@@ -148,7 +192,7 @@ PrepareCommit(tx) ==
     /\ txPhase' = [txPhase EXCEPT ![tx] = "prepared"]
     /\ publisher' = tx
     /\ UNCHANGED <<publishedEpoch, durableEpoch, txMode, baseEpoch,
-                    commitEpoch, heldShared, heldExclusive, waitFor, readerEpoch>>
+                    commitEpoch, heldShared, heldExclusive, lockTokens, waitFor, readerEpoch>>
 
 RejectOptimisticConflict(tx) ==
     /\ txPhase[tx] = "active"
@@ -158,6 +202,7 @@ RejectOptimisticConflict(tx) ==
     /\ txPhase' = [txPhase EXCEPT ![tx] = "conflict"]
     /\ heldShared' = [heldShared EXCEPT ![tx] = {}]
     /\ heldExclusive' = [heldExclusive EXCEPT ![tx] = {}]
+    /\ lockTokens' = [lockTokens EXCEPT ![tx] = {}]
     /\ waitFor' = RemoveDependency(waitFor, tx)
     /\ UNCHANGED <<publishedEpoch, durableEpoch, txMode, baseEpoch,
                     commitEpoch, publisher, readerEpoch>>
@@ -169,7 +214,7 @@ MakeDurable(tx) ==
     /\ durableEpoch' = publishedEpoch + 1
     /\ txPhase' = [txPhase EXCEPT ![tx] = "durable"]
     /\ UNCHANGED <<publishedEpoch, txMode, baseEpoch, commitEpoch, publisher,
-                    heldShared, heldExclusive, waitFor, readerEpoch>>
+                    heldShared, heldExclusive, lockTokens, waitFor, readerEpoch>>
 
 Publish(tx) ==
     /\ publisher = tx
@@ -181,6 +226,7 @@ Publish(tx) ==
     /\ publisher' = "none"
     /\ heldShared' = [heldShared EXCEPT ![tx] = {}]
     /\ heldExclusive' = [heldExclusive EXCEPT ![tx] = {}]
+    /\ lockTokens' = [lockTokens EXCEPT ![tx] = {}]
     /\ waitFor' = RemoveDependency(waitFor, tx)
     /\ UNCHANGED <<durableEpoch, txMode, baseEpoch, readerEpoch>>
 
@@ -189,6 +235,7 @@ Rollback(tx) ==
     /\ txPhase' = [txPhase EXCEPT ![tx] = "aborted"]
     /\ heldShared' = [heldShared EXCEPT ![tx] = {}]
     /\ heldExclusive' = [heldExclusive EXCEPT ![tx] = {}]
+    /\ lockTokens' = [lockTokens EXCEPT ![tx] = {}]
     /\ waitFor' = RemoveDependency(waitFor, tx)
     /\ UNCHANGED <<publishedEpoch, durableEpoch, txMode, baseEpoch,
                     commitEpoch, publisher, readerEpoch>>
@@ -197,13 +244,13 @@ BeginRead(reader) ==
     /\ readerEpoch[reader] = -1
     /\ readerEpoch' = [readerEpoch EXCEPT ![reader] = publishedEpoch]
     /\ UNCHANGED <<publishedEpoch, durableEpoch, txPhase, txMode, baseEpoch,
-                    commitEpoch, publisher, heldShared, heldExclusive, waitFor>>
+                    commitEpoch, publisher, heldShared, heldExclusive, lockTokens, waitFor>>
 
 EndRead(reader) ==
     /\ readerEpoch[reader] >= 0
     /\ readerEpoch' = [readerEpoch EXCEPT ![reader] = -1]
     /\ UNCHANGED <<publishedEpoch, durableEpoch, txPhase, txMode, baseEpoch,
-                    commitEpoch, publisher, heldShared, heldExclusive, waitFor>>
+                    commitEpoch, publisher, heldShared, heldExclusive, lockTokens, waitFor>>
 
 Crash ==
     /\ publishedEpoch' = durableEpoch
@@ -220,6 +267,7 @@ Crash ==
     /\ publisher' = "none"
     /\ heldShared' = [tx \in Transactions |-> {}]
     /\ heldExclusive' = [tx \in Transactions |-> {}]
+    /\ lockTokens' = [tx \in Transactions |-> {}]
     /\ waitFor' = [tx \in Transactions |-> {}]
     /\ readerEpoch' = [reader \in Readers |-> -1]
     /\ UNCHANGED <<durableEpoch, txMode, baseEpoch>>
@@ -228,6 +276,8 @@ Next ==
     \/ \E tx \in Transactions, mode \in {"optimistic", "pessimistic"}: Begin(tx, mode)
     \/ \E tx \in Transactions, span \in LockSpans, lockMode \in LockModes:
         AcquireLock(tx, span, lockMode)
+    \/ \E tx \in Transactions, lockMode \in LockModes: EscalateLock(tx, lockMode)
+    \/ \E tx \in Transactions: RejectLockBudget(tx)
     \/ \E waiter \in Transactions, span \in LockSpans, lockMode \in LockModes:
         RegisterWait(waiter, span, lockMode)
     \/ \E waiter \in Transactions: ReleaseWait(waiter)
@@ -252,6 +302,7 @@ TypeInvariant ==
     /\ publisher \in Transactions \union {"none"}
     /\ heldShared \in [Transactions -> SUBSET Keys]
     /\ heldExclusive \in [Transactions -> SUBSET Keys]
+    /\ lockTokens \in [Transactions -> SUBSET LockTokens]
     /\ waitFor \in [Transactions -> SUBSET Transactions]
     /\ readerEpoch \in [Readers -> -1..MaxEpoch]
 
@@ -271,6 +322,17 @@ LockCompatibility ==
         left # right =>
             heldExclusive[left] \intersect
                 (heldShared[right] \union heldExclusive[right]) = {}
+
+LockTokensAreExclusive ==
+    \A left, right \in Transactions:
+        left # right => lockTokens[left] \intersect lockTokens[right] = {}
+
+LockOwnershipHasOneOrMoreBudgetTokens ==
+    \A tx \in Transactions:
+        (heldShared[tx] \union heldExclusive[tx] = {}) <=> (lockTokens[tx] = {})
+
+LockTableIsBounded ==
+    Cardinality(UNION {lockTokens[tx] : tx \in Transactions}) <= Cardinality(LockTokens)
 
 OptimisticPublisherOwnsDatabaseLock ==
     \A tx \in Transactions:

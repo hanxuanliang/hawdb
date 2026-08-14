@@ -70,11 +70,37 @@ The scoped grammar includes:
   `OCTET_LENGTH`;
 - deterministic PostgreSQL null ordering, `LIMIT`, and `OFFSET`;
 - `INSERT`, multi-row `VALUES`, `ON CONFLICT`, `UPDATE`, and `DELETE`;
+- `SELECT ... FOR SHARE` and `SELECT ... FOR UPDATE` in pessimistic concurrent
+  transactions;
 - `CREATE TABLE`, primary/unique/foreign-key constraints, `CREATE INDEX`, and
   append-only `ALTER TABLE ... ADD COLUMN` parsing.
 
 Unsupported syntax MUST fail during parse or binding. It MUST NOT silently use
 different semantics.
+
+## Concurrent locking
+
+Ordinary `SELECT` is a snapshot read and acquires no logical row lock. An
+explicit `FOR SHARE` or `FOR UPDATE` locking read is accepted only inside a
+pessimistic `ConcurrentDatabaseTransaction`. `NOWAIT`, `SKIP LOCKED`, locking
+virtual `system.*` tables, and locking reads in optimistic transactions fail
+instead of silently degrading.
+
+For a single public table, a predicate that is exactly representable by its
+primary key becomes a shared or exclusive point/range request. An UPDATE or
+DELETE uses the same primary-key inference with exclusive mode. A predicate
+that cannot be represented safely falls back to a table lock, not a database
+lock. Joins use deterministic table locks until a separately specified
+multi-table row-lock derivation exists. DDL and mutations that rewrite primary,
+unique, or foreign-key columns retain the database-exclusive fallback because
+their complete constraint lock set is not yet derived.
+
+Requests are deduplicated and acquired in deterministic namespace/key order.
+The lock table escalates a transaction's narrow locks for one table before the
+next request exceeds the per-table threshold. Escalation acquires the covering
+table lock before removing covered locks. The lock table also enforces hard
+entry and estimated-byte limits; an over-budget request aborts and releases the
+transaction rather than growing unbounded resident state.
 
 ## Relational Storage
 

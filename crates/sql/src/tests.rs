@@ -1,7 +1,8 @@
 use super::{
     parse_postgres_sql, prepare_postgres_sql, SelectProjection, SqlBound, SqlColumnRef,
     SqlComparisonOp, SqlConflictAction, SqlDataType, SqlExpression, SqlFunctionArgument,
-    SqlJoinKind, SqlOrderDirection, SqlPredicate, SqlStatement, SqlTableName, SqlValue,
+    SqlJoinKind, SqlLockStrength, SqlOrderDirection, SqlPredicate, SqlStatement, SqlTableName,
+    SqlValue,
 };
 use skein_core::Value;
 
@@ -75,6 +76,28 @@ fn parses_postgres_select_subset() {
             negated: false,
         }
     );
+}
+
+#[test]
+fn parses_postgres_locking_selects_and_rejects_nonblocking_variants() {
+    for (suffix, expected) in [
+        ("FOR SHARE", SqlLockStrength::Share),
+        ("FOR UPDATE", SqlLockStrength::Update),
+    ] {
+        let statement =
+            parse_postgres_sql(&format!("SELECT id FROM messages WHERE id = $1 {suffix}"))
+                .expect("valid PostgreSQL locking SELECT");
+        let SqlStatement::Select(select) = statement else {
+            panic!("expected SELECT statement");
+        };
+        assert_eq!(select.lock_strength, Some(expected));
+    }
+
+    for suffix in ["FOR UPDATE NOWAIT", "FOR SHARE SKIP LOCKED"] {
+        let error = parse_postgres_sql(&format!("SELECT id FROM messages {suffix}"))
+            .expect_err("nonblocking locking reads are not implemented");
+        assert!(error.to_string().contains("NOWAIT, and SKIP LOCKED"));
+    }
 }
 
 #[test]

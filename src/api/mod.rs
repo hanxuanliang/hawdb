@@ -18197,8 +18197,10 @@ fn execute_database_transaction_sql(
     sql_text: &str,
     parameters: &[Value],
     allow_system_schema_registry_write: bool,
+    allow_locking_select: bool,
 ) -> Result<QueryOutput> {
     let prepared = skein_sql::prepare_postgres_sql(sql_text)?;
+    reject_locking_select_without_manager(&prepared.statement, allow_locking_select)?;
     if !allow_system_schema_registry_write
         && crate::relational_sql::statement_writes_system_schema_registry(&prepared.statement)
     {
@@ -18274,6 +18276,25 @@ fn execute_database_transaction_sql(
     Ok(QueryOutput { rows: Vec::new() })
 }
 
+fn reject_locking_select_without_manager(
+    statement: &crate::sql::SqlStatement,
+    allow_locking_select: bool,
+) -> Result<()> {
+    let locking_select = match statement {
+        crate::sql::SqlStatement::Select(select) => select.lock_strength.is_some(),
+        crate::sql::SqlStatement::Explain(explain) => {
+            matches!(explain.statement.as_ref(), crate::sql::SqlStatement::Select(select) if select.lock_strength.is_some())
+        }
+        _ => false,
+    };
+    if locking_select && !allow_locking_select {
+        return Err(SkeinError::Semantic(
+            "FOR UPDATE/SHARE requires a pessimistic concurrent transaction".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn commit_database_transaction_state(
     db: &mut Database,
     state: &mut DatabaseTransactionState,
@@ -18332,6 +18353,7 @@ impl DatabaseTransaction<'_> {
             sql_text,
             parameters,
             false,
+            false,
         )
     }
 
@@ -18344,7 +18366,14 @@ impl DatabaseTransaction<'_> {
         sql_text: &str,
         parameters: &[Value],
     ) -> Result<QueryOutput> {
-        execute_database_transaction_sql(&self.runtime, &mut self.state, sql_text, parameters, true)
+        execute_database_transaction_sql(
+            &self.runtime,
+            &mut self.state,
+            sql_text,
+            parameters,
+            true,
+            false,
+        )
     }
 
     pub fn commit(mut self) -> Result<QueryOutput> {
@@ -19138,6 +19167,7 @@ impl DatabaseReadTransaction {
             options.max_payload_bytes,
         );
         let prepared = skein_sql::prepare_postgres_sql(sql_text)?;
+        reject_locking_select_without_manager(&prepared.statement, false)?;
         if matches!(
             &prepared.statement,
             crate::sql::SqlStatement::Select(select)

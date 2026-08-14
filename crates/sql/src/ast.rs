@@ -30,6 +30,13 @@ pub struct SelectStatement {
     pub order_by: Vec<SqlOrderItem>,
     pub limit: Option<SqlBound>,
     pub offset: Option<SqlBound>,
+    pub lock_strength: Option<SqlLockStrength>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlLockStrength {
+    Share,
+    Update,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
