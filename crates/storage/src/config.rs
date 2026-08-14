@@ -54,8 +54,8 @@ pub struct WalReplayConfig {
     /// validates it. Off by default; reads are never served from the shadow.
     pub graph_columnar_shadow_checkpoint: bool,
     /// Derived relational index-page shadow. Checkpoints publish a
-    /// generation-fenced fixed-slot tree, but SQL does not read it until a
-    /// later activation stage. Off by default.
+    /// generation-fenced fixed-slot tree. The library facade controls SQL
+    /// read activation independently. Off by default.
     pub relational_index_shadow_checkpoint: bool,
 }
 

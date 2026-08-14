@@ -1,8 +1,9 @@
-//! Non-serving relational index-page shadow publication.
+//! Relational index-page publication and generation-pinned read views.
 //!
 //! The shadow is deliberately derived: canonical checkpoint success never
-//! depends on it and SQL never reads it in this stage. A valid shadow is
-//! generation/epoch fenced to the checkpoint that supplied its rows.
+//! depends on it. A valid view is generation/epoch fenced to the checkpoint
+//! that supplied its rows and is selected by SQL only through the facade's
+//! explicit demand-read mode.
 
 use super::{GraphStore, SkeinError};
 use skein_integrity::{IntegrityHasher, Sha256Digest};
@@ -17,7 +18,12 @@ use skein_storage::{
     RelationalTransaction, RelationalValue, RELATIONAL_INDEX_SHADOW_MANIFEST_FILE,
     RELATIONAL_PRIMARY_INDEX_NAME,
 };
-use std::{collections::BTreeSet, fmt, fs, num::NonZeroUsize, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt, fs,
+    num::NonZeroUsize,
+    sync::Arc,
+};
 
 pub const RELATIONAL_INDEX_VIEW_QUALIFICATION_PROTOCOL: &str =
     "skein-relational-index-view-qualification-v1";
@@ -64,6 +70,11 @@ impl RelationalIndexReadViewBackendReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationalIndexReadViewReport {
+    pub base_generation: u64,
+    pub delta_generation: Option<u64>,
+    pub base_commit_epoch: u64,
+    pub visible_commit_epoch: u64,
+    pub schema_digest: String,
     pub backend: RelationalIndexReadViewBackendReport,
     pub live_batches_visited: usize,
     pub live_entries_visited: usize,
@@ -383,53 +394,10 @@ impl RelationalIndexReadView {
                 "relational index read view is poisoned".to_string(),
             ));
         }
-        let mut rows = BTreeSet::new();
-        let mut collect = |primary_key: &RelationalKey| {
-            rows.insert(primary_key.clone());
-            true
-        };
-        let backend =
-            match (&self.backend, &selector) {
-                (
-                    RelationalIndexReadBackend::Base(reader),
-                    RelationalIndexReadSelector::Exact(key),
-                ) => RelationalIndexReadViewBackendReport::Base(reader.visit_exact_postings(
-                    table,
-                    index,
-                    key,
-                    limits,
-                    &mut collect,
-                )?),
-                (
-                    RelationalIndexReadBackend::Base(reader),
-                    RelationalIndexReadSelector::Prefix(prefix),
-                ) => RelationalIndexReadViewBackendReport::Base(reader.visit_prefix_postings(
-                    table,
-                    index,
-                    prefix,
-                    limits,
-                    &mut collect,
-                )?),
-                (
-                    RelationalIndexReadBackend::Recovered(reader),
-                    RelationalIndexReadSelector::Exact(key),
-                ) => RelationalIndexReadViewBackendReport::Recovered(reader.visit_exact_postings(
-                    table,
-                    index,
-                    key,
-                    limits,
-                    &mut collect,
-                )?),
-                (
-                    RelationalIndexReadBackend::Recovered(reader),
-                    RelationalIndexReadSelector::Prefix(prefix),
-                ) => RelationalIndexReadViewBackendReport::Recovered(
-                    reader.visit_prefix_postings(table, index, prefix, limits, &mut collect)?,
-                ),
-            };
         let mut live_entries_visited = 0usize;
         let mut live_entries_matched = 0usize;
         let mut live_bytes_visited = 0usize;
+        let mut pending_live = BTreeMap::new();
         let mut previous_epoch = self.durable_commit_epoch();
         for batch in self.live.batches.iter() {
             if batch.commit_epoch <= previous_epoch
@@ -444,17 +412,6 @@ impl RelationalIndexReadView {
             live_bytes_visited = live_bytes_visited
                 .checked_add(batch.encoded_bytes)
                 .ok_or_else(|| admission("relational index live byte counter overflow"))?;
-            let total_bytes = backend
-                .bytes_read()
-                .ok_or_else(|| admission("relational index backend byte counter overflow"))?
-                .checked_add(live_bytes_visited)
-                .ok_or_else(|| admission("relational index read byte counter overflow"))?;
-            if total_bytes > limits.max_bytes.get() {
-                return Err(admission(format!(
-                    "relational index read needs {total_bytes} bytes including live changes, exceeding byte limit {}",
-                    limits.max_bytes
-                )));
-            }
             for change in batch.changes.iter() {
                 live_entries_visited = live_entries_visited
                     .checked_add(1)
@@ -468,38 +425,164 @@ impl RelationalIndexReadView {
                 live_entries_matched = live_entries_matched
                     .checked_add(1)
                     .ok_or_else(|| admission("relational index matched-live counter overflow"))?;
-                match change.kind {
-                    RelationalIndexChangeKind::Delete => {
-                        rows.remove(&change.primary_key);
-                    }
-                    RelationalIndexChangeKind::Insert => {
-                        rows.insert(change.primary_key.clone());
-                    }
+                pending_live.insert(change.primary_key.clone(), change.kind);
+                if pending_live.len() >= limits.max_rows.get() {
+                    return Err(admission(format!(
+                        "relational index live merge needs {} row locators, exhausting row limit {}",
+                        pending_live.len(), limits.max_rows
+                    )));
                 }
-                if rows.len() > limits.max_rows.get() {
+            }
+        }
+        let backend_byte_limit = limits
+            .max_bytes
+            .get()
+            .checked_sub(live_bytes_visited)
+            .and_then(NonZeroUsize::new)
+            .ok_or_else(|| {
+                admission(format!(
+                    "relational index live merge needs {live_bytes_visited} bytes, exhausting byte limit {}",
+                    limits.max_bytes
+                ))
+            })?;
+        let backend_row_limit = limits
+            .max_rows
+            .get()
+            .checked_sub(pending_live.len())
+            .and_then(NonZeroUsize::new)
+            .ok_or_else(|| admission("relational index live merge exhausted its row budget"))?;
+        let backend_limits = RelationalIndexReadLimits {
+            max_rows: backend_row_limit,
+            max_bytes: backend_byte_limit,
+            ..limits
+        };
+        let mut rows_visited = 0usize;
+        let mut stopped_early = false;
+        let mut callback_error = None;
+        let backend = {
+            let mut emit_backend = |primary_key: &RelationalKey| {
+                if matches!(
+                    pending_live.remove(primary_key),
+                    Some(RelationalIndexChangeKind::Delete)
+                ) {
+                    return true;
+                }
+                let Some(next_rows_visited) = rows_visited.checked_add(1) else {
+                    callback_error =
+                        Some(admission("relational index output row counter overflow"));
+                    return false;
+                };
+                if next_rows_visited > limits.max_rows.get() {
+                    callback_error = Some(admission(format!(
+                        "relational index read exceeds row limit {} after live merge",
+                        limits.max_rows
+                    )));
+                    return false;
+                }
+                rows_visited = next_rows_visited;
+                if !visit(primary_key) {
+                    stopped_early = true;
+                    return false;
+                }
+                true
+            };
+            match (&self.backend, &selector) {
+                (
+                    RelationalIndexReadBackend::Base(reader),
+                    RelationalIndexReadSelector::Exact(key),
+                ) => RelationalIndexReadViewBackendReport::Base(reader.visit_exact_postings(
+                    table,
+                    index,
+                    key,
+                    backend_limits,
+                    &mut emit_backend,
+                )?),
+                (
+                    RelationalIndexReadBackend::Base(reader),
+                    RelationalIndexReadSelector::Prefix(prefix),
+                ) => RelationalIndexReadViewBackendReport::Base(reader.visit_prefix_postings(
+                    table,
+                    index,
+                    prefix,
+                    backend_limits,
+                    &mut emit_backend,
+                )?),
+                (
+                    RelationalIndexReadBackend::Recovered(reader),
+                    RelationalIndexReadSelector::Exact(key),
+                ) => RelationalIndexReadViewBackendReport::Recovered(reader.visit_exact_postings(
+                    table,
+                    index,
+                    key,
+                    backend_limits,
+                    &mut emit_backend,
+                )?),
+                (
+                    RelationalIndexReadBackend::Recovered(reader),
+                    RelationalIndexReadSelector::Prefix(prefix),
+                ) => {
+                    RelationalIndexReadViewBackendReport::Recovered(reader.visit_prefix_postings(
+                        table,
+                        index,
+                        prefix,
+                        backend_limits,
+                        &mut emit_backend,
+                    )?)
+                }
+            }
+        };
+        if let Some(error) = callback_error {
+            return Err(error);
+        }
+        if !stopped_early {
+            for (primary_key, kind) in pending_live {
+                if kind == RelationalIndexChangeKind::Delete {
+                    continue;
+                }
+                rows_visited = rows_visited
+                    .checked_add(1)
+                    .ok_or_else(|| admission("relational index output row counter overflow"))?;
+                if rows_visited > limits.max_rows.get() {
                     return Err(admission(format!(
                         "relational index read exceeds row limit {} after live merge",
                         limits.max_rows
                     )));
                 }
+                if !visit(&primary_key) {
+                    stopped_early = true;
+                    break;
+                }
             }
         }
+        let total_bytes = backend
+            .bytes_read()
+            .ok_or_else(|| admission("relational index backend byte counter overflow"))?
+            .checked_add(live_bytes_visited)
+            .ok_or_else(|| admission("relational index read byte counter overflow"))?;
+        if total_bytes > limits.max_bytes.get() {
+            return Err(admission(format!(
+                "relational index read needs {total_bytes} bytes including live changes, exceeding byte limit {}",
+                limits.max_bytes
+            )));
+        }
         let mut report = RelationalIndexReadViewReport {
+            base_generation: self.identity.base_generation,
+            delta_generation: self.identity.delta_generation,
+            base_commit_epoch: self.identity.base_commit_epoch,
+            visible_commit_epoch: self.identity.visible_commit_epoch,
+            schema_digest: self.identity.schema_digest.to_string(),
             backend,
             live_batches_visited: self.live.batch_count(),
             live_entries_visited,
             live_entries_matched,
             live_bytes_visited,
-            rows_visited: 0,
-            stopped_early: false,
+            rows_visited,
+            stopped_early,
         };
-        for row in rows {
-            report.rows_visited += 1;
-            if !visit(&row) {
-                report.stopped_early = true;
-                break;
-            }
-        }
+        report.stopped_early |= match &report.backend {
+            RelationalIndexReadViewBackendReport::Base(backend) => backend.stopped_early,
+            RelationalIndexReadViewBackendReport::Recovered(backend) => backend.stopped_early,
+        };
         Ok(report)
     }
 
@@ -1149,6 +1232,20 @@ impl GraphStore {
 
     pub fn relational_index_recovery_report(&self) -> Option<&RelationalIndexRecoveryReport> {
         self.relational_index_shadow.recovery_report.as_ref()
+    }
+
+    pub(crate) fn visit_relational_index_read_view_prefix(
+        &self,
+        table: &str,
+        index: &str,
+        prefix: &RelationalKey,
+        limits: RelationalIndexReadLimits,
+        visit: impl FnMut(&RelationalKey) -> bool,
+    ) -> Option<std::result::Result<RelationalIndexReadViewReport, RelationalIndexShadowError>>
+    {
+        self.relational_index_shadow
+            .current_read_view(self.commit_epoch)
+            .map(|view| view.visit_prefix_postings(table, index, prefix, limits, visit))
     }
 
     /// Differentially checks the pinned demand-paged relational index view

@@ -88,25 +88,12 @@ and algorithms outside active routes are not implied backlog items.
 
 ## P1: Persistent Row And Index Storage
 
-The immutable relational index codec, generation-fenced shadow publisher,
-demand reader, bounded page-cache integration, and WAL recovery delta are
-implemented as non-serving evidence paths. The remaining work below activates
-those foundations without allowing a stale index or a database-sized resident
-set to become a correctness dependency.
-
-- [ ] Activate demand-paged relational indexes through PostgreSQL SQL.
-  - Differentially qualify exact, unique, leading composite-prefix, and join
-    probes against the materialized oracle across base, recovery-delta, and
-    live-delta state before changing query routing.
-  - Keep SQL as the production entrypoint. The executor consumes bounded row
-    locators from the pinned index view; do not add route-specific public APIs.
-  - Missing, unavailable, or admission-rejected optional query indexes may use
-    an observable canonical fallback while it exists. Corruption, immutable
-    identity mismatch, or generation mismatch poisons the selected view and
-    fails closed.
-  - Report generation, epoch, logical and physical page bytes, cache results,
-    delta work, and fallback reason in query evidence. Keep one rollback mode
-    until business-shaped activation evidence passes.
+The immutable relational index codec, generation-fenced publisher, demand
+reader, bounded page-cache integration, WAL recovery delta, differential
+qualification, and opt-in PostgreSQL SQL execution path are implemented. The
+remaining work below makes those derived foundations canonical without
+allowing a stale index or a database-sized resident set to become a correctness
+dependency.
 
 - [ ] Make persistent relational indexes authoritative.
   - Publish row identity, primary, unique, secondary, and foreign-key support

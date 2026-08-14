@@ -58,6 +58,7 @@ use skein_optimizer::{
     SearchPredicateSet,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -265,8 +266,12 @@ pub struct DatabaseConfig {
     /// never served from the shadow.
     pub graph_columnar_shadow_checkpoint: bool,
     /// Derived relational index-page shadow double-write. Off by default;
-    /// SQL continues to use the materialized relational indexes.
+    /// query activation is controlled independently.
     pub relational_index_shadow_checkpoint: bool,
+    /// Use a generation-pinned demand-paged relational index view for SQL
+    /// index access when available. Missing or admission-rejected optional
+    /// views fall back observably to the canonical materialized path.
+    pub relational_index_demand_reads: bool,
     pub max_search_projection_change_log_entries: Option<usize>,
     pub max_plan_cache_entries: Option<usize>,
     pub slow_query_log_capacity: usize,
@@ -321,6 +326,29 @@ fn relational_query_limits_with_payload(
             max_memory_bytes: max_output_payload_bytes,
             ..skein_storage::RelationalHydrationBudget::default()
         },
+        index_read: skein_storage::RelationalIndexReadLimits {
+            max_rows: NonZeroUsize::new(
+                max_intermediate_rows.clamp(1, skein_storage::DEFAULT_RELATIONAL_INDEX_READ_ROWS),
+            )
+            .expect("relational index query row budget is non-zero"),
+            max_bytes: NonZeroUsize::new(
+                max_output_payload_bytes
+                    .clamp(1, skein_storage::DEFAULT_RELATIONAL_INDEX_READ_BYTES),
+            )
+            .expect("relational index query byte budget is non-zero"),
+            ..skein_storage::RelationalIndexReadLimits::default()
+        },
+    }
+}
+
+fn relational_index_read_mode<'a>(
+    config: &DatabaseConfig,
+    store: &'a GraphStore,
+) -> crate::relational_sql::RelationalIndexReadMode<'a> {
+    if config.relational_index_demand_reads {
+        crate::relational_sql::RelationalIndexReadMode::DemandPaged(store)
+    } else {
+        crate::relational_sql::RelationalIndexReadMode::Materialized
     }
 }
 
@@ -347,6 +375,7 @@ impl Default for DatabaseConfig {
             max_out_of_core_delta_bytes: Some(skein_storage::DEFAULT_MAX_OUT_OF_CORE_DELTA_BYTES),
             graph_columnar_shadow_checkpoint: false,
             relational_index_shadow_checkpoint: false,
+            relational_index_demand_reads: false,
             max_search_projection_change_log_entries: Some(
                 DEFAULT_SEARCH_PROJECTION_CHANGE_LOG_MAX_ENTRIES,
             ),
@@ -1244,9 +1273,9 @@ impl Database {
         self.store.columnar_shadow_recovery_status()
     }
 
-    /// Publication evidence for the non-serving relational index-page
-    /// shadow. `None` while the shadow is disabled or before its first
-    /// checkpoint attempt.
+    /// Publication evidence for the derived relational index-page store.
+    /// `None` while publication is disabled or before its first checkpoint
+    /// attempt.
     pub fn relational_index_shadow_checkpoint_report(
         &self,
     ) -> Option<&crate::store::RelationalIndexShadowCheckpointReport> {
@@ -1254,7 +1283,7 @@ impl Database {
     }
 
     /// Recovery's bounded manifest-only assessment of the relational index
-    /// shadow. SQL does not consume the shadow in this stage.
+    /// store. Selected pages remain lazily validated on first SQL access.
     pub fn relational_index_shadow_recovery_status(
         &self,
     ) -> &crate::store::RelationalIndexShadowRecoveryStatus {
@@ -1262,8 +1291,7 @@ impl Database {
     }
 
     /// Resource and publication evidence for WAL index deltas derived during
-    /// the most recent open. SQL remains on the materialized oracle until the
-    /// separate production activation gate is enabled.
+    /// the most recent open.
     pub fn relational_index_recovery_report(
         &self,
     ) -> Option<&skein_storage::RelationalIndexRecoveryReport> {
@@ -18447,6 +18475,11 @@ fn execute_database_transaction_sql(
             sql_text,
             parameters,
             &state.relational_state,
+            if runtime.config.relational_index_demand_reads {
+                crate::relational_sql::RelationalIndexReadMode::TransactionWorkspace
+            } else {
+                crate::relational_sql::RelationalIndexReadMode::Materialized
+            },
             relational_query_limits(&runtime.config, runtime.config.max_read_result_rows),
             &runtime.config.execution_memory,
             None,
@@ -19400,6 +19433,7 @@ impl DatabaseReadTransaction {
             sql_text,
             parameters,
             self.store.relational_state(),
+            relational_index_read_mode(&self.config, &self.store),
             relational_query_limits_with_payload(&self.config, max_rows, max_payload_bytes),
             &self.config.execution_memory,
             None,

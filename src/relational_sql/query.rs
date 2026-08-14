@@ -1,5 +1,8 @@
 use crate::error::{Result, SkeinError};
 use crate::executor::{map_payload_bytes, Row};
+use crate::relational_sql::index_access::{
+    RelationalIndexExecutionEvidence, RelationalIndexReadMode, RelationalIndexRuntime,
+};
 use crate::sql::{
     SelectProjection, SelectStatement, SqlBound, SqlColumnRef, SqlComparisonOp, SqlExpression,
     SqlFunctionArgument, SqlJoinKind, SqlNullOrder, SqlOrderDirection, SqlPredicate, SqlStatement,
@@ -36,6 +39,7 @@ pub(crate) struct RelationalQueryLimits {
     pub batch_rows: NonZeroUsize,
     pub blocking_operator_bytes: NonZeroUsize,
     pub hydration: RelationalHydrationBudget,
+    pub index_read: skein_storage::RelationalIndexReadLimits,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,13 +49,24 @@ pub(crate) struct RelationalQueryOutput {
     pub hydration: RelationalHydrationBudget,
     pub access_path: RelationalAccessPathDescriptor,
     pub join_access_paths: Vec<RelationalAccessPathDescriptor>,
+    pub index_execution_evidence: Vec<RelationalIndexExecutionEvidence>,
     pub blocking_operator_memory_reports: Vec<BlockingOperatorMemoryReport>,
 }
 
-pub(crate) fn execute_relational_query_sql_with_runtime(
+#[derive(Clone, Copy)]
+struct RelationalSelectExecution<'state, 'runtime> {
+    state: &'state RelationalState,
+    index_read_mode: RelationalIndexReadMode<'state>,
+    limits: RelationalQueryLimits,
+    execution_memory: &'runtime skein_executor::ExecutionMemoryConfig,
+    task_context: Option<&'runtime skein_core::RuntimeTaskContext>,
+}
+
+pub(crate) fn execute_relational_query_sql_with_runtime<'a>(
     sql: &str,
     parameters: &[Value],
-    state: &RelationalState,
+    state: &'a RelationalState,
+    index_read_mode: RelationalIndexReadMode<'a>,
     limits: RelationalQueryLimits,
     execution_memory: &skein_executor::ExecutionMemoryConfig,
     task_context: Option<&skein_core::RuntimeTaskContext>,
@@ -64,31 +79,22 @@ pub(crate) fn execute_relational_query_sql_with_runtime(
             parameters.len()
         )));
     }
+    let execution = RelationalSelectExecution {
+        state,
+        index_read_mode,
+        limits,
+        execution_memory,
+        task_context,
+    };
     match prepared.statement {
-        SqlStatement::Select(select) => execute_select(
-            &select,
-            parameters,
-            state,
-            limits,
-            execution_memory,
-            task_context,
-            false,
-        ),
+        SqlStatement::Select(select) => execute_select(&select, parameters, execution, false),
         SqlStatement::Explain(explain) => {
             let SqlStatement::Select(select) = *explain.statement else {
                 return Err(SkeinError::Semantic(
                     "EXPLAIN only supports relational SELECT".to_string(),
                 ));
             };
-            let output = execute_select(
-                &select,
-                parameters,
-                state,
-                limits,
-                execution_memory,
-                task_context,
-                !explain.analyze,
-            )?;
+            let output = execute_select(&select, parameters, execution, !explain.analyze)?;
             if explain.analyze {
                 format_relational_explain(&select, parameters, output, true, limits)
             } else {
@@ -189,15 +195,19 @@ impl<'a> RelationalPipelineState<'a> {
     }
 }
 
-fn execute_select(
+fn execute_select<'state>(
     select: &SelectStatement,
     parameters: &[Value],
-    state: &RelationalState,
-    limits: RelationalQueryLimits,
-    execution_memory: &skein_executor::ExecutionMemoryConfig,
-    task_context: Option<&skein_core::RuntimeTaskContext>,
+    execution: RelationalSelectExecution<'state, '_>,
     explain_only: bool,
 ) -> Result<RelationalQueryOutput> {
+    let RelationalSelectExecution {
+        state,
+        index_read_mode,
+        limits,
+        execution_memory,
+        task_context,
+    } = execution;
     reject_non_public_schema(select.from.schema.as_deref())?;
     let base_schema = state.table_schema(&select.from.name).ok_or_else(|| {
         SkeinError::Semantic(format!("unknown relational table {}", select.from.name))
@@ -253,6 +263,7 @@ fn execute_select(
                 hydration: limits.hydration,
                 access_path,
                 join_access_paths,
+                index_execution_evidence: Vec::new(),
                 blocking_operator_memory_reports: Vec::new(),
             },
             false,
@@ -260,6 +271,7 @@ fn execute_select(
         );
     }
     let mut pipeline = RelationalPipelineState::new(task_context, limits);
+    let index_runtime = RelationalIndexRuntime::new(index_read_mode, limits.index_read);
     if !has_blocking_operator {
         let output = execute_streaming_projection(
             select,
@@ -270,6 +282,7 @@ fn execute_select(
             &base_access.access,
             &planned_joins,
             &mut pipeline,
+            &index_runtime,
             limits,
         )?;
         pipeline.finish()?;
@@ -279,6 +292,7 @@ fn execute_select(
             hydration: output.hydration,
             access_path,
             join_access_paths,
+            index_execution_evidence: index_runtime.evidence(),
             blocking_operator_memory_reports: output.blocking_operator_memory_reports,
         });
     }
@@ -293,6 +307,7 @@ fn execute_select(
             &base_access.access,
             &planned_joins,
             &mut pipeline,
+            &index_runtime,
             limits,
             execution_memory,
             access_path,
@@ -309,6 +324,7 @@ fn execute_select(
         &base_access.access,
         &planned_joins,
         &mut pipeline,
+        &index_runtime,
         limits,
         execution_memory,
     )?;
@@ -319,6 +335,7 @@ fn execute_select(
         hydration: output.hydration,
         access_path,
         join_access_paths,
+        index_execution_evidence: index_runtime.evidence(),
         blocking_operator_memory_reports: output.blocking_operator_memory_reports,
     })
 }
@@ -436,7 +453,10 @@ fn format_relational_explain(
             },
             estimated_rows: Some(descriptor.estimated_rows),
             access_object: explain_access_object(&join.table.name, descriptor),
-            operator_info: explain_access_path(descriptor),
+            operator_info: explain_access_path(
+                descriptor,
+                relational_index_evidence(&output, &join.table.name, descriptor),
+            ),
             report_operator: None,
         });
     }
@@ -448,7 +468,10 @@ fn format_relational_explain(
         },
         estimated_rows: Some(output.access_path.estimated_rows),
         access_object: explain_access_object(&select.from.name, &output.access_path),
-        operator_info: explain_access_path(&output.access_path),
+        operator_info: explain_access_path(
+            &output.access_path,
+            relational_index_evidence(&output, &select.from.name, &output.access_path),
+        ),
         report_operator: None,
     });
 
@@ -561,11 +584,75 @@ fn explain_access_object(table: &str, descriptor: &RelationalAccessPathDescripto
     }
 }
 
-fn explain_access_path(descriptor: &RelationalAccessPathDescriptor) -> String {
-    format!(
+fn relational_index_evidence<'a>(
+    output: &'a RelationalQueryOutput,
+    table: &str,
+    descriptor: &RelationalAccessPathDescriptor,
+) -> Option<&'a RelationalIndexExecutionEvidence> {
+    let physical_index = match descriptor.kind {
+        RelationalAccessPathKind::PrimaryKey => skein_storage::RELATIONAL_PRIMARY_INDEX_NAME,
+        RelationalAccessPathKind::Index => descriptor.name.as_str(),
+        RelationalAccessPathKind::FullScan => return None,
+    };
+    output
+        .index_execution_evidence
+        .iter()
+        .find(|evidence| evidence.table == table && evidence.index == physical_index)
+}
+
+fn explain_access_path(
+    descriptor: &RelationalAccessPathDescriptor,
+    evidence: Option<&RelationalIndexExecutionEvidence>,
+) -> String {
+    let planned = format!(
         "equality_prefix={}, unique_point={}, row_fetch={}",
         descriptor.equality_prefix_len, descriptor.unique_point, descriptor.requires_row_fetch
+    );
+    let Some(evidence) = evidence else {
+        return planned;
+    };
+    let fallback_reasons = if evidence.fallback_reasons.is_empty() {
+        "none".to_string()
+    } else {
+        evidence
+            .fallback_reasons
+            .iter()
+            .copied()
+            .collect::<Vec<_>>()
+            .join("|")
+    };
+    format!(
+        "{planned}, runtime_path={}, lookups={}, demand_paged={}, canonical_fallback={}, fallback_reasons={}, base_generation={}, delta_generation={}, base_epoch={}, visible_epoch={}, schema_digest={}, logical_pages={}, logical_bytes={}, physical_pages={}, physical_bytes={}, cache_hits={}, cache_misses={}, cache_admission_rejections={}, delta_entries={}, live_batches={}, live_entries={}, live_matches={}, live_bytes={}, index_rows={}",
+        evidence.runtime_path(),
+        evidence.lookups,
+        evidence.demand_paged_lookups,
+        evidence.canonical_fallback_lookups,
+        fallback_reasons,
+        optional_u64_text(evidence.base_generation),
+        optional_u64_text(evidence.delta_generation),
+        optional_u64_text(evidence.base_commit_epoch),
+        optional_u64_text(evidence.visible_commit_epoch),
+        evidence.schema_digest.as_deref().unwrap_or("none"),
+        evidence.logical_pages,
+        evidence.logical_bytes,
+        evidence.file_pages,
+        evidence.file_bytes,
+        evidence.cache_hits,
+        evidence.cache_misses,
+        evidence.cache_admission_rejections,
+        evidence.delta_entries_visited,
+        evidence.live_batches_visited,
+        evidence.live_entries_visited,
+        evidence.live_entries_matched,
+        evidence.live_bytes_visited,
+        evidence.rows_visited,
     )
+}
+
+fn optional_u64_text(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "none".to_string())
 }
 
 fn explain_order_by(order_by: &[crate::sql::SqlOrderItem]) -> String {
@@ -1008,6 +1095,7 @@ fn bound_join_key(
 
 fn visit_join_entries<'a>(
     state: &'a RelationalState,
+    index_runtime: &RelationalIndexRuntime<'_>,
     table: &str,
     schema: &RelationalTableSchema,
     row: &BoundRow<'a>,
@@ -1019,33 +1107,13 @@ fn visit_join_entries<'a>(
             let Some(key) = bound_join_key(row, schema, columns)? else {
                 return Ok(true);
             };
-            if let Some((key, row)) = state.row_entry(table, &key) {
-                return visit(key, row);
-            }
+            return index_runtime.visit_primary(state, table, &key, visit);
         }
         RelationalJoinAccess::Index { name, columns } => {
             let Some(prefix) = bound_join_key(row, schema, columns)? else {
                 return Ok(true);
             };
-            let mut error = None;
-            state
-                .visit_index_prefix_rows(table, name, &prefix, |key, candidate| {
-                    match visit(key, candidate) {
-                        Ok(keep_going) => keep_going,
-                        Err(candidate_error) => {
-                            error = Some(candidate_error);
-                            false
-                        }
-                    }
-                })
-                .ok_or_else(|| {
-                    SkeinError::Execution(format!(
-                        "relational index {name} on table {table} is not materialized"
-                    ))
-                })?;
-            if let Some(error) = error {
-                return Err(error);
-            }
+            return index_runtime.visit_prefix(state, table, name, &prefix, visit);
         }
         RelationalJoinAccess::FullScan => {
             for (key, candidate) in state.rows(table) {
@@ -1060,38 +1128,17 @@ fn visit_join_entries<'a>(
 
 fn visit_base_entries<'a>(
     state: &'a RelationalState,
+    index_runtime: &RelationalIndexRuntime<'_>,
     table: &str,
     access: &RelationalBaseAccess,
     visit: &mut dyn FnMut(&'a RelationalKey, &'a RelationalRow) -> Result<bool>,
 ) -> Result<bool> {
     match access {
-        RelationalBaseAccess::PrimaryKey(key) => match state.row_entry(table, key) {
-            Some((key, row)) => visit(key, row),
-            None => Ok(true),
-        },
+        RelationalBaseAccess::PrimaryKey(key) => {
+            index_runtime.visit_primary(state, table, key, visit)
+        }
         RelationalBaseAccess::Index { name, prefix } => {
-            let mut error = None;
-            let mut keep_going = true;
-            state
-                .visit_index_prefix_rows(table, name, prefix, |key, row| match visit(key, row) {
-                    Ok(continue_scan) => {
-                        keep_going = continue_scan;
-                        continue_scan
-                    }
-                    Err(candidate_error) => {
-                        error = Some(candidate_error);
-                        false
-                    }
-                })
-                .ok_or_else(|| {
-                    SkeinError::Execution(format!(
-                        "relational index {name} on table {table} is not materialized"
-                    ))
-                })?;
-            match error {
-                Some(error) => Err(error),
-                None => Ok(keep_going),
-            }
+            index_runtime.visit_prefix(state, table, name, prefix, visit)
         }
         RelationalBaseAccess::FullScan => {
             for (key, row) in state.rows(table) {
@@ -1114,29 +1161,37 @@ fn visit_relational_rows<'a>(
     base_access: &RelationalBaseAccess,
     joins: &'a [PlannedJoin<'a>],
     pipeline: &mut RelationalPipelineState<'_>,
+    index_runtime: &RelationalIndexRuntime<'_>,
     visit: &mut dyn FnMut(BoundRow<'a>) -> Result<bool>,
 ) -> Result<bool> {
-    visit_base_entries(state, &select.from.name, base_access, &mut |key, row| {
-        pipeline.account_row()?;
-        visit_joined_row(
-            select,
-            parameters,
-            state,
-            joins,
-            0,
-            BoundRow {
-                bindings: vec![Binding {
-                    table: &select.from.name,
-                    qualifier: base_qualifier,
-                    schema: base_schema,
-                    key: Some(key),
-                    row: Some(row),
-                }],
-            },
-            pipeline,
-            visit,
-        )
-    })
+    visit_base_entries(
+        state,
+        index_runtime,
+        &select.from.name,
+        base_access,
+        &mut |key, row| {
+            pipeline.account_row()?;
+            visit_joined_row(
+                select,
+                parameters,
+                state,
+                joins,
+                0,
+                BoundRow {
+                    bindings: vec![Binding {
+                        table: &select.from.name,
+                        qualifier: base_qualifier,
+                        schema: base_schema,
+                        key: Some(key),
+                        row: Some(row),
+                    }],
+                },
+                pipeline,
+                index_runtime,
+                visit,
+            )
+        },
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1148,6 +1203,7 @@ fn visit_joined_row<'a>(
     join_index: usize,
     row: BoundRow<'a>,
     pipeline: &mut RelationalPipelineState<'_>,
+    index_runtime: &RelationalIndexRuntime<'_>,
     visit: &mut dyn FnMut(BoundRow<'a>) -> Result<bool>,
 ) -> Result<bool> {
     let Some(planned) = joins.get(join_index) else {
@@ -1166,6 +1222,7 @@ fn visit_joined_row<'a>(
     let mut matched = false;
     let completed = visit_join_entries(
         state,
+        index_runtime,
         &planned.join.table.name,
         planned.schema,
         &row,
@@ -1192,6 +1249,7 @@ fn visit_joined_row<'a>(
                 join_index + 1,
                 combined,
                 pipeline,
+                index_runtime,
                 visit,
             )
         },
@@ -1217,6 +1275,7 @@ fn visit_joined_row<'a>(
             join_index + 1,
             combined,
             pipeline,
+            index_runtime,
             visit,
         );
     }
@@ -1252,6 +1311,7 @@ struct LocatorBatchSource<'a, 'pipeline> {
     base_access: &'a RelationalBaseAccess,
     joins: &'a [PlannedJoin<'a>],
     pipeline: &'pipeline mut RelationalPipelineState<'a>,
+    index_runtime: &'pipeline RelationalIndexRuntime<'a>,
     batch_rows: usize,
 }
 
@@ -1264,6 +1324,7 @@ struct GroupLocatorBatchSource<'a, 'pipeline> {
     base_access: &'a RelationalBaseAccess,
     joins: &'a [PlannedJoin<'a>],
     pipeline: &'pipeline mut RelationalPipelineState<'a>,
+    index_runtime: &'pipeline RelationalIndexRuntime<'a>,
     batch_rows: usize,
 }
 
@@ -1285,6 +1346,7 @@ impl BindingBatchSource for GroupLocatorBatchSource<'_, '_> {
             self.base_access,
             self.joins,
             self.pipeline,
+            self.index_runtime,
             &mut |row| {
                 let mut values =
                     BTreeMap::from([(RELATIONAL_LOCATOR_COLUMN.to_string(), locator_value(&row))]);
@@ -1334,6 +1396,7 @@ impl BindingBatchSource for LocatorBatchSource<'_, '_> {
             self.base_access,
             self.joins,
             self.pipeline,
+            self.index_runtime,
             &mut |row| {
                 batch.push(locator_sort_binding(&row, &self.select.order_by)?);
                 if batch.len() == self.batch_rows {
@@ -1361,6 +1424,7 @@ struct ProjectedBatchSource<'a, 'pipeline, 'hydration> {
     base_access: &'a RelationalBaseAccess,
     joins: &'a [PlannedJoin<'a>],
     pipeline: &'pipeline mut RelationalPipelineState<'a>,
+    index_runtime: &'pipeline RelationalIndexRuntime<'a>,
     hydration: &'hydration mut RelationalHydrationBudget,
     task_context: Option<&'a skein_core::RuntimeTaskContext>,
     batch_rows: usize,
@@ -1376,6 +1440,7 @@ struct DistinctAggregateValueBatchSource<'a, 'pipeline> {
     base_access: &'a RelationalBaseAccess,
     joins: &'a [PlannedJoin<'a>],
     pipeline: &'pipeline mut RelationalPipelineState<'a>,
+    index_runtime: &'pipeline RelationalIndexRuntime<'a>,
     batch_rows: usize,
 }
 
@@ -1397,6 +1462,7 @@ impl BindingBatchSource for DistinctAggregateValueBatchSource<'_, '_> {
             self.base_access,
             self.joins,
             self.pipeline,
+            self.index_runtime,
             &mut |row| {
                 let value = resolve_column(&row, self.column)?;
                 if matches!(value, RelationalValue::Null) {
@@ -1440,6 +1506,7 @@ impl BindingBatchSource for ProjectedBatchSource<'_, '_, '_> {
             self.base_access,
             self.joins,
             self.pipeline,
+            self.index_runtime,
             &mut |row| {
                 let projected = project_bound_row(
                     &row,
@@ -1539,6 +1606,7 @@ fn execute_blocking_projection<'a>(
     base_access: &'a RelationalBaseAccess,
     joins: &'a [PlannedJoin<'a>],
     pipeline: &mut RelationalPipelineState<'a>,
+    index_runtime: &RelationalIndexRuntime<'a>,
     limits: RelationalQueryLimits,
     memory: &skein_executor::ExecutionMemoryConfig,
 ) -> Result<StreamingProjectionOutput> {
@@ -1570,6 +1638,7 @@ fn execute_blocking_projection<'a>(
             base_access,
             joins,
             pipeline,
+            index_runtime,
             hydration: &mut hydration,
             task_context,
             batch_rows: limits.batch_rows.get(),
@@ -1654,6 +1723,7 @@ fn execute_blocking_projection<'a>(
             base_access,
             joins,
             pipeline,
+            index_runtime,
             batch_rows: limits.batch_rows.get(),
         };
         execute_relational_order(
@@ -2144,6 +2214,7 @@ fn execute_streaming_projection<'a>(
     base_access: &RelationalBaseAccess,
     joins: &'a [PlannedJoin<'a>],
     pipeline: &mut RelationalPipelineState<'_>,
+    index_runtime: &RelationalIndexRuntime<'a>,
     limits: RelationalQueryLimits,
 ) -> Result<StreamingProjectionOutput> {
     let mut offset = usize::try_from(bind_bound(select.offset, parameters, "OFFSET")?.unwrap_or(0))
@@ -2169,6 +2240,7 @@ fn execute_streaming_projection<'a>(
             base_access,
             joins,
             pipeline,
+            index_runtime,
             &mut |row| {
                 if offset != 0 {
                     offset -= 1;
@@ -2219,6 +2291,7 @@ fn execute_aggregate_select<'a>(
     base_access: &'a RelationalBaseAccess,
     joins: &'a [PlannedJoin<'a>],
     pipeline: &mut RelationalPipelineState<'a>,
+    index_runtime: &RelationalIndexRuntime<'a>,
     limits: RelationalQueryLimits,
     execution_memory: &skein_executor::ExecutionMemoryConfig,
     access_path: RelationalAccessPathDescriptor,
@@ -2236,6 +2309,7 @@ fn execute_aggregate_select<'a>(
             base_access,
             joins,
             pipeline,
+            index_runtime,
             limits,
             execution_memory,
             access_path,
@@ -2252,6 +2326,7 @@ fn execute_aggregate_select<'a>(
             base_access,
             joins,
             pipeline,
+            index_runtime,
             limits,
             execution_memory,
             access_path,
@@ -2287,6 +2362,7 @@ fn execute_aggregate_select<'a>(
         base_access,
         joins,
         pipeline,
+        index_runtime,
         &mut |row| {
             aggregate_input_rows = aggregate_input_rows.saturating_add(1);
             let key = if select.group_by.is_empty() {
@@ -2366,6 +2442,7 @@ fn execute_aggregate_select<'a>(
         hydration: limits.hydration,
         access_path,
         join_access_paths,
+        index_execution_evidence: index_runtime.evidence(),
         blocking_operator_memory_reports: vec![skein_executor::blocking::in_memory_report(
             "RelationalAggregateExec",
             &memory_tracker,
@@ -2408,6 +2485,7 @@ fn execute_single_count_distinct<'a>(
     base_access: &'a RelationalBaseAccess,
     joins: &'a [PlannedJoin<'a>],
     pipeline: &mut RelationalPipelineState<'a>,
+    index_runtime: &RelationalIndexRuntime<'a>,
     limits: RelationalQueryLimits,
     execution_memory: &skein_executor::ExecutionMemoryConfig,
     access_path: RelationalAccessPathDescriptor,
@@ -2427,6 +2505,7 @@ fn execute_single_count_distinct<'a>(
         base_access,
         joins,
         pipeline,
+        index_runtime,
         batch_rows: limits.batch_rows.get(),
     };
     let mut count = 0usize;
@@ -2467,6 +2546,7 @@ fn execute_single_count_distinct<'a>(
         hydration: limits.hydration,
         access_path,
         join_access_paths,
+        index_execution_evidence: index_runtime.evidence(),
         blocking_operator_memory_reports: observer.reports.into_inner(),
     })
 }
@@ -2481,6 +2561,7 @@ fn execute_grouped_aggregate<'a>(
     base_access: &'a RelationalBaseAccess,
     joins: &'a [PlannedJoin<'a>],
     pipeline: &mut RelationalPipelineState<'a>,
+    index_runtime: &RelationalIndexRuntime<'a>,
     limits: RelationalQueryLimits,
     execution_memory: &skein_executor::ExecutionMemoryConfig,
     access_path: RelationalAccessPathDescriptor,
@@ -2528,6 +2609,7 @@ fn execute_grouped_aggregate<'a>(
         base_access,
         joins,
         pipeline,
+        index_runtime,
         batch_rows: limits.batch_rows.get(),
     };
     let mut current_key = None::<Vec<RelationalValue>>;
@@ -2631,6 +2713,7 @@ fn execute_grouped_aggregate<'a>(
         hydration: limits.hydration,
         access_path,
         join_access_paths,
+        index_execution_evidence: index_runtime.evidence(),
         blocking_operator_memory_reports: reports,
     })
 }

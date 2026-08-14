@@ -98,9 +98,8 @@ including composite keys. Opening the shadow verifies only its manifest fence
 and artifact length; page header and payload integrity are checked on first
 access. The sequential slot writer uses constant page-accounting metadata; it
 does not retain a page-id set or offset directory proportional to index size.
-SQL still uses the existing materialized indexes in this stage.
 
-The relational demand reader implements step 3 without changing SQL routing.
+The relational demand reader implements step 3.
 Exact-key traversal reads one root-to-leaf path; leading composite-key prefix
 traversal skips subtrees whose upper bound precedes the encoded prefix and
 stops after the contiguous prefix range. Oversized postings are streamed from
@@ -109,9 +108,8 @@ lookup enforces page, byte, row, and tree-height limits and reports the pages,
 bytes, leaf entries, matched keys, and rows it consumed. A callback may stop a
 large posting early; values observed before an eventual error are provisional
 and must be discarded. Admission or a missing root does not poison the reader,
-while structural, checksum, generation, and row-locator corruption does. The
-shadow remains non-serving until WAL delta recovery and production activation
-land separately.
+while structural, checksum, generation, and row-locator corruption does.
+Activation remains independent from publication and is off by default.
 
 The relational recovery-delta path implements step 4 without activating SQL.
 Relational apply emits the final insert/delete change for each affected
@@ -147,8 +145,8 @@ encoded bytes. Graph-only commits advance the view's visible epoch without
 adding a batch. DDL, relational snapshot replacement, poisoned backing pages,
 epoch discontinuity, or exhausted live admission removes the current view and
 records an explicit unavailable status; canonical WAL publication still
-succeeds, but no reader may continue from stale postings. This read view is
-still non-serving until SQL activation lands separately.
+succeeds, but no reader may continue from stale postings. This read view may be
+selected only by the bounded SQL activation described below.
 
 `GraphStore::qualify_relational_index_read_view` is the bounded typed evidence
 path for that activation boundary. It samples a configured maximum number of
@@ -161,8 +159,29 @@ oracle. Reports expose immutable view identity, physical read evidence, live
 work, row counts, and SHA-256 result digests without exposing sampled key
 values. Missing views, corrupt pages, and admission failures return errors;
 semantic differences, incomplete index coverage, or exhausted qualification
-budgets return `ready = false`. This API does not route SQL or introduce a
-business-specific lookup surface.
+budgets return `ready = false`. This API does not introduce a business-specific
+lookup surface.
+
+PostgreSQL SQL activation is controlled by
+`DatabaseConfig::relational_index_demand_reads` and is disabled by default as
+the rollback mode. Primary-key, unique, leading secondary-prefix, and index
+nested-loop probes consume logical row locators from one generation-pinned
+view and hydrate rows from the same relational snapshot. One statement-wide
+ledger bounds logical pages, logical bytes, result locators, and tree height
+across every probe, including repeated inner-side join probes. A missing view,
+missing optional query index, or admission rejection before provisional output
+uses the observable canonical materialized fallback. Corruption, durability or
+generation mismatch, view-identity drift within a statement, and a locator
+whose canonical row is missing fail closed. A writable transaction uses the
+canonical transaction workspace so read-your-own-writes cannot consult a
+pre-transaction index view; this fallback is also observable.
+
+`EXPLAIN ANALYZE` reports the runtime path, fallback reason, base and delta
+generations, commit epochs, schema digest, logical and physical page bytes,
+cache outcomes, recovery-delta work, live-overlay work, and index rows. Plain
+`EXPLAIN` remains history-independent. Persistent relational indexes are still
+derived in this phase: materialized postings remain the constraint oracle and
+canonical fallback until authoritative index publication lands separately.
 
 ## Identities and terminology
 
@@ -301,13 +320,12 @@ not the target open path.
 5. A crash during recovery-delta flush leaves either the previous selected
    root plus replayable WAL or a completely published newer recovery root.
 
-The current non-serving implementation satisfies these rules for DML whose
+The current derived implementation satisfies these rules for DML whose
 checkpoint schema fence remains unchanged. DDL and relational snapshot WAL
-records deliberately make the shadow unavailable. They do not weaken
-canonical recovery and MUST NOT trigger an implicit full index rebuild in this
-path. Production activation therefore remains a separate gate and may fall
-back to the existing materialized oracle until a later checkpoint publishes
-new roots for the changed schema.
+records deliberately make the view unavailable. They do not weaken canonical
+recovery and MUST NOT trigger an implicit full index rebuild in this path. SQL
+activation may fall back observably to the existing materialized oracle until
+a later checkpoint publishes roots for the changed schema.
 
 ### Integrity boundary
 

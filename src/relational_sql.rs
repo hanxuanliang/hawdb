@@ -14,8 +14,10 @@ use skein_storage::{
     RelationalWrite,
 };
 
+mod index_access;
 mod query;
 
+pub(crate) use index_access::RelationalIndexReadMode;
 pub(crate) use query::{execute_relational_query_sql_with_runtime, RelationalQueryLimits};
 
 pub(crate) fn compile_relational_statement_sql(
@@ -593,8 +595,8 @@ fn reject_non_public_schema(schema: Option<&str>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Database;
-    use skein_storage::RelationalStore;
+    use crate::{Database, DatabaseConfig};
+    use skein_storage::{DurabilityPolicy, RelationalStore};
     use std::collections::BTreeMap;
 
     #[test]
@@ -672,6 +674,238 @@ mod tests {
             snapshot_output.rows[0]["id"],
             Value::String("message-1".to_string())
         );
+    }
+
+    #[test]
+    fn database_sql_uses_bounded_pinned_relational_indexes_with_observable_fallback() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "skein-relational-sql-demand-index-{}-{nonce}",
+            std::process::id()
+        ));
+        let config = DatabaseConfig {
+            relational_index_shadow_checkpoint: true,
+            relational_index_demand_reads: true,
+            ..DatabaseConfig::default()
+        };
+        let published_generation;
+        let published_pages;
+        {
+            let mut database = Database::open_with_durability_and_config(
+                &path,
+                DurabilityPolicy::default(),
+                config.clone(),
+            )
+            .expect("open demand-index database");
+            database
+                .query_sql(
+                    "CREATE TABLE documents (id TEXT PRIMARY KEY, owner TEXT NOT NULL, body TEXT NOT NULL)",
+                )
+                .expect("create documents table");
+            database
+                .query_sql("CREATE INDEX documents_owner_id_idx ON documents (owner, id)")
+                .expect("create documents owner index");
+            database
+                .query_sql("CREATE TABLE anchors (id TEXT PRIMARY KEY, document_id TEXT NOT NULL)")
+                .expect("create anchors table");
+            database
+                .query_sql("CREATE INDEX anchors_document_idx ON anchors (document_id)")
+                .expect("create anchor document index");
+            database
+                .query_sql(
+                    "INSERT INTO documents (id, owner, body) VALUES ('doc-1', 'owner-1', 'body-1')",
+                )
+                .expect("insert base document");
+            database
+                .query_sql("INSERT INTO anchors (id, document_id) VALUES ('anchor-1', 'doc-1')")
+                .expect("insert base anchor");
+
+            let fallback = database
+                .query_sql("EXPLAIN ANALYZE SELECT id FROM documents WHERE owner = 'owner-1'")
+                .expect("fall back before a relational index view is published");
+            let fallback_info = relational_explain_operator_info(&fallback, "IndexRangeScanExec");
+            assert!(fallback_info.contains("runtime_path=canonical_fallback"));
+            assert!(fallback_info.contains("fallback_reasons=read_view_unavailable"));
+
+            database
+                .checkpoint()
+                .expect("publish relational index base");
+            let published = database
+                .relational_index_shadow_checkpoint_report()
+                .expect("published relational index evidence");
+            published_generation = published.generation;
+            published_pages = published.pages_written;
+            let primary = database
+                .query_sql("EXPLAIN ANALYZE SELECT id FROM documents WHERE id = 'doc-1'")
+                .expect("read the demand-paged primary index");
+            let primary_info = relational_explain_operator_info(&primary, "TablePointGetExec");
+            assert!(primary_info.contains("runtime_path=demand_paged"));
+            assert!(primary_info.contains("schema_digest="));
+            {
+                let mut transaction = database.begin_transaction();
+                transaction
+                    .query_sql(
+                        "INSERT INTO documents (id, owner, body) VALUES ('doc-tx', 'owner-1', 'body-tx')",
+                    )
+                    .expect("insert transaction-local document");
+                let own_write = transaction
+                    .query_sql("SELECT id FROM documents WHERE id = 'doc-tx'")
+                    .expect("read transaction-local document");
+                assert_eq!(own_write.rows.len(), 1);
+                let workspace = transaction
+                    .query_sql("EXPLAIN ANALYZE SELECT id FROM documents WHERE owner = 'owner-1'")
+                    .expect("explain transaction-workspace fallback");
+                let workspace_info =
+                    relational_explain_operator_info(&workspace, "IndexRangeScanExec");
+                assert!(workspace_info.contains("runtime_path=canonical_fallback"));
+                assert!(workspace_info.contains("fallback_reasons=transaction_workspace"));
+                transaction.rollback();
+            }
+            database
+                .query_sql(
+                    "INSERT INTO documents (id, owner, body) VALUES ('doc-2', 'owner-1', 'body-2')",
+                )
+                .expect("insert live document");
+            database
+                .query_sql("INSERT INTO anchors (id, document_id) VALUES ('anchor-2', 'doc-2')")
+                .expect("insert live anchor");
+            database
+                .query_sql("DELETE FROM anchors WHERE id = 'anchor-1'")
+                .expect("delete base anchor through live delta");
+            database
+                .query_sql("DELETE FROM documents WHERE id = 'doc-1'")
+                .expect("delete base document through live delta");
+
+            let rows = database
+                .query_sql("SELECT id FROM documents WHERE owner = 'owner-1' ORDER BY id ASC")
+                .expect("read live-merged relational index");
+            assert_eq!(rows.rows.len(), 1);
+            assert_eq!(rows.rows[0]["id"], Value::String("doc-2".to_string()));
+
+            let joined = database
+                .query_sql(
+                    "EXPLAIN ANALYZE SELECT d.id FROM documents AS d INNER JOIN anchors AS a ON a.document_id = d.id WHERE d.owner = 'owner-1'",
+                )
+                .expect("run base and join demand-index probes");
+            let demand_infos = joined
+                .rows
+                .iter()
+                .filter_map(|row| match (row.get("id"), row.get("operator info")) {
+                    (Some(Value::String(id)), Some(Value::String(info)))
+                        if id.contains("IndexRangeScanExec")
+                            || id.contains("IndexNestedLoopJoinExec") =>
+                    {
+                        Some(info.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(demand_infos.len(), 2);
+            assert!(demand_infos
+                .iter()
+                .all(|info| info.contains("runtime_path=demand_paged")));
+            assert!(demand_infos
+                .iter()
+                .all(|info| info.contains("base_generation=") && info.contains("live_entries=")));
+        }
+        {
+            let mut database = Database::open_with_durability_and_config(
+                &path,
+                DurabilityPolicy::default(),
+                config.clone(),
+            )
+            .expect("reopen demand-index database");
+            let recovered = database
+                .query_sql("EXPLAIN ANALYZE SELECT id FROM documents WHERE owner = 'owner-1'")
+                .expect("read recovery-delta relational index");
+            let recovered_info = relational_explain_operator_info(&recovered, "IndexRangeScanExec");
+            assert!(recovered_info.contains("runtime_path=demand_paged"));
+            assert!(!recovered_info.contains("delta_generation=none"));
+            assert!(recovered_info.contains("delta_entries="));
+        }
+        {
+            let tight_config = DatabaseConfig {
+                max_read_result_payload_bytes: Some(4 * 1024),
+                ..config
+            };
+            let mut database = Database::open_with_durability_and_config(
+                &path,
+                DurabilityPolicy::default(),
+                tight_config,
+            )
+            .expect("reopen demand-index database with a tight read budget");
+            let admitted_fallback = database
+                .query_sql("EXPLAIN ANALYZE SELECT id FROM documents WHERE owner = 'owner-1'")
+                .expect("fall back when the index page cannot be admitted");
+            let admitted_info =
+                relational_explain_operator_info(&admitted_fallback, "IndexRangeScanExec");
+            assert!(admitted_info.contains("runtime_path=canonical_fallback"));
+            assert!(admitted_info.contains("fallback_reasons=admission_rejected"));
+        }
+        {
+            use std::io::{Read, Seek, SeekFrom, Write};
+
+            let page_bytes = skein_storage::RelationalIndexShadowConfig::default()
+                .page_limits
+                .max_page_bytes
+                .get() as u64;
+            let artifact = path.join(skein_storage::relational_index_shadow_artifact_file(
+                published_generation,
+            ));
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&artifact)
+                .expect("open relational index artifact for corruption fixture");
+            for page in 0..published_pages {
+                file.seek(SeekFrom::Start(page * page_bytes))
+                    .expect("seek relational index page");
+                let mut byte = [0u8; 1];
+                file.read_exact(&mut byte)
+                    .expect("read relational index page byte");
+                byte[0] ^= 0xff;
+                file.seek(SeekFrom::Start(page * page_bytes))
+                    .expect("rewind relational index page");
+                file.write_all(&byte)
+                    .expect("corrupt relational index page byte");
+            }
+            file.sync_all().expect("sync corruption fixture");
+
+            let mut database = Database::open_with_durability_and_config(
+                &path,
+                DurabilityPolicy::default(),
+                DatabaseConfig {
+                    relational_index_shadow_checkpoint: true,
+                    relational_index_demand_reads: true,
+                    ..DatabaseConfig::default()
+                },
+            )
+            .expect("open database with lazily validated corrupt index pages");
+            let error = database
+                .query_sql("SELECT id FROM documents WHERE owner = 'owner-1'")
+                .expect_err("selected corrupt relational index must fail closed");
+            assert!(error.to_string().contains("storage integrity"));
+        }
+        std::fs::remove_dir_all(path).expect("remove demand-index SQL fixture");
+    }
+
+    fn relational_explain_operator_info<'a>(
+        output: &'a crate::QueryOutput,
+        operator: &str,
+    ) -> &'a str {
+        output
+            .rows
+            .iter()
+            .find_map(|row| match (row.get("id"), row.get("operator info")) {
+                (Some(Value::String(id)), Some(Value::String(info))) if id.contains(operator) => {
+                    Some(info.as_str())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("EXPLAIN output has no {operator} row: {:?}", output.rows))
     }
 
     #[test]
@@ -1025,6 +1259,7 @@ mod tests {
             "SELECT id FROM documents WHERE owner_kind = 'thread' AND owner_id = $1",
             &[text("thread-1")],
             snapshot.value(),
+            RelationalIndexReadMode::Materialized,
             query_limits(1, 4 * 1024),
             &skein_executor::ExecutionMemoryConfig::default(),
             None,
@@ -1039,6 +1274,7 @@ mod tests {
             "SELECT id, body FROM messages WHERE stream_id = $1 ORDER BY order_index ASC, id ASC LIMIT $2 OFFSET $3",
             &[text("stream-1"), Value::Int(1), Value::Int(1)],
             snapshot.value(),
+            RelationalIndexReadMode::Materialized,
             query_limits(1, 64 * 1024),
             &skein_executor::ExecutionMemoryConfig::default(),
             None,
@@ -1054,6 +1290,7 @@ mod tests {
             "SELECT m.id FROM messages AS m INNER JOIN anchors AS a ON a.document_id = m.document_id AND a.message_id = m.id WHERE m.stream_id = $1",
             &[text("stream-1")],
             snapshot.value(),
+            RelationalIndexReadMode::Materialized,
             query_limits(2, 4 * 1024),
             &skein_executor::ExecutionMemoryConfig::default(),
             None,
@@ -1069,6 +1306,7 @@ mod tests {
             summary_sql,
             &[text("stream-1")],
             snapshot.value(),
+            RelationalIndexReadMode::Materialized,
             query_limits(1, 4 * 1024),
             &skein_executor::ExecutionMemoryConfig::default(),
             None,
@@ -1085,6 +1323,7 @@ mod tests {
             summary_sql,
             &[text("stream-1")],
             snapshot.value(),
+            RelationalIndexReadMode::Materialized,
             constrained,
             &skein_executor::ExecutionMemoryConfig::default(),
             None,
@@ -1118,6 +1357,7 @@ mod tests {
             blocking_operator_bytes: std::num::NonZeroUsize::new(64 * 1024 * 1024)
                 .expect("non-zero aggregate memory budget"),
             hydration: skein_storage::RelationalHydrationBudget::default(),
+            index_read: skein_storage::RelationalIndexReadLimits::default(),
         }
     }
 
@@ -1192,6 +1432,7 @@ mod tests {
             "SELECT id FROM spill_rows ORDER BY value ASC, id ASC",
             &[],
             snapshot.value(),
+            RelationalIndexReadMode::Materialized,
             limits,
             &memory,
             None,
@@ -1207,6 +1448,7 @@ mod tests {
             "SELECT DISTINCT id FROM spill_rows ORDER BY id ASC",
             &[],
             snapshot.value(),
+            RelationalIndexReadMode::Materialized,
             limits,
             &memory,
             None,
@@ -1222,6 +1464,7 @@ mod tests {
             "SELECT COUNT(DISTINCT id) AS item_count FROM spill_rows",
             &[],
             snapshot.value(),
+            RelationalIndexReadMode::Materialized,
             limits,
             &memory,
             None,
@@ -1237,6 +1480,7 @@ mod tests {
             "SELECT value, COUNT(*) AS item_count FROM spill_rows GROUP BY value",
             &[],
             snapshot.value(),
+            RelationalIndexReadMode::Materialized,
             limits,
             &memory,
             None,
@@ -1267,6 +1511,7 @@ mod tests {
             "EXPLAIN SELECT id FROM spill_rows WHERE id = $1",
             &[Value::Int(7)],
             snapshot.value(),
+            RelationalIndexReadMode::Materialized,
             limits,
             &memory,
             Some(&explain_context),
@@ -1287,6 +1532,7 @@ mod tests {
             "EXPLAIN ANALYZE SELECT id FROM spill_rows ORDER BY value ASC, id ASC",
             &[],
             snapshot.value(),
+            RelationalIndexReadMode::Materialized,
             limits,
             &memory,
             None,
@@ -1305,6 +1551,7 @@ mod tests {
             "SELECT id FROM spill_rows",
             &[],
             snapshot.value(),
+            RelationalIndexReadMode::Materialized,
             limits,
             &memory,
             Some(&task_context),

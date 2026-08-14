@@ -10,6 +10,7 @@ fn system_sql_exposes_runtime_configuration_and_capabilities() {
         max_read_result_rows: Some(16),
         max_read_result_payload_bytes: Some(4096),
         storage_residency_mode: skein_storage::StorageResidencyMode::OutOfCore,
+        relational_index_demand_reads: true,
         runtime_capabilities: capabilities,
         ..DatabaseConfig::default()
     });
@@ -17,7 +18,7 @@ fn system_sql_exposes_runtime_configuration_and_capabilities() {
     let status = db
         .query_sql(
             "SELECT read_only, max_read_result_rows, max_read_result_payload_bytes, \
-                    storage_residency_mode \
+                    storage_residency_mode, relational_index_demand_reads \
              FROM system.runtime_status",
         )
         .unwrap();
@@ -33,6 +34,10 @@ fn system_sql_exposes_runtime_configuration_and_capabilities() {
             (
                 "storage_residency_mode".to_string(),
                 Value::String("out_of_core".to_string()),
+            ),
+            (
+                "relational_index_demand_reads".to_string(),
+                Value::Bool(true),
             ),
         ])]
     );
