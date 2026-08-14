@@ -1,0 +1,54 @@
+load("@rules_tla//tla:defs.bzl", "tla_check")
+
+package(default_visibility = ["//visibility:public"])
+
+_STORAGE_MODELS = [
+    "SkeinColumnGroupManifest",
+    "SkeinColumnarShadowIntegration",
+    "SkeinCompactionVisibility",
+    "SkeinConcurrentSnapshots",
+    "SkeinCowPagePublication",
+    "SkeinCrdtReplication",
+    "SkeinGenerationReclamation",
+    "SkeinGossipDelivery",
+    "SkeinIndexPublication",
+    "SkeinIndexRecovery",
+    "SkeinIndexStatistics",
+    "SkeinPageCacheAdmission",
+    "SkeinProjectionDurability",
+    "SkeinPropertyIndexPruning",
+    "SkeinRelationalIndexDemandRead",
+    "SkeinRelationalIndexShadowPublication",
+    "SkeinRuntimeAdmission",
+    "SkeinSourceSegmentPublication",
+    "SkeinStatisticsEligibility",
+    "SkeinStorageDurability",
+    "SkeinSystemSchemaUpgrade",
+    "SkeinTransactionConcurrency",
+    "SkeinWalDoctor",
+    "SkeinWalGroupCommit",
+]
+
+[
+    tla_check(
+        name = model + "_check",
+        config = model + ".cfg",
+        module = model + ".tla",
+        tags = [
+            "storage",
+            "tla",
+        ],
+        timeout_seconds = 1800,
+        tlc_args = [
+            "-cleanup",
+            "-workers",
+            "auto",
+        ],
+    )
+    for model in _STORAGE_MODELS
+]
+
+test_suite(
+    name = "storage_models",
+    tests = [":" + model + "_check" for model in _STORAGE_MODELS],
+)

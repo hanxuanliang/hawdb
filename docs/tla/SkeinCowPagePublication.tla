@@ -1,0 +1,651 @@
+------------------- MODULE SkeinCowPagePublication -------------------
+EXTENDS Integers, Naturals, FiniteSets
+
+(***************************************************************************)
+(* Canonical row pages use immutable physical identities. A commit becomes  *)
+(* visible only after its WAL record is durable. A checkpoint writes new    *)
+(* versions of dirty pages, reuses clean page references from the selected  *)
+(* root, and publishes one generation-fenced manifest only after every new  *)
+(* page is durable. Readers pin manifest generations, so reclamation keeps  *)
+(* the complete page-reference closure of active, previous, and pinned      *)
+(* roots. A crash discards an unpublished candidate and reconstructs the    *)
+(* dirty overlay from the durable WAL prefix.                               *)
+(***************************************************************************)
+
+CONSTANT Readers, MaxEpoch, MaxGeneration, MaxPage
+
+ASSUME /\ Readers # {}
+       /\ MaxEpoch \in Nat \ {0}
+       /\ MaxGeneration \in Nat \ {0}
+       /\ MaxPage \in Nat \ {0}
+
+Epochs == 0..MaxEpoch
+CommitEpochs == 1..MaxEpoch
+Generations == 0..MaxGeneration
+Pages == 1..MaxPage
+ReaderGenerations == (-1)..MaxGeneration
+PendingPhases == {"none", "appended", "durable"}
+CandidatePhases == {"idle", "building", "durable"}
+PageRefs == [generation : Generations, page : Pages]
+RootType == [Pages -> Generations]
+
+PageRef(generation, page) ==
+    [generation |-> generation, page |-> page]
+
+RootRefs(root) ==
+    {PageRef(root[page], page) : page \in Pages}
+
+VARIABLES
+    walDurableEpoch,
+    walDirtyByEpoch,
+    visibleEpoch,
+    dirtyPages,
+    pendingPhase,
+    pendingEpoch,
+    pendingPage,
+    activeGeneration,
+    previousGeneration,
+    manifestEpoch,
+    nextGeneration,
+    publishedRoots,
+    rootByGeneration,
+    generationEpoch,
+    durablePages,
+    pageEpoch,
+    candidatePhase,
+    candidateGeneration,
+    candidateEpoch,
+    candidateBaseGeneration,
+    candidateDirtyPages,
+    candidateRoot,
+    readerGeneration,
+    staleCandidateRejected
+
+vars == <<
+    walDurableEpoch,
+    walDirtyByEpoch,
+    visibleEpoch,
+    dirtyPages,
+    pendingPhase,
+    pendingEpoch,
+    pendingPage,
+    activeGeneration,
+    previousGeneration,
+    manifestEpoch,
+    nextGeneration,
+    publishedRoots,
+    rootByGeneration,
+    generationEpoch,
+    durablePages,
+    pageEpoch,
+    candidatePhase,
+    candidateGeneration,
+    candidateEpoch,
+    candidateBaseGeneration,
+    candidateDirtyPages,
+    candidateRoot,
+    readerGeneration,
+    staleCandidateRejected
+>>
+
+DirtyAfter(lowerEpoch, upperEpoch) ==
+    IF lowerEpoch = upperEpoch
+    THEN {}
+    ELSE UNION {
+        walDirtyByEpoch[epoch] :
+            epoch \in (lowerEpoch + 1)..upperEpoch
+    }
+
+PinnedReaders ==
+    {reader \in Readers : readerGeneration[reader] # -1}
+
+PinnedGenerations ==
+    {readerGeneration[reader] : reader \in PinnedReaders}
+
+RequiredRootGenerations ==
+    {activeGeneration, previousGeneration} \cup PinnedGenerations
+
+RequiredPageRefs ==
+    UNION {
+        RootRefs(rootByGeneration[generation]) :
+            generation \in RequiredRootGenerations
+    }
+
+StaleCandidate ==
+    /\ candidatePhase \in {"building", "durable"}
+    /\ candidateBaseGeneration # activeGeneration
+
+Init ==
+    /\ walDurableEpoch = 0
+    /\ walDirtyByEpoch = [epoch \in CommitEpochs |-> {}]
+    /\ visibleEpoch = 0
+    /\ dirtyPages = {}
+    /\ pendingPhase = "none"
+    /\ pendingEpoch = 0
+    /\ pendingPage = 0
+    /\ activeGeneration = 0
+    /\ previousGeneration = 0
+    /\ manifestEpoch = 0
+    /\ nextGeneration = 1
+    /\ publishedRoots = {0}
+    /\ rootByGeneration =
+        [generation \in Generations |-> [page \in Pages |-> 0]]
+    /\ generationEpoch =
+        [generation \in Generations |->
+            IF generation = 0 THEN 0 ELSE -1]
+    /\ durablePages = {ref \in PageRefs : ref.generation = 0}
+    /\ pageEpoch =
+        [ref \in PageRefs |-> IF ref.generation = 0 THEN 0 ELSE -1]
+    /\ candidatePhase = "idle"
+    /\ candidateGeneration = 0
+    /\ candidateEpoch = 0
+    /\ candidateBaseGeneration = 0
+    /\ candidateDirtyPages = {}
+    /\ candidateRoot = [page \in Pages |-> 0]
+    /\ readerGeneration = [reader \in Readers |-> -1]
+    /\ staleCandidateRejected = FALSE
+
+BeginCommit ==
+    /\ pendingPhase = "none"
+    /\ visibleEpoch < MaxEpoch
+    /\ pendingPhase' = "appended"
+    /\ pendingEpoch' = visibleEpoch + 1
+    /\ \E page \in Pages: pendingPage' = page
+    /\ UNCHANGED <<
+        walDurableEpoch,
+        walDirtyByEpoch,
+        visibleEpoch,
+        dirtyPages,
+        activeGeneration,
+        previousGeneration,
+        manifestEpoch,
+        nextGeneration,
+        publishedRoots,
+        rootByGeneration,
+        generationEpoch,
+        durablePages,
+        pageEpoch,
+        candidatePhase,
+        candidateGeneration,
+        candidateEpoch,
+        candidateBaseGeneration,
+        candidateDirtyPages,
+        candidateRoot,
+        readerGeneration,
+        staleCandidateRejected
+        >>
+
+SyncWal ==
+    /\ pendingPhase = "appended"
+    /\ pendingEpoch = walDurableEpoch + 1
+    /\ walDirtyByEpoch' =
+        [walDirtyByEpoch EXCEPT ![pendingEpoch] = {pendingPage}]
+    /\ walDurableEpoch' = pendingEpoch
+    /\ pendingPhase' = "durable"
+    /\ UNCHANGED <<
+        visibleEpoch,
+        dirtyPages,
+        pendingEpoch,
+        pendingPage,
+        activeGeneration,
+        previousGeneration,
+        manifestEpoch,
+        nextGeneration,
+        publishedRoots,
+        rootByGeneration,
+        generationEpoch,
+        durablePages,
+        pageEpoch,
+        candidatePhase,
+        candidateGeneration,
+        candidateEpoch,
+        candidateBaseGeneration,
+        candidateDirtyPages,
+        candidateRoot,
+        readerGeneration,
+        staleCandidateRejected
+        >>
+
+PublishCommit ==
+    /\ pendingPhase = "durable"
+    /\ pendingEpoch = visibleEpoch + 1
+    /\ pendingEpoch <= walDurableEpoch
+    /\ visibleEpoch' = pendingEpoch
+    /\ dirtyPages' = dirtyPages \cup {pendingPage}
+    /\ pendingPhase' = "none"
+    /\ pendingEpoch' = 0
+    /\ pendingPage' = 0
+    /\ UNCHANGED <<
+        walDurableEpoch,
+        walDirtyByEpoch,
+        activeGeneration,
+        previousGeneration,
+        manifestEpoch,
+        nextGeneration,
+        publishedRoots,
+        rootByGeneration,
+        generationEpoch,
+        durablePages,
+        pageEpoch,
+        candidatePhase,
+        candidateGeneration,
+        candidateEpoch,
+        candidateBaseGeneration,
+        candidateDirtyPages,
+        candidateRoot,
+        readerGeneration,
+        staleCandidateRejected
+        >>
+
+BeginCheckpoint ==
+    /\ candidatePhase = "idle"
+    /\ pendingPhase = "none"
+    /\ manifestEpoch < visibleEpoch
+    /\ nextGeneration <= MaxGeneration
+    /\ candidatePhase' = "building"
+    /\ candidateGeneration' = nextGeneration
+    /\ candidateEpoch' = visibleEpoch
+    /\ candidateBaseGeneration' = activeGeneration
+    /\ candidateDirtyPages' = dirtyPages
+    /\ candidateRoot' =
+        [page \in Pages |->
+            IF page \in dirtyPages
+            THEN nextGeneration
+            ELSE rootByGeneration[activeGeneration][page]]
+    /\ nextGeneration' = nextGeneration + 1
+    /\ staleCandidateRejected' = FALSE
+    /\ UNCHANGED <<
+        walDurableEpoch,
+        walDirtyByEpoch,
+        visibleEpoch,
+        dirtyPages,
+        pendingPhase,
+        pendingEpoch,
+        pendingPage,
+        activeGeneration,
+        previousGeneration,
+        manifestEpoch,
+        publishedRoots,
+        rootByGeneration,
+        generationEpoch,
+        durablePages,
+        pageEpoch,
+        readerGeneration
+        >>
+
+PersistCandidatePages ==
+    /\ candidatePhase = "building"
+    /\ LET refs == {
+            PageRef(candidateGeneration, page) :
+                page \in candidateDirtyPages
+        }
+       IN /\ \A ref \in refs: pageEpoch[ref] = -1
+          /\ durablePages' = durablePages \cup refs
+          /\ pageEpoch' =
+              [ref \in PageRefs |->
+                  IF ref \in refs THEN candidateEpoch ELSE pageEpoch[ref]]
+    /\ candidatePhase' = "durable"
+    /\ UNCHANGED <<
+        walDurableEpoch,
+        walDirtyByEpoch,
+        visibleEpoch,
+        dirtyPages,
+        pendingPhase,
+        pendingEpoch,
+        pendingPage,
+        activeGeneration,
+        previousGeneration,
+        manifestEpoch,
+        nextGeneration,
+        publishedRoots,
+        rootByGeneration,
+        generationEpoch,
+        candidateGeneration,
+        candidateEpoch,
+        candidateBaseGeneration,
+        candidateDirtyPages,
+        candidateRoot,
+        readerGeneration,
+        staleCandidateRejected
+        >>
+
+PublishCheckpoint ==
+    /\ candidatePhase = "durable"
+    /\ candidateBaseGeneration = activeGeneration
+    /\ \A page \in candidateDirtyPages:
+        PageRef(candidateGeneration, page) \in durablePages
+    /\ previousGeneration' = activeGeneration
+    /\ activeGeneration' = candidateGeneration
+    /\ manifestEpoch' = candidateEpoch
+    /\ publishedRoots' = publishedRoots \cup {candidateGeneration}
+    /\ rootByGeneration' =
+        [rootByGeneration EXCEPT ![candidateGeneration] = candidateRoot]
+    /\ generationEpoch' =
+        [generationEpoch EXCEPT ![candidateGeneration] = candidateEpoch]
+    /\ dirtyPages' = DirtyAfter(candidateEpoch, visibleEpoch)
+    /\ candidatePhase' = "idle"
+    /\ candidateGeneration' = 0
+    /\ candidateEpoch' = 0
+    /\ candidateBaseGeneration' = candidateGeneration
+    /\ candidateDirtyPages' = {}
+    /\ UNCHANGED <<
+        walDurableEpoch,
+        walDirtyByEpoch,
+        visibleEpoch,
+        pendingPhase,
+        pendingEpoch,
+        pendingPage,
+        nextGeneration,
+        durablePages,
+        pageEpoch,
+        candidateRoot,
+        readerGeneration,
+        staleCandidateRejected
+        >>
+
+(***************************************************************************)
+(* A complete competing checkpoint may win after this candidate captured   *)
+(* its base generation. It uses a fresh generation and full-page rewrite so *)
+(* the older candidate can only be rejected, never overwrite the winner.   *)
+(***************************************************************************)
+PublishCompetingCheckpoint ==
+    /\ candidatePhase \in {"building", "durable"}
+    /\ nextGeneration <= MaxGeneration
+    /\ LET generation == nextGeneration
+           root == [page \in Pages |-> generation]
+           refs == RootRefs(root)
+       IN /\ \A ref \in refs: pageEpoch[ref] = -1
+          /\ durablePages' = durablePages \cup refs
+          /\ pageEpoch' =
+              [ref \in PageRefs |->
+                  IF ref \in refs THEN visibleEpoch ELSE pageEpoch[ref]]
+          /\ rootByGeneration' =
+              [rootByGeneration EXCEPT ![generation] = root]
+          /\ generationEpoch' =
+              [generationEpoch EXCEPT ![generation] = visibleEpoch]
+          /\ publishedRoots' = publishedRoots \cup {generation}
+          /\ previousGeneration' = activeGeneration
+          /\ activeGeneration' = generation
+          /\ nextGeneration' = generation + 1
+    /\ manifestEpoch' = visibleEpoch
+    /\ dirtyPages' = {}
+    /\ UNCHANGED <<
+        walDurableEpoch,
+        walDirtyByEpoch,
+        visibleEpoch,
+        pendingPhase,
+        pendingEpoch,
+        pendingPage,
+        candidatePhase,
+        candidateGeneration,
+        candidateEpoch,
+        candidateBaseGeneration,
+        candidateDirtyPages,
+        candidateRoot,
+        readerGeneration,
+        staleCandidateRejected
+        >>
+
+RejectStaleCandidate ==
+    /\ candidatePhase \in {"building", "durable"}
+    /\ candidateBaseGeneration # activeGeneration
+    /\ candidatePhase' = "idle"
+    /\ candidateGeneration' = 0
+    /\ candidateEpoch' = 0
+    /\ candidateBaseGeneration' = activeGeneration
+    /\ candidateDirtyPages' = {}
+    /\ staleCandidateRejected' = TRUE
+    /\ UNCHANGED <<
+        walDurableEpoch,
+        walDirtyByEpoch,
+        visibleEpoch,
+        dirtyPages,
+        pendingPhase,
+        pendingEpoch,
+        pendingPage,
+        activeGeneration,
+        previousGeneration,
+        manifestEpoch,
+        nextGeneration,
+        publishedRoots,
+        rootByGeneration,
+        generationEpoch,
+        durablePages,
+        pageEpoch,
+        candidateRoot,
+        readerGeneration
+        >>
+
+BeginRead(reader) ==
+    /\ readerGeneration[reader] = -1
+    /\ readerGeneration' =
+        [readerGeneration EXCEPT ![reader] = activeGeneration]
+    /\ UNCHANGED <<
+        walDurableEpoch,
+        walDirtyByEpoch,
+        visibleEpoch,
+        dirtyPages,
+        pendingPhase,
+        pendingEpoch,
+        pendingPage,
+        activeGeneration,
+        previousGeneration,
+        manifestEpoch,
+        nextGeneration,
+        publishedRoots,
+        rootByGeneration,
+        generationEpoch,
+        durablePages,
+        pageEpoch,
+        candidatePhase,
+        candidateGeneration,
+        candidateEpoch,
+        candidateBaseGeneration,
+        candidateDirtyPages,
+        candidateRoot,
+        staleCandidateRejected
+        >>
+
+EndRead(reader) ==
+    /\ readerGeneration[reader] # -1
+    /\ readerGeneration' = [readerGeneration EXCEPT ![reader] = -1]
+    /\ UNCHANGED <<
+        walDurableEpoch,
+        walDirtyByEpoch,
+        visibleEpoch,
+        dirtyPages,
+        pendingPhase,
+        pendingEpoch,
+        pendingPage,
+        activeGeneration,
+        previousGeneration,
+        manifestEpoch,
+        nextGeneration,
+        publishedRoots,
+        rootByGeneration,
+        generationEpoch,
+        durablePages,
+        pageEpoch,
+        candidatePhase,
+        candidateGeneration,
+        candidateEpoch,
+        candidateBaseGeneration,
+        candidateDirtyPages,
+        candidateRoot,
+        staleCandidateRejected
+        >>
+
+Reclaim ==
+    /\ candidatePhase = "idle"
+    /\ \/ publishedRoots # RequiredRootGenerations
+       \/ durablePages # RequiredPageRefs
+    /\ publishedRoots' = RequiredRootGenerations
+    /\ durablePages' = durablePages \cap RequiredPageRefs
+    /\ UNCHANGED <<
+        walDurableEpoch,
+        walDirtyByEpoch,
+        visibleEpoch,
+        dirtyPages,
+        pendingPhase,
+        pendingEpoch,
+        pendingPage,
+        activeGeneration,
+        previousGeneration,
+        manifestEpoch,
+        nextGeneration,
+        rootByGeneration,
+        generationEpoch,
+        pageEpoch,
+        candidatePhase,
+        candidateGeneration,
+        candidateEpoch,
+        candidateBaseGeneration,
+        candidateDirtyPages,
+        candidateRoot,
+        readerGeneration,
+        staleCandidateRejected
+        >>
+
+CrashAndRecover ==
+    /\ \/ pendingPhase # "none"
+       \/ candidatePhase # "idle"
+       \/ PinnedReaders # {}
+       \/ visibleEpoch # walDurableEpoch
+    /\ visibleEpoch' = walDurableEpoch
+    /\ dirtyPages' = DirtyAfter(manifestEpoch, walDurableEpoch)
+    /\ pendingPhase' = "none"
+    /\ pendingEpoch' = 0
+    /\ pendingPage' = 0
+    /\ candidatePhase' = "idle"
+    /\ candidateGeneration' = 0
+    /\ candidateEpoch' = 0
+    /\ candidateBaseGeneration' = activeGeneration
+    /\ candidateDirtyPages' = {}
+    /\ readerGeneration' = [reader \in Readers |-> -1]
+    /\ UNCHANGED <<
+        walDurableEpoch,
+        walDirtyByEpoch,
+        activeGeneration,
+        previousGeneration,
+        manifestEpoch,
+        nextGeneration,
+        publishedRoots,
+        rootByGeneration,
+        generationEpoch,
+        durablePages,
+        pageEpoch,
+        candidateRoot,
+        staleCandidateRejected
+        >>
+
+Next ==
+    \/ BeginCommit
+    \/ SyncWal
+    \/ PublishCommit
+    \/ BeginCheckpoint
+    \/ PersistCandidatePages
+    \/ PublishCheckpoint
+    \/ PublishCompetingCheckpoint
+    \/ RejectStaleCandidate
+    \/ \E reader \in Readers: BeginRead(reader)
+    \/ \E reader \in Readers: EndRead(reader)
+    \/ Reclaim
+    \/ CrashAndRecover
+
+TypeOK ==
+    /\ walDurableEpoch \in Epochs
+    /\ walDirtyByEpoch \in [CommitEpochs -> SUBSET Pages]
+    /\ visibleEpoch \in Epochs
+    /\ dirtyPages \subseteq Pages
+    /\ pendingPhase \in PendingPhases
+    /\ pendingEpoch \in Epochs
+    /\ pendingPage \in 0..MaxPage
+    /\ activeGeneration \in Generations
+    /\ previousGeneration \in Generations
+    /\ manifestEpoch \in Epochs
+    /\ nextGeneration \in 1..(MaxGeneration + 1)
+    /\ publishedRoots \subseteq Generations
+    /\ rootByGeneration \in [Generations -> RootType]
+    /\ generationEpoch \in [Generations -> (-1)..MaxEpoch]
+    /\ durablePages \subseteq PageRefs
+    /\ pageEpoch \in [PageRefs -> (-1)..MaxEpoch]
+    /\ candidatePhase \in CandidatePhases
+    /\ candidateGeneration \in Generations
+    /\ candidateEpoch \in Epochs
+    /\ candidateBaseGeneration \in Generations
+    /\ candidateDirtyPages \subseteq Pages
+    /\ candidateRoot \in RootType
+    /\ readerGeneration \in [Readers -> ReaderGenerations]
+    /\ staleCandidateRejected \in BOOLEAN
+
+VisibleOnlyAfterWal ==
+    visibleEpoch <= walDurableEpoch
+
+ManifestDoesNotLeadVisibleState ==
+    manifestEpoch <= visibleEpoch
+
+WalPrefixIsComplete ==
+    \A epoch \in 1..walDurableEpoch:
+        walDirtyByEpoch[epoch] # {}
+
+DirtyOverlayMatchesVisibleWal ==
+    dirtyPages = DirtyAfter(manifestEpoch, visibleEpoch)
+
+ActiveAndPreviousRootsRemainPublished ==
+    /\ activeGeneration \in publishedRoots
+    /\ previousGeneration \in publishedRoots
+
+PublishedGenerationDoesNotRegress ==
+    activeGeneration >= previousGeneration
+
+PublishedEpochDoesNotRegress ==
+    generationEpoch[activeGeneration] >= generationEpoch[previousGeneration]
+
+PinnedRootsRemainPublished ==
+    PinnedGenerations \subseteq publishedRoots
+
+PublishedRootsReferenceDurablePages ==
+    \A generation \in publishedRoots:
+        /\ generationEpoch[generation] >= 0
+        /\ RootRefs(rootByGeneration[generation]) \subseteq durablePages
+        /\ \A page \in Pages:
+            LET ref == PageRef(rootByGeneration[generation][page], page)
+            IN /\ pageEpoch[ref] >= 0
+               /\ pageEpoch[ref] <= generationEpoch[generation]
+
+CandidateUsesFreshImmutableIdentity ==
+    candidatePhase = "idle" \/
+        /\ candidateGeneration < nextGeneration
+        /\ candidateGeneration \notin publishedRoots
+        /\ generationEpoch[candidateGeneration] = -1
+        /\ candidateBaseGeneration \in publishedRoots
+        /\ candidateEpoch <= visibleEpoch
+
+CandidateRootCopiesOnlyDirtyPages ==
+    candidatePhase = "idle" \/
+        \A page \in Pages:
+            candidateRoot[page] =
+                IF page \in candidateDirtyPages
+                THEN candidateGeneration
+                ELSE rootByGeneration[candidateBaseGeneration][page]
+
+DurableCandidateHasCompletePages ==
+    candidatePhase = "durable" =>
+        \A page \in candidateDirtyPages:
+            LET ref == PageRef(candidateGeneration, page)
+            IN /\ ref \in durablePages
+               /\ pageEpoch[ref] = candidateEpoch
+
+ReclamationPreservesRequiredClosure ==
+    /\ RequiredRootGenerations \subseteq publishedRoots
+    /\ RequiredPageRefs \subseteq durablePages
+
+StaleCandidateRejectionIsTerminal ==
+    staleCandidateRejected => candidatePhase = "idle"
+
+StaleCandidateEventuallyTerminates ==
+    StaleCandidate ~> (candidatePhase = "idle")
+
+Spec == Init /\ [][Next]_vars /\ WF_vars(RejectStaleCandidate)
+
+=============================================================================

@@ -89,8 +89,10 @@ representative-load gates remain required before SQLite can be decommissioned.
 The bounded `SkeinSystemSchemaUpgrade.tla` model checks ordered suffix staging,
 atomic durable and visible schema/registry versions, fail-closed validation,
 read-only and failed-DDL behavior, crash recovery, and the Skein Lightning
-registry boundary. The model and its TLC configuration are executed by
-`scripts/check-storage-tla.sh`.
+registry boundary. The model and its TLC configuration are executed by the
+`//docs/tla:SkeinSystemSchemaUpgrade_check` Bazel target and included in the
+`//docs/tla:storage_models` suite. `scripts/check-storage-tla.sh` repeats the
+bounded check only when producing retained release evidence.
 
 Focused Skein tests must prove:
 

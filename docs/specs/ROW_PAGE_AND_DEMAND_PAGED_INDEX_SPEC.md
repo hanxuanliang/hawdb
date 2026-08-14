@@ -445,7 +445,7 @@ boundaries and MUST land before their corresponding production activation:
 
 - `SkeinTransactionConcurrency.tla`: logical lock namespaces, compatibility,
   wait-for deadlocks, escalation, savepoint release, and durable publication.
-- planned `SkeinCowPagePublication.tla`: WAL ordering, immutable page publication,
+- `SkeinCowPagePublication.tla`: WAL ordering, immutable page publication,
   reader pins, crash recovery, and reclamation.
 - `SkeinIndexPublication.tla`: atomic row/index root agreement, durable and
   generation-fenced publication, stale-builder rejection, cold open, on-demand
@@ -457,7 +457,7 @@ boundaries and MUST land before their corresponding production activation:
 - `SkeinPageCacheAdmission.tla`: clean immutable page residency, pin-safe
   eviction, cancellation release, caller-carved foreground reserve, corrupt
   admission rejection, cold open, and background hit/admit/bypass progress.
-  Dirty row-page publication remains owned by the planned
+  Dirty row-page publication remains owned by
   `SkeinCowPagePublication.tla`; it is not inferred from this clean-cache model.
 
 Existing `SkeinCompactionVisibility.tla`, `SkeinColumnGroupManifest.tla`, and

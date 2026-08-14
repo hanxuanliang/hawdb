@@ -1,24 +1,30 @@
 # Skein Storage TLA+ Models
 
-These models specify the storage publication and recovery protocols that are
-implemented by the embedded Skein library. They are executable specifications,
-checked over bounded state spaces by TLC.
+These models specify storage publication and recovery protocols implemented by
+the embedded Skein library or required before a planned storage path may be
+activated. They are executable specifications checked over bounded state spaces
+by TLC.
 
-Run every model with the repository-default pinned TLC release:
+Run every model through the hermetic `rules_tla` Bazel targets. Bazel resolves
+the pinned TLA+ Tools artifact and Java runtime; `--jobs=1` bounds outer model
+parallelism because each TLC process already owns an internal worker pool:
 
 ```bash
-scripts/check-storage-tla.sh
+bazel test //docs/tla:storage_models --jobs=1 --test_output=errors
 ```
 
-Set `TLA2TOOLS_JAR` to use an existing `tla2tools.jar`, or `TLA_JAVA` to select
-a Java 11 or newer runtime. Without `TLA2TOOLS_JAR`, the script downloads TLA+
-Tools 1.7.4 and verifies its SHA-256 digest before execution.
+`rules_tla` 0.2.0 is source-pinned in `MODULE.bazel`. It resolves TLA+ Tools
+1.7.4 by version and SHA-256 and uses Bazel's Java runtime toolchain. Each
+`.tla`/`.cfg` pair is an individual `tla_check`; the `storage_models` suite is
+the CI gate.
 
-Set `TLA_RESULTS_DIR` and `TLA_SOURCE_REVISION` to retain a release artifact.
-The artifact contains the exact `.tla` and `.cfg` inputs for every model in
-the checked set, one complete TLC log per model, the Java version, and a
-revision- and tool-bound manifest. CI
-validates the downloaded artifact with:
+The release-evidence collector remains separate because `rules_tla` 0.2.0
+declares a success marker but does not expose a successful action log as an
+output after a cache hit. Set `TLA_RESULTS_DIR` and `TLA_SOURCE_REVISION` when
+running `scripts/check-storage-tla.sh` to retain exact `.tla` and `.cfg` inputs,
+one complete TLC log per model, the Java version, and a revision- and tool-bound
+manifest. This repeats the bounded checks for audit retention; it is not the
+authoritative Bazel gate. CI validates the downloaded artifact with:
 
 ```bash
 scripts/check-storage-tla.sh --verify-results tla-results "$GITHUB_SHA"
@@ -133,6 +139,33 @@ and the current and immediately previous generations remain after reclamation.
 Reader actions map to `Database::begin_read_transaction` and `ReaderPin::drop`.
 Publication and reclamation map to `DurableStore::publish_checkpoint_manifest`
 and `DurableStore::reclaim_old_generations`.
+
+## Canonical COW Row-Page Publication
+
+`SkeinCowPagePublication.tla` specifies the publication protocol required by
+the canonical row-page format before runtime activation. A commit is visible
+only after its WAL record is durable. The recoverable dirty overlay is exactly
+the visible WAL suffix after the published manifest epoch. A checkpoint writes
+only dirty pages into a fresh physical generation, reuses immutable clean-page
+references from its selected base root, and publishes the candidate manifest
+only after every new page is durable.
+
+The model includes a competing checkpoint so a candidate prepared from a stale
+base must be rejected. Published generations and epochs cannot regress.
+Readers pin manifest generations; reclamation therefore retains the active,
+immediately previous, and reader-pinned roots together with their complete
+cross-generation page-reference closure. Crash recovery discards volatile
+commits, readers, and unpublished candidates while reconstructing the dirty
+overlay from durable WAL.
+
+The configured instance uses two readers, two logical commit epochs, four
+physical generations, and two logical pages. TLC checks WAL-before-visible,
+manifest-last publication, immutable physical page identity, dirty-only COW,
+stale-builder rejection, pinned-root retention, durable reference closure, and
+crash recovery. This is a protocol model, not a refinement proof of a shipped
+persistent row-page implementation; runtime activation remains blocked on the
+format, recovery, and demand-hydration implementation and their regression
+evidence.
 
 ## Durable Projection Cursor and Catch-up
 

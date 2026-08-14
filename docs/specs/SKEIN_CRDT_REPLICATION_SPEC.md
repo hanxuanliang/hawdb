@@ -416,7 +416,10 @@ an already-applied frame, still fail the replica closed.
 ## Verification
 
 `docs/tla/SkeinCrdtReplication.tla` is the executable model of this
-contract, checked by `scripts/check-storage-tla.sh`. The model abstracts
+contract, checked by `//docs/tla:SkeinCrdtReplication_check` and included in
+the `//docs/tla:storage_models` Bazel suite. The release-evidence collector in
+`scripts/check-storage-tla.sh` repeats the bounded check for audit retention.
+The model abstracts
 delta segments as state joins (their semantic foundation) and checks:
 
 | Contract obligation | Model invariant / property |

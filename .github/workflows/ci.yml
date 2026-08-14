@@ -61,9 +61,27 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Check storage TLA+ models
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+          external-cache: false
+          disk-cache: bazel-storage-tla
+
+      - name: Check storage TLA+ models with Bazel
+        # Each TLC process already parallelizes internally. Serial Bazel action
+        # scheduling prevents a runner from multiplying that worker count by
+        # the number of models in the suite.
+        run: bazel test //docs/tla:storage_models --jobs=1 --test_output=errors
+
+      # rules_tla is the authoritative model-check gate. The release artifact
+      # collector repeats the bounded checks only because the published
+      # evidence contract retains complete TLC logs, while rules_tla 0.2.0
+      # exposes a success marker but not the action log as a declared output.
+      - name: Collect storage model-check evidence
         env:
-          TLA_RESULTS_DIR: tla-results
+          TLA_RESULTS_DIR: ${{ github.workspace }}/tla-results
           TLA_SOURCE_REVISION: ${{ github.sha }}
         run: scripts/check-storage-tla.sh
 

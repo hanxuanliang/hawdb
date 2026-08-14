@@ -320,7 +320,8 @@ The revision-bound `tla-model-check-<revision>` artifact MUST contain successful
 TLC logs and exact `.tla` and `.cfg` inputs for `SkeinStorageDurability`,
 `SkeinWalGroupCommit`, `SkeinWalDoctor`, `SkeinGenerationReclamation`,
 `SkeinConcurrentSnapshots`, `SkeinTransactionConcurrency`,
-`SkeinSourceSegmentPublication`, `SkeinCrdtReplication`, and
+`SkeinCowPagePublication`, `SkeinSourceSegmentPublication`,
+`SkeinCrdtReplication`, and
 `SkeinGossipDelivery`, together
 with the Java version and the pinned TLA+ Tools version and SHA-256 digest. A
 downstream CI job MUST download and verify the complete artifact before the
