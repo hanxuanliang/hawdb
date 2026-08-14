@@ -1,10 +1,13 @@
 //! Relational index-page publication and generation-pinned read views.
 //!
-//! The shadow is deliberately derived: canonical checkpoint success never
-//! depends on it. A valid view is generation/epoch fenced to the checkpoint
-//! that supplied its rows and is selected by SQL only through the facade's
-//! explicit demand-read mode.
+//! `Shadow` and `DemandPaged` keep the files derived, so canonical checkpoint
+//! success does not depend on them. The explicit `Authoritative` mode promotes
+//! the complete generation binding and its recovery/live view into a required
+//! open, constraint, and SQL dependency. Every mode uses the same immutable,
+//! generation/epoch-fenced reader.
 
+#[path = "relational_index_shadow/authoritative.rs"]
+mod authoritative;
 #[path = "relational_index_shadow/constraint_qualification.rs"]
 mod constraint_qualification;
 
@@ -36,6 +39,15 @@ use std::{
 
 pub const RELATIONAL_INDEX_VIEW_QUALIFICATION_PROTOCOL: &str =
     "skein-relational-index-view-qualification-v1";
+
+const fn relational_index_generation_identity(
+    artifacts: RelationalIndexGenerationArtifacts,
+) -> RelationalIndexGenerationIdentity {
+    RelationalIndexGenerationIdentity {
+        generation: artifacts.generation,
+        source_commit_epoch: artifacts.source_commit_epoch,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RelationalIndexQualificationProbeKind {
@@ -857,7 +869,7 @@ pub(super) struct RelationalIndexShadowState {
     recovery_status: RelationalIndexShadowRecoveryStatus,
     read_view: Option<Arc<RelationalIndexReadView>>,
     live_limits: RelationalIndexChangeCaptureLimits,
-    generation_binding: Option<RelationalIndexGenerationIdentity>,
+    generation_artifacts: Option<RelationalIndexGenerationArtifacts>,
 }
 
 impl RelationalIndexShadowState {
@@ -986,7 +998,7 @@ impl GraphStore {
             return;
         };
         let Some(report) = prepared.candidate else {
-            self.relational_index_shadow.generation_binding = None;
+            self.relational_index_shadow.generation_artifacts = None;
             self.relational_index_shadow.recovery_builder = None;
             self.relational_index_shadow.recovery_report = None;
             self.relational_index_shadow.read_view = None;
@@ -1001,10 +1013,7 @@ impl GraphStore {
             self.relational_index_shadow.checkpoint_report = Some(prepared.report);
             return;
         };
-        self.relational_index_shadow.generation_binding = Some(RelationalIndexGenerationIdentity {
-            generation: report.generation,
-            source_commit_epoch: report.source_commit_epoch,
-        });
+        self.relational_index_shadow.generation_artifacts = Some(report.generation_artifacts);
         self.relational_index_shadow.expected_previous_generation = Some(report.generation);
         self.relational_index_shadow.recovery_builder = None;
         self.relational_index_shadow.recovery_report = None;
@@ -1056,11 +1065,7 @@ impl GraphStore {
                             .to_string(),
                     )
                 })?;
-        let generation_binding = RelationalIndexGenerationIdentity {
-            generation: generation_artifacts.generation,
-            source_commit_epoch: generation_artifacts.source_commit_epoch,
-        };
-        if Some(generation_binding) != self.relational_index_shadow.generation_binding {
+        if Some(generation_artifacts) != self.relational_index_shadow.generation_artifacts {
             return Err(RelationalIndexShadowError::Corrupt(
                 "relational index read selection does not match the canonical manifest binding"
                     .to_string(),
@@ -1069,7 +1074,7 @@ impl GraphStore {
         validate_bounded_relational_index_generation(durable.root_path(), generation_artifacts)?;
         let reader = RelationalIndexShadowReader::open_generation_with_cache(
             durable.root_path(),
-            generation_binding,
+            relational_index_generation_identity(generation_artifacts),
             RelationalIndexShadowConfig::default(),
             Arc::clone(&durable.segment_cache),
             durable.store_id(),
@@ -1095,18 +1100,17 @@ impl GraphStore {
                 "relational index read view requires a durable store".to_string(),
             )
         })?;
-        let generation_binding =
-            self.relational_index_shadow
-                .generation_binding
-                .ok_or_else(|| {
-                    RelationalIndexShadowError::Admission(
-                        "canonical manifest does not bind a relational index generation"
-                            .to_string(),
-                    )
-                })?;
+        let generation_artifacts = self
+            .relational_index_shadow
+            .generation_artifacts
+            .ok_or_else(|| {
+                RelationalIndexShadowError::Admission(
+                    "canonical manifest does not bind a relational index generation".to_string(),
+                )
+            })?;
         let reader = RelationalIndexRecoveryReader::open_generation_with_cache(
             durable.root_path(),
-            generation_binding,
+            relational_index_generation_identity(generation_artifacts),
             recovered_commit_epoch,
             RelationalIndexShadowConfig::default(),
             RelationalIndexRecoveryConfig::default(),
@@ -1197,15 +1201,12 @@ impl GraphStore {
         let checkpoint_commit_epoch = durable.checkpoint_commit_epoch;
         let read_only = durable.read_only;
         let Some(binding) = durable.relational_index_generation_artifacts else {
-            self.relational_index_shadow.generation_binding = None;
+            self.relational_index_shadow.generation_artifacts = None;
             self.relational_index_shadow.recovery_status =
                 RelationalIndexShadowRecoveryStatus::Missing;
             return;
         };
-        self.relational_index_shadow.generation_binding = Some(RelationalIndexGenerationIdentity {
-            generation: binding.generation,
-            source_commit_epoch: binding.source_commit_epoch,
-        });
+        self.relational_index_shadow.generation_artifacts = Some(binding);
         let manifest_path = root.join(relational_index_shadow_manifest_generation_file(
             binding.generation,
         ));
@@ -2087,7 +2088,7 @@ mod tests {
             store.relational_index_shadow_recovery_status(),
             &RelationalIndexShadowRecoveryStatus::Missing
         );
-        assert_eq!(store.relational_index_shadow.generation_binding, None);
+        assert_eq!(store.relational_index_shadow.generation_artifacts, None);
         assert!(store.relational_index_shadow.read_view.is_none());
         assert_eq!(store.relational_state().row_count("documents"), 1);
 
@@ -2930,6 +2931,421 @@ mod tests {
                 .is_none());
         }
         std::fs::remove_dir_all(path).expect("remove schema recovery fixture");
+    }
+
+    #[test]
+    fn authoritative_relational_indexes_gate_constraints_and_recover_live_commits() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "skein-authoritative-relational-index-{}-{nonce}",
+            std::process::id()
+        ));
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                WalReplayConfig {
+                    relational_index_mode: RelationalIndexMode::Shadow,
+                    ..WalReplayConfig::default()
+                },
+            )
+            .expect("open authoritative bootstrap store");
+            store
+                .commit_relational_transaction(
+                    &mut catalog,
+                    create_constraint_qualification_state(),
+                )
+                .expect("commit authoritative bootstrap state");
+            store
+                .checkpoint(&catalog)
+                .expect("publish authoritative bootstrap generation");
+        }
+
+        let replay = WalReplayConfig {
+            relational_index_mode: RelationalIndexMode::Authoritative,
+            ..WalReplayConfig::default()
+        };
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay,
+            )
+            .expect("open authoritative relational index store");
+            store
+                .validate_authoritative_relational_index_open()
+                .expect("authoritative view is current");
+            let pinned_snapshot = store.snapshot();
+            pinned_snapshot
+                .ensure_usable()
+                .expect("authoritative snapshot retains its complete binding");
+            let base_epoch = store.commit_epoch;
+            let base_lsn = store.durable.as_ref().expect("durable store").next_lsn;
+
+            let duplicate = store.commit_relational_transaction(
+                &mut catalog,
+                RelationalTransaction {
+                    writes: vec![RelationalWrite::Insert {
+                        table: "accounts".to_string(),
+                        rows: vec![constraint_account_row(
+                            "account-c",
+                            "tenant-3",
+                            RelationalValue::Text("c@example.test".to_string()),
+                            "alice",
+                        )],
+                        mode: RelationalInsertMode::Error,
+                    }],
+                },
+            );
+            assert!(
+                matches!(duplicate, Err(SkeinError::Storage(message)) if message.contains("duplicate key"))
+            );
+            assert_eq!(store.commit_epoch, base_epoch);
+            assert_eq!(
+                store.durable.as_ref().expect("durable store").next_lsn,
+                base_lsn
+            );
+
+            let missing_foreign_key = store.commit_relational_transaction(
+                &mut catalog,
+                RelationalTransaction {
+                    writes: vec![RelationalWrite::Insert {
+                        table: "sessions".to_string(),
+                        rows: vec![constraint_session_row(
+                            "session-invalid",
+                            "account-missing",
+                            RelationalValue::Null,
+                        )],
+                        mode: RelationalInsertMode::Error,
+                    }],
+                },
+            );
+            assert!(
+                matches!(missing_foreign_key, Err(SkeinError::Storage(message)) if message.contains("no visible target"))
+            );
+            assert_eq!(store.commit_epoch, base_epoch);
+            assert_eq!(
+                store.durable.as_ref().expect("durable store").next_lsn,
+                base_lsn
+            );
+
+            let default_live_limits = store.relational_index_shadow.live_limits;
+            store.relational_index_shadow.live_limits = RelationalIndexChangeCaptureLimits {
+                max_entries: NonZeroUsize::new(1).expect("test limit is non-zero"),
+                max_bytes: default_live_limits.max_bytes,
+            };
+            let live_budget_failure = store.commit_relational_transaction(
+                &mut catalog,
+                RelationalTransaction {
+                    writes: vec![RelationalWrite::Insert {
+                        table: "accounts".to_string(),
+                        rows: vec![constraint_account_row(
+                            "account-c",
+                            "tenant-3",
+                            RelationalValue::Text("c@example.test".to_string()),
+                            "carol",
+                        )],
+                        mode: RelationalInsertMode::Error,
+                    }],
+                },
+            );
+            assert!(
+                matches!(live_budget_failure, Err(SkeinError::Storage(message)) if message.contains("capture"))
+            );
+            assert_eq!(store.commit_epoch, base_epoch);
+            assert_eq!(
+                store.durable.as_ref().expect("durable store").next_lsn,
+                base_lsn
+            );
+            store.relational_index_shadow.live_limits = default_live_limits;
+
+            store
+                .commit_relational_transaction(
+                    &mut catalog,
+                    RelationalTransaction {
+                        writes: vec![RelationalWrite::Upsert {
+                            table: "accounts".to_string(),
+                            rows: vec![constraint_account_row(
+                                "ignored-primary-key",
+                                "tenant-2",
+                                RelationalValue::Text("updated@example.test".to_string()),
+                                "bob",
+                            )],
+                            conflict_columns: vec!["handle".to_string()],
+                            action: RelationalConflictAction::Update(vec![
+                                RelationalUpsertAssignment {
+                                    column: "tenant".to_string(),
+                                    value: RelationalUpsertValue::ExcludedColumn(
+                                        "tenant".to_string(),
+                                    ),
+                                },
+                                RelationalUpsertAssignment {
+                                    column: "email".to_string(),
+                                    value: RelationalUpsertValue::ExcludedColumn(
+                                        "email".to_string(),
+                                    ),
+                                },
+                            ]),
+                        }],
+                    },
+                )
+                .expect("commit upsert through authoritative unique index");
+            assert_eq!(store.commit_epoch, base_epoch + 1);
+            assert_eq!(pinned_snapshot.commit_epoch, base_epoch);
+            pinned_snapshot
+                .ensure_usable()
+                .expect("pinned authoritative snapshot remains usable after publication");
+            assert!(matches!(
+                store.relational_index_shadow_recovery_status(),
+                RelationalIndexShadowRecoveryStatus::LiveCurrent {
+                    visible_commit_epoch,
+                    ..
+                } if *visible_commit_epoch == base_epoch + 1
+            ));
+            let account_b = store
+                .relational_state()
+                .row(
+                    "accounts",
+                    &RelationalKey(vec![RelationalValue::Text("account-b".to_string())]),
+                )
+                .expect("upserted account");
+            assert_eq!(
+                account_b.values()[2],
+                RelationalValue::Text("updated@example.test".to_string())
+            );
+        }
+        {
+            let mut catalog = Catalog::default();
+            let store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay,
+            )
+            .expect("recover authoritative live commit");
+            store
+                .validate_authoritative_relational_index_open()
+                .expect("recovered authoritative view is current");
+            assert!(matches!(
+                store.relational_index_shadow_recovery_status(),
+                RelationalIndexShadowRecoveryStatus::WalRecovered { .. }
+            ));
+        }
+        std::fs::remove_dir_all(path).expect("remove authoritative fixture");
+    }
+
+    #[test]
+    fn authoritative_open_rejects_missing_and_corrupt_bound_generations() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let missing_path = std::env::temp_dir().join(format!(
+            "skein-authoritative-missing-index-{}-{nonce}",
+            std::process::id()
+        ));
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open_with_durability_and_replay_config(
+                &missing_path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                WalReplayConfig::default(),
+            )
+            .expect("open unbound materialized store");
+            store
+                .commit_relational_transaction(
+                    &mut catalog,
+                    create_recovery_documents_table("doc-1"),
+                )
+                .expect("commit unbound source");
+            store
+                .checkpoint(&catalog)
+                .expect("publish checkpoint without index binding");
+        }
+        let mut catalog = Catalog::default();
+        let missing = GraphStore::open_with_durability_and_replay_config(
+            &missing_path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            WalReplayConfig {
+                relational_index_mode: RelationalIndexMode::Authoritative,
+                ..WalReplayConfig::default()
+            },
+        )
+        .expect_err("authoritative open must reject a missing binding");
+        assert!(missing
+            .to_string()
+            .contains("authoritative relational index"));
+
+        let corrupt_path = std::env::temp_dir().join(format!(
+            "skein-authoritative-corrupt-index-{}-{nonce}",
+            std::process::id()
+        ));
+        let generation;
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open_with_durability_and_replay_config(
+                &corrupt_path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                WalReplayConfig {
+                    relational_index_mode: RelationalIndexMode::Shadow,
+                    ..WalReplayConfig::default()
+                },
+            )
+            .expect("open corrupt authoritative bootstrap");
+            store
+                .commit_relational_transaction(
+                    &mut catalog,
+                    create_recovery_documents_table("doc-1"),
+                )
+                .expect("commit corrupt authoritative source");
+            store
+                .checkpoint(&catalog)
+                .expect("publish bound generation for corruption test");
+            generation = current_index_view(&store).identity().base_generation;
+        }
+        std::fs::write(
+            corrupt_path.join(relational_index_shadow_manifest_generation_file(generation)),
+            b"corrupt",
+        )
+        .expect("corrupt bound generation manifest");
+        let mut catalog = Catalog::default();
+        let corrupt = GraphStore::open_with_durability_and_replay_config(
+            &corrupt_path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            WalReplayConfig {
+                relational_index_mode: RelationalIndexMode::Authoritative,
+                ..WalReplayConfig::default()
+            },
+        )
+        .expect_err("authoritative open must reject a corrupt bound generation");
+        assert!(corrupt
+            .to_string()
+            .contains("authoritative relational index"));
+
+        std::fs::remove_dir_all(missing_path).expect("remove missing binding fixture");
+        std::fs::remove_dir_all(corrupt_path).expect("remove corrupt binding fixture");
+    }
+
+    #[test]
+    fn authoritative_constraint_corruption_rejects_before_wal_and_poisons_service() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "skein-authoritative-constraint-corruption-{}-{nonce}",
+            std::process::id()
+        ));
+        let (generation, pages);
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                WalReplayConfig {
+                    relational_index_mode: RelationalIndexMode::Shadow,
+                    ..WalReplayConfig::default()
+                },
+            )
+            .expect("open authoritative corruption bootstrap");
+            store
+                .commit_relational_transaction(
+                    &mut catalog,
+                    create_constraint_qualification_state(),
+                )
+                .expect("commit authoritative corruption source");
+            store
+                .checkpoint(&catalog)
+                .expect("publish authoritative corruption generation");
+            let report = store
+                .relational_index_shadow_checkpoint_report()
+                .expect("published authoritative corruption report");
+            generation = report.generation;
+            pages = report.pages_written;
+        }
+
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::open_with_durability_and_replay_config(
+            &path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            WalReplayConfig {
+                relational_index_mode: RelationalIndexMode::Authoritative,
+                ..WalReplayConfig::default()
+            },
+        )
+        .expect("open cold authoritative corruption reader");
+        let page_bytes = RelationalIndexShadowConfig::default()
+            .page_limits
+            .max_page_bytes
+            .get() as u64;
+        let artifact = path.join(relational_index_shadow_artifact_file(generation));
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&artifact)
+            .expect("open authoritative page artifact");
+        for page in 0..pages {
+            file.seek(SeekFrom::Start(page * page_bytes))
+                .expect("seek authoritative page");
+            let mut byte = [0_u8; 1];
+            file.read_exact(&mut byte)
+                .expect("read authoritative page byte");
+            byte[0] ^= 0xff;
+            file.seek(SeekFrom::Start(page * page_bytes))
+                .expect("rewind authoritative page");
+            file.write_all(&byte)
+                .expect("corrupt authoritative page byte");
+        }
+        file.sync_all().expect("sync authoritative corruption");
+
+        let epoch = store.commit_epoch;
+        let next_lsn = store.durable.as_ref().expect("durable store").next_lsn;
+        let error = store
+            .commit_relational_transaction(
+                &mut catalog,
+                RelationalTransaction {
+                    writes: vec![RelationalWrite::Insert {
+                        table: "accounts".to_string(),
+                        rows: vec![constraint_account_row(
+                            "account-c",
+                            "tenant-3",
+                            RelationalValue::Text("c@example.test".to_string()),
+                            "carol",
+                        )],
+                        mode: RelationalInsertMode::Error,
+                    }],
+                },
+            )
+            .expect_err("corrupt authoritative constraint page must reject the mutation");
+        assert!(matches!(error, SkeinError::StorageIntegrity(_)));
+        assert_eq!(store.commit_epoch, epoch);
+        assert_eq!(
+            store.durable.as_ref().expect("durable store").next_lsn,
+            next_lsn
+        );
+        assert!(matches!(
+            store.ensure_usable(),
+            Err(SkeinError::StorageIntegrity(_))
+        ));
+
+        drop(file);
+        drop(store);
+        std::fs::remove_dir_all(path).expect("remove authoritative corruption fixture");
     }
 
     #[test]

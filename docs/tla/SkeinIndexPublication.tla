@@ -17,6 +17,7 @@ Epochs == 0..MaxEpoch
 Pages == 1..MaxPage
 BuildPhases == {"idle", "building", "durable"}
 QueryStates == {"idle", "reading", "succeeded", "failed"}
+ConstraintStates == {"idle", "reading", "accepted", "durable", "failed"}
 
 VARIABLES
     canonicalEpoch,
@@ -34,7 +35,15 @@ VARIABLES
     queryState,
     requiredPage,
     poisoned,
-    stalePublishRejected
+    stalePublishRejected,
+    visibleRowEpoch,
+    visibleIndexEpoch,
+    authoritativeHandle,
+    constraintState,
+    constraintTarget,
+    constraintPage,
+    durableWalEpochs,
+    constraintRejected
 
 vars == <<
     canonicalEpoch,
@@ -52,7 +61,24 @@ vars == <<
     queryState,
     requiredPage,
     poisoned,
-    stalePublishRejected
+    stalePublishRejected,
+    visibleRowEpoch,
+    visibleIndexEpoch,
+    authoritativeHandle,
+    constraintState,
+    constraintTarget,
+    constraintPage,
+    durableWalEpochs,
+    constraintRejected
+>>
+
+authorityMutationVars == <<
+    authoritativeHandle,
+    constraintState,
+    constraintTarget,
+    constraintPage,
+    durableWalEpochs,
+    constraintRejected
 >>
 
 Init ==
@@ -72,10 +98,21 @@ Init ==
     /\ requiredPage = 0
     /\ poisoned = FALSE
     /\ stalePublishRejected = FALSE
+    /\ visibleRowEpoch = 0
+    /\ visibleIndexEpoch = 0
+    /\ authoritativeHandle = FALSE
+    /\ constraintState = "idle"
+    /\ constraintTarget = 0
+    /\ constraintPage = 0
+    /\ durableWalEpochs = {}
+    /\ constraintRejected = FALSE
 
 Commit ==
     /\ canonicalEpoch < MaxEpoch
+    /\ ~authoritativeHandle
+    /\ constraintState = "idle"
     /\ canonicalEpoch' = canonicalEpoch + 1
+    /\ visibleRowEpoch' = canonicalEpoch + 1
     /\ UNCHANGED <<
         rowRootEpoch,
         indexRootEpoch,
@@ -91,8 +128,10 @@ Commit ==
         queryState,
         requiredPage,
         poisoned,
-        stalePublishRejected
+        stalePublishRejected,
+        visibleIndexEpoch
         >>
+    /\ UNCHANGED authorityMutationVars
 
 BeginBuild ==
     /\ buildPhase = "idle"
@@ -113,8 +152,11 @@ BeginBuild ==
         corruptPages,
         queryState,
         requiredPage,
-        poisoned
+        poisoned,
+        visibleRowEpoch,
+        visibleIndexEpoch
         >>
+    /\ UNCHANGED authorityMutationVars
 
 PersistIndexPages ==
     /\ buildPhase = "building"
@@ -134,8 +176,11 @@ PersistIndexPages ==
         queryState,
         requiredPage,
         poisoned,
-        stalePublishRejected
+        stalePublishRejected,
+        visibleRowEpoch,
+        visibleIndexEpoch
         >>
+    /\ UNCHANGED authorityMutationVars
 
 (***************************************************************************)
 (* A competing complete checkpoint may win while this builder is active.  *)
@@ -144,8 +189,11 @@ PersistIndexPages ==
 PublishCompetingRoot ==
     /\ buildPhase \in {"building", "durable"}
     /\ canonicalEpoch > rowRootEpoch
+    /\ constraintState = "idle"
     /\ rowRootEpoch' = canonicalEpoch
     /\ indexRootEpoch' = canonicalEpoch
+    /\ visibleRowEpoch' = canonicalEpoch
+    /\ visibleIndexEpoch' = canonicalEpoch
     /\ rootGeneration' = rootGeneration + 1
     /\ durableIndexEpochs' = durableIndexEpochs \cup {canonicalEpoch}
     /\ UNCHANGED <<
@@ -162,14 +210,18 @@ PublishCompetingRoot ==
         poisoned,
         stalePublishRejected
         >>
+    /\ UNCHANGED authorityMutationVars
 
 PublishBuiltRoot ==
     /\ buildPhase = "durable"
     /\ buildTarget = canonicalEpoch
     /\ buildTarget \in durableIndexEpochs
     /\ buildBaseGeneration = rootGeneration
+    /\ constraintState = "idle"
     /\ rowRootEpoch' = buildTarget
     /\ indexRootEpoch' = buildTarget
+    /\ visibleRowEpoch' = buildTarget
+    /\ visibleIndexEpoch' = buildTarget
     /\ rootGeneration' = rootGeneration + 1
     /\ buildPhase' = "idle"
     /\ buildTarget' = 0
@@ -186,6 +238,7 @@ PublishBuiltRoot ==
         poisoned,
         stalePublishRejected
         >>
+    /\ UNCHANGED authorityMutationVars
 
 RejectStalePublish ==
     /\ buildPhase = "durable"
@@ -207,14 +260,52 @@ RejectStalePublish ==
         corruptPages,
         queryState,
         requiredPage,
-        poisoned
+        poisoned,
+        visibleRowEpoch,
+        visibleIndexEpoch
         >>
+    /\ UNCHANGED authorityMutationVars
 
 OpenHandle ==
     /\ ~handleOpen
     /\ rowRootEpoch = indexRootEpoch
     /\ indexRootEpoch \in durableIndexEpochs
     /\ handleOpen' = TRUE
+    /\ queriesStarted' = FALSE
+    /\ loadedPages' = {}
+    /\ queryState' = "idle"
+    /\ requiredPage' = 0
+    /\ poisoned' = FALSE
+    /\ authoritativeHandle' = FALSE
+    /\ UNCHANGED <<
+        canonicalEpoch,
+        rowRootEpoch,
+        indexRootEpoch,
+        rootGeneration,
+        buildPhase,
+        buildTarget,
+        buildBaseGeneration,
+        durableIndexEpochs,
+        corruptPages,
+        stalePublishRejected,
+        visibleRowEpoch,
+        visibleIndexEpoch,
+        constraintState,
+        constraintTarget,
+        constraintPage,
+        durableWalEpochs,
+        constraintRejected
+        >>
+
+OpenAuthoritativeHandle ==
+    /\ ~handleOpen
+    /\ rowRootEpoch = indexRootEpoch
+    /\ indexRootEpoch \in durableIndexEpochs
+    /\ visibleRowEpoch = canonicalEpoch
+    /\ visibleIndexEpoch = canonicalEpoch
+    /\ constraintState = "idle"
+    /\ handleOpen' = TRUE
+    /\ authoritativeHandle' = TRUE
     /\ queriesStarted' = FALSE
     /\ loadedPages' = {}
     /\ queryState' = "idle"
@@ -230,13 +321,21 @@ OpenHandle ==
         buildBaseGeneration,
         durableIndexEpochs,
         corruptPages,
-        stalePublishRejected
+        stalePublishRejected,
+        visibleRowEpoch,
+        visibleIndexEpoch,
+        constraintState,
+        constraintTarget,
+        constraintPage,
+        durableWalEpochs,
+        constraintRejected
         >>
 
 BeginLookup ==
     /\ handleOpen
     /\ ~poisoned
     /\ queryState = "idle"
+    /\ constraintState = "idle"
     /\ \E page \in Pages:
         /\ requiredPage' = page
         /\ queryState' = "reading"
@@ -256,6 +355,8 @@ BeginLookup ==
         poisoned,
         stalePublishRejected
         >>
+    /\ UNCHANGED <<visibleRowEpoch, visibleIndexEpoch>>
+    /\ UNCHANGED authorityMutationVars
 
 ReadHealthyPage ==
     /\ queryState = "reading"
@@ -278,6 +379,8 @@ ReadHealthyPage ==
         poisoned,
         stalePublishRejected
         >>
+    /\ UNCHANGED <<visibleRowEpoch, visibleIndexEpoch>>
+    /\ UNCHANGED authorityMutationVars
 
 ReadCorruptPage ==
     /\ queryState = "reading"
@@ -300,6 +403,8 @@ ReadCorruptPage ==
         requiredPage,
         stalePublishRejected
         >>
+    /\ UNCHANGED <<visibleRowEpoch, visibleIndexEpoch>>
+    /\ UNCHANGED authorityMutationVars
 
 FinishLookup ==
     /\ queryState = "succeeded"
@@ -321,6 +426,8 @@ FinishLookup ==
         poisoned,
         stalePublishRejected
         >>
+    /\ UNCHANGED <<visibleRowEpoch, visibleIndexEpoch>>
+    /\ UNCHANGED authorityMutationVars
 
 CorruptColdPage ==
     /\ \E page \in Pages \ loadedPages:
@@ -342,6 +449,234 @@ CorruptColdPage ==
         poisoned,
         stalePublishRejected
         >>
+    /\ UNCHANGED <<visibleRowEpoch, visibleIndexEpoch>>
+    /\ UNCHANGED authorityMutationVars
+
+(***************************************************************************)
+(* Authoritative mutations read one current index view before the WAL. A   *)
+(* semantic rejection or corrupt page cannot append WAL or advance either  *)
+(* visible epoch. Once the WAL is durable, normal publication or recovery  *)
+(* advances row and index visibility together.                             *)
+(***************************************************************************)
+BeginAuthoritativeConstraint ==
+    /\ handleOpen
+    /\ authoritativeHandle
+    /\ ~poisoned
+    /\ queryState = "idle"
+    /\ constraintState = "idle"
+    /\ visibleRowEpoch = canonicalEpoch
+    /\ visibleIndexEpoch = canonicalEpoch
+    /\ canonicalEpoch < MaxEpoch
+    /\ \E page \in Pages:
+        /\ constraintPage' = page
+        /\ constraintState' = "reading"
+    /\ constraintTarget' = canonicalEpoch + 1
+    /\ constraintRejected' = FALSE
+    /\ queriesStarted' = TRUE
+    /\ UNCHANGED <<
+        canonicalEpoch,
+        rowRootEpoch,
+        indexRootEpoch,
+        rootGeneration,
+        buildPhase,
+        buildTarget,
+        buildBaseGeneration,
+        durableIndexEpochs,
+        handleOpen,
+        loadedPages,
+        corruptPages,
+        queryState,
+        requiredPage,
+        poisoned,
+        stalePublishRejected,
+        visibleRowEpoch,
+        visibleIndexEpoch,
+        authoritativeHandle,
+        durableWalEpochs
+        >>
+
+AcceptAuthoritativeConstraint ==
+    /\ constraintState = "reading"
+    /\ constraintPage \notin corruptPages
+    /\ ~poisoned
+    /\ constraintState' = "accepted"
+    /\ loadedPages' = loadedPages \cup {constraintPage}
+    /\ UNCHANGED <<
+        canonicalEpoch,
+        rowRootEpoch,
+        indexRootEpoch,
+        rootGeneration,
+        buildPhase,
+        buildTarget,
+        buildBaseGeneration,
+        durableIndexEpochs,
+        handleOpen,
+        queriesStarted,
+        corruptPages,
+        queryState,
+        requiredPage,
+        poisoned,
+        stalePublishRejected,
+        visibleRowEpoch,
+        visibleIndexEpoch,
+        authoritativeHandle,
+        constraintTarget,
+        constraintPage,
+        durableWalEpochs,
+        constraintRejected
+        >>
+
+RejectAuthoritativeConstraint ==
+    /\ constraintState = "reading"
+    /\ constraintPage \notin corruptPages
+    /\ constraintState' = "failed"
+    /\ constraintRejected' = TRUE
+    /\ loadedPages' = loadedPages \cup {constraintPage}
+    /\ UNCHANGED <<
+        canonicalEpoch,
+        rowRootEpoch,
+        indexRootEpoch,
+        rootGeneration,
+        buildPhase,
+        buildTarget,
+        buildBaseGeneration,
+        durableIndexEpochs,
+        handleOpen,
+        queriesStarted,
+        corruptPages,
+        queryState,
+        requiredPage,
+        poisoned,
+        stalePublishRejected,
+        visibleRowEpoch,
+        visibleIndexEpoch,
+        authoritativeHandle,
+        constraintTarget,
+        constraintPage,
+        durableWalEpochs
+        >>
+
+FailAuthoritativeConstraint ==
+    /\ constraintState = "reading"
+    /\ constraintPage \in corruptPages
+    /\ constraintState' = "failed"
+    /\ constraintRejected' = TRUE
+    /\ poisoned' = TRUE
+    /\ UNCHANGED <<
+        canonicalEpoch,
+        rowRootEpoch,
+        indexRootEpoch,
+        rootGeneration,
+        buildPhase,
+        buildTarget,
+        buildBaseGeneration,
+        durableIndexEpochs,
+        handleOpen,
+        queriesStarted,
+        loadedPages,
+        corruptPages,
+        queryState,
+        requiredPage,
+        stalePublishRejected,
+        visibleRowEpoch,
+        visibleIndexEpoch,
+        authoritativeHandle,
+        constraintTarget,
+        constraintPage,
+        durableWalEpochs
+        >>
+
+PersistAuthoritativeWal ==
+    /\ constraintState = "accepted"
+    /\ ~poisoned
+    /\ constraintTarget \notin durableWalEpochs
+    /\ constraintState' = "durable"
+    /\ durableWalEpochs' = durableWalEpochs \cup {constraintTarget}
+    /\ UNCHANGED <<
+        canonicalEpoch,
+        rowRootEpoch,
+        indexRootEpoch,
+        rootGeneration,
+        buildPhase,
+        buildTarget,
+        buildBaseGeneration,
+        durableIndexEpochs,
+        handleOpen,
+        queriesStarted,
+        loadedPages,
+        corruptPages,
+        queryState,
+        requiredPage,
+        poisoned,
+        stalePublishRejected,
+        visibleRowEpoch,
+        visibleIndexEpoch,
+        authoritativeHandle,
+        constraintTarget,
+        constraintPage,
+        constraintRejected
+        >>
+
+PublishAuthoritativeMutation ==
+    /\ constraintState = "durable"
+    /\ constraintTarget = canonicalEpoch + 1
+    /\ constraintTarget \in durableWalEpochs
+    /\ canonicalEpoch' = constraintTarget
+    /\ visibleRowEpoch' = constraintTarget
+    /\ visibleIndexEpoch' = constraintTarget
+    /\ constraintState' = "idle"
+    /\ constraintTarget' = 0
+    /\ constraintPage' = 0
+    /\ constraintRejected' = FALSE
+    /\ UNCHANGED <<
+        rowRootEpoch,
+        indexRootEpoch,
+        rootGeneration,
+        buildPhase,
+        buildTarget,
+        buildBaseGeneration,
+        durableIndexEpochs,
+        handleOpen,
+        queriesStarted,
+        loadedPages,
+        corruptPages,
+        queryState,
+        requiredPage,
+        poisoned,
+        stalePublishRejected,
+        authoritativeHandle,
+        durableWalEpochs
+        >>
+
+ResetRejectedConstraint ==
+    /\ constraintState = "failed"
+    /\ ~poisoned
+    /\ constraintState' = "idle"
+    /\ constraintTarget' = 0
+    /\ constraintPage' = 0
+    /\ constraintRejected' = FALSE
+    /\ UNCHANGED <<
+        canonicalEpoch,
+        rowRootEpoch,
+        indexRootEpoch,
+        rootGeneration,
+        buildPhase,
+        buildTarget,
+        buildBaseGeneration,
+        durableIndexEpochs,
+        handleOpen,
+        queriesStarted,
+        loadedPages,
+        corruptPages,
+        queryState,
+        requiredPage,
+        poisoned,
+        stalePublishRejected,
+        visibleRowEpoch,
+        visibleIndexEpoch,
+        authoritativeHandle,
+        durableWalEpochs
+        >>
 
 CrashAndRecover ==
     /\ handleOpen \/ buildPhase # "idle"
@@ -354,14 +689,22 @@ CrashAndRecover ==
     /\ buildPhase' = "idle"
     /\ buildTarget' = 0
     /\ buildBaseGeneration' = rootGeneration
+    /\ canonicalEpoch' = IF constraintState = "durable" THEN constraintTarget ELSE canonicalEpoch
+    /\ visibleRowEpoch' = IF constraintState = "durable" THEN constraintTarget ELSE visibleRowEpoch
+    /\ visibleIndexEpoch' = IF constraintState = "durable" THEN constraintTarget ELSE visibleIndexEpoch
+    /\ authoritativeHandle' = FALSE
+    /\ constraintState' = "idle"
+    /\ constraintTarget' = 0
+    /\ constraintPage' = 0
+    /\ constraintRejected' = FALSE
     /\ UNCHANGED <<
-        canonicalEpoch,
         rowRootEpoch,
         indexRootEpoch,
         rootGeneration,
         durableIndexEpochs,
         corruptPages,
-        stalePublishRejected
+        stalePublishRejected,
+        durableWalEpochs
         >>
 
 Next ==
@@ -372,11 +715,19 @@ Next ==
     \/ PublishBuiltRoot
     \/ RejectStalePublish
     \/ OpenHandle
+    \/ OpenAuthoritativeHandle
     \/ BeginLookup
     \/ ReadHealthyPage
     \/ ReadCorruptPage
     \/ FinishLookup
     \/ CorruptColdPage
+    \/ BeginAuthoritativeConstraint
+    \/ AcceptAuthoritativeConstraint
+    \/ RejectAuthoritativeConstraint
+    \/ FailAuthoritativeConstraint
+    \/ PersistAuthoritativeWal
+    \/ PublishAuthoritativeMutation
+    \/ ResetRejectedConstraint
     \/ CrashAndRecover
 
 TypeOK ==
@@ -396,6 +747,14 @@ TypeOK ==
     /\ requiredPage \in 0..MaxPage
     /\ poisoned \in BOOLEAN
     /\ stalePublishRejected \in BOOLEAN
+    /\ visibleRowEpoch \in Epochs
+    /\ visibleIndexEpoch \in Epochs
+    /\ authoritativeHandle \in BOOLEAN
+    /\ constraintState \in ConstraintStates
+    /\ constraintTarget \in Epochs
+    /\ constraintPage \in 0..MaxPage
+    /\ durableWalEpochs \subseteq Epochs
+    /\ constraintRejected \in BOOLEAN
 
 RowAndIndexRootsAgree == rowRootEpoch = indexRootEpoch
 
@@ -413,7 +772,47 @@ SuccessfulLookupReadVerifiedPage ==
         /\ ~poisoned
 
 CorruptionPoisonsOpenHandle ==
-    poisoned => /\ handleOpen /\ queryState = "failed"
+    poisoned =>
+        /\ handleOpen
+        /\ \/ queryState = "failed"
+           \/ constraintState = "failed"
+
+AuthoritativeVisibleEpochsAgree ==
+    authoritativeHandle =>
+        /\ handleOpen
+        /\ visibleRowEpoch = canonicalEpoch
+        /\ visibleIndexEpoch = canonicalEpoch
+
+AuthoritativeIndexIsRecoverable ==
+    authoritativeHandle =>
+        /\ indexRootEpoch \in durableIndexEpochs
+        /\ \/ visibleIndexEpoch = indexRootEpoch
+           \/ visibleIndexEpoch \in durableWalEpochs
+
+ConstraintCheckUsesCurrentView ==
+    constraintState # "idle" =>
+        /\ authoritativeHandle
+        /\ handleOpen
+        /\ visibleRowEpoch = canonicalEpoch
+        /\ visibleIndexEpoch = canonicalEpoch
+        /\ constraintTarget = canonicalEpoch + 1
+
+AcceptedConstraintHasNoWal ==
+    constraintState = "accepted" => constraintTarget \notin durableWalEpochs
+
+DurableMutationHasWal ==
+    constraintState = "durable" => constraintTarget \in durableWalEpochs
+
+RejectedConstraintLeavesCanonicalState ==
+    constraintRejected =>
+        /\ constraintState = "failed"
+        /\ constraintTarget \notin durableWalEpochs
+        /\ visibleRowEpoch = canonicalEpoch
+        /\ visibleIndexEpoch = canonicalEpoch
+
+AuthoritativeAdvanceHasDurableWal ==
+    authoritativeHandle /\ canonicalEpoch > indexRootEpoch =>
+        canonicalEpoch \in durableWalEpochs
 
 Spec == Init /\ [][Next]_vars
 

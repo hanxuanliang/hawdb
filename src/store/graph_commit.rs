@@ -1,6 +1,7 @@
 //! Mutation transaction commit paths and out-of-core delta admission for [`GraphStore`].
 
 use super::*;
+use skein_storage::RelationalError;
 
 impl GraphStore {
     pub fn commit_mutations(
@@ -1696,6 +1697,7 @@ impl GraphStore {
         preserve_single_create_wal: bool,
         captured_graph_ops: Option<&mut Vec<WalOp>>,
     ) -> Result<MutationSummary> {
+        self.ensure_usable()?;
         ensure_mutation_commit_limits(&ops, &rows, limits)?;
         if let Some(captured_graph_ops) = captured_graph_ops {
             captured_graph_ops.extend(ops.iter().cloned());
@@ -1707,16 +1709,26 @@ impl GraphStore {
             .checked_add(1)
             .ok_or_else(|| SkeinError::Storage("commit epoch overflow".to_string()))?;
         if let Some(transaction) = relational_transaction.filter(|value| !value.writes.is_empty()) {
+            let authoritative_index = self.authoritative_relational_constraint_index()?;
             if let Some(capture_limits) = self.relational_index_live_capture_limits() {
-                let (next, capture) = self
-                    .relational_state
-                    .stage_transaction_with_index_changes(
+                let staged = match authoritative_index.as_ref() {
+                    Some(index) => self
+                        .relational_state
+                        .stage_transaction_with_authoritative_index(
+                            transaction.clone(),
+                            self.relational_mutation_limits,
+                            self.relational_overflow_config,
+                            capture_limits,
+                            index,
+                        ),
+                    None => self.relational_state.stage_transaction_with_index_changes(
                         transaction.clone(),
                         self.relational_mutation_limits,
                         self.relational_overflow_config,
                         capture_limits,
-                    )
-                    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                    ),
+                };
+                let (next, capture) = staged.map_err(map_relational_staging_error)?;
                 staged_relational_state = Some(next);
                 staged_relational_index_capture = Some(capture);
             } else {
@@ -1727,7 +1739,7 @@ impl GraphStore {
                             self.relational_mutation_limits,
                             self.relational_overflow_config,
                         )
-                        .map_err(|error| SkeinError::Storage(error.to_string()))?,
+                        .map_err(map_relational_staging_error)?,
                 );
             }
             let record = encode_relational_wal_batch(next_commit_epoch, &transaction)
@@ -1743,6 +1755,10 @@ impl GraphStore {
             next_commit_epoch,
             staged_relational_index_capture,
         );
+        self.require_authoritative_relational_index_live_publication(
+            next_commit_epoch,
+            &staged_relational_index_publication,
+        )?;
         self.validate_constraints_for_ops(&working_catalog, &ops)?;
         if let Some(durable) = &mut self.durable {
             if preserve_single_create_wal
@@ -2113,5 +2129,15 @@ impl GraphStore {
             }
         }
         Ok(())
+    }
+}
+
+fn map_relational_staging_error(error: RelationalError) -> SkeinError {
+    match error {
+        RelationalError::Corruption(_) => SkeinError::StorageIntegrity(error.to_string()),
+        RelationalError::Admission(_)
+        | RelationalError::Schema(_)
+        | RelationalError::Constraint(_)
+        | RelationalError::Durability(_) => SkeinError::Storage(error.to_string()),
     }
 }

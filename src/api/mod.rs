@@ -340,10 +340,17 @@ fn relational_index_read_mode<'a>(
     config: &DatabaseConfig,
     store: &'a GraphStore,
 ) -> crate::relational_sql::RelationalIndexReadMode<'a> {
-    if config.relational_index_mode.serves_demand_paged_reads() {
-        crate::relational_sql::RelationalIndexReadMode::DemandPaged(store)
-    } else {
-        crate::relational_sql::RelationalIndexReadMode::Materialized
+    match config.relational_index_mode {
+        skein_storage::RelationalIndexMode::Materialized
+        | skein_storage::RelationalIndexMode::Shadow => {
+            crate::relational_sql::RelationalIndexReadMode::Materialized
+        }
+        skein_storage::RelationalIndexMode::DemandPaged => {
+            crate::relational_sql::RelationalIndexReadMode::DemandPaged(store)
+        }
+        skein_storage::RelationalIndexMode::Authoritative => {
+            crate::relational_sql::RelationalIndexReadMode::Authoritative(store)
+        }
     }
 }
 

@@ -231,6 +231,7 @@ impl GraphStore {
                 .transpose()?;
             let relational_index_candidate =
                 self.prepare_relational_index_candidate(generation, commit_epoch);
+            self.require_authoritative_relational_index_candidate(&relational_index_candidate)?;
             let relational_index = relational_index_candidate
                 .as_ref()
                 .and_then(|prepared| prepared.candidate.as_ref())
@@ -378,6 +379,7 @@ impl GraphStore {
             self.relationship_property_index = CowSegmentedMap::default();
         }
         self.install_prepared_relational_index_candidate(prepared.relational_index_candidate);
+        self.validate_authoritative_relational_index_open()?;
         // Derived shadow double-write: published after the row-oriented
         // checkpoint so its `source_commit_epoch` is the epoch this
         // checkpoint made durable. The checkpoint's Result reflects

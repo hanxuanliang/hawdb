@@ -890,6 +890,82 @@ mod tests {
         std::fs::remove_dir_all(path).expect("remove demand-index SQL fixture");
     }
 
+    #[test]
+    fn authoritative_sql_never_falls_back_to_materialized_postings() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "skein-relational-sql-authoritative-index-{}-{nonce}",
+            std::process::id()
+        ));
+        {
+            let mut database = Database::open_with_durability_and_config(
+                &path,
+                DurabilityPolicy::default(),
+                DatabaseConfig {
+                    relational_index_mode: skein_storage::RelationalIndexMode::Shadow,
+                    ..DatabaseConfig::default()
+                },
+            )
+            .expect("open authoritative SQL bootstrap");
+            database
+                .query_sql(
+                    "CREATE TABLE documents (id TEXT PRIMARY KEY, owner TEXT NOT NULL, body TEXT NOT NULL)",
+                )
+                .expect("create authoritative SQL table");
+            database
+                .query_sql("CREATE INDEX documents_owner_idx ON documents (owner)")
+                .expect("create authoritative SQL index");
+            database
+                .query_sql(
+                    "INSERT INTO documents (id, owner, body) VALUES ('doc-1', 'owner-1', 'body-1')",
+                )
+                .expect("insert authoritative SQL source");
+            database
+                .checkpoint()
+                .expect("publish authoritative SQL generation");
+        }
+        {
+            let mut database = Database::open_with_durability_and_config(
+                &path,
+                DurabilityPolicy::default(),
+                DatabaseConfig {
+                    relational_index_mode: skein_storage::RelationalIndexMode::Authoritative,
+                    ..DatabaseConfig::default()
+                },
+            )
+            .expect("open authoritative SQL reader");
+            let output = database
+                .query_sql("EXPLAIN ANALYZE SELECT id FROM documents WHERE owner = 'owner-1'")
+                .expect("read authoritative SQL index");
+            let info = relational_explain_operator_info(&output, "IndexRangeScanExec");
+            assert!(info.contains("runtime_path=authoritative"));
+            assert!(info.contains("authoritative=1"));
+            assert!(info.contains("canonical_fallback=0"));
+        }
+        {
+            let mut database = Database::open_with_durability_and_config(
+                &path,
+                DurabilityPolicy::default(),
+                DatabaseConfig {
+                    relational_index_mode: skein_storage::RelationalIndexMode::Authoritative,
+                    max_read_result_payload_bytes: Some(4 * 1024),
+                    ..DatabaseConfig::default()
+                },
+            )
+            .expect("open authoritative SQL reader with tight admission");
+            let error = database
+                .query_sql("SELECT id FROM documents WHERE owner = 'owner-1'")
+                .expect_err("authoritative SQL must not fall back after admission rejection");
+            assert!(error
+                .to_string()
+                .contains("authoritative relational index read"));
+        }
+        std::fs::remove_dir_all(path).expect("remove authoritative SQL fixture");
+    }
+
     fn relational_explain_operator_info<'a>(
         output: &'a crate::QueryOutput,
         operator: &str,

@@ -1604,6 +1604,7 @@ impl GraphStore {
                     .to_string(),
             ));
         }
+        self.validate_authoritative_relational_index_open()?;
         Ok(())
     }
 
@@ -1797,6 +1798,7 @@ impl GraphStore {
         store.mount_relational_index_shadow_for_recovery();
         let checkpoint_catalog = catalog.clone();
         store.storage_recovery_report = store.replay_wal(catalog, replay_config)?;
+        store.validate_authoritative_relational_index_open()?;
         store.validate_relationship_endpoints()?;
         store.refresh_basic_statistics_epoch();
         store.load_projected_graph_artifacts()?;

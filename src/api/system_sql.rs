@@ -2329,6 +2329,7 @@ const fn relational_index_mode_name(mode: skein_storage::RelationalIndexMode) ->
         skein_storage::RelationalIndexMode::Materialized => "materialized",
         skein_storage::RelationalIndexMode::Shadow => "shadow",
         skein_storage::RelationalIndexMode::DemandPaged => "demand_paged",
+        skein_storage::RelationalIndexMode::Authoritative => "authoritative",
     }
 }
 

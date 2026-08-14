@@ -96,15 +96,17 @@ remaining work below makes those derived foundations canonical without allowing
 a stale index or a database-sized resident set to become a correctness
 dependency.
 
-- [ ] Make persistent relational indexes authoritative.
-  - Make the existing generation/epoch/root-set binding mandatory for writable
-    open and use the pinned view for primary-key, unique, UPSERT, and foreign-key
-    decisions before WAL publication.
-  - Extend `SkeinIndexPublication.tla` for canonical uniqueness and row/index
-    epoch agreement.
-  - Remove normal-open `rebuild_indexes()` only after required constraint roots
-    fail writable open when missing, stale, or corrupt. Index-open I/O and
-    mandatory residency must remain independent of leaf and posting counts.
+- [ ] Remove materialized relational indexes from authoritative open.
+  - `Authoritative` mode now requires the bound current view for open, SQL, and
+    primary-key, unique, UPSERT, and foreign-key decisions before WAL. The
+    default remains `Materialized`; `Shadow` and `DemandPaged` keep their prior
+    isolation and fallback semantics.
+  - Stop normal-open `rebuild_indexes()` in `Authoritative` mode. Derive live
+    change capture from before/after rows, and stream checkpoint index builds
+    without retaining database-sized postings.
+  - Prove index-open I/O and mandatory residency remain independent of leaf and
+    posting counts while preserving the materialized oracle in non-authoritative
+    modes for differential rollback evidence.
 
 - [ ] Implement the canonical relational row-page runtime.
   - Add the v1 row-page codec, bounded slot directory, ordered primary-key

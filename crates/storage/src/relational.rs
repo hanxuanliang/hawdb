@@ -1901,9 +1901,6 @@ fn conflict_primary_key(
                 "UPSERT conflict target on table {table} is not materialized"
             ))
         })?;
-    if definition.role == RelationalIndexRole::Primary {
-        return Ok(state.row(table, conflict_key).map(|_| conflict_key.clone()));
-    }
     if let Some(constraint_index) = constraint_index {
         return constraints::authoritative_conflict_primary_key(
             state,
@@ -1914,6 +1911,9 @@ fn conflict_primary_key(
             changed_keys,
             constraint_index,
         );
+    }
+    if definition.role == RelationalIndexRole::Primary {
+        return Ok(state.row(table, conflict_key).map(|_| conflict_key.clone()));
     }
     let Some(postings) = state.index_lookup(table, &definition.name, conflict_key) else {
         return Ok(None);

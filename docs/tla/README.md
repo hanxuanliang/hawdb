@@ -378,6 +378,7 @@ They are implementation evidence, not a machine-checked refinement proof.
 | A deadlock-closing multi-owner wait edge selects one victim and releases its dependencies | `WaitForGraph::register`, `ConcurrentDatabaseTransaction::abort_after_lock_failure` | `point_lock_upgrade_cycle_selects_one_deadlock_victim`, `wait_for_graph_detects_a_cycle_with_multiple_blockers` |
 | A stale, mixed, missing, or corrupt Source scan sidecar falls back to the canonical graph | `source_scan::load`, `ScanSegmentManifest::plan_scan` | `checkpoint_publishes_source_scan_and_wal_mutation_invalidates_it`, `corrupted_source_scan_artifact_never_blocks_canonical_graph_recovery` |
 | A graph-property index payload stays cold at open, publishes with the checkpoint generation, merges its WAL overlay, and verifies each selected block before serving | `PersistentPropertyProjectionWriter`, `PersistentPropertyProjectionReader`, `GraphStore::visit_nodes_by_property_owned` | `external_projection_round_trips_equality_range_and_full_text_candidates`, `out_of_core_property_projections_merge_wal_delta_and_fail_closed`, `SkeinIndexPublication.tla` |
+| An authoritative relational mutation pins one current base-plus-recovery-plus-live index view and its complete generation artifacts, validates primary/unique/UPSERT/foreign-key constraints and stages the next visible view before WAL, leaves WAL/rows/index epochs unchanged on rejection, and recovers a durable WAL publication after restart | `AuthoritativeRelationalConstraintIndex`, `GraphStore::{snapshot,validate_authoritative_relational_index_open,require_authoritative_relational_index_live_publication}`, `RelationalState::stage_transaction_with_authoritative_index` | `authoritative_relational_indexes_gate_constraints_and_recover_live_commits`, `authoritative_open_rejects_missing_and_corrupt_bound_generations`, `authoritative_constraint_corruption_rejects_before_wal_and_poisons_service`, `authoritative_sql_never_falls_back_to_materialized_postings`, `SkeinIndexPublication.tla` |
 | A column-group catalog publishes artifacts and changed table directories before one generation-CAS manifest; reopen ignores orphan candidates and fails closed on referenced corruption | `ColumnGroupTableDirectory::write_immutable`, `ColumnGroupManifest::{publish,open}`, `PublishedColumnGroupCatalog::scrub_artifacts` | `publishes_reopens_and_reuses_untouched_table_directory`, `stale_publishers_are_serialized_and_one_fails_closed`, `orphan_candidate_is_ignored_and_corrupt_published_metadata_fails_closed`, `deep_scrub_detects_payload_corruption_not_read_by_reopen` |
 | The columnar shadow never influences canonical recovery or checkpoint success; recovery discards a corrupt shadow and rebuilds all-dirty after an epoch gap; a shadow failure preserves dirty state and later converges. Codec body-size symmetry and pre-allocation metadata accounting are finite byte contracts outside the publication model and are checked directly at the Rust refinement boundary. | `GraphStore::{mount_columnar_shadow_for_recovery, record_columnar_shadow_checkpoint}`, `column_group::encoding::{finish_chunk,decompress_body}`, `ShadowMetadataBudget` | `restart_validates_the_shadow_and_replayed_mutations_mark_dirty_tables`, `shadow_publish_failure_never_fails_the_canonical_checkpoint_and_retries`, `shadow_reconstruction_matches_canonical_scan_and_reuses_untouched_tables`, `writer_and_reader_enforce_the_same_chunk_body_limit`, `metadata_budget_rejects_new_schema_before_allocating_or_publishing`, `metadata_budget_is_charged_before_dictionary_serialization` |
 | System schema objects and migration identities publish atomically; invalid, future, read-only, failed-DDL, and crash-recovered states never return a usable partially upgraded handle | `Database::apply_system_schema_registry`, `execute_database_transaction_sql`, `GraphStore::commit_mutation_transaction_and_relational` | `application_system_schema_upgrades_and_reopens_idempotently`, `application_system_schema_upgrade_crash_recovers_a_consistent_registry_and_schema`, `application_system_schema_rejects_changed_applied_migration`, `application_system_schema_rejects_a_database_from_a_newer_binary`, `failed_application_system_schema_upgrade_does_not_publish_version`, `read_only_database_rejects_pending_application_system_schema_upgrade` |
@@ -423,20 +424,26 @@ durability recovers the committed epoch.
 
 `SkeinIndexPublication.tla` models one manifest-selected row/index root pair,
 generation-CAS publication, durable index pages, cold handle open, demand leaf
-reads, cache loss on crash, and first-access corruption. It checks that row and
-index root epochs never diverge, published roots are durable and not ahead of
-canonical state, opening a handle does not warm leaf pages, a successful lookup
-has loaded and verified its required page, and a corrupt selected page poisons
-the handle. `PublishCompetingRoot` represents a newer checkpoint winning while
-an older builder is active; the old builder can only take
+reads, cache loss on crash, and first-access corruption. It also models the
+opt-in authoritative state machine: open requires a recoverable current
+row/index view; a mutation reads and accepts or rejects one constraint page
+before WAL; only an accepted mutation may make its WAL durable; and normal
+publication or crash recovery advances row and index visible epochs together.
+It checks that row and index root epochs never diverge, published roots are
+durable and not ahead of canonical state, opening a handle does not warm leaf
+pages, a successful lookup has loaded and verified its required page, a corrupt
+selected page poisons the handle, a rejected constraint has no durable WAL or
+visible effect, and an authoritative advance is recoverable from its bound
+root plus durable WAL. `PublishCompetingRoot` represents a newer checkpoint
+winning while an older builder is active; the old builder can only take
 `RejectStalePublish`.
 
-The concrete first refinement is the rebuildable graph-property projection for
-equality, range, and full-text reads. Its post-checkpoint COW/WAL overlay is
-merged before results are returned. The model does not yet claim canonical
-relational-index recovery, uniqueness validation from disk, multilevel root
-navigation, or cache-capacity accounting; those remain owned by the row-page,
-index-recovery, and page-cache obligations.
+The graph-property refinement remains rebuildable and merges its
+post-checkpoint COW/WAL overlay before returning results. The relational
+refinement uses the exact generation binding, recovery/live view, bounded
+constraint reader, pre-WAL live-publication gate, and fail-closed
+`Authoritative` SQL mode. The model abstracts multilevel navigation and cache
+capacity; those remain owned by the index-recovery and page-cache obligations.
 
 `SkeinRelationalIndexShadowPublication.tla` models the generation-aligned but
 non-authoritative relational index candidate. Candidate fixed-slot pages become
@@ -453,10 +460,11 @@ cannot replace or disable the selected checkpoint. Exact bound
 generation/epoch open leaves page slots cold. A corrupt candidate is isolated
 from canonical open in `Shadow` mode, while an explicitly selected
 `DemandPaged` integrity failure fails the indexed read closed. Old selected
-generations remain available to already-open handles. The model does not make
-the binding a uniqueness or foreign-key oracle; mandatory writable-open and
-constraint validation from the pinned view remain obligations of the later
-authoritative publication stage.
+generations remain available to already-open handles. This shadow model does
+not make an optional binding a uniqueness or foreign-key oracle. The stronger
+mandatory-open and constraint-before-WAL contract is modeled separately by the
+authoritative actions in `SkeinIndexPublication.tla` and implemented only when
+the explicit `Authoritative` mode is selected.
 
 The configured instance uses two non-zero generations, one non-zero commit
 epoch, and one demand-loaded page. This is sufficient to cover a selected old

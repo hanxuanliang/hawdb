@@ -15,6 +15,7 @@ use std::num::NonZeroUsize;
 pub(crate) enum RelationalIndexReadMode<'a> {
     Materialized,
     DemandPaged(&'a GraphStore),
+    Authoritative(&'a GraphStore),
     TransactionWorkspace,
 }
 
@@ -24,6 +25,7 @@ pub(crate) struct RelationalIndexExecutionEvidence {
     pub index: String,
     pub lookups: usize,
     pub demand_paged_lookups: usize,
+    pub authoritative_lookups: usize,
     pub canonical_fallback_lookups: usize,
     pub fallback_reasons: BTreeSet<&'static str>,
     pub base_generation: Option<u64>,
@@ -50,12 +52,14 @@ impl RelationalIndexExecutionEvidence {
     pub(crate) fn runtime_path(&self) -> &'static str {
         match (
             self.demand_paged_lookups != 0,
+            self.authoritative_lookups != 0,
             self.canonical_fallback_lookups != 0,
         ) {
-            (true, false) => "demand_paged",
-            (false, true) => "canonical_fallback",
-            (true, true) => "mixed",
-            (false, false) => "not_executed",
+            (true, false, false) => "demand_paged",
+            (false, true, false) => "authoritative",
+            (false, false, true) => "canonical_fallback",
+            (false, false, false) => "not_executed",
+            _ => "mixed",
         }
     }
 }
@@ -174,15 +178,21 @@ impl<'a> RelationalIndexRuntime<'a> {
             index,
             prefix,
         } = probe;
-        let store = match self.mode {
+        let (store, authoritative) = match self.mode {
             RelationalIndexReadMode::Materialized => unreachable!("handled by the caller"),
             RelationalIndexReadMode::TransactionWorkspace => {
                 self.record_fallback(table, index, "transaction_workspace")?;
                 return fallback(visit);
             }
-            RelationalIndexReadMode::DemandPaged(store) => store,
+            RelationalIndexReadMode::DemandPaged(store) => (store, false),
+            RelationalIndexReadMode::Authoritative(store) => (store, true),
         };
         let Some(remaining) = self.remaining_limits() else {
+            if authoritative {
+                return Err(SkeinError::Execution(format!(
+                    "authoritative relational index budget is exhausted before reading {table}.{index}"
+                )));
+            }
             self.record_fallback(table, index, "query_index_budget_exhausted")?;
             return fallback(visit);
         };
@@ -228,6 +238,11 @@ impl<'a> RelationalIndexRuntime<'a> {
                         "relational index read for {table}.{index} exhausted admission after producing provisional row locators"
                     )));
                 }
+                if authoritative {
+                    return Err(SkeinError::Execution(format!(
+                        "authoritative relational index read for {table}.{index} was rejected by admission"
+                    )));
+                }
                 self.record_fallback(table, index, "admission_rejected")?;
                 fallback(visit)
             }
@@ -235,6 +250,11 @@ impl<'a> RelationalIndexRuntime<'a> {
                 if produced_provisional_rows {
                     return Err(SkeinError::StorageIntegrity(format!(
                         "relational index {table}.{index} disappeared after producing provisional row locators"
+                    )));
+                }
+                if authoritative {
+                    return Err(SkeinError::StorageIntegrity(format!(
+                        "authoritative relational index {table}.{index} is missing"
                     )));
                 }
                 self.record_fallback(table, index, "missing_index")?;
@@ -252,6 +272,11 @@ impl<'a> RelationalIndexRuntime<'a> {
                 )))
             }
             None => {
+                if authoritative {
+                    return Err(SkeinError::StorageIntegrity(format!(
+                        "authoritative relational index view is unavailable for {table}.{index}"
+                    )));
+                }
                 self.record_fallback(table, index, "read_view_unavailable")?;
                 fallback(visit)
             }
@@ -351,11 +376,26 @@ impl<'a> RelationalIndexRuntime<'a> {
         let evidence = Self::evidence_mut(&mut state, table, index);
         ensure_identity(evidence, report)?;
         evidence.lookups = checked_add(evidence.lookups, 1, "index lookup count")?;
-        evidence.demand_paged_lookups = checked_add(
-            evidence.demand_paged_lookups,
-            1,
-            "demand-paged lookup count",
-        )?;
+        match self.mode {
+            RelationalIndexReadMode::DemandPaged(_) => {
+                evidence.demand_paged_lookups = checked_add(
+                    evidence.demand_paged_lookups,
+                    1,
+                    "demand-paged lookup count",
+                )?;
+            }
+            RelationalIndexReadMode::Authoritative(_) => {
+                evidence.authoritative_lookups = checked_add(
+                    evidence.authoritative_lookups,
+                    1,
+                    "authoritative lookup count",
+                )?;
+            }
+            RelationalIndexReadMode::Materialized
+            | RelationalIndexReadMode::TransactionWorkspace => {
+                unreachable!("materialized paths cannot record a persistent-index success")
+            }
+        }
         metrics.accumulate(evidence)?;
         evidence.live_batches_visited = checked_add(
             evidence.live_batches_visited,
@@ -435,7 +475,9 @@ fn ensure_identity(
         evidence.visible_commit_epoch,
         evidence.root_set_digest.as_deref(),
     );
-    if evidence.demand_paged_lookups != 0 && expected != observed {
+    if (evidence.demand_paged_lookups != 0 || evidence.authoritative_lookups != 0)
+        && expected != observed
+    {
         return Err(SkeinError::StorageIntegrity(
             "relational index view identity changed within one SQL statement".to_string(),
         ));

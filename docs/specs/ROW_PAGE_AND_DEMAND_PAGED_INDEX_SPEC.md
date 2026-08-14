@@ -55,8 +55,11 @@ reads, and a byte-bounded digest-verified cache. Equality, range, and full-text
 graph-property indexes have a checkpoint-generation projection whose payload
 blocks remain cold until a query needs them; post-checkpoint WAL changes stay
 in the COW overlay and are merged at read time. Relational, composite-property,
-constraint, and remaining graph index state is still materialized or rebuilt
-in memory and remains migration work.
+and remaining graph index state is still materialized or rebuilt in memory and
+remains migration work. Relational constraints may opt into the generation-
+bound authoritative reader, but materialized relational postings remain a
+temporary checkpoint builder and differential oracle until the next migration
+stage removes their ordinary-open residency.
 
 The migration defined here is incremental:
 
@@ -120,9 +123,9 @@ manifest. A successful candidate is reverse-bound by the publish-last durable
 manifest for the same checkpoint generation. Candidate failure writes an
 all-absent binding; partially present identity or artifact metadata is invalid.
 
-These candidates remain non-authoritative. The canonical checkpoint does not
-yet depend on the optional reverse reference for canonical recovery or
-constraint enforcement. Open selects only the bound generation and verifies
+These artifacts remain non-authoritative in `Shadow` and `DemandPaged` modes.
+The canonical checkpoint does not depend on their optional reverse reference
+in those modes. Open selects only the bound generation and verifies
 the complete bounded generation manifest bytes against its length, CRC32C, and
 SHA-256, then verifies its internal generation/source-epoch, catalog schema,
 exact root set, and page artifact length. It does not scan the page artifact to
@@ -134,9 +137,20 @@ corrupt selected candidate does not prevent canonical open in `Shadow` mode.
 In `DemandPaged` mode, an integrity failure for the explicitly selected
 candidate fails the indexed statement closed instead of silently using
 materialized postings; missing or admission-unavailable candidates may still
-take the observable materialized fallback while that oracle exists. Making
-the binding mandatory for writable open and constraint validation is the later
-authoritative publication stage.
+take the observable materialized fallback while that oracle exists.
+
+`Authoritative` mode makes the complete binding mandatory for open and makes
+the generation-pinned base plus recovery/live view a constraint dependency.
+The view identity MUST match the bound base generation, source commit epoch,
+root-set digest, and current visible commit epoch. Missing, stale, corrupt,
+poisoned, or unavailable state rejects open or the next operation. A
+snapshot MUST pin both the immutable read view and the complete generation
+artifacts; it MUST NOT need a mutable durable handle to revalidate that
+identity. A live durable handle additionally cross-checks the pinned artifacts
+against the currently published canonical manifest binding. A
+checkpoint in this mode MUST prepare a complete candidate before canonical
+manifest publication; candidate failure aborts the checkpoint rather than
+publishing an unusable authoritative generation.
 
 Backup includes exactly the bound generation page artifact and generation
 manifest, rejects unbound or extra relational-index files, and verifies their
@@ -229,15 +243,17 @@ the report exposes key and result digests rather than key values. Exhausted
 table or probe coverage returns `ready = false`; the row sample limit bounds
 representative probe discovery. Physical read admission, missing roots, or
 corruption returns an error and provisional rows are discarded. A ready report
-is evidence for sampled constraint semantics only. It does not route mutations
-through the candidate, remove the materialized oracle, or make the candidate a
-canonical recovery dependency.
+is evidence for sampled constraint semantics only. It does not itself change
+routing. Selecting `Authoritative` is the separate explicit activation step;
+materialized postings remain available only as a transitional differential
+oracle and checkpoint-build input.
 
 PostgreSQL SQL activation is controlled by
 `DatabaseConfig::relational_index_mode`. `Materialized` is the default rollback
 mode, `Shadow` publishes and qualifies persistent generations without serving
-them, and `DemandPaged` selects them for eligible reads. Primary-key, unique,
-leading secondary-prefix, and index
+them, and `DemandPaged` selects them for eligible reads with an observable
+fallback. `Authoritative` selects the same bounded reader but prohibits
+materialized fallback. Primary-key, unique, leading secondary-prefix, and index
 nested-loop probes consume logical row locators from one generation-pinned
 view and hydrate rows from the same relational snapshot. One statement-wide
 ledger bounds logical pages, logical bytes, result locators, and tree height
@@ -247,14 +263,26 @@ uses the observable canonical materialized fallback. Corruption, durability or
 generation mismatch, view-identity drift within a statement, and a locator
 whose canonical row is missing fail closed. A writable transaction uses the
 canonical transaction workspace so read-your-own-writes cannot consult a
-pre-transaction index view; this fallback is also observable.
+pre-transaction index view; this transaction-workspace path is also observable
+and is not a fallback to stale persistent state.
+
+In `Authoritative` mode one transaction-scoped ledger bounds the aggregate
+logical pages, bytes, and row locators consumed by all primary, unique, UPSERT,
+foreign-key-target, and foreign-key-referrer probes. The pinned view validates
+constraints before WAL append. Constraint failure, exhausted admission, a
+missing required root, or failure to stage the next live view leaves the WAL
+LSN, canonical rows, and visible row/index epochs unchanged. After WAL append,
+row state and the already-staged index view publish the same new epoch.
+Schema-changing relational transactions are rejected until a new complete
+generation can be prepared outside authoritative mutation service.
 
 `EXPLAIN ANALYZE` reports the runtime path, fallback reason, base and delta
 generations, commit epochs, root-set digest, logical and physical page bytes,
-cache outcomes, recovery-delta work, live-overlay work, and index rows. Plain
-`EXPLAIN` remains history-independent. Persistent relational indexes are still
-derived in this phase: materialized postings remain the constraint oracle and
-canonical fallback until authoritative index publication lands separately.
+cache outcomes, recovery-delta work, live-overlay work, and index rows. It
+distinguishes `demand_paged`, `authoritative`, canonical fallback, and mixed
+execution. Plain `EXPLAIN` remains history-independent. Authoritative
+activation changes constraint and fallback semantics, but it does not yet
+remove materialized postings or make row pages demand-resident.
 
 ## Identities and terminology
 
@@ -355,6 +383,14 @@ derived projections and follow the projection contract below.
    candidate failure. A present binding MUST name the same generation and
    source commit epoch, contain the exact catalog/root-set digests, and include
    complete page and generation-manifest length, CRC32C, and SHA-256 metadata.
+7. An authoritative checkpoint MUST include the complete binding. A candidate
+   failure MUST abort before canonical manifest publication.
+8. An authoritative relational mutation MUST validate its primary, unique,
+   UPSERT, and foreign-key decisions through one current pinned index view and
+   stage the next live view before appending WAL.
+9. A rejected authoritative mutation MUST NOT advance the WAL LSN, canonical
+   row epoch, or index visible epoch. A successful mutation publishes row and
+   index visibility only after its WAL batch is durable.
 
 ## Database open and recovery
 
@@ -397,12 +433,13 @@ not the target open path.
 5. A crash during recovery-delta flush leaves either the previous selected
    root plus replayable WAL or a completely published newer recovery root.
 
-The current derived implementation satisfies these rules for DML whose
+The current persistent implementation satisfies these rules for DML whose
 checkpoint schema fence remains unchanged. DDL and relational snapshot WAL
-records deliberately make the view unavailable. They do not weaken canonical
-recovery and MUST NOT trigger an implicit full index rebuild in this path. SQL
-activation may fall back observably to the existing materialized oracle until
-a later checkpoint publishes roots for the changed schema.
+records deliberately make a non-authoritative view unavailable. They do not
+weaken canonical recovery and MUST NOT trigger an implicit full index rebuild
+in this path. `DemandPaged` SQL may fall back observably to the materialized
+oracle. `Authoritative` rejects schema-changing mutations before WAL and never
+falls back from a missing recovery/live view.
 
 ### Integrity boundary
 
@@ -572,12 +609,15 @@ boundaries and MUST land before their corresponding production activation:
   reader pins, crash recovery, and reclamation.
 - `SkeinIndexPublication.tla`: atomic row/index root agreement, durable and
   generation-fenced publication, stale-builder rejection, cold open, on-demand
-  leaf loading, and corrupt-page fail-closed behavior. Canonical uniqueness is
-  still outside this first projection slice.
+  leaf loading, corrupt-page fail-closed behavior, authoritative constraint
+  acceptance/rejection before WAL, durable-before-visible mutation
+  publication, row/index visible-epoch agreement, and recovery after a crash
+  between WAL durability and in-process publication.
 - `SkeinRelationalIndexShadowPublication.tla`: optional checkpoint-bound
   relational-index identity, complete root-set publication, candidate-failure
-  isolation, cold open, and mode-specific corruption handling. The binding is
-  not yet a writable-open or constraint dependency.
+  isolation, cold open, and mode-specific corruption handling. Its optional
+  candidate contract remains the `Shadow`/`DemandPaged` boundary; the runtime
+  authoritative mode strengthens that binding separately.
 - `SkeinIndexRecovery.tla`: base root plus ordered WAL delta equivalence,
   bounded dirty overlays, immutable candidate generations, crash recovery,
   schema invalidation, no partial replay visibility, and sound exact-key

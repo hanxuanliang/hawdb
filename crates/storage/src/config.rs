@@ -50,6 +50,12 @@ pub enum RelationalIndexMode {
     Shadow,
     /// Publish persistent generations and use them for eligible SQL reads.
     DemandPaged,
+    /// Require a current persistent view for SQL reads and constraint checks.
+    ///
+    /// This mode is deliberately opt-in. Missing, stale, corrupt, or
+    /// admission-unavailable required indexes fail closed instead of falling
+    /// back to materialized postings.
+    Authoritative,
 }
 
 impl RelationalIndexMode {
@@ -58,7 +64,11 @@ impl RelationalIndexMode {
     }
 
     pub const fn serves_demand_paged_reads(self) -> bool {
-        matches!(self, Self::DemandPaged)
+        matches!(self, Self::DemandPaged | Self::Authoritative)
+    }
+
+    pub const fn requires_authoritative_indexes(self) -> bool {
+        matches!(self, Self::Authoritative)
     }
 }
 
@@ -125,6 +135,10 @@ mod tests {
         assert!(!RelationalIndexMode::Shadow.serves_demand_paged_reads());
         assert!(RelationalIndexMode::DemandPaged.publishes_persistent_indexes());
         assert!(RelationalIndexMode::DemandPaged.serves_demand_paged_reads());
+        assert!(!RelationalIndexMode::DemandPaged.requires_authoritative_indexes());
+        assert!(RelationalIndexMode::Authoritative.publishes_persistent_indexes());
+        assert!(RelationalIndexMode::Authoritative.serves_demand_paged_reads());
+        assert!(RelationalIndexMode::Authoritative.requires_authoritative_indexes());
         let replay = WalReplayConfig::default();
         assert_eq!(replay.max_entries, Some(DEFAULT_MAX_WAL_REPLAY_ENTRIES));
         assert_eq!(replay.max_bytes, Some(DEFAULT_MAX_WAL_REPLAY_BYTES));
