@@ -84,6 +84,22 @@ root fields, unordered keys/postings, oversized fields/pages, truncation, and
 checksum mismatches fail closed. The codec is not selected by the durable
 manifest and does not change query or recovery behavior yet.
 
+The relational index shadow publisher is the first implementation of step 2.
+It builds primary, unique, and secondary trees from the current relational
+oracle into generation-specific fixed-size slots, so a `PageId` determines its
+offset without a cardinality-sized in-memory directory. Default slots are 64
+KiB, with 16 KiB admission limits for encoded keys and logical row locators, to
+bound desktop random I/O and avoid one-megabyte amplification for sparse pages.
+A bounded root manifest is replaced only after every slot is synced. A
+cross-platform publication lock serializes the expected-generation check;
+stale publishers fail and orphan generation files are ignored. Relational
+primary keys are encoded as bounded, order-preserving logical row locators,
+including composite keys. Opening the shadow verifies only its manifest fence
+and artifact length; page header and payload integrity are checked on first
+access. The sequential slot writer uses constant page-accounting metadata; it
+does not retain a page-id set or offset directory proportional to index size.
+SQL still uses the existing materialized indexes in this stage.
+
 ## Identities and terminology
 
 - **Commit epoch**: monotonically increasing visibility identity; one atomic

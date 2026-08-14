@@ -41,6 +41,8 @@ mod graph_read;
 mod graph_recovery;
 #[path = "store/read_view.rs"]
 mod read_view;
+#[path = "store/relational_index_shadow.rs"]
+mod relational_index_shadow;
 #[path = "store/source_scan.rs"]
 mod source_scan;
 #[path = "store/statistics_refresh.rs"]
@@ -88,6 +90,11 @@ pub use graph_columnar_shadow::{
     ColumnarShadowRecoveryStatus, COLUMN_GROUP_SHADOW_DIR,
 };
 pub use read_view::PublishedReadView;
+use relational_index_shadow::RelationalIndexShadowState;
+pub use relational_index_shadow::{
+    RelationalIndexShadowCheckpointReport, RelationalIndexShadowCheckpointStatus,
+    RelationalIndexShadowRecoveryStatus,
+};
 use skein_storage::{
     available_storage_space, decode_relational_checkpoint, decode_relational_checkpoint_file,
     decode_relational_wal_batch, encode_relational_checkpoint, encode_relational_wal_batch,
@@ -939,6 +946,7 @@ pub struct GraphStore {
     relational_mutation_limits: RelationalMutationLimits,
     relational_overflow_config: RelationalOverflowConfig,
     columnar_shadow: ColumnarShadowState,
+    relational_index_shadow: RelationalIndexShadowState,
     /// The engine's runtime governor, threaded down from the embedding
     /// layer (`SkeinEmbedded` / `NowledgeMemGraph`) so background shadow
     /// work can request admission. The store never constructs its own.
@@ -1764,6 +1772,9 @@ impl GraphStore {
             relational_mutation_limits: RelationalMutationLimits::default(),
             relational_overflow_config: RelationalOverflowConfig::default(),
             columnar_shadow: ColumnarShadowState::default(),
+            relational_index_shadow: RelationalIndexShadowState::new(
+                replay_config.relational_index_shadow_checkpoint,
+            ),
             runtime_governor: None,
             durable: Some(durable),
         };
@@ -1773,6 +1784,7 @@ impl GraphStore {
             // mutations mark their derived shadow tables dirty.
             store.mount_columnar_shadow_for_recovery()?;
         }
+        store.mount_relational_index_shadow_for_recovery();
         let checkpoint_catalog = catalog.clone();
         store.storage_recovery_report = store.replay_wal(catalog, replay_config)?;
         store.validate_relationship_endpoints()?;
@@ -2020,6 +2032,7 @@ impl GraphStore {
             relational_mutation_limits: self.relational_mutation_limits,
             relational_overflow_config: self.relational_overflow_config,
             columnar_shadow: self.columnar_shadow.clone(),
+            relational_index_shadow: self.relational_index_shadow.clone(),
             runtime_governor: self.runtime_governor.clone(),
             durable: None,
         }

@@ -363,6 +363,10 @@ impl GraphStore {
             self.full_text_property_index = CowSegmentedMap::default();
             self.relationship_property_index = CowSegmentedMap::default();
         }
+        self.record_relational_index_shadow_checkpoint(
+            prepared.generation,
+            prepared.source_commit_epoch,
+        );
         // Derived shadow double-write: published after the row-oriented
         // checkpoint so its `source_commit_epoch` is the epoch this
         // checkpoint made durable. The checkpoint's Result reflects

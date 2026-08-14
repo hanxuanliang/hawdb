@@ -405,6 +405,16 @@ relational-index recovery, uniqueness validation from disk, multilevel root
 navigation, or cache-capacity accounting; those remain owned by the row-page,
 index-recovery, and page-cache obligations.
 
+`SkeinRelationalIndexShadowPublication.tla` narrows the next format stage to a
+non-serving relational shadow. It models the cross-platform publication lock,
+generation-specific fixed-slot page artifact, durable-before-visible
+manifest replacement, stale expected-generation rejection, crash-orphaned
+artifacts, exact generation/epoch open, cold page residency, and on-demand
+corruption. Old generation artifacts remain available to already-open handles.
+The model deliberately does not allow SQL execution to consume the shadow;
+production activation still requires WAL delta recovery and differential read
+evidence.
+
 ## Derived Source Segment Publication
 
 `SkeinSourceSegmentPublication.tla` models Source scan sidecars, including the

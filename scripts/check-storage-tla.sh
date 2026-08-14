@@ -20,6 +20,7 @@ readonly specifications=(
   SkeinSystemSchemaUpgrade
   SkeinPropertyIndexPruning
   SkeinIndexPublication
+  SkeinRelationalIndexShadowPublication
   SkeinProjectionDurability
   SkeinCompactionVisibility
   SkeinColumnGroupManifest

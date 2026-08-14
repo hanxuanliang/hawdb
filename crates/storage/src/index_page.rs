@@ -1,4 +1,4 @@
-use skein_integrity::{integrity_digest, Sha256Digest, SHA256_BYTES};
+use skein_integrity::{IntegrityHasher, Sha256Digest, SHA256_BYTES};
 use std::fmt;
 use std::num::{NonZeroU64, NonZeroUsize};
 
@@ -14,10 +14,12 @@ const ROOT_HEIGHT_FIELD: u16 = 4;
 const INTERIOR_ENTRY_FIELD: u16 = 10;
 const LEAF_ENTRY_FIELD: u16 = 11;
 const POSTING_ENTRY_FIELD: u16 = 12;
+const POSTING_NEXT_FIELD: u16 = 13;
 
-pub const DEFAULT_IMMUTABLE_INDEX_PAGE_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_IMMUTABLE_INDEX_PAGE_BYTES: usize = 64 * 1024;
 pub const DEFAULT_IMMUTABLE_INDEX_PAGE_ENTRIES: usize = 4096;
-pub const DEFAULT_IMMUTABLE_INDEX_KEY_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_IMMUTABLE_INDEX_KEY_BYTES: usize = 16 * 1024;
+pub const DEFAULT_IMMUTABLE_INDEX_ROW_ID_BYTES: usize = 16 * 1024;
 pub const DEFAULT_IMMUTABLE_INDEX_IDENTITY_BYTES: usize = 16 * 1024;
 pub const DEFAULT_IMMUTABLE_INDEX_INLINE_POSTINGS: usize = 256;
 
@@ -34,14 +36,25 @@ impl IndexPageId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct IndexRowId(pub u64);
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct IndexRowId(Vec<u8>);
+
+impl IndexRowId {
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImmutableIndexPageLimits {
     pub max_page_bytes: NonZeroUsize,
     pub max_entries: NonZeroUsize,
     pub max_key_bytes: NonZeroUsize,
+    pub max_row_id_bytes: NonZeroUsize,
     pub max_identity_bytes: NonZeroUsize,
     pub max_inline_postings: NonZeroUsize,
 }
@@ -55,11 +68,19 @@ impl Default for ImmutableIndexPageLimits {
                 .expect("default index page entry limit is non-zero"),
             max_key_bytes: NonZeroUsize::new(DEFAULT_IMMUTABLE_INDEX_KEY_BYTES)
                 .expect("default index key limit is non-zero"),
+            max_row_id_bytes: NonZeroUsize::new(DEFAULT_IMMUTABLE_INDEX_ROW_ID_BYTES)
+                .expect("default index row id limit is non-zero"),
             max_identity_bytes: NonZeroUsize::new(DEFAULT_IMMUTABLE_INDEX_IDENTITY_BYTES)
                 .expect("default index identity limit is non-zero"),
             max_inline_postings: NonZeroUsize::new(DEFAULT_IMMUTABLE_INDEX_INLINE_POSTINGS)
                 .expect("default inline posting limit is non-zero"),
         }
+    }
+}
+
+impl ImmutableIndexPageLimits {
+    pub const fn max_payload_bytes(self) -> Option<usize> {
+        self.max_page_bytes.get().checked_sub(PAGE_HEADER_BYTES)
     }
 }
 
@@ -91,7 +112,7 @@ pub struct IndexInteriorPage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexLeafPosting {
     Inline(Vec<IndexRowId>),
-    Page(IndexPageId),
+    Page { first: IndexPageId, total_rows: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +128,7 @@ pub struct IndexLeafPage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexPostingPage {
+    pub next: Option<IndexPageId>,
     pub row_ids: Vec<IndexRowId>,
 }
 
@@ -144,6 +166,15 @@ impl fmt::Display for ImmutableIndexPageError {
 impl std::error::Error for ImmutableIndexPageError {}
 
 impl ImmutableIndexPage {
+    pub fn encode_slot(
+        &self,
+        limits: ImmutableIndexPageLimits,
+    ) -> Result<Vec<u8>, ImmutableIndexPageError> {
+        let mut slot = self.encode(limits)?;
+        slot.resize(limits.max_page_bytes.get(), 0);
+        Ok(slot)
+    }
+
     pub fn encode(
         &self,
         limits: ImmutableIndexPageLimits,
@@ -177,7 +208,6 @@ impl ImmutableIndexPage {
         let entry_count = u32::try_from(entry_count).map_err(|_| {
             ImmutableIndexPageError::Admission("entry count does not fit u32".to_string())
         })?;
-        let digest = integrity_digest(&payload);
         let mut encoded = Vec::with_capacity(total_bytes);
         encoded.extend_from_slice(PAGE_MAGIC);
         encoded.extend_from_slice(&PAGE_VERSION.to_le_bytes());
@@ -188,6 +218,10 @@ impl ImmutableIndexPage {
         encoded.extend_from_slice(&self.page_id.get().to_le_bytes());
         encoded.extend_from_slice(&entry_count.to_le_bytes());
         encoded.extend_from_slice(&payload_len.to_le_bytes());
+        let mut hasher = IntegrityHasher::new();
+        hasher.update(&encoded);
+        hasher.update(&payload);
+        let digest = hasher.finish();
         encoded.extend_from_slice(&digest.crc32c.get().to_le_bytes());
         encoded.extend_from_slice(digest.sha256.as_bytes());
         debug_assert_eq!(encoded.len(), PAGE_HEADER_BYTES);
@@ -242,7 +276,10 @@ impl ImmutableIndexPage {
             )));
         }
         let payload = &encoded[PAGE_HEADER_BYTES..];
-        let digest = integrity_digest(payload);
+        let mut hasher = IntegrityHasher::new();
+        hasher.update(&encoded[..48]);
+        hasher.update(payload);
+        let digest = hasher.finish();
         let expected_crc = read_u32(&encoded[48..52]);
         if digest.crc32c.get() != expected_crc
             || digest.sha256.as_bytes() != &encoded[52..52 + SHA256_BYTES]
@@ -260,6 +297,41 @@ impl ImmutableIndexPage {
         };
         validate_page(&page, limits, ErrorClass::Corrupt)?;
         Ok(page)
+    }
+
+    pub fn decode_slot(
+        slot: &[u8],
+        limits: ImmutableIndexPageLimits,
+    ) -> Result<Self, ImmutableIndexPageError> {
+        if slot.len() != limits.max_page_bytes.get() {
+            return Err(ImmutableIndexPageError::Corrupt(format!(
+                "index page slot has {} bytes, expected {}",
+                slot.len(),
+                limits.max_page_bytes
+            )));
+        }
+        if slot.len() < PAGE_HEADER_BYTES {
+            return Err(ImmutableIndexPageError::Corrupt(
+                "index page slot is smaller than its header".to_string(),
+            ));
+        }
+        let payload_len = usize::try_from(read_u64(&slot[40..48])).map_err(|_| {
+            ImmutableIndexPageError::Corrupt("payload length overflows usize".to_string())
+        })?;
+        let encoded_len = PAGE_HEADER_BYTES
+            .checked_add(payload_len)
+            .ok_or_else(|| ImmutableIndexPageError::Corrupt("page length overflow".to_string()))?;
+        if encoded_len > slot.len() {
+            return Err(ImmutableIndexPageError::Corrupt(
+                "page payload exceeds its fixed slot".to_string(),
+            ));
+        }
+        if slot[encoded_len..].iter().any(|byte| *byte != 0) {
+            return Err(ImmutableIndexPageError::Corrupt(
+                "index page slot contains non-zero trailing bytes".to_string(),
+            ));
+        }
+        Self::decode(&slot[..encoded_len], limits)
     }
 }
 
@@ -351,7 +423,7 @@ fn validate_page(
             )?;
         }
         ImmutableIndexPageBody::Leaf(leaf) => {
-            validate_entry_count(leaf.entries.len(), limits, error_class)?;
+            validate_max_entry_count(leaf.entries.len(), limits, error_class)?;
             validate_sorted_keys(
                 leaf.entries.iter().map(|entry| entry.key.as_slice()),
                 limits,
@@ -372,13 +444,26 @@ fn validate_page(
                             ),
                         ));
                     }
-                    validate_sorted_row_ids(row_ids, error_class)?;
+                    validate_sorted_row_ids(row_ids, limits, error_class)?;
+                } else if let IndexLeafPosting::Page { total_rows, .. } = &entry.posting
+                    && *total_rows == 0
+                {
+                    return Err(invalid(
+                        error_class,
+                        "posting page reference must declare at least one row",
+                    ));
                 }
             }
         }
         ImmutableIndexPageBody::Posting(posting) => {
             validate_entry_count(posting.row_ids.len(), limits, error_class)?;
-            validate_sorted_row_ids(&posting.row_ids, error_class)?;
+            validate_sorted_row_ids(&posting.row_ids, limits, error_class)?;
+            if posting.next == Some(page.page_id) {
+                return Err(invalid(
+                    error_class,
+                    "posting page must not reference itself",
+                ));
+            }
         }
     }
     Ok(())
@@ -392,6 +477,14 @@ fn validate_entry_count(
     if count == 0 {
         return Err(invalid(error_class, "non-root page must not be empty"));
     }
+    validate_max_entry_count(count, limits, error_class)
+}
+
+fn validate_max_entry_count(
+    count: usize,
+    limits: ImmutableIndexPageLimits,
+    error_class: ErrorClass,
+) -> Result<(), ImmutableIndexPageError> {
     if count > limits.max_entries.get() {
         return Err(invalid(
             error_class,
@@ -434,8 +527,25 @@ fn validate_sorted_keys<'a>(
 
 fn validate_sorted_row_ids(
     row_ids: &[IndexRowId],
+    limits: ImmutableIndexPageLimits,
     error_class: ErrorClass,
 ) -> Result<(), ImmutableIndexPageError> {
+    if row_ids.iter().any(|row_id| row_id.as_bytes().is_empty()) {
+        return Err(invalid(error_class, "row id must be non-empty"));
+    }
+    if let Some(row_id) = row_ids
+        .iter()
+        .find(|row_id| row_id.as_bytes().len() > limits.max_row_id_bytes.get())
+    {
+        return Err(invalid(
+            error_class,
+            format!(
+                "row id contains {} bytes, exceeding limit {}",
+                row_id.as_bytes().len(),
+                limits.max_row_id_bytes
+            ),
+        ));
+    }
     if row_ids.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(invalid(
             error_class,
@@ -509,12 +619,13 @@ fn encode_body(
                         })?;
                         encoded.extend_from_slice(&count.to_le_bytes());
                         for row_id in row_ids {
-                            encoded.extend_from_slice(&row_id.0.to_le_bytes());
+                            encode_bytes(&mut encoded, row_id.as_bytes())?;
                         }
                     }
-                    IndexLeafPosting::Page(page_id) => {
+                    IndexLeafPosting::Page { first, total_rows } => {
                         encoded.push(1);
-                        encoded.extend_from_slice(&page_id.get().to_le_bytes());
+                        encoded.extend_from_slice(&first.get().to_le_bytes());
+                        encoded.extend_from_slice(&total_rows.to_le_bytes());
                     }
                 }
                 encode_field(&mut payload, LEAF_ENTRY_FIELD, &encoded, max_payload_bytes)?;
@@ -522,11 +633,19 @@ fn encode_body(
             Ok((IndexPageKind::Leaf, leaf.entries.len(), payload))
         }
         ImmutableIndexPageBody::Posting(posting) => {
+            if let Some(next) = posting.next {
+                encode_field(
+                    &mut payload,
+                    POSTING_NEXT_FIELD,
+                    &next.get().to_le_bytes(),
+                    max_payload_bytes,
+                )?;
+            }
             for row_id in &posting.row_ids {
                 encode_field(
                     &mut payload,
                     POSTING_ENTRY_FIELD,
-                    &row_id.0.to_le_bytes(),
+                    row_id.as_bytes(),
                     max_payload_bytes,
                 )?;
             }
@@ -546,7 +665,7 @@ fn decode_body(
         IndexPageKind::Root => decode_root(fields, entry_count, limits),
         IndexPageKind::Interior => decode_interior(fields, entry_count, limits),
         IndexPageKind::Leaf => decode_leaf(fields, entry_count, limits),
-        IndexPageKind::Posting => decode_posting(fields, entry_count),
+        IndexPageKind::Posting => decode_posting(fields, entry_count, limits),
     }
 }
 
@@ -669,19 +788,17 @@ fn decode_leaf(
                         limits.max_inline_postings
                     )));
                 }
-                let bytes_needed = count.checked_mul(8).ok_or_else(|| {
-                    ImmutableIndexPageError::Corrupt(
-                        "inline posting byte count overflow".to_string(),
-                    )
-                })?;
-                let row_bytes = bytes.get(offset..offset + bytes_needed).ok_or_else(|| {
-                    ImmutableIndexPageError::Corrupt("truncated inline posting".to_string())
-                })?;
-                offset += bytes_needed;
-                let row_ids = row_bytes
-                    .chunks_exact(8)
-                    .map(|chunk| IndexRowId(read_u64(chunk)))
-                    .collect();
+                let mut row_ids = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let (row_id, next) = decode_bytes(
+                        bytes,
+                        offset,
+                        limits.max_row_id_bytes.get(),
+                        "inline row id",
+                    )?;
+                    row_ids.push(IndexRowId::new(row_id.to_vec()));
+                    offset = next;
+                }
                 IndexLeafPosting::Inline(row_ids)
             }
             1 => {
@@ -689,7 +806,16 @@ fn decode_leaf(
                     ImmutableIndexPageError::Corrupt("truncated posting page reference".to_string())
                 })?;
                 offset += 8;
-                IndexLeafPosting::Page(page_id(read_u64(page_bytes), "posting page")?)
+                let total_rows_bytes = bytes.get(offset..offset + 8).ok_or_else(|| {
+                    ImmutableIndexPageError::Corrupt(
+                        "truncated posting page cardinality".to_string(),
+                    )
+                })?;
+                offset += 8;
+                IndexLeafPosting::Page {
+                    first: page_id(read_u64(page_bytes), "posting page")?,
+                    total_rows: read_u64(total_rows_bytes),
+                }
             }
             _ => {
                 return Err(ImmutableIndexPageError::Corrupt(format!(
@@ -719,27 +845,39 @@ fn decode_leaf(
 fn decode_posting(
     fields: Fields<'_>,
     entry_count: usize,
+    limits: ImmutableIndexPageLimits,
 ) -> Result<ImmutableIndexPageBody, ImmutableIndexPageError> {
     let mut row_ids = Vec::with_capacity(entry_count);
+    let mut next = None;
     for field in fields {
         let (tag, bytes) = field?;
-        if tag != POSTING_ENTRY_FIELD {
-            continue;
-        }
-        if bytes.len() != 8 {
-            return Err(ImmutableIndexPageError::Corrupt(
-                "posting row id has an invalid length".to_string(),
-            ));
-        }
-        row_ids.push(IndexRowId(read_u64(bytes)));
-        if row_ids.len() > entry_count {
-            return Err(ImmutableIndexPageError::Corrupt(
-                "posting page contains more entries than declared".to_string(),
-            ));
+        match tag {
+            POSTING_NEXT_FIELD => set_once(
+                &mut next,
+                Some(decode_page_id(bytes, "next posting page")?),
+                "next posting page",
+            )?,
+            POSTING_ENTRY_FIELD => {
+                if bytes.len() > limits.max_row_id_bytes.get() {
+                    return Err(ImmutableIndexPageError::Admission(format!(
+                        "posting row id contains {} bytes, exceeding limit {}",
+                        bytes.len(),
+                        limits.max_row_id_bytes
+                    )));
+                }
+                row_ids.push(IndexRowId::new(bytes.to_vec()));
+                if row_ids.len() > entry_count {
+                    return Err(ImmutableIndexPageError::Corrupt(
+                        "posting page contains more entries than declared".to_string(),
+                    ));
+                }
+            }
+            _ => {}
         }
     }
     ensure_entry_count(entry_count, row_ids.len())?;
     Ok(ImmutableIndexPageBody::Posting(IndexPostingPage {
+        next: next.flatten(),
         row_ids,
     }))
 }
@@ -940,6 +1078,7 @@ fn read_u64(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use skein_integrity::integrity_digest;
 
     fn page_id(value: u64) -> IndexPageId {
         IndexPageId::new(NonZeroU64::new(value).unwrap())
@@ -947,6 +1086,10 @@ mod tests {
 
     fn schema_digest() -> Sha256Digest {
         integrity_digest(b"table schema").sha256
+    }
+
+    fn row_id(value: u64) -> IndexRowId {
+        IndexRowId::new(value.to_be_bytes().to_vec())
     }
 
     fn round_trip(body: ImmutableIndexPageBody) {
@@ -988,17 +1131,52 @@ mod tests {
             entries: vec![
                 IndexLeafEntry {
                     key: b"a".to_vec(),
-                    posting: IndexLeafPosting::Inline(vec![IndexRowId(1), IndexRowId(2)]),
+                    posting: IndexLeafPosting::Inline(vec![row_id(1), row_id(2)]),
                 },
                 IndexLeafEntry {
                     key: b"z".to_vec(),
-                    posting: IndexLeafPosting::Page(page_id(4)),
+                    posting: IndexLeafPosting::Page {
+                        first: page_id(4),
+                        total_rows: 2,
+                    },
                 },
             ],
         }));
         round_trip(ImmutableIndexPageBody::Posting(IndexPostingPage {
-            row_ids: vec![IndexRowId(3), IndexRowId(9)],
+            next: Some(page_id(5)),
+            row_ids: vec![row_id(3), row_id(9)],
         }));
+    }
+
+    #[test]
+    fn fixed_slot_round_trip_rejects_trailing_corruption() {
+        let page = ImmutableIndexPage {
+            generation: 9,
+            source_commit_epoch: 400,
+            page_id: page_id(1),
+            body: ImmutableIndexPageBody::Posting(IndexPostingPage {
+                next: None,
+                row_ids: vec![row_id(1), row_id(2)],
+            }),
+        };
+        let limits = ImmutableIndexPageLimits {
+            max_page_bytes: NonZeroUsize::new(4096).unwrap(),
+            ..ImmutableIndexPageLimits::default()
+        };
+        let slot = page.encode_slot(limits).unwrap();
+        assert_eq!(slot.len(), 4096);
+        assert_eq!(
+            ImmutableIndexPage::decode_slot(&slot, limits).unwrap(),
+            page
+        );
+
+        let mut corrupt = slot;
+        *corrupt.last_mut().unwrap() = 1;
+        assert!(matches!(
+            ImmutableIndexPage::decode_slot(&corrupt, limits),
+            Err(ImmutableIndexPageError::Corrupt(message))
+                if message == "index page slot contains non-zero trailing bytes"
+        ));
     }
 
     #[test]
@@ -1008,7 +1186,8 @@ mod tests {
             source_commit_epoch: 2,
             page_id: page_id(1),
             body: ImmutableIndexPageBody::Posting(IndexPostingPage {
-                row_ids: vec![IndexRowId(1)],
+                next: None,
+                row_ids: vec![row_id(1)],
             }),
         };
         let limits = ImmutableIndexPageLimits::default();
@@ -1032,7 +1211,7 @@ mod tests {
             body: ImmutableIndexPageBody::Leaf(IndexLeafPage {
                 entries: vec![IndexLeafEntry {
                     key: b"oversized".to_vec(),
-                    posting: IndexLeafPosting::Inline(vec![IndexRowId(1)]),
+                    posting: IndexLeafPosting::Inline(vec![row_id(1)]),
                 }],
             }),
         };
@@ -1073,8 +1252,11 @@ mod tests {
         let mut payload = encoded[PAGE_HEADER_BYTES..].to_vec();
         encode_field(&mut payload, 999, b"future", usize::MAX).unwrap();
         let mut extended = encoded[..PAGE_HEADER_BYTES].to_vec();
-        let digest = integrity_digest(&payload);
         extended[40..48].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+        let mut hasher = IntegrityHasher::new();
+        hasher.update(&extended[..48]);
+        hasher.update(&payload);
+        let digest = hasher.finish();
         extended[48..52].copy_from_slice(&digest.crc32c.get().to_le_bytes());
         extended[52..84].copy_from_slice(digest.sha256.as_bytes());
         extended.extend_from_slice(&payload);
@@ -1091,11 +1273,11 @@ mod tests {
                 entries: vec![
                     IndexLeafEntry {
                         key: b"z".to_vec(),
-                        posting: IndexLeafPosting::Inline(vec![IndexRowId(1)]),
+                        posting: IndexLeafPosting::Inline(vec![row_id(1)]),
                     },
                     IndexLeafEntry {
                         key: b"a".to_vec(),
-                        posting: IndexLeafPosting::Inline(vec![IndexRowId(2)]),
+                        posting: IndexLeafPosting::Inline(vec![row_id(2)]),
                     },
                 ],
             }),
@@ -1110,7 +1292,8 @@ mod tests {
             source_commit_epoch: 5,
             page_id: page_id(1),
             body: ImmutableIndexPageBody::Posting(IndexPostingPage {
-                row_ids: vec![IndexRowId(1)],
+                next: None,
+                row_ids: vec![row_id(1)],
             }),
         };
         assert!(matches!(
@@ -1129,7 +1312,7 @@ mod tests {
                 entries: (0..128)
                     .map(|ordinal| IndexLeafEntry {
                         key: format!("{ordinal:04}-{}", "x".repeat(1024)).into_bytes(),
-                        posting: IndexLeafPosting::Inline(vec![IndexRowId(ordinal)]),
+                        posting: IndexLeafPosting::Inline(vec![row_id(ordinal)]),
                     })
                     .collect(),
             }),

@@ -1100,6 +1100,128 @@ fn wal_codec_preserves_upsert_and_delete_predicates() {
     assert_eq!(decoded.transaction, transaction);
 }
 
+#[test]
+fn relational_index_shadow_publishes_generation_fenced_cold_pages() {
+    let state = RelationalState::default()
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![
+                    RelationalWrite::CreateTable(RelationalTableSchema {
+                        name: "documents".to_string(),
+                        columns: vec![text_column("id", false), text_column("owner", false)],
+                        primary_key: vec!["id".to_string()],
+                        unique_constraints: Vec::new(),
+                        foreign_keys: Vec::new(),
+                        indexes: vec![RelationalIndexSchema {
+                            name: "documents_owner_idx".to_string(),
+                            columns: vec!["owner".to_string()],
+                            unique: false,
+                        }],
+                    }),
+                    RelationalWrite::Insert {
+                        table: "documents".to_string(),
+                        rows: (0..8)
+                            .map(|ordinal| {
+                                RelationalRow::new(vec![
+                                    RelationalValue::Text(format!("doc-{ordinal}")),
+                                    RelationalValue::Text("shared-owner".to_string()),
+                                ])
+                            })
+                            .collect(),
+                        mode: RelationalInsertMode::Error,
+                    },
+                ],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("build relational shadow source");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "skein-relational-index-shadow-{}-{nonce}",
+        std::process::id()
+    ));
+    let config = RelationalIndexShadowConfig {
+        page_limits: crate::ImmutableIndexPageLimits {
+            max_page_bytes: std::num::NonZeroUsize::new(4096).unwrap(),
+            max_entries: std::num::NonZeroUsize::new(2).unwrap(),
+            max_inline_postings: std::num::NonZeroUsize::new(2).unwrap(),
+            ..crate::ImmutableIndexPageLimits::default()
+        },
+        ..RelationalIndexShadowConfig::default()
+    };
+    let writer = RelationalIndexShadowWriter::new(config);
+    let first = writer
+        .publish(&directory, &state, 1, 40, None)
+        .expect("publish first shadow generation");
+    assert_eq!(first.index_roots, 2);
+    assert!(first.pages_written > first.index_roots as u64);
+    assert_eq!(first.artifact_bytes, first.pages_written * 4096);
+
+    let stale = writer
+        .publish(&directory, &state, 2, 41, None)
+        .expect_err("stale publisher must not replace the selected root");
+    assert!(matches!(
+        stale,
+        RelationalIndexShadowError::StaleGeneration {
+            expected_previous: None,
+            actual_previous: Some(1),
+        }
+    ));
+    assert!(!directory
+        .join(relational_index_shadow_artifact_file(2))
+        .exists());
+
+    let second = writer
+        .publish(&directory, &state, 2, 41, Some(1))
+        .expect("publish next shadow generation");
+    let reader = RelationalIndexShadowReader::open(&directory, 2, 41, config)
+        .expect("open manifest without reading page payloads");
+    assert_eq!(reader.manifest().page_count, second.pages_written);
+    for root in &reader.manifest().roots {
+        reader.read_root(root).expect("read and verify root page");
+    }
+    assert!(RelationalIndexShadowReader::open(&directory, 2, 42, config).is_err());
+
+    std::fs::write(
+        directory.join(relational_index_shadow_artifact_file(99)),
+        b"orphan",
+    )
+    .expect("write orphan candidate");
+    RelationalIndexShadowReader::open(&directory, 2, 41, config)
+        .expect("orphan generation must not affect selected manifest");
+
+    let artifact = directory.join(relational_index_shadow_artifact_file(2));
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&artifact)
+        .expect("open selected page artifact");
+    use std::io::{Seek, Write};
+    file.seek(std::io::SeekFrom::Start(4095))
+        .expect("seek cold page padding");
+    file.write_all(&[1]).expect("corrupt cold page padding");
+    file.sync_all().expect("sync page corruption");
+    let cold_reader = RelationalIndexShadowReader::open(&directory, 2, 41, config)
+        .expect("cold open must not scan page payloads");
+    let first_page = crate::IndexPageId::new(std::num::NonZeroU64::new(1).unwrap());
+    assert!(matches!(
+        cold_reader.read_page(first_page),
+        Err(RelationalIndexShadowError::Corrupt(_))
+    ));
+    assert!(cold_reader.is_poisoned());
+    let second_page = crate::IndexPageId::new(std::num::NonZeroU64::new(2).unwrap());
+    assert!(matches!(
+        cold_reader.read_page(second_page),
+        Err(RelationalIndexShadowError::Corrupt(message)) if message.contains("poisoned")
+    ));
+
+    std::fs::remove_dir_all(directory).expect("remove relational index shadow fixture");
+}
+
 fn create_content_tables() -> RelationalTransaction {
     RelationalTransaction {
         writes: vec![

@@ -53,6 +53,10 @@ pub struct WalReplayConfig {
     /// publish a column-group catalog under `column-groups/` and recovery
     /// validates it. Off by default; reads are never served from the shadow.
     pub graph_columnar_shadow_checkpoint: bool,
+    /// Derived relational index-page shadow. Checkpoints publish a
+    /// generation-fenced fixed-slot tree, but SQL does not read it until a
+    /// later activation stage. Off by default.
+    pub relational_index_shadow_checkpoint: bool,
 }
 
 impl Default for WalReplayConfig {
@@ -70,6 +74,7 @@ impl Default for WalReplayConfig {
             auto_materialize_checkpoint_bytes: DEFAULT_AUTO_MATERIALIZE_CHECKPOINT_BYTES,
             max_out_of_core_delta_bytes: Some(DEFAULT_MAX_OUT_OF_CORE_DELTA_BYTES),
             graph_columnar_shadow_checkpoint: false,
+            relational_index_shadow_checkpoint: false,
         }
     }
 }

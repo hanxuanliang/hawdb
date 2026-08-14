@@ -10,12 +10,21 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 mod codec;
+mod index_shadow;
 mod overflow;
 
 pub use codec::{
     decode_relational_checkpoint, decode_relational_checkpoint_file, decode_relational_wal_batch,
     encode_relational_checkpoint, encode_relational_checkpoint_to_writer,
     encode_relational_wal_batch, RelationalCheckpoint, RelationalDecodeLimits, RelationalWalBatch,
+};
+pub use index_shadow::{
+    relational_index_shadow_artifact_file, RelationalIndexRootDescriptor,
+    RelationalIndexShadowBuildReport, RelationalIndexShadowConfig, RelationalIndexShadowError,
+    RelationalIndexShadowManifest, RelationalIndexShadowReader, RelationalIndexShadowWriter,
+    DEFAULT_RELATIONAL_INDEX_SHADOW_BUILD_METADATA_BYTES,
+    DEFAULT_RELATIONAL_INDEX_SHADOW_MANIFEST_BYTES, DEFAULT_RELATIONAL_INDEX_SHADOW_ROOTS,
+    RELATIONAL_INDEX_SHADOW_MANIFEST_FILE,
 };
 pub use overflow::{
     RelationalHydrationBudget, RelationalOverflowConfig, RelationalOverflowRef,
@@ -491,6 +500,10 @@ struct RelationalIndexPages {
 }
 
 impl RelationalIndexPages {
+    fn iter(&self) -> impl DoubleEndedIterator<Item = (&RelationalKey, &RelationalKeySetPages)> {
+        self.pages.iter().flat_map(|page| page.iter())
+    }
+
     fn page_index(&self, key: &RelationalKey) -> Option<usize> {
         if self.pages.is_empty() {
             return None;
