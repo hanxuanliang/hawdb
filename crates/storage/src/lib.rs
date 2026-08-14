@@ -7,6 +7,7 @@ pub mod column_group;
 pub mod config;
 pub mod durability;
 pub mod ids;
+pub mod index_page;
 pub mod mutation;
 mod ownership;
 pub mod pressure;
@@ -72,6 +73,14 @@ pub use durability::{
     WalSyncGroupProgress, WalSyncGroupState,
 };
 pub use ids::{NodeId, NodeRecord, RelId, RelRecord};
+pub use index_page::{
+    ImmutableIndexPage, ImmutableIndexPageBody, ImmutableIndexPageError, ImmutableIndexPageLimits,
+    IndexIdentity, IndexInteriorEntry, IndexInteriorPage, IndexLeafEntry, IndexLeafPage,
+    IndexLeafPosting, IndexPageId, IndexPostingPage, IndexRootPage, IndexRowId,
+    DEFAULT_IMMUTABLE_INDEX_IDENTITY_BYTES, DEFAULT_IMMUTABLE_INDEX_INLINE_POSTINGS,
+    DEFAULT_IMMUTABLE_INDEX_KEY_BYTES, DEFAULT_IMMUTABLE_INDEX_PAGE_BYTES,
+    DEFAULT_IMMUTABLE_INDEX_PAGE_ENTRIES,
+};
 pub use mutation::{
     ConnectedNodesCreate, GraphMutation, MatchedRelationshipCopyMerge, MatchedRelationshipCreate,
     MatchedRelationshipMerge, MatchedRelationshipRetargetMerge,

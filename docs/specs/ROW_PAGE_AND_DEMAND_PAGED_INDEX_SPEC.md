@@ -75,6 +75,15 @@ blocks. It is a rebuildable query index, not the uniqueness oracle. Missing or
 incomplete projection coverage uses the canonical bounded scan; corruption in
 a selected block fails closed.
 
+The immutable index-page codec is the first format-only slice of step 1. It
+defines generation-tagged root, interior, leaf, and posting pages. Every page
+has an independent CRC32C and SHA-256 payload digest; roots also bind the index
+identity, source commit epoch, schema digest, child page, and tree height.
+Field-tagged payloads skip unknown fields, while duplicate or missing required
+root fields, unordered keys/postings, oversized fields/pages, truncation, and
+checksum mismatches fail closed. The codec is not selected by the durable
+manifest and does not change query or recovery behavior yet.
+
 ## Identities and terminology
 
 - **Commit epoch**: monotonically increasing visibility identity; one atomic
