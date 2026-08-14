@@ -93,11 +93,13 @@ pub use graph_columnar_shadow::{
 pub use read_view::PublishedReadView;
 use relational_index_shadow::RelationalIndexShadowState;
 pub use relational_index_shadow::{
-    RelationalIndexQualificationProbeKind, RelationalIndexQualificationProbeReport,
-    RelationalIndexReadViewBackendReport, RelationalIndexReadViewReport,
-    RelationalIndexShadowCheckpointReport, RelationalIndexShadowCheckpointStatus,
-    RelationalIndexShadowRecoveryStatus, RelationalIndexViewQualificationOptions,
-    RelationalIndexViewQualificationReport, RELATIONAL_INDEX_VIEW_QUALIFICATION_PROTOCOL,
+    RelationalConstraintQualificationProbeReport, RelationalConstraintQualificationReport,
+    RelationalConstraintQualificationUse, RelationalIndexQualificationProbeKind,
+    RelationalIndexQualificationProbeReport, RelationalIndexReadViewBackendReport,
+    RelationalIndexReadViewReport, RelationalIndexShadowCheckpointReport,
+    RelationalIndexShadowCheckpointStatus, RelationalIndexShadowRecoveryStatus,
+    RelationalIndexViewQualificationOptions, RelationalIndexViewQualificationReport,
+    RELATIONAL_CONSTRAINT_QUALIFICATION_PROTOCOL, RELATIONAL_INDEX_VIEW_QUALIFICATION_PROTOCOL,
 };
 use skein_storage::{
     available_storage_space, decode_relational_checkpoint, decode_relational_checkpoint_file,

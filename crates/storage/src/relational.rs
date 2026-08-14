@@ -297,6 +297,36 @@ impl RelationalTableSchema {
         );
         definitions
     }
+
+    pub fn unique_index_definition(&self, columns: &[String]) -> Option<RelationalIndexDefinition> {
+        if columns == self.primary_key {
+            return Some(RelationalIndexDefinition {
+                name: RELATIONAL_PRIMARY_INDEX_NAME.to_string(),
+                columns: self.primary_key.clone(),
+                role: RelationalIndexRole::Primary,
+            });
+        }
+        if let Some((ordinal, columns)) = self
+            .unique_constraints
+            .iter()
+            .enumerate()
+            .find(|(_, candidate)| candidate.as_slice() == columns)
+        {
+            return Some(RelationalIndexDefinition {
+                name: relational_unique_index_name(ordinal),
+                columns: columns.clone(),
+                role: RelationalIndexRole::UniqueConstraint,
+            });
+        }
+        self.indexes
+            .iter()
+            .find(|index| index.unique && index.columns == columns)
+            .map(|index| RelationalIndexDefinition {
+                name: index.name.clone(),
+                columns: index.columns.clone(),
+                role: RelationalIndexRole::DeclaredUnique,
+            })
+    }
 }
 
 pub fn relational_unique_index_name(ordinal: usize) -> String {
@@ -1644,16 +1674,7 @@ fn apply_upsert(
             .ok_or_else(|| RelationalError::Schema(format!("unknown table {table}")))?,
     );
     let conflict_positions = column_positions(&schema, conflict_columns)?;
-    let conflict_is_unique = conflict_columns == schema.primary_key
-        || schema
-            .unique_constraints
-            .iter()
-            .any(|columns| columns == conflict_columns)
-        || schema
-            .indexes
-            .iter()
-            .any(|index| index.unique && index.columns == conflict_columns);
-    if conflict_columns.is_empty() || !conflict_is_unique {
+    if conflict_columns.is_empty() || schema.unique_index_definition(conflict_columns).is_none() {
         return Err(RelationalError::Schema(format!(
             "UPSERT conflict target on table {table} must name a primary or unique key"
         )));
@@ -1764,34 +1785,25 @@ fn conflict_primary_key(
     conflict_columns: &[String],
     conflict_key: &RelationalKey,
 ) -> Result<Option<RelationalKey>, RelationalError> {
-    if conflict_columns == schema.primary_key {
+    let definition = schema
+        .unique_index_definition(conflict_columns)
+        .ok_or_else(|| {
+            RelationalError::Schema(format!(
+                "UPSERT conflict target on table {table} is not materialized"
+            ))
+        })?;
+    if definition.role == RelationalIndexRole::Primary {
         return Ok(state.row(table, conflict_key).map(|_| conflict_key.clone()));
     }
-    let index_name = if let Some(ordinal) = schema
-        .unique_constraints
-        .iter()
-        .position(|columns| columns == conflict_columns)
-    {
-        relational_unique_index_name(ordinal)
-    } else if let Some(index) = schema
-        .indexes
-        .iter()
-        .find(|index| index.unique && index.columns == conflict_columns)
-    {
-        index.name.clone()
-    } else {
-        return Err(RelationalError::Schema(format!(
-            "UPSERT conflict target on table {table} is not materialized"
-        )));
-    };
-    let Some(postings) = state.index_lookup(table, &index_name, conflict_key) else {
+    let Some(postings) = state.index_lookup(table, &definition.name, conflict_key) else {
         return Ok(None);
     };
     let mut keys = postings.iter();
     let primary_key = keys.next().cloned();
     if keys.next().is_some() {
         return Err(RelationalError::Corruption(format!(
-            "unique conflict index {index_name} on table {table} has multiple visible rows"
+            "unique conflict index {} on table {table} has multiple visible rows",
+            definition.name
         )));
     }
     Ok(primary_key)
@@ -2447,15 +2459,9 @@ fn validate_foreign_keys(state: &RelationalState) -> Result<(), RelationalError>
                 })?;
             let referenced_positions =
                 column_positions(referenced_schema, &foreign_key.referenced_columns)?;
-            let references_unique_key =
-                foreign_key.referenced_columns == referenced_schema.primary_key
-                    || referenced_schema
-                        .unique_constraints
-                        .iter()
-                        .any(|columns| columns == &foreign_key.referenced_columns)
-                    || referenced_schema.indexes.iter().any(|index| {
-                        index.unique && index.columns == foreign_key.referenced_columns
-                    });
+            let references_unique_key = referenced_schema
+                .unique_index_definition(&foreign_key.referenced_columns)
+                .is_some();
             if !references_unique_key {
                 return Err(RelationalError::Schema(format!(
                     "foreign key from {table} must reference a primary or unique key on {}",
@@ -2588,15 +2594,9 @@ fn validate_foreign_key_shape(
     local_positions: &[usize],
     referenced_positions: &[usize],
 ) -> Result<(), RelationalError> {
-    let references_unique_key = foreign_key.referenced_columns == referenced_schema.primary_key
-        || referenced_schema
-            .unique_constraints
-            .iter()
-            .any(|columns| columns == &foreign_key.referenced_columns)
-        || referenced_schema
-            .indexes
-            .iter()
-            .any(|index| index.unique && index.columns == foreign_key.referenced_columns);
+    let references_unique_key = referenced_schema
+        .unique_index_definition(&foreign_key.referenced_columns)
+        .is_some();
     if !references_unique_key {
         return Err(RelationalError::Schema(format!(
             "foreign key from {table} must reference a primary or unique key on {}",
@@ -2646,35 +2646,20 @@ fn foreign_key_target_exists(
                 foreign_key.referenced_table
             ))
         })?;
-    if foreign_key.referenced_columns == schema.primary_key {
+    let definition = schema
+        .unique_index_definition(&foreign_key.referenced_columns)
+        .ok_or_else(|| {
+            RelationalError::Schema(format!(
+                "foreign key references non-unique columns on {}",
+                foreign_key.referenced_table
+            ))
+        })?;
+    if definition.role == RelationalIndexRole::Primary {
         return Ok(state.row(&foreign_key.referenced_table, key).is_some());
     }
-    if let Some(ordinal) = schema
-        .unique_constraints
-        .iter()
-        .position(|columns| columns == &foreign_key.referenced_columns)
-    {
-        return Ok(state
-            .index_lookup(
-                &foreign_key.referenced_table,
-                &relational_unique_index_name(ordinal),
-                key,
-            )
-            .is_some_and(|postings| !postings.is_empty()));
-    }
-    if let Some(index) = schema
-        .indexes
-        .iter()
-        .find(|index| index.unique && index.columns == foreign_key.referenced_columns)
-    {
-        return Ok(state
-            .index_lookup(&foreign_key.referenced_table, &index.name, key)
-            .is_some_and(|postings| !postings.is_empty()));
-    }
-    Err(RelationalError::Schema(format!(
-        "foreign key references non-unique columns on {}",
-        foreign_key.referenced_table
-    )))
+    Ok(state
+        .index_lookup(&foreign_key.referenced_table, &definition.name, key)
+        .is_some_and(|postings| !postings.is_empty()))
 }
 
 fn key_contains_null(key: &RelationalKey) -> bool {

@@ -5,6 +5,14 @@
 //! that supplied its rows and is selected by SQL only through the facade's
 //! explicit demand-read mode.
 
+#[path = "relational_index_shadow/constraint_qualification.rs"]
+mod constraint_qualification;
+
+pub use constraint_qualification::{
+    RelationalConstraintQualificationProbeReport, RelationalConstraintQualificationReport,
+    RelationalConstraintQualificationUse, RELATIONAL_CONSTRAINT_QUALIFICATION_PROTOCOL,
+};
+
 use super::{GraphStore, SkeinError};
 use skein_integrity::{IntegrityHasher, Sha256Digest};
 use skein_storage::{
@@ -1708,9 +1716,12 @@ mod tests {
     use super::*;
     use crate::schema::Catalog;
     use skein_storage::{
-        DurabilityPolicy, RelationalColumnSchema, RelationalIndexChangeKind, RelationalIndexSchema,
-        RelationalKey, RelationalScalarType, RelationalTableSchema, RelationalTransaction,
-        RelationalValue, RelationalWrite, WalReplayConfig,
+        DurabilityPolicy, RelationalColumnSchema, RelationalConflictAction,
+        RelationalForeignKeySchema, RelationalIndexChangeKind, RelationalIndexSchema,
+        RelationalInsertMode, RelationalKey, RelationalReferentialAction, RelationalRow,
+        RelationalScalarType, RelationalTableSchema, RelationalTransaction,
+        RelationalUpsertAssignment, RelationalUpsertValue, RelationalValue, RelationalWrite,
+        WalReplayConfig,
     };
 
     #[test]
@@ -2248,6 +2259,271 @@ mod tests {
     }
 
     #[test]
+    fn constraint_qualification_covers_base_live_recovery_and_pinned_views() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "skein-relational-constraint-qualification-{}-{nonce}",
+            std::process::id()
+        ));
+        let replay = WalReplayConfig {
+            relational_index_mode: RelationalIndexMode::Shadow,
+            ..WalReplayConfig::default()
+        };
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay,
+            )
+            .expect("open constraint qualification store");
+            store
+                .commit_relational_transaction(
+                    &mut catalog,
+                    create_constraint_qualification_state(),
+                )
+                .expect("commit constraint qualification base");
+            store
+                .checkpoint(&catalog)
+                .expect("checkpoint constraint qualification base");
+
+            let base = store
+                .qualify_relational_constraint_read_view(
+                    RelationalIndexViewQualificationOptions::default(),
+                )
+                .expect("qualify base constraint view");
+            assert_constraint_qualification_ready(&base, 1);
+            assert!(base.probes.iter().all(|probe| {
+                matches!(
+                    probe.read.backend,
+                    RelationalIndexReadViewBackendReport::Base(_)
+                )
+            }));
+
+            let truncated = store
+                .qualify_relational_constraint_read_view(RelationalIndexViewQualificationOptions {
+                    max_probes: NonZeroUsize::new(1).unwrap(),
+                    ..RelationalIndexViewQualificationOptions::default()
+                })
+                .expect("report an exhausted constraint probe budget");
+            assert!(truncated.truncated);
+            assert!(!truncated.ready);
+
+            let budget_error = store
+                .qualify_relational_constraint_read_view(RelationalIndexViewQualificationOptions {
+                    read_limits: RelationalIndexReadLimits {
+                        max_rows: NonZeroUsize::new(1).unwrap(),
+                        ..RelationalIndexReadLimits::default()
+                    },
+                    ..RelationalIndexViewQualificationOptions::default()
+                })
+                .expect_err("two foreign-key referrers must exhaust a one-row budget");
+            assert!(
+                matches!(budget_error, SkeinError::Storage(message) if message.contains("qualification probe"))
+            );
+
+            let pinned = Arc::clone(current_index_view(&store));
+            store
+                .commit_relational_transaction(
+                    &mut catalog,
+                    RelationalTransaction {
+                        writes: vec![
+                            RelationalWrite::Upsert {
+                                table: "accounts".to_string(),
+                                rows: vec![
+                                    constraint_account_row(
+                                        "account-c",
+                                        "tenant-2",
+                                        RelationalValue::Text("c@example.test".to_string()),
+                                        "carol",
+                                    ),
+                                    constraint_account_row(
+                                        "ignored-primary-key",
+                                        "tenant-2",
+                                        RelationalValue::Text("b2@example.test".to_string()),
+                                        "bob",
+                                    ),
+                                ],
+                                conflict_columns: vec!["handle".to_string()],
+                                action: RelationalConflictAction::Update(vec![
+                                    RelationalUpsertAssignment {
+                                        column: "tenant".to_string(),
+                                        value: RelationalUpsertValue::ExcludedColumn(
+                                            "tenant".to_string(),
+                                        ),
+                                    },
+                                    RelationalUpsertAssignment {
+                                        column: "email".to_string(),
+                                        value: RelationalUpsertValue::ExcludedColumn(
+                                            "email".to_string(),
+                                        ),
+                                    },
+                                ]),
+                            },
+                            RelationalWrite::Insert {
+                                table: "sessions".to_string(),
+                                rows: vec![constraint_session_row(
+                                    "session-3",
+                                    "account-c",
+                                    RelationalValue::Text("account-b".to_string()),
+                                )],
+                                mode: RelationalInsertMode::Error,
+                            },
+                        ],
+                    },
+                )
+                .expect("commit live UPSERT and foreign-key changes");
+
+            let live = store
+                .qualify_relational_constraint_read_view(
+                    RelationalIndexViewQualificationOptions::default(),
+                )
+                .expect("qualify live constraint view");
+            assert_constraint_qualification_ready(&live, 2);
+            assert!(live
+                .probes
+                .iter()
+                .all(|probe| probe.read.live_entries_visited > 0));
+
+            let carol = RelationalKey(vec![RelationalValue::Text("carol".to_string())]);
+            let mut pinned_rows = Vec::new();
+            pinned
+                .visit_exact_postings(
+                    "accounts",
+                    "accounts_handle_idx",
+                    &carol,
+                    RelationalIndexReadLimits::default(),
+                    |key| {
+                        pinned_rows.push(key.clone());
+                        true
+                    },
+                )
+                .expect("read the pre-commit pinned constraint view");
+            assert!(pinned_rows.is_empty());
+            let mut current_rows = Vec::new();
+            current_index_view(&store)
+                .visit_exact_postings(
+                    "accounts",
+                    "accounts_handle_idx",
+                    &carol,
+                    RelationalIndexReadLimits::default(),
+                    |key| {
+                        current_rows.push(key.clone());
+                        true
+                    },
+                )
+                .expect("read the current constraint view");
+            assert_eq!(
+                current_rows,
+                vec![RelationalKey(vec![RelationalValue::Text(
+                    "account-c".to_string()
+                )])]
+            );
+        }
+        {
+            let mut catalog = Catalog::default();
+            let store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay,
+            )
+            .expect("reopen constraint qualification store");
+            let recovered = store
+                .qualify_relational_constraint_read_view(
+                    RelationalIndexViewQualificationOptions::default(),
+                )
+                .expect("qualify recovered constraint view");
+            assert_constraint_qualification_ready(&recovered, 2);
+            assert!(recovered.probes.iter().all(|probe| {
+                matches!(
+                    probe.read.backend,
+                    RelationalIndexReadViewBackendReport::Recovered(_)
+                )
+            }));
+        }
+        std::fs::remove_dir_all(path).expect("remove constraint qualification fixture");
+    }
+
+    #[test]
+    fn constraint_qualification_fails_closed_on_a_corrupt_selected_page() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "skein-relational-constraint-corruption-{}-{nonce}",
+            std::process::id()
+        ));
+        let replay = WalReplayConfig {
+            relational_index_mode: RelationalIndexMode::Shadow,
+            ..WalReplayConfig::default()
+        };
+        let generation;
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay,
+            )
+            .expect("open constraint corruption fixture");
+            store
+                .commit_relational_transaction(
+                    &mut catalog,
+                    create_constraint_qualification_state(),
+                )
+                .expect("commit constraint corruption source");
+            store
+                .checkpoint(&catalog)
+                .expect("checkpoint constraint corruption source");
+            generation = current_index_view(&store).identity().base_generation;
+        }
+        {
+            let mut catalog = Catalog::default();
+            let store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay,
+            )
+            .expect("open cold constraint corruption reader");
+            let artifact = path.join(skein_storage::relational_index_shadow_artifact_file(
+                generation,
+            ));
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&artifact)
+                .expect("open constraint page artifact");
+            let mut first = [0_u8; 1];
+            file.read_exact(&mut first).expect("read page prefix");
+            first[0] ^= 0xff;
+            file.seek(SeekFrom::Start(0)).expect("rewind page artifact");
+            file.write_all(&first).expect("corrupt page prefix");
+            file.sync_all().expect("sync corrupt page prefix");
+
+            let error = store
+                .qualify_relational_constraint_read_view(
+                    RelationalIndexViewQualificationOptions::default(),
+                )
+                .expect_err("constraint qualification must reject a corrupt selected page");
+            assert!(
+                matches!(error, SkeinError::StorageIntegrity(message) if message.contains("qualification probe"))
+            );
+            assert_eq!(store.relational_state().row_count("accounts"), 2);
+        }
+        std::fs::remove_dir_all(path).expect("remove constraint corruption fixture");
+    }
+
+    #[test]
     fn schema_wal_invalidates_shadow_recovery_without_blocking_canonical_open() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2410,6 +2686,171 @@ mod tests {
                 },
             ],
         }
+    }
+
+    fn create_constraint_qualification_state() -> RelationalTransaction {
+        RelationalTransaction {
+            writes: vec![
+                RelationalWrite::CreateTable(RelationalTableSchema {
+                    name: "accounts".to_string(),
+                    columns: vec![
+                        constraint_text_column("id", false),
+                        constraint_text_column("tenant", false),
+                        constraint_text_column("email", true),
+                        constraint_text_column("handle", false),
+                    ],
+                    primary_key: vec!["id".to_string()],
+                    unique_constraints: vec![vec!["tenant".to_string(), "email".to_string()]],
+                    foreign_keys: Vec::new(),
+                    indexes: vec![RelationalIndexSchema {
+                        name: "accounts_handle_idx".to_string(),
+                        columns: vec!["handle".to_string()],
+                        unique: true,
+                    }],
+                }),
+                RelationalWrite::CreateTable(RelationalTableSchema {
+                    name: "sessions".to_string(),
+                    columns: vec![
+                        constraint_text_column("id", false),
+                        constraint_text_column("account_id", false),
+                        constraint_text_column("inviter_id", true),
+                    ],
+                    primary_key: vec!["id".to_string()],
+                    unique_constraints: Vec::new(),
+                    foreign_keys: vec![
+                        RelationalForeignKeySchema {
+                            columns: vec!["account_id".to_string()],
+                            referenced_table: "accounts".to_string(),
+                            referenced_columns: vec!["id".to_string()],
+                            on_delete: RelationalReferentialAction::Restrict,
+                            on_update: RelationalReferentialAction::Restrict,
+                        },
+                        RelationalForeignKeySchema {
+                            columns: vec!["inviter_id".to_string()],
+                            referenced_table: "accounts".to_string(),
+                            referenced_columns: vec!["id".to_string()],
+                            on_delete: RelationalReferentialAction::Restrict,
+                            on_update: RelationalReferentialAction::Restrict,
+                        },
+                    ],
+                    indexes: Vec::new(),
+                }),
+                RelationalWrite::Insert {
+                    table: "accounts".to_string(),
+                    rows: vec![
+                        constraint_account_row(
+                            "account-a",
+                            "tenant-1",
+                            RelationalValue::Null,
+                            "alice",
+                        ),
+                        constraint_account_row(
+                            "account-b",
+                            "tenant-1",
+                            RelationalValue::Text("b@example.test".to_string()),
+                            "bob",
+                        ),
+                    ],
+                    mode: RelationalInsertMode::Error,
+                },
+                RelationalWrite::Insert {
+                    table: "sessions".to_string(),
+                    rows: vec![
+                        constraint_session_row("session-1", "account-a", RelationalValue::Null),
+                        constraint_session_row(
+                            "session-2",
+                            "account-a",
+                            RelationalValue::Text("account-a".to_string()),
+                        ),
+                    ],
+                    mode: RelationalInsertMode::Error,
+                },
+            ],
+        }
+    }
+
+    fn constraint_text_column(name: &str, nullable: bool) -> RelationalColumnSchema {
+        RelationalColumnSchema {
+            name: name.to_string(),
+            scalar_type: RelationalScalarType::Text,
+            nullable,
+            default: None,
+        }
+    }
+
+    fn constraint_account_row(
+        id: &str,
+        tenant: &str,
+        email: RelationalValue,
+        handle: &str,
+    ) -> RelationalRow {
+        RelationalRow::new(vec![
+            RelationalValue::Text(id.to_string()),
+            RelationalValue::Text(tenant.to_string()),
+            email,
+            RelationalValue::Text(handle.to_string()),
+        ])
+    }
+
+    fn constraint_session_row(
+        id: &str,
+        account_id: &str,
+        inviter_id: RelationalValue,
+    ) -> RelationalRow {
+        RelationalRow::new(vec![
+            RelationalValue::Text(id.to_string()),
+            RelationalValue::Text(account_id.to_string()),
+            inviter_id,
+        ])
+    }
+
+    fn assert_constraint_qualification_ready(
+        report: &RelationalConstraintQualificationReport,
+        visible_commit_epoch: u64,
+    ) {
+        assert_eq!(
+            report.protocol,
+            RELATIONAL_CONSTRAINT_QUALIFICATION_PROTOCOL
+        );
+        assert_eq!(report.visible_commit_epoch, visible_commit_epoch);
+        assert_eq!(report.tables_discovered, 2);
+        assert_eq!(report.tables_sampled, 2);
+        assert_eq!(report.unique_targets_discovered, 4);
+        assert_eq!(report.nullable_unique_targets_discovered, 1);
+        assert_eq!(report.foreign_keys_discovered, 2);
+        assert_eq!(report.mismatches, 0);
+        assert!(!report.truncated);
+        assert!(report.ready);
+        assert!(!report.probes.is_empty());
+        assert!(report.probes.iter().all(|probe| {
+            probe.matched
+                && probe.semantic_valid
+                && probe.candidate_rows == probe.oracle_rows
+                && probe.candidate_digest == probe.oracle_digest
+        }));
+        let uses = report
+            .probes
+            .iter()
+            .flat_map(|probe| probe.uses.iter().copied())
+            .collect::<BTreeSet<_>>();
+        let uses_covered = report
+            .probes
+            .iter()
+            .map(|probe| probe.uses.len())
+            .sum::<usize>();
+        assert_eq!(
+            uses,
+            BTreeSet::from([
+                RelationalConstraintQualificationUse::PrimaryKeyIdentity,
+                RelationalConstraintQualificationUse::UniqueEnforcement,
+                RelationalConstraintQualificationUse::UpsertConflict,
+                RelationalConstraintQualificationUse::ForeignKeyTarget,
+                RelationalConstraintQualificationUse::ForeignKeyReferrers,
+                RelationalConstraintQualificationUse::NullableUniqueNoConflict,
+                RelationalConstraintQualificationUse::AbsentKeyNoConflict,
+            ])
+        );
+        assert_eq!(report.uses_covered, uses_covered);
     }
 
     fn current_index_view(store: &GraphStore) -> &Arc<RelationalIndexReadView> {

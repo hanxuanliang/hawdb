@@ -486,7 +486,12 @@ checks a bounded immutable live-change sequence, graph-only epoch advancement,
 base-plus-live equivalence, retained pinned-reader state, and fail-closed live
 capture invalidation. `CrashCandidate` discards only unpublished candidate
 state; the previously published manifest and canonical WAL remain unchanged.
-Production SQL selection is still false in every modeled state.
+The constraint-qualification invariant interprets membership as an exact
+primary, unique, UPSERT-conflict, or foreign-key decision and proves that a
+qualification can run only when the pinned live view is current and produces
+the same decision as the canonical oracle for every modeled key. Production SQL
+selection is still false in every modeled state; qualification does not make
+the candidate authoritative.
 
 `SkeinPageCacheAdmission.tla` models the clean immutable page-cache boundary
 used by relational base and recovery-delta readers. The cache capacity is a

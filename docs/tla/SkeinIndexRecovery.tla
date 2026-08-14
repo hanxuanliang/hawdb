@@ -517,6 +517,19 @@ SchemaInvalidationCannotPublish ==
 
 ProductionSqlRemainsOnOracle == ~sqlUsesRecoveredIndex
 
+ConstraintLookup(state, key) == key \in state
+
+ConstraintQualificationCanRun ==
+    /\ phase = "idle"
+    /\ liveViewAvailable
+    /\ liveViewEpoch = commitEpoch
+
+ConstraintQualificationMatchesOracle ==
+    ConstraintQualificationCanRun =>
+        \A key \in Keys:
+            ConstraintLookup(liveViewState, key) =
+                ConstraintLookup(canonicalState, key)
+
 Spec == Init /\ [][Next]_vars
 
 =============================================================================

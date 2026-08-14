@@ -195,6 +195,23 @@ semantic differences, incomplete index coverage, or exhausted qualification
 budgets return `ready = false`. This API does not introduce a business-specific
 lookup surface.
 
+`GraphStore::qualify_relational_constraint_read_view` narrows that evidence to
+the exact lookups required by primary-key identity, unique enforcement, UPSERT
+conflict detection, foreign-key target existence, and foreign-key referrer
+discovery. It generates present and deterministic absent-key probes, includes a
+null-containing probe for every nullable unique target, and deduplicates one
+physical lookup that satisfies several semantic uses. Primary, table-unique,
+declared-unique, and foreign-key-support roots are checked through one pinned
+base-plus-recovery-plus-live view against the materialized postings at the same
+visible commit epoch. Oracle row cloning is bounded by the production row limit;
+the report exposes key and result digests rather than key values. Exhausted
+table or probe coverage returns `ready = false`; the row sample limit bounds
+representative probe discovery. Physical read admission, missing roots, or
+corruption returns an error and provisional rows are discarded. A ready report
+is evidence for sampled constraint semantics only. It does not route mutations
+through the candidate, remove the materialized oracle, or make the candidate a
+canonical recovery dependency.
+
 PostgreSQL SQL activation is controlled by
 `DatabaseConfig::relational_index_mode`. `Materialized` is the default rollback
 mode, `Shadow` publishes and qualifies persistent generations without serving
@@ -534,7 +551,8 @@ boundaries and MUST land before their corresponding production activation:
   still outside this first projection slice.
 - `SkeinIndexRecovery.tla`: base root plus ordered WAL delta equivalence,
   bounded dirty overlays, immutable candidate generations, crash recovery,
-  schema invalidation, and no partial replay visibility.
+  schema invalidation, no partial replay visibility, and sound exact-key
+  constraint qualification only from a current pinned view.
 - `SkeinPageCacheAdmission.tla`: clean immutable page residency, pin-safe
   eviction, cancellation release, caller-carved foreground reserve, corrupt
   admission rejection, cold open, and background hit/admit/bypass progress.
