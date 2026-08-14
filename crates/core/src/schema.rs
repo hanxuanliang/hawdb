@@ -74,7 +74,10 @@ pub enum PropertyType {
     Bool,
     Int,
     Float,
+    /// Application string eligible for statistics; exposed as VARCHAR-like DDL.
     String,
+    /// Unbounded text payload. Optimizer value statistics intentionally skip it.
+    Text,
     List,
 }
 

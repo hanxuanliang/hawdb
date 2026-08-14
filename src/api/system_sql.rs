@@ -661,7 +661,7 @@ fn execute_system_table_scan(
         SystemTable::RuntimeStatus => runtime_status_rows(context),
         SystemTable::RuntimeCapabilities => runtime_capability_rows(context.runtime),
         SystemTable::GraphStatistics => {
-            graph_statistics_rows(context.catalog, &context.store.statistics())
+            graph_statistics_rows(context.catalog, &context.store.statistics(context.catalog))
         }
         SystemTable::ProjectedGraphs => {
             projected_graph_rows(context.store.projected_graph_statuses())
@@ -1644,6 +1644,7 @@ const fn property_type_name(value_type: PropertyType) -> &'static str {
         PropertyType::Int => "int",
         PropertyType::Float => "float",
         PropertyType::String => "string",
+        PropertyType::Text => "text",
         PropertyType::List => "list",
     }
 }

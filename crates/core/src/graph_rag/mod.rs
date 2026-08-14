@@ -480,6 +480,7 @@ const fn property_type_name(value_type: PropertyType) -> &'static str {
         PropertyType::Int => "int",
         PropertyType::Float => "float",
         PropertyType::String => "string",
+        PropertyType::Text => "text",
         PropertyType::List => "list",
     }
 }

@@ -947,10 +947,12 @@ equality, inequality, range, null, list membership, `CONTAINS`, `STARTS WITH`,
 and `ENDS WITH` predicate subset; disjunctions
 currently execute as a residual filter rather than an index-union access path.
 Per-label/property distinct counts and bounded sorted value histograms are
-computed from canonical records, written to checkpoints, and used by range-index
-costing for selectivity estimates. Histogram sampling is deterministic and
-adaptive by property cardinality, preserving exact small sets and expanding
-sample capacity for medium and large distinct sets. Unique
+computed for eligible scalar values including `VARCHAR`, written to checkpoints,
+and used by range-index costing for selectivity estimates. Declared `TEXT`, list,
+map, and mixed-type groups use the conservative unknown-statistics fallback.
+Histogram sampling is
+deterministic and adaptive by property cardinality, preserving exact small sets
+and expanding sample capacity for medium and large distinct sets. Unique
 node property constraint DDL is implemented through
 `CREATE CONSTRAINT ON :Label(property) ASSERT UNIQUE`; descriptors persist
 through WAL replay and checkpoint, existing duplicate data rejects constraint

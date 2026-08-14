@@ -15,6 +15,7 @@ pub const fn property_type_to_core(value_type: SchemaPropertyType) -> PropertyTy
         SchemaPropertyType::Int => PropertyType::Int,
         SchemaPropertyType::Float => PropertyType::Float,
         SchemaPropertyType::String => PropertyType::String,
+        SchemaPropertyType::Text => PropertyType::Text,
         SchemaPropertyType::List => PropertyType::List,
     }
 }
@@ -66,6 +67,10 @@ mod tests {
         assert_eq!(
             property_type_to_core(SchemaPropertyType::String),
             PropertyType::String
+        );
+        assert_eq!(
+            property_type_to_core(SchemaPropertyType::Text),
+            PropertyType::Text
         );
         assert_eq!(
             property_type_to_core(SchemaPropertyType::List),

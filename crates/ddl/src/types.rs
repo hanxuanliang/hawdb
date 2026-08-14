@@ -20,6 +20,7 @@ pub enum SchemaPropertyType {
     Int,
     Float,
     String,
+    Text,
     List,
 }
 
@@ -31,6 +32,7 @@ impl SchemaPropertyType {
             Self::Int => ":int",
             Self::Float => ":float",
             Self::String => ":string",
+            Self::Text => ":text",
             Self::List => ":list",
         }
     }

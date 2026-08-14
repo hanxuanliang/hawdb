@@ -12,7 +12,11 @@ impl Database {
         &self,
         options: GraphRagSchemaContextOptions,
     ) -> GraphRagSchemaContext {
-        build_graph_rag_schema_context(&self.catalog, &self.store.statistics(), options)
+        build_graph_rag_schema_context(
+            &self.catalog,
+            &self.store.statistics(&self.catalog),
+            options,
+        )
     }
 }
 
@@ -21,7 +25,11 @@ impl DatabaseReadTransaction {
         &self,
         options: GraphRagSchemaContextOptions,
     ) -> GraphRagSchemaContext {
-        build_graph_rag_schema_context(&self.catalog, &self.store.statistics(), options)
+        build_graph_rag_schema_context(
+            &self.catalog,
+            &self.store.statistics(&self.catalog),
+            options,
+        )
     }
 
     pub fn query_generated_graph_rag(
@@ -44,7 +52,10 @@ impl DatabaseReadTransaction {
         parameters: &BTreeMap<String, Value>,
         max_rows: Option<usize>,
     ) -> Result<BoundedReadQueryOutput> {
-        let pinned_epoch = self.store.statistics().computed_at_commit_epoch;
+        let pinned_epoch = self
+            .store
+            .statistics(&self.catalog)
+            .computed_at_commit_epoch;
         if query.context_commit_epoch() != pinned_epoch {
             return Err(SkeinError::Semantic(format!(
                 "GraphRAG schema context is stale: generated at graph epoch {}, pinned at {}",

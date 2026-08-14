@@ -493,8 +493,11 @@ Skein should use a Cascades model similar to Chryso:
 - `CostModel`: scores physical alternatives using graph statistics. The current
   slice applies this to scan-vs-index-seek choices and records a recursive
   selected-plan row/cost summary that includes bounded expand estimates. Basic
-  graph counters are maintained incrementally in the store; richer histogram
-  and path statistics are still derived from canonical records.
+  graph counters are maintained incrementally in the store; scalar histograms
+  and path statistics are still derived from canonical records. Declared
+  `TEXT` and container property groups deliberately use unknown-statistics
+  fallback rather than retaining payloads in the cost model; `VARCHAR` remains
+  eligible for NDV and histogram collection.
 - `PhysicalProperties`: required and delivered ordering, distinctness, and
   binding properties.
 - `PlanNode`: a graph-payload-independent trait for walking selected plans and

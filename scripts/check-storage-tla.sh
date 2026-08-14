@@ -24,6 +24,7 @@ readonly specifications=(
   SkeinRelationalIndexDemandRead
   SkeinIndexRecovery
   SkeinPageCacheAdmission
+  SkeinStatisticsEligibility
   SkeinProjectionDurability
   SkeinCompactionVisibility
   SkeinColumnGroupManifest

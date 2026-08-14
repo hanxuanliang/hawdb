@@ -743,6 +743,9 @@ fn external_optimizer_statistics_refresh_spills_and_persists_exact_stats() {
     };
     let refreshed_statistics = {
         let mut db = Database::open_with_config(&path, config.clone()).unwrap();
+        db.query("CREATE NODE TABLE Memory").unwrap();
+        db.query("CREATE PROPERTY ON NODE TABLE Memory(body) TYPE TEXT")
+            .unwrap();
         db.query("CREATE (:Memory {id: 'memory:one', kind: 'note'})")
             .unwrap();
         db.query("CREATE (:Entity {id: 'entity:rust', kind: 'language'})")
@@ -776,13 +779,20 @@ fn external_optimizer_statistics_refresh_spills_and_persists_exact_stats() {
         })
         .unwrap();
         let mut transaction = db.begin_transaction();
-        for id in 0..32 {
+        for id in 0..128 {
+            let mixed_value = if id == 0 {
+                Value::Int(1)
+            } else {
+                Value::Map(BTreeMap::from([("id".to_string(), Value::Int(id))]))
+            };
             transaction
                 .query_with_params(
-                    "CREATE (:Memory {id: $id, body: $body})",
+                    "CREATE (:Memory {id: $id, body: $body, score: $score, mixed_value: $mixed_value})",
                     &BTreeMap::from([
-                        ("id".to_string(), Value::String(format!("filler:{id}"))),
-                        ("body".to_string(), Value::String("x".repeat(1024))),
+                        ("id".to_string(), Value::String("filler".to_string())),
+                        ("body".to_string(), Value::String("x".repeat(16 * 1024))),
+                        ("score".to_string(), Value::Int(id % 8)),
+                        ("mixed_value".to_string(), mixed_value),
                     ]),
                 )
                 .unwrap();
@@ -824,14 +834,28 @@ fn external_optimizer_statistics_refresh_spills_and_persists_exact_stats() {
         assert!(report.spill_run_count > 1);
         assert!(report.spilled_bytes > 0);
         assert!(report.peak_buffer_bytes <= 8 * 1024);
+        assert!(report.excluded_property_group_count > 0);
         let statistics = db.statistics();
         assert!(statistics.advanced_statistics_complete);
         assert_eq!(statistics.computed_at_commit_epoch, source_epoch);
+        assert!(!statistics
+            .property_distinct_counts
+            .keys()
+            .any(|(_, property)| property == "body"));
+        assert!(!statistics
+            .property_histograms
+            .keys()
+            .any(|(_, property)| property == "body"));
+        assert!(!statistics
+            .property_distinct_counts
+            .keys()
+            .any(|(_, property)| property == "mixed_value"));
         assert_eq!(
             statistics
                 .property_distinct_counts
-                .get(&(crate::schema::LabelId(0), "body".to_string())),
-            Some(&1)
+                .iter()
+                .find_map(|((_, property), count)| (property == "score").then_some(*count)),
+            Some(8)
         );
         assert_eq!(
             statistics

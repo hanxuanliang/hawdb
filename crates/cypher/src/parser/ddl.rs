@@ -12,6 +12,7 @@ const SCHEMA_PROPERTY_TYPES: &[(&str, SchemaPropertyType)] = &[
     ("FLOAT", SchemaPropertyType::Float),
     ("DOUBLE", SchemaPropertyType::Float),
     ("STRING", SchemaPropertyType::String),
+    ("TEXT", SchemaPropertyType::Text),
     ("LIST", SchemaPropertyType::List),
 ];
 
@@ -148,6 +149,13 @@ impl Parser<'_> {
     }
 
     pub(super) fn parse_schema_property_type(&mut self) -> Result<SchemaPropertyType> {
+        if self.consume_keyword("CHARACTER") {
+            self.expect_keyword("VARYING")?;
+            return Ok(SchemaPropertyType::String);
+        }
+        if self.consume_keyword("VARCHAR") {
+            return Ok(SchemaPropertyType::String);
+        }
         self.parse_keyword_choice(SCHEMA_PROPERTY_TYPES, "expected property type")
     }
 

@@ -65,7 +65,10 @@ pub(super) fn generate_query(
             let value_type =
                 validate_property(context, &pattern, predicate.binding, &predicate.property)?;
             if predicate.operator.requires_string_property()
-                && !matches!(value_type, PropertyType::String | PropertyType::Any)
+                && !matches!(
+                    value_type,
+                    PropertyType::String | PropertyType::Text | PropertyType::Any
+                )
             {
                 return Err(
                     GraphRagQueryGenerationError::OperatorRequiresStringProperty {

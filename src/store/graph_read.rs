@@ -257,15 +257,17 @@ impl GraphStore {
         }
     }
 
-    pub fn statistics(&self) -> GraphStatistics {
+    pub fn statistics(&self, catalog: &Catalog) -> GraphStatistics {
         if !self.canonical_base_out_of_core {
             return compute_statistics_with_basic(
                 &self.nodes,
                 &self.relationships,
+                Some(catalog),
                 self.basic_statistics(),
             );
         }
         let mut statistics = self.checkpoint_statistics.clone();
+        retain_supported_property_statistics(&mut statistics, Some(catalog));
         let basic = self.basic_statistics();
         statistics.node_count = basic.node_count;
         statistics.relationship_count = basic.relationship_count;
@@ -309,7 +311,12 @@ impl GraphStore {
         &self,
         catalog: &Catalog,
     ) -> DistinctValueStatisticsConsistencyReport {
-        let recomputed = compute_statistics(&self.nodes, &self.relationships, self.commit_epoch);
+        let recomputed = compute_statistics_for_catalog(
+            &self.nodes,
+            &self.relationships,
+            catalog,
+            self.basic_statistics(),
+        );
         // The index-derived side can only speak for declared properties, so
         // the recomputed side is narrowed to the same keys. Comparing against
         // every property would flag the undeclared ones forever.
@@ -322,10 +329,11 @@ impl GraphStore {
             .collect();
         DistinctValueStatisticsConsistencyReport::new(
             self.commit_epoch,
-            compute_node_property_distinct_counts_from_index(&self.property_index),
+            compute_node_property_distinct_counts_from_index(&self.property_index, catalog),
             recomputed_property_distinct_counts,
             compute_relationship_property_distinct_counts_from_index(
                 &self.relationship_property_index,
+                catalog,
             ),
             recomputed.rel_property_distinct_counts,
         )

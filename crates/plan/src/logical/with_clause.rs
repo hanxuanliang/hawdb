@@ -1362,6 +1362,7 @@ pub(super) fn plan_schema_property_type(
         CypherSchemaPropertyType::Int => SchemaPropertyType::Int,
         CypherSchemaPropertyType::Float => SchemaPropertyType::Float,
         CypherSchemaPropertyType::String => SchemaPropertyType::String,
+        CypherSchemaPropertyType::Text => SchemaPropertyType::Text,
         CypherSchemaPropertyType::List => SchemaPropertyType::List,
     }
 }

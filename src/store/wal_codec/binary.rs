@@ -251,6 +251,7 @@ fn property_type_code(value_type: PropertyType) -> u64 {
         PropertyType::Float => 3,
         PropertyType::String => 4,
         PropertyType::List => 5,
+        PropertyType::Text => 6,
     }
 }
 
@@ -262,6 +263,7 @@ fn decode_property_type_code(code: u64) -> Result<PropertyType> {
         3 => Ok(PropertyType::Float),
         4 => Ok(PropertyType::String),
         5 => Ok(PropertyType::List),
+        6 => Ok(PropertyType::Text),
         code => Err(SkeinError::Storage(format!(
             "invalid property type: {code}"
         ))),
@@ -1026,6 +1028,7 @@ mod tests {
                 PropertyType::Int,
                 PropertyType::Float,
                 PropertyType::String,
+                PropertyType::Text,
                 PropertyType::List,
             ] {
                 samples.push(WalOp::CreateProperty {

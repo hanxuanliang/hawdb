@@ -520,7 +520,7 @@ impl GraphStore {
                 // an index declared before its nodes finds none, and one
                 // declared after them finds exactly the nodes that were
                 // written while the property was unindexed.
-                self.backfill_property_index(label_id, &property);
+                self.backfill_property_index(catalog, label_id, &property);
             }
             WalOp::CreateCompositeIndex { label, properties } => {
                 let label_id = catalog.get_or_create_label(&label);

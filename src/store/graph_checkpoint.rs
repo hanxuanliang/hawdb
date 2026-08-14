@@ -150,7 +150,7 @@ impl GraphStore {
         let checkpoint_statistics = if checkpoint_out_of_core && !self.canonical_base_out_of_core {
             graph_statistics_from_basic(self.basic_statistics(), false)
         } else {
-            self.statistics()
+            self.statistics(catalog)
         };
         let generation = durable.checkpoint_epoch.saturating_add(1);
         let staging_path = durable.prepare_checkpoint_staging(generation)?;

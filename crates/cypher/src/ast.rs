@@ -114,6 +114,7 @@ pub enum SchemaPropertyType {
     Int,
     Float,
     String,
+    Text,
     List,
 }
 

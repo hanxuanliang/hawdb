@@ -1717,7 +1717,7 @@ impl Database {
     }
 
     fn skein_lightning_bootstrap_export_estimated_operations(&self) -> usize {
-        let statistics = self.store.statistics();
+        let statistics = self.store.basic_statistics();
         let graph_total = statistics
             .node_count
             .saturating_add(statistics.relationship_count);
@@ -1741,7 +1741,7 @@ impl Database {
 
     #[cfg(test)]
     pub(crate) fn statistics(&self) -> GraphStatistics {
-        self.store.statistics()
+        self.store.statistics(&self.catalog)
     }
 
     pub fn refresh_optimizer_statistics_external(
@@ -1750,7 +1750,9 @@ impl Database {
     ) -> Result<crate::store::OptimizerStatisticsRefreshReport> {
         self.ensure_writable()?;
         let previous_statistics = self.store.checkpoint_statistics_snapshot();
-        let mut report = self.store.refresh_optimizer_statistics_external(options)?;
+        let mut report = self
+            .store
+            .refresh_optimizer_statistics_external(&self.catalog, options)?;
         if let Err(error) = self.checkpoint() {
             self.store
                 .replace_checkpoint_statistics(previous_statistics);
@@ -19426,7 +19428,7 @@ impl DatabaseReadTransaction {
 
     #[cfg(test)]
     pub(crate) fn statistics(&self) -> GraphStatistics {
-        self.store.statistics()
+        self.store.statistics(&self.catalog)
     }
 
     #[cfg(test)]

@@ -347,8 +347,12 @@ and retain their historical complete-statistics interpretation.
 optimizer statistics over canonical base plus WAL delta with explicit memory,
 input-record, generated-fact, path-expansion, spill-byte, and spill-run limits.
 It emits sorted temporary runs, performs a bounded merge for exact distinct and
-path counts, retains bounded deterministic histograms, and removes every run on
-success or failure. The refreshed statistics become visible only after a
+path counts, retains bounded deterministic histograms for eligible scalar
+properties including `VARCHAR`, and removes every run on success or failure.
+Declared `TEXT`, list, map, and mixed-type property groups are excluded before
+large values can be cloned,
+encoded, sorted, or spilled; the bounded exclusion set is charged to the same
+memory budget. The refreshed statistics become visible only after a
 generation checkpoint publishes them; checkpoint failure restores the prior
 live statistics. The report records work, spill, output-state, and publication
 measurements. The operation rejects non-durable or materialized stores because
@@ -576,11 +580,14 @@ writing WAL. Internal background loops can expose the same work as a
 bounded background/scheduled wrappers that bind QoS admission to the same
 descriptor rebuild budget. Conjunctive range seeks keep the complete `AND`
 predicate as a residual filter while using merged lower and upper bounds as the
-access path. Statistics now include per-label/property and
+access path. Statistics now include eligible-scalar per-label/property and
 per-relationship-type/property distinct counts, one-hop path source/target
 coverage distinct counts, bounded multi-hop path source/target coverage
 distinct counts, bounded sorted value histograms, and exact-versus-sampled
-markers. Histograms use deterministic adaptive samples:
+markers. Declared `TEXT` and container property values do not produce generic
+NDV or histogram statistics; `VARCHAR` remains eligible and text indexes remain
+independent. Histograms use
+deterministic adaptive samples:
 small distinct sets remain exact, medium sets keep up to 256 values, and large
 sets keep up to 512 values while always retaining the minimum and maximum
 sampled bounds. Range costing uses these histograms for selectivity estimates.

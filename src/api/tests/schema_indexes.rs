@@ -199,6 +199,8 @@ fn schema_ddl_replays_from_wal_without_data_rows() {
         db.query("CREATE RELATIONSHIP TABLE MENTIONS").unwrap();
         db.query("CREATE PROPERTY ON NODE TABLE Memory(id) TYPE INT NOT NULL")
             .unwrap();
+        db.query("CREATE PROPERTY ON NODE TABLE Memory(body) TYPE TEXT")
+            .unwrap();
         db.query("CREATE PROPERTY ON RELATIONSHIP TABLE MENTIONS(weight) TYPE INT")
             .unwrap();
         db.query("CREATE INDEX ON :Memory(id)").unwrap();
@@ -241,6 +243,9 @@ fn schema_ddl_replays_from_wal_without_data_rows() {
             .query("CREATE PROPERTY ON NODE TABLE Memory(id) TYPE INT NOT NULL")
             .unwrap();
         assert_eq!(property.rows[0].get("created"), Some(&Value::Bool(false)));
+        assert!(db.property_descriptors().iter().any(|property| {
+            property.name == "body" && property.value_type == PropertyType::Text
+        }));
         let property = db
             .query("CREATE PROPERTY ON RELATIONSHIP TABLE MENTIONS(weight) TYPE INT")
             .unwrap();
@@ -284,6 +289,8 @@ fn schema_ddl_survives_checkpoint_without_wal() {
         db.query("CREATE RELATIONSHIP TABLE MENTIONS").unwrap();
         db.query("CREATE PROPERTY ON NODE TABLE Memory(id) TYPE INT NOT NULL")
             .unwrap();
+        db.query("CREATE PROPERTY ON NODE TABLE Memory(body) TYPE TEXT")
+            .unwrap();
         db.query("CREATE PROPERTY ON RELATIONSHIP TABLE MENTIONS(weight) TYPE INT")
             .unwrap();
         db.query("CREATE INDEX ON :Memory(id)").unwrap();
@@ -325,6 +332,9 @@ fn schema_ddl_survives_checkpoint_without_wal() {
             .query("CREATE PROPERTY ON NODE TABLE Memory(id) TYPE INT NOT NULL")
             .unwrap();
         assert_eq!(property.rows[0].get("created"), Some(&Value::Bool(false)));
+        assert!(db.property_descriptors().iter().any(|property| {
+            property.name == "body" && property.value_type == PropertyType::Text
+        }));
         let property = db
             .query("CREATE PROPERTY ON RELATIONSHIP TABLE MENTIONS(weight) TYPE INT")
             .unwrap();
@@ -1941,6 +1951,89 @@ fn property_histograms_are_bounded_deterministic_samples() {
         .find_map(|((_, property), sampled)| (property == "exact_score").then_some(sampled))
         .unwrap();
     assert!(!sampled);
+}
+
+#[test]
+fn optimizer_statistics_exclude_text_large_and_mixed_property_groups() {
+    let mut db = Database::new();
+    db.query("CREATE NODE TABLE Metric").unwrap();
+    db.query("CREATE RELATIONSHIP TABLE MEASURES").unwrap();
+    db.query("CREATE PROPERTY ON NODE TABLE Metric(text_value) TYPE TEXT")
+        .unwrap();
+    db.query("CREATE PROPERTY ON NODE TABLE Metric(varchar_value) TYPE VARCHAR")
+        .unwrap();
+    db.query("CREATE PROPERTY ON RELATIONSHIP TABLE MEASURES(text_value) TYPE TEXT")
+        .unwrap();
+    db.query(
+        "CREATE PROPERTY ON RELATIONSHIP TABLE MEASURES(varchar_value) TYPE CHARACTER VARYING",
+    )
+    .unwrap();
+    db.query_with_params(
+        "CREATE (:Metric {score: 1, text_value: $text, varchar_value: 'short', list_value: $list, map_value: $map, mixed_value: 1})",
+        &BTreeMap::from([
+            ("text".to_string(), Value::String("large text".to_string())),
+            (
+                "list".to_string(),
+                Value::List(vec![Value::Int(1), Value::Int(2)]),
+            ),
+            (
+                "map".to_string(),
+                Value::Map(BTreeMap::from([("key".to_string(), Value::Int(1))])),
+            ),
+        ]),
+    )
+    .unwrap();
+    db.query_with_params(
+        "CREATE (:Metric {score: 2, varchar_value: 'other', mixed_value: $mixed})",
+        &BTreeMap::from([(
+            "mixed".to_string(),
+            Value::Map(BTreeMap::from([("nested".to_string(), Value::Int(1))])),
+        )]),
+    )
+    .unwrap();
+    db.query(
+        "CREATE (:Source)-[:MEASURES {score: 3, text_value: 'payload', varchar_value: 'kind', list_value: [1, 2]}]->(:Target)",
+    )
+    .unwrap();
+
+    let statistics = db.statistics();
+    let node_properties = statistics
+        .property_distinct_counts
+        .keys()
+        .map(|(_, property)| property.as_str())
+        .collect::<BTreeSet<_>>();
+    let relationship_properties = statistics
+        .rel_property_distinct_counts
+        .keys()
+        .map(|(_, property)| property.as_str())
+        .collect::<BTreeSet<_>>();
+
+    assert!(node_properties.contains("score"));
+    assert!(node_properties.contains("varchar_value"));
+    assert!(!node_properties.contains("text_value"));
+    assert!(!node_properties.contains("list_value"));
+    assert!(!node_properties.contains("map_value"));
+    assert!(!node_properties.contains("mixed_value"));
+    assert_eq!(
+        relationship_properties,
+        BTreeSet::from(["score", "varchar_value"])
+    );
+    assert!(statistics
+        .property_histograms
+        .values()
+        .flatten()
+        .all(|value| matches!(
+            value,
+            Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::String(_)
+        )));
+    assert!(statistics
+        .rel_property_histograms
+        .values()
+        .flatten()
+        .all(|value| matches!(
+            value,
+            Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::String(_)
+        )));
 }
 
 #[test]

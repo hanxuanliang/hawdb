@@ -711,6 +711,7 @@ impl GraphStore {
         if saw_checkpoint_statistics {
             self.checkpoint_statistics.advanced_statistics_complete =
                 loaded_statistics_complete.unwrap_or(true);
+            retain_supported_property_statistics(&mut self.checkpoint_statistics, Some(catalog));
         }
         if loaded_generation != Some(expected_generation) {
             return Err(SkeinError::Storage(format!(

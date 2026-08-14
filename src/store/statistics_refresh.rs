@@ -55,6 +55,8 @@ pub struct OptimizerStatisticsRefreshReport {
     pub output_statistics_bytes: usize,
     pub property_group_count: usize,
     pub relationship_property_group_count: usize,
+    pub excluded_property_group_count: usize,
+    pub excluded_relationship_property_group_count: usize,
     pub path_group_count: usize,
     pub bounded_path_group_count: usize,
     pub checkpoint_persisted: bool,
@@ -76,6 +78,8 @@ impl OptimizerStatisticsRefreshReport {
             "output_statistics_bytes": self.output_statistics_bytes,
             "property_group_count": self.property_group_count,
             "relationship_property_group_count": self.relationship_property_group_count,
+            "excluded_property_group_count": self.excluded_property_group_count,
+            "excluded_relationship_property_group_count": self.excluded_relationship_property_group_count,
             "path_group_count": self.path_group_count,
             "bounded_path_group_count": self.bounded_path_group_count,
             "checkpoint_persisted": self.checkpoint_persisted,
@@ -86,6 +90,7 @@ impl OptimizerStatisticsRefreshReport {
 impl GraphStore {
     pub fn refresh_optimizer_statistics_external(
         &mut self,
+        catalog: &Catalog,
         options: &OptimizerStatisticsRefreshOptions,
     ) -> Result<OptimizerStatisticsRefreshReport> {
         options.validate()?;
@@ -102,18 +107,14 @@ impl GraphStore {
 
         let source_commit_epoch = self.commit_epoch;
         let spill = RefreshSpillDirectory::create(&options.spill_directory)?;
-        let mut writer = StatsRunWriter::new(spill.path(), options);
+        let mut writer = StatsRunWriter::new(spill.path(), catalog, options);
         let mut work = RefreshWork::new(options);
 
         self.try_visit_nodes_owned(None, |node| {
             work.read_node()?;
             for label in &node.labels {
                 for (property, value) in &node.properties {
-                    writer.push(StatsRecord::NodeProperty {
-                        label: *label,
-                        property: property.clone(),
-                        value: value.clone(),
-                    })?;
+                    writer.push_node_property(*label, property, value)?;
                 }
             }
             Ok(GraphScanControl::Continue)
@@ -130,11 +131,7 @@ impl GraphStore {
                 node: relationship.target,
             })?;
             for (property, value) in &relationship.properties {
-                writer.push(StatsRecord::RelProperty {
-                    rel_type: relationship.rel_type,
-                    property: property.clone(),
-                    value: value.clone(),
-                })?;
+                writer.push_relationship_property(relationship.rel_type, property, value)?;
             }
             let source = self.node_owned(relationship.source)?.ok_or_else(|| {
                 SkeinError::Storage(format!(
@@ -225,6 +222,9 @@ impl GraphStore {
                 .checkpoint_statistics
                 .rel_property_distinct_counts
                 .len(),
+            excluded_property_group_count: merge_report.excluded_property_group_count,
+            excluded_relationship_property_group_count: merge_report
+                .excluded_relationship_property_group_count,
             path_group_count: self.checkpoint_statistics.path_counts.len(),
             bounded_path_group_count: self.checkpoint_statistics.bounded_path_counts.len(),
             checkpoint_persisted: false,
@@ -600,9 +600,12 @@ fn parse_usize_field(raw: &str, name: &str) -> Result<usize> {
 
 struct StatsRunWriter<'a> {
     directory: &'a Path,
+    catalog: &'a Catalog,
     options: &'a OptimizerStatisticsRefreshOptions,
     chunk: Vec<StatsRecord>,
     chunk_bytes: usize,
+    excluded_property_groups: BTreeSet<PropertyGroupKey>,
+    excluded_property_group_bytes: usize,
     peak_buffer_bytes: usize,
     generated_facts: u64,
     spilled_bytes: u64,
@@ -610,17 +613,101 @@ struct StatsRunWriter<'a> {
 }
 
 impl<'a> StatsRunWriter<'a> {
-    fn new(directory: &'a Path, options: &'a OptimizerStatisticsRefreshOptions) -> Self {
+    fn new(
+        directory: &'a Path,
+        catalog: &'a Catalog,
+        options: &'a OptimizerStatisticsRefreshOptions,
+    ) -> Self {
         Self {
             directory,
+            catalog,
             options,
             chunk: Vec::new(),
             chunk_bytes: 0,
+            excluded_property_groups: BTreeSet::new(),
+            excluded_property_group_bytes: 0,
             peak_buffer_bytes: 0,
             generated_facts: 0,
             spilled_bytes: 0,
             runs: Vec::new(),
         }
+    }
+
+    fn push_node_property(&mut self, label: LabelId, property: &str, value: &Value) -> Result<()> {
+        let key = PropertyGroupKey::Node(label, property.to_string());
+        if !node_property_supports_optimizer_statistics(Some(self.catalog), label, property, value)
+        {
+            return self.exclude_property_group(key);
+        }
+        if self.excluded_property_groups.contains(&key) {
+            return Ok(());
+        }
+        let PropertyGroupKey::Node(_, property) = key else {
+            unreachable!("node property key changed variant")
+        };
+        self.push(StatsRecord::NodeProperty {
+            label,
+            property,
+            value: value.clone(),
+        })
+    }
+
+    fn push_relationship_property(
+        &mut self,
+        rel_type: RelTypeId,
+        property: &str,
+        value: &Value,
+    ) -> Result<()> {
+        let key = PropertyGroupKey::Relationship(rel_type, property.to_string());
+        if !relationship_property_supports_optimizer_statistics(
+            Some(self.catalog),
+            rel_type,
+            property,
+            value,
+        ) {
+            return self.exclude_property_group(key);
+        }
+        if self.excluded_property_groups.contains(&key) {
+            return Ok(());
+        }
+        let PropertyGroupKey::Relationship(_, property) = key else {
+            unreachable!("relationship property key changed variant")
+        };
+        self.push(StatsRecord::RelProperty {
+            rel_type,
+            property,
+            value: value.clone(),
+        })
+    }
+
+    fn exclude_property_group(&mut self, key: PropertyGroupKey) -> Result<()> {
+        if self.excluded_property_groups.contains(&key) {
+            return Ok(());
+        }
+        let key_bytes = key.estimated_bytes();
+        if !self.chunk.is_empty()
+            && self
+                .excluded_property_group_bytes
+                .saturating_add(key_bytes)
+                .saturating_add(self.chunk_bytes)
+                > self.options.memory_budget_bytes
+        {
+            self.flush()?;
+        }
+        let next_excluded_bytes = self.excluded_property_group_bytes.saturating_add(key_bytes);
+        if next_excluded_bytes > self.options.memory_budget_bytes {
+            return Err(SkeinError::Execution(format!(
+                "optimizer statistics excluded-property state exceeds memory_budget_bytes {}",
+                self.options.memory_budget_bytes
+            )));
+        }
+        self.excluded_property_groups.insert(key);
+        self.excluded_property_group_bytes = next_excluded_bytes;
+        self.peak_buffer_bytes = self.peak_buffer_bytes.max(
+            self.chunk_bytes
+                .saturating_add(self.excluded_property_group_bytes),
+        );
+        Ok(())
     }
 
     fn push(&mut self, record: StatsRecord) -> Result<()> {
@@ -632,20 +719,29 @@ impl<'a> StatsRunWriter<'a> {
             )));
         }
         let record_bytes = record.estimated_bytes();
-        if record_bytes > self.options.memory_budget_bytes {
+        if record_bytes.saturating_add(self.excluded_property_group_bytes)
+            > self.options.memory_budget_bytes
+        {
             return Err(SkeinError::Execution(format!(
                 "optimizer statistics fact uses {record_bytes} bytes, exceeding memory_budget_bytes {}",
                 self.options.memory_budget_bytes
             )));
         }
         if !self.chunk.is_empty()
-            && self.chunk_bytes.saturating_add(record_bytes) > self.options.memory_budget_bytes
+            && self
+                .chunk_bytes
+                .saturating_add(record_bytes)
+                .saturating_add(self.excluded_property_group_bytes)
+                > self.options.memory_budget_bytes
         {
             self.flush()?;
         }
         self.chunk.push(record);
         self.chunk_bytes = self.chunk_bytes.saturating_add(record_bytes);
-        self.peak_buffer_bytes = self.peak_buffer_bytes.max(self.chunk_bytes);
+        self.peak_buffer_bytes = self.peak_buffer_bytes.max(
+            self.chunk_bytes
+                .saturating_add(self.excluded_property_group_bytes),
+        );
         Ok(())
     }
 
@@ -727,7 +823,24 @@ impl<'a> StatsRunWriter<'a> {
                 heap.push(Reverse((record, run)));
             }
         }
-        let mut accumulator = StatsAccumulator::new(statistics, self.options.memory_budget_bytes);
+        let excluded_property_group_count = self
+            .excluded_property_groups
+            .iter()
+            .filter(|key| matches!(key, PropertyGroupKey::Node(_, _)))
+            .count();
+        let excluded_relationship_property_group_count = self
+            .excluded_property_groups
+            .len()
+            .saturating_sub(excluded_property_group_count);
+        let accumulator_memory_budget = self
+            .options
+            .memory_budget_bytes
+            .saturating_sub(self.excluded_property_group_bytes);
+        let mut accumulator = StatsAccumulator::new(
+            statistics,
+            accumulator_memory_budget,
+            self.excluded_property_groups,
+        );
         while let Some(Reverse((record, run))) = heap.pop() {
             accumulator.consume(record)?;
             if let Some(next) = read_next_record(&mut readers[run])? {
@@ -741,10 +854,13 @@ impl<'a> StatsRunWriter<'a> {
                 generated_facts: self.generated_facts,
                 spill_run_count: self.runs.len(),
                 spilled_bytes: self.spilled_bytes,
-                peak_buffer_bytes: self
-                    .peak_buffer_bytes
-                    .max(accumulator_peak_bytes(output_statistics_bytes)),
+                peak_buffer_bytes: self.peak_buffer_bytes.max(
+                    accumulator_peak_bytes(output_statistics_bytes)
+                        .saturating_add(self.excluded_property_group_bytes),
+                ),
                 output_statistics_bytes,
+                excluded_property_group_count,
+                excluded_relationship_property_group_count,
             },
         ))
     }
@@ -772,12 +888,23 @@ struct StatsMergeReport {
     spilled_bytes: u64,
     peak_buffer_bytes: usize,
     output_statistics_bytes: usize,
+    excluded_property_group_count: usize,
+    excluded_relationship_property_group_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum PropertyGroupKey {
     Node(LabelId, String),
     Relationship(RelTypeId, String),
+}
+
+impl PropertyGroupKey {
+    fn estimated_bytes(&self) -> usize {
+        let property_bytes = match self {
+            Self::Node(_, property) | Self::Relationship(_, property) => property.len(),
+        };
+        property_bytes.saturating_add(96)
+    }
 }
 
 struct PropertyGroup {
@@ -792,16 +919,22 @@ struct StatsAccumulator {
     statistics: GraphStatistics,
     memory_budget_bytes: usize,
     output_statistics_bytes: usize,
+    excluded_property_groups: BTreeSet<PropertyGroupKey>,
     current_property: Option<PropertyGroup>,
     last_distinct_record: Option<StatsRecord>,
 }
 
 impl StatsAccumulator {
-    fn new(statistics: GraphStatistics, memory_budget_bytes: usize) -> Self {
+    fn new(
+        statistics: GraphStatistics,
+        memory_budget_bytes: usize,
+        excluded_property_groups: BTreeSet<PropertyGroupKey>,
+    ) -> Self {
         Self {
             statistics,
             memory_budget_bytes,
             output_statistics_bytes: 0,
+            excluded_property_groups,
             current_property: None,
             last_distinct_record: None,
         }
@@ -827,6 +960,10 @@ impl StatsAccumulator {
     }
 
     fn consume_property(&mut self, key: PropertyGroupKey, value: Value) -> Result<()> {
+        if self.excluded_property_groups.contains(&key) {
+            self.finish_property_group()?;
+            return Ok(());
+        }
         if self
             .current_property
             .as_ref()

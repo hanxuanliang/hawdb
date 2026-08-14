@@ -585,7 +585,7 @@ impl GraphStore {
             }])?;
         }
         let id = catalog.get_or_create_property_index(label_id, property);
-        self.backfill_property_index(label_id, property);
+        self.backfill_property_index(catalog, label_id, property);
         self.commit_epoch += 1;
         Ok(id)
     }
@@ -926,9 +926,15 @@ impl GraphStore {
     /// before the declaration. The pruner treats a declared index as
     /// complete, so an unbackfilled one makes queries omit rows rather than
     /// run slowly.
-    pub(super) fn backfill_property_index(&mut self, label_id: LabelId, property: &str) {
+    pub(super) fn backfill_property_index(
+        &mut self,
+        catalog: &Catalog,
+        label_id: LabelId,
+        property: &str,
+    ) {
         let nodes = self.nodes.values().cloned().collect::<Vec<_>>();
         let mut distinct = BTreeSet::new();
+        let mut statistics_eligible = true;
         for node in nodes {
             if !node.labels.contains(&label_id) {
                 continue;
@@ -936,7 +942,19 @@ impl GraphStore {
             let Some(value) = node.properties.get(property) else {
                 continue;
             };
-            distinct.insert(value.clone());
+            if statistics_eligible {
+                if node_property_supports_optimizer_statistics(
+                    Some(catalog),
+                    label_id,
+                    property,
+                    value,
+                ) {
+                    distinct.insert(value.clone());
+                } else {
+                    statistics_eligible = false;
+                    distinct.clear();
+                }
+            }
             self.property_index
                 .entry_or_default((label_id, property.to_string(), value.clone()))
                 .insert(node.id);
@@ -946,7 +964,7 @@ impl GraphStore {
         // the optimizer on its no-statistics fallback for a property the user
         // just asked to index, which is the case where a good estimate is
         // most likely to be wanted.
-        if distinct.is_empty() {
+        if !statistics_eligible || distinct.is_empty() {
             self.checkpoint_statistics
                 .property_distinct_counts
                 .remove(&(label_id, property.to_string()));

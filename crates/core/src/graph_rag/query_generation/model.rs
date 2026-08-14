@@ -237,7 +237,7 @@ fn value_matches_property_type(value: &Value, value_type: PropertyType) -> bool 
             PropertyType::Bool => matches!(value, Value::Bool(_)),
             PropertyType::Int => matches!(value, Value::Int(_)),
             PropertyType::Float => matches!(value, Value::Int(_) | Value::Float(_)),
-            PropertyType::String => matches!(value, Value::String(_)),
+            PropertyType::String | PropertyType::Text => matches!(value, Value::String(_)),
             PropertyType::List => matches!(value, Value::List(_)),
         }
 }
@@ -261,6 +261,7 @@ fn parameter_requirement_name(requirement: &GraphRagQueryParameterRequirement) -
         PropertyType::Int => "int",
         PropertyType::Float => "float",
         PropertyType::String => "string",
+        PropertyType::Text => "text",
         PropertyType::List => "list",
     };
     match requirement.cardinality {

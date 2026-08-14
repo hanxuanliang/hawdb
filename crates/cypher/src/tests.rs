@@ -415,6 +415,26 @@ fn parses_schema_ddl() {
         })
     );
     assert_eq!(
+        parse("CREATE PROPERTY ON NODE TABLE Memory(title) TYPE CHARACTER VARYING").unwrap(),
+        Statement::CreateProperty(CreateProperty {
+            table_kind: SchemaTableKind::Node,
+            table: "Memory".to_string(),
+            property: "title".to_string(),
+            value_type: SchemaPropertyType::String,
+            nullable: true,
+        })
+    );
+    assert_eq!(
+        parse("CREATE PROPERTY ON NODE TABLE Memory(body) TYPE TEXT").unwrap(),
+        Statement::CreateProperty(CreateProperty {
+            table_kind: SchemaTableKind::Node,
+            table: "Memory".to_string(),
+            property: "body".to_string(),
+            value_type: SchemaPropertyType::Text,
+            nullable: true,
+        })
+    );
+    assert_eq!(
         parse("CREATE INDEX ON :Memory(id)").unwrap(),
         Statement::CreateIndex(CreateIndex {
             label: "Memory".to_string(),

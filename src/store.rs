@@ -2899,6 +2899,7 @@ fn validate_property_schema_value(
             | (PropertyType::Int, Value::Int(_))
             | (PropertyType::Float, Value::Float(_))
             | (PropertyType::String, Value::String(_))
+            | (PropertyType::Text, Value::String(_))
             | (PropertyType::List, Value::List(_))
     );
     if matches {
@@ -3173,6 +3174,7 @@ fn validate_unique_relationship_property_streaming(
     validation_error.map_or(Ok(()), Err)
 }
 
+#[cfg(test)]
 fn compute_statistics(
     nodes: &CowSegmentedMap<NodeId, NodeRecord>,
     relationships: &CowSegmentedMap<RelId, RelRecord>,
@@ -3181,8 +3183,18 @@ fn compute_statistics(
     compute_statistics_with_basic(
         nodes,
         relationships,
+        None,
         compute_basic_statistics(nodes, relationships, computed_at_commit_epoch),
     )
+}
+
+fn compute_statistics_for_catalog(
+    nodes: &CowSegmentedMap<NodeId, NodeRecord>,
+    relationships: &CowSegmentedMap<RelId, RelRecord>,
+    catalog: &Catalog,
+    basic_statistics: BasicGraphStatistics,
+) -> GraphStatistics {
+    compute_statistics_with_basic(nodes, relationships, Some(catalog), basic_statistics)
 }
 
 fn graph_statistics_from_basic(
@@ -3204,11 +3216,14 @@ fn graph_statistics_from_basic(
 fn compute_statistics_with_basic(
     nodes: &CowSegmentedMap<NodeId, NodeRecord>,
     relationships: &CowSegmentedMap<RelId, RelRecord>,
+    catalog: Option<&Catalog>,
     basic_statistics: BasicGraphStatistics,
 ) -> GraphStatistics {
     let mut statistics = graph_statistics_from_basic(basic_statistics, true);
     let mut property_values = BTreeMap::<(LabelId, String), BTreeSet<Value>>::new();
     let mut rel_property_values = BTreeMap::<(RelTypeId, String), BTreeSet<Value>>::new();
+    let mut excluded_property_groups = BTreeSet::<(LabelId, String)>::new();
+    let mut excluded_rel_property_groups = BTreeSet::<(RelTypeId, String)>::new();
     let mut rel_type_sources = BTreeMap::<RelTypeId, BTreeSet<NodeId>>::new();
     let mut rel_type_targets = BTreeMap::<RelTypeId, BTreeSet<NodeId>>::new();
     let mut path_sources = BTreeMap::<(LabelId, RelTypeId, LabelId), BTreeSet<NodeId>>::new();
@@ -3218,10 +3233,16 @@ fn compute_statistics_with_basic(
     for node in nodes.values() {
         for label_id in &node.labels {
             for (property, value) in &node.properties {
-                property_values
-                    .entry((*label_id, property.clone()))
-                    .or_default()
-                    .insert(value.clone());
+                let key = (*label_id, property.clone());
+                collect_property_statistic_value(
+                    &mut property_values,
+                    &mut excluded_property_groups,
+                    key,
+                    value,
+                    node_property_supports_optimizer_statistics(
+                        catalog, *label_id, property, value,
+                    ),
+                );
             }
         }
     }
@@ -3239,10 +3260,19 @@ fn compute_statistics_with_basic(
             .or_default()
             .push(relationship.target);
         for (property, value) in &relationship.properties {
-            rel_property_values
-                .entry((relationship.rel_type, property.clone()))
-                .or_default()
-                .insert(value.clone());
+            let key = (relationship.rel_type, property.clone());
+            collect_property_statistic_value(
+                &mut rel_property_values,
+                &mut excluded_rel_property_groups,
+                key,
+                value,
+                relationship_property_supports_optimizer_statistics(
+                    catalog,
+                    relationship.rel_type,
+                    property,
+                    value,
+                ),
+            );
         }
         if let (Some(source), Some(target)) = (
             nodes.get(&relationship.source),
@@ -3317,24 +3347,184 @@ fn compute_statistics_with_basic(
     statistics
 }
 
+fn property_value_supports_optimizer_statistics(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::String(_) => true,
+        Value::List(_) | Value::Map(_) => false,
+    }
+}
+
+fn property_type_supports_optimizer_statistics(value_type: PropertyType) -> bool {
+    !matches!(value_type, PropertyType::Text | PropertyType::List)
+}
+
+fn node_property_supports_optimizer_statistics(
+    catalog: Option<&Catalog>,
+    label_id: LabelId,
+    property: &str,
+    value: &Value,
+) -> bool {
+    property_supports_optimizer_statistics(
+        catalog.and_then(|catalog| {
+            let label = catalog.label_name(label_id)?;
+            declared_property_type(catalog, TableKind::Node, label, property)
+        }),
+        value,
+    )
+}
+
+fn relationship_property_supports_optimizer_statistics(
+    catalog: Option<&Catalog>,
+    rel_type_id: RelTypeId,
+    property: &str,
+    value: &Value,
+) -> bool {
+    property_supports_optimizer_statistics(
+        catalog.and_then(|catalog| {
+            let rel_type = catalog.rel_type_name(rel_type_id)?;
+            declared_property_type(catalog, TableKind::Relationship, rel_type, property)
+        }),
+        value,
+    )
+}
+
+fn declared_property_type(
+    catalog: &Catalog,
+    table_kind: TableKind,
+    table: &str,
+    property: &str,
+) -> Option<PropertyType> {
+    let table_id = catalog.table_id(table_kind, table)?;
+    let property_id = catalog.property_descriptor_id(table_id, property)?;
+    catalog
+        .property_descriptor(property_id)
+        .map(|descriptor| descriptor.value_type)
+}
+
+fn property_supports_optimizer_statistics(
+    declared_type: Option<PropertyType>,
+    value: &Value,
+) -> bool {
+    declared_type.is_none_or(property_type_supports_optimizer_statistics)
+        && property_value_supports_optimizer_statistics(value)
+}
+
+fn collect_property_statistic_value<K: Ord>(
+    values: &mut BTreeMap<K, BTreeSet<Value>>,
+    excluded: &mut BTreeSet<K>,
+    key: K,
+    value: &Value,
+    eligible: bool,
+) {
+    if !eligible {
+        values.remove(&key);
+        excluded.insert(key);
+    } else if !excluded.contains(&key) {
+        values.entry(key).or_default().insert(value.clone());
+    }
+}
+
+fn retain_supported_property_statistics(
+    statistics: &mut GraphStatistics,
+    catalog: Option<&Catalog>,
+) {
+    retain_supported_property_statistics_group(
+        &mut statistics.property_distinct_counts,
+        &mut statistics.property_histograms,
+        &mut statistics.sampled_property_histograms,
+        |(label_id, property), value| {
+            node_property_supports_optimizer_statistics(catalog, *label_id, property, value)
+        },
+    );
+    retain_supported_property_statistics_group(
+        &mut statistics.rel_property_distinct_counts,
+        &mut statistics.rel_property_histograms,
+        &mut statistics.sampled_rel_property_histograms,
+        |(rel_type_id, property), value| {
+            relationship_property_supports_optimizer_statistics(
+                catalog,
+                *rel_type_id,
+                property,
+                value,
+            )
+        },
+    );
+}
+
+fn retain_supported_property_statistics_group<K: Ord + Clone>(
+    distinct_counts: &mut BTreeMap<K, u64>,
+    histograms: &mut BTreeMap<K, Vec<Value>>,
+    sampled_histograms: &mut BTreeMap<K, bool>,
+    mut supports: impl FnMut(&K, &Value) -> bool,
+) {
+    let complete_groups = histograms
+        .iter()
+        .filter(|(key, values)| {
+            distinct_counts.contains_key(*key)
+                && sampled_histograms.contains_key(*key)
+                && !values.is_empty()
+                && values.iter().all(|value| supports(key, value))
+        })
+        .map(|(key, _)| key.clone())
+        .collect::<BTreeSet<_>>();
+    distinct_counts.retain(|key, _| complete_groups.contains(key));
+    histograms.retain(|key, _| complete_groups.contains(key));
+    sampled_histograms.retain(|key, _| complete_groups.contains(key));
+}
+
 fn compute_node_property_distinct_counts_from_index(
     property_index: &NodePropertyIndex,
+    catalog: &Catalog,
 ) -> BTreeMap<(LabelId, String), u64> {
-    let mut counts = BTreeMap::new();
-    for (label_id, property, _) in property_index.keys() {
-        *counts.entry((*label_id, property.clone())).or_default() += 1;
-    }
-    counts
+    compute_supported_property_distinct_counts(
+        property_index
+            .keys()
+            .map(|(label, property, value)| ((*label, property.clone()), value)),
+        |(label, property), value| {
+            node_property_supports_optimizer_statistics(Some(catalog), *label, property, value)
+        },
+    )
 }
 
 fn compute_relationship_property_distinct_counts_from_index(
     relationship_property_index: &RelationshipPropertyIndex,
+    catalog: &Catalog,
 ) -> BTreeMap<(RelTypeId, String), u64> {
-    let mut counts = BTreeMap::new();
-    for (rel_type, property, _) in relationship_property_index.keys() {
-        *counts.entry((*rel_type, property.clone())).or_default() += 1;
+    compute_supported_property_distinct_counts(
+        relationship_property_index
+            .keys()
+            .map(|(rel_type, property, value)| ((*rel_type, property.clone()), value)),
+        |(rel_type, property), value| {
+            relationship_property_supports_optimizer_statistics(
+                Some(catalog),
+                *rel_type,
+                property,
+                value,
+            )
+        },
+    )
+}
+
+fn compute_supported_property_distinct_counts<'a, K: Ord>(
+    entries: impl Iterator<Item = (K, &'a Value)>,
+    mut supports: impl FnMut(&K, &Value) -> bool,
+) -> BTreeMap<K, u64> {
+    let mut counts = BTreeMap::<K, Option<u64>>::new();
+    for (key, value) in entries {
+        let eligible = supports(&key, value);
+        let count = counts.entry(key).or_insert(Some(0));
+        if eligible {
+            if let Some(count) = count {
+                *count = count.saturating_add(1);
+            }
+        } else {
+            *count = None;
+        }
     }
     counts
+        .into_iter()
+        .filter_map(|(key, count)| count.map(|count| (key, count)))
+        .collect()
 }
 
 /// Recomputes the node property index the way the write path maintains it:
@@ -4950,6 +5140,7 @@ fn encode_property_type(value_type: PropertyType) -> &'static str {
         PropertyType::Int => "int",
         PropertyType::Float => "float",
         PropertyType::String => "string",
+        PropertyType::Text => "text",
         PropertyType::List => "list",
     }
 }
@@ -4961,6 +5152,7 @@ fn decode_property_type(input: &str) -> Result<PropertyType> {
         "int" => Ok(PropertyType::Int),
         "float" => Ok(PropertyType::Float),
         "string" => Ok(PropertyType::String),
+        "text" => Ok(PropertyType::Text),
         "list" => Ok(PropertyType::List),
         _ => Err(SkeinError::Storage(format!(
             "invalid property type: {input}"
@@ -5318,18 +5510,18 @@ mod tests {
         canonical_adjacency_artifact_generation_file, canonical_adjacency_manifest_generation_file,
         checksum_bytes, compute_statistics, encode_durable_text,
         property_projection_artifact_generation_file, property_spill_artifact_generation_file,
-        read_durable_text, restore_storage_backup, set_checkpoint_failpoint,
-        set_wal_apply_failpoint, source_scan, AdjacencyConsolidationPlan, AdjacencyDirection,
-        AdjacencyGroupStats, AdjacencyLayout, CheckpointPublishStage, ConnectedNodesCreate,
-        CowSegmentedMap, DatabaseDoctor, DegreeStatisticsEntry, DegreeStatisticsKey,
-        DurableCompression, GraphScanControl, GraphStore, NodeId, NodeRecord, NodeSetAssignment,
-        NodeSetValue, OrderedAdjacencyEntry, ProjectedGraphDefinition, PropertyFilter, RelId,
-        RelRecord, RelTypeId, RelationshipDeleteRequest, ScanPruningStrategy,
-        ScanPruningTargetKind, SearchProjectionGraphChange, SourceScanCandidateRead,
-        WalDoctorOptions, COW_MAP_TARGET_SEGMENT_BYTES, DENSE_ADJACENCY_DEGREE_THRESHOLD,
-        DURABLE_COMPRESSION_HEADER, MANIFEST_FILE,
+        read_durable_text, restore_storage_backup, retain_supported_property_statistics,
+        set_checkpoint_failpoint, set_wal_apply_failpoint, source_scan, AdjacencyConsolidationPlan,
+        AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, CheckpointPublishStage,
+        ConnectedNodesCreate, CowSegmentedMap, DatabaseDoctor, DegreeStatisticsEntry,
+        DegreeStatisticsKey, DurableCompression, GraphScanControl, GraphStore, NodeId, NodeRecord,
+        NodeSetAssignment, NodeSetValue, OrderedAdjacencyEntry, ProjectedGraphDefinition,
+        PropertyFilter, RelId, RelRecord, RelTypeId, RelationshipDeleteRequest,
+        ScanPruningStrategy, ScanPruningTargetKind, SearchProjectionGraphChange,
+        SourceScanCandidateRead, WalDoctorOptions, COW_MAP_TARGET_SEGMENT_BYTES,
+        DENSE_ADJACENCY_DEGREE_THRESHOLD, DURABLE_COMPRESSION_HEADER, MANIFEST_FILE,
     };
-    use crate::schema::{Catalog, LabelId};
+    use crate::schema::{Catalog, GraphStatistics, LabelId, PropertyType, TableKind};
     use crate::value::Value;
     use skein_integrity::integrity_digest;
     use skein_storage::{
@@ -9624,6 +9816,96 @@ mod tests {
                 .sampled_rel_property_histograms
                 .get(&(RelTypeId(0), "weight".to_string())),
             Some(&false)
+        );
+    }
+
+    #[test]
+    fn recovered_property_statistics_drop_ineligible_and_incomplete_groups() {
+        let mut catalog = Catalog::default();
+        let label_id = catalog.get_or_create_label("Metric");
+        let rel_type_id = catalog.get_or_create_rel_type("MEASURES");
+        let node_table = catalog.get_or_create_table(TableKind::Node, "Metric");
+        let relationship_table = catalog.get_or_create_table(TableKind::Relationship, "MEASURES");
+        catalog.get_or_create_property(node_table, "body", PropertyType::Text, true);
+        catalog.get_or_create_property(relationship_table, "note", PropertyType::Text, true);
+        let compact_node = (label_id, "score".to_string());
+        let text_node = (label_id, "body".to_string());
+        let incomplete_node = (label_id, "missing_marker".to_string());
+        let empty_node = (label_id, "empty_histogram".to_string());
+        let compact_relationship = (rel_type_id, "weight".to_string());
+        let text_relationship = (rel_type_id, "note".to_string());
+        let mut statistics = GraphStatistics {
+            property_distinct_counts: BTreeMap::from([
+                (compact_node.clone(), 2),
+                (text_node.clone(), 1),
+                (incomplete_node.clone(), 1),
+                (empty_node.clone(), 0),
+            ]),
+            property_histograms: BTreeMap::from([
+                (compact_node.clone(), vec![Value::Int(1), Value::Int(2)]),
+                (
+                    text_node.clone(),
+                    vec![Value::String("payload".to_string())],
+                ),
+                (incomplete_node, vec![Value::Int(3)]),
+                (empty_node.clone(), Vec::new()),
+            ]),
+            sampled_property_histograms: BTreeMap::from([
+                (compact_node.clone(), false),
+                (text_node, false),
+                (empty_node, false),
+            ]),
+            rel_property_distinct_counts: BTreeMap::from([
+                (compact_relationship.clone(), 1),
+                (text_relationship.clone(), 1),
+            ]),
+            rel_property_histograms: BTreeMap::from([
+                (compact_relationship.clone(), vec![Value::Float(0.5)]),
+                (
+                    text_relationship.clone(),
+                    vec![Value::String("payload".to_string())],
+                ),
+            ]),
+            sampled_rel_property_histograms: BTreeMap::from([
+                (compact_relationship.clone(), false),
+                (text_relationship, false),
+            ]),
+            ..GraphStatistics::default()
+        };
+
+        retain_supported_property_statistics(&mut statistics, Some(&catalog));
+
+        assert_eq!(
+            statistics.property_distinct_counts,
+            BTreeMap::from([(compact_node.clone(), 2)])
+        );
+        assert_eq!(
+            statistics
+                .property_histograms
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![compact_node.clone()]
+        );
+        assert_eq!(
+            statistics
+                .sampled_property_histograms
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![compact_node]
+        );
+        assert_eq!(
+            statistics.rel_property_distinct_counts,
+            BTreeMap::from([(compact_relationship.clone(), 1)])
+        );
+        assert_eq!(
+            statistics
+                .rel_property_histograms
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![compact_relationship]
         );
     }
 

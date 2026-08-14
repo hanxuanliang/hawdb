@@ -244,7 +244,7 @@ impl OptimizerPlanningCache {
             .as_ref()
             .is_none_or(|statistics| statistics_refresh_required(statistics, store));
         if refresh_statistics {
-            let statistics = Arc::new(store.statistics());
+            let statistics = Arc::new(store.statistics(catalog));
             decisions.push(format!(
                 "optimizer statistics cache refresh: statistics_epoch={} graph_commit_epoch={}",
                 statistics.computed_at_commit_epoch,

@@ -446,6 +446,16 @@ weak-fair and always terminates through a hit, admission, unpinned eviction, or
 non-blocking bypass; it never waits for or evicts a pin. Dirty pages are outside
 this model and remain a later COW page-publication obligation.
 
+`SkeinStatisticsEligibility.tla` models the property-statistics type boundary.
+Compact scalar and `VARCHAR` observations may create candidate facts, while
+declared `TEXT` and other large values exclude the complete property group. The
+mixed-type path includes the adverse ordering where a compact fact is observed
+before the unsupported value. Publication occurs only after the complete scan
+and filters every excluded group. The model checks that `VARCHAR` remains
+publishable, text, large, and mixed groups never enter published NDV or
+histogram state, and a fair complete scan eventually publishes its derived
+snapshot.
+
 ## Derived Source Segment Publication
 
 `SkeinSourceSegmentPublication.tla` models Source scan sidecars, including the
