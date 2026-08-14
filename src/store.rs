@@ -93,8 +93,11 @@ pub use graph_columnar_shadow::{
 pub use read_view::PublishedReadView;
 use relational_index_shadow::RelationalIndexShadowState;
 pub use relational_index_shadow::{
+    RelationalIndexQualificationProbeKind, RelationalIndexQualificationProbeReport,
+    RelationalIndexReadViewBackendReport, RelationalIndexReadViewReport,
     RelationalIndexShadowCheckpointReport, RelationalIndexShadowCheckpointStatus,
-    RelationalIndexShadowRecoveryStatus,
+    RelationalIndexShadowRecoveryStatus, RelationalIndexViewQualificationOptions,
+    RelationalIndexViewQualificationReport, RELATIONAL_INDEX_VIEW_QUALIFICATION_PROTOCOL,
 };
 use skein_storage::{
     available_storage_space, decode_relational_checkpoint, decode_relational_checkpoint_file,
@@ -119,7 +122,8 @@ pub use skein_storage::{
     PersistentPropertyProjectionReader, PersistentPropertyProjectionWriter,
     ProjectedGraphDefinition, ProjectedGraphStatus, PropertyFilter,
     PropertyIndexProjectionRebuildAction, PropertySpillConfig, PropertySpillManifest,
-    PropertySpillReader, RecoveryMode, RelId, RelRecord, RelationshipDeleteRequest,
+    PropertySpillReader, RecoveryMode, RelId, RelRecord, RelationalIndexReadLimits,
+    RelationalIndexReadReport, RelationalIndexRecoveryReadReport, RelationshipDeleteRequest,
     RelationshipOnCreatePropertyValue, RelationshipPropertiesUpdate, RelationshipPropertyUpdate,
     RelationshipSetAssignment, RelationshipTargetNodeDelete, ScanPredicate, ScanPruningReport,
     ScanPruningStrategy, ScanPruningTargetKind, ScanSegmentAccessPlan, ScanSegmentFallback,

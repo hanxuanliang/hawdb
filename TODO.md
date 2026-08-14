@@ -94,18 +94,6 @@ implemented as non-serving evidence paths. The remaining work below activates
 those foundations without allowing a stale index or a database-sized resident
 set to become a correctness dependency.
 
-- [ ] Pin generation-bound relational index read views and merge live changes.
-  - Retain one immutable read view binding the base generation, base and
-    recovered commit epochs, schema digest, recovery-delta pages, and a bounded
-    COW overlay for relational mutations committed after open.
-  - Capture live index changes from the transaction apply result instead of
-    independently interpreting WAL syntax.
-  - Bound the live overlay by entries and bytes. DDL, relational snapshot
-    replacement, or exhausted admission makes the view explicitly unavailable;
-    no reader may continue from stale postings.
-  - Extend `SkeinIndexRecovery.tla` for recovery-to-live continuity, pinned
-    readers, and fail-closed invalidation.
-
 - [ ] Activate demand-paged relational indexes through PostgreSQL SQL.
   - Differentially qualify exact, unique, leading composite-prefix, and join
     probes against the materialized oracle across base, recovery-delta, and

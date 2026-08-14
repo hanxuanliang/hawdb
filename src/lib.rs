@@ -538,6 +538,10 @@ pub use store::{
     DerivedArtifactRepairReport, DistinctValueStatisticsConsistencyReport, DurabilityPolicy,
     FileSegmentRangeReader, OptimizerStatisticsRefreshOptions, OptimizerStatisticsRefreshReport,
     OrderedAdjacencyEntry, PropertyIndexConsistencyReport, PublishedReadView, RecoveryMode,
+    RelationalIndexQualificationProbeKind, RelationalIndexQualificationProbeReport,
+    RelationalIndexReadLimits, RelationalIndexReadReport, RelationalIndexReadViewBackendReport,
+    RelationalIndexReadViewReport, RelationalIndexRecoveryReadReport,
+    RelationalIndexViewQualificationOptions, RelationalIndexViewQualificationReport,
     SearchProjectionChangefeedReadiness, SearchProjectionChangefeedStatus,
     SearchProjectionMutationId, SegmentCacheSnapshot, SegmentRangeReader, SegmentReadError,
     SegmentReadExecutionError, SegmentReadExecutionReport, SegmentReadExecutor, SegmentReadPayload,
@@ -547,8 +551,9 @@ pub use store::{
     StorageRecoveryReport, StorageResidencyMode, StorageResidencyReport, StorageRestoreReport,
     StorageScrubReport, WalDoctorOptions, WalRepairAcknowledgement, WalReplayConfig,
     WalTailRepairPlan, WalTailRepairReason, WalTailRepairReport, DENSE_ADJACENCY_DEGREE_THRESHOLD,
-    DERIVED_ARTIFACT_REPAIR_PROTOCOL, STORAGE_PRESSURE_DELAY_RATIO_PER_MILLION,
-    STORAGE_PRESSURE_SOFT_RATIO_PER_MILLION, WAL_DOCTOR_REPAIR_PROTOCOL,
+    DERIVED_ARTIFACT_REPAIR_PROTOCOL, RELATIONAL_INDEX_VIEW_QUALIFICATION_PROTOCOL,
+    STORAGE_PRESSURE_DELAY_RATIO_PER_MILLION, STORAGE_PRESSURE_SOFT_RATIO_PER_MILLION,
+    WAL_DOCTOR_REPAIR_PROTOCOL,
 };
 #[cfg(feature = "opentelemetry")]
 pub use telemetry::OpenTelemetryMetrics;

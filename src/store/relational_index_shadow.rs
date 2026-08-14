@@ -4,16 +4,107 @@
 //! depends on it and SQL never reads it in this stage. A valid shadow is
 //! generation/epoch fenced to the checkpoint that supplied its rows.
 
-use super::GraphStore;
+use super::{GraphStore, SkeinError};
 use skein_integrity::{IntegrityHasher, Sha256Digest};
 use skein_storage::{
     RelationalIndexChange, RelationalIndexChangeCapture, RelationalIndexChangeCaptureLimits,
-    RelationalIndexRecoveryBuilder, RelationalIndexRecoveryConfig, RelationalIndexRecoveryReader,
+    RelationalIndexChangeKind, RelationalIndexReadLimits, RelationalIndexReadReport,
+    RelationalIndexRecoveryBuilder, RelationalIndexRecoveryConfig,
+    RelationalIndexRecoveryReadReport, RelationalIndexRecoveryReader,
     RelationalIndexRecoveryReport, RelationalIndexShadowBuildReport, RelationalIndexShadowConfig,
-    RelationalIndexShadowManifest, RelationalIndexShadowReader, RelationalIndexShadowWriter,
-    RelationalTransaction, RELATIONAL_INDEX_SHADOW_MANIFEST_FILE,
+    RelationalIndexShadowError, RelationalIndexShadowManifest, RelationalIndexShadowReader,
+    RelationalIndexShadowWriter, RelationalKey, RelationalScalarType, RelationalTableSchema,
+    RelationalTransaction, RelationalValue, RELATIONAL_INDEX_SHADOW_MANIFEST_FILE,
+    RELATIONAL_PRIMARY_INDEX_NAME,
 };
-use std::{fmt, fs, sync::Arc};
+use std::{collections::BTreeSet, fmt, fs, num::NonZeroUsize, sync::Arc};
+
+pub const RELATIONAL_INDEX_VIEW_QUALIFICATION_PROTOCOL: &str =
+    "skein-relational-index-view-qualification-v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RelationalIndexQualificationProbeKind {
+    Exact,
+    LeadingPrefix,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelationalIndexViewQualificationOptions {
+    pub max_tables: NonZeroUsize,
+    pub max_rows_per_table: NonZeroUsize,
+    pub max_probes: NonZeroUsize,
+    pub read_limits: RelationalIndexReadLimits,
+}
+
+impl Default for RelationalIndexViewQualificationOptions {
+    fn default() -> Self {
+        Self {
+            max_tables: NonZeroUsize::new(64).expect("default table limit is non-zero"),
+            max_rows_per_table: NonZeroUsize::new(8).expect("default row sample limit is non-zero"),
+            max_probes: NonZeroUsize::new(512).expect("default probe limit is non-zero"),
+            read_limits: RelationalIndexReadLimits::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelationalIndexReadViewBackendReport {
+    Base(RelationalIndexReadReport),
+    Recovered(RelationalIndexRecoveryReadReport),
+}
+
+impl RelationalIndexReadViewBackendReport {
+    fn bytes_read(&self) -> Option<usize> {
+        match self {
+            Self::Base(report) => Some(report.bytes_read),
+            Self::Recovered(report) => report.base.bytes_read.checked_add(report.delta_bytes_read),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationalIndexReadViewReport {
+    pub backend: RelationalIndexReadViewBackendReport,
+    pub live_batches_visited: usize,
+    pub live_entries_visited: usize,
+    pub live_entries_matched: usize,
+    pub live_bytes_visited: usize,
+    pub rows_visited: usize,
+    pub stopped_early: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationalIndexQualificationProbeReport {
+    pub ordinal: usize,
+    pub table: String,
+    pub index: String,
+    pub kind: RelationalIndexQualificationProbeKind,
+    pub candidate_rows: usize,
+    pub oracle_rows: usize,
+    pub candidate_digest: String,
+    pub oracle_digest: String,
+    pub matched: bool,
+    pub read: RelationalIndexReadViewReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationalIndexViewQualificationReport {
+    pub protocol: &'static str,
+    pub base_generation: u64,
+    pub delta_generation: Option<u64>,
+    pub base_commit_epoch: u64,
+    pub visible_commit_epoch: u64,
+    pub schema_digest: String,
+    pub tables_discovered: usize,
+    pub tables_sampled: usize,
+    pub rows_sampled: usize,
+    pub indexes_discovered: usize,
+    pub indexes_probed: usize,
+    pub probes: Vec<RelationalIndexQualificationProbeReport>,
+    pub mismatches: usize,
+    pub truncated: bool,
+    pub ready: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RelationalIndexReadViewKind {
@@ -38,9 +129,9 @@ enum RelationalIndexReadBackend {
 
 #[derive(Debug)]
 struct RelationalIndexLiveBatch {
-    _commit_epoch: u64,
-    _changes: Arc<[RelationalIndexChange]>,
-    _encoded_bytes: usize,
+    commit_epoch: u64,
+    changes: Arc<[RelationalIndexChange]>,
+    encoded_bytes: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -91,9 +182,9 @@ impl RelationalIndexLiveOverlay {
         }
         let mut batches = Arc::clone(&self.batches);
         Arc::make_mut(&mut batches).push(Arc::new(RelationalIndexLiveBatch {
-            _commit_epoch: commit_epoch,
-            _changes: Arc::from(changes),
-            _encoded_bytes: encoded_bytes,
+            commit_epoch,
+            changes: Arc::from(changes),
+            encoded_bytes,
         }));
         Ok(Self {
             batches,
@@ -104,6 +195,28 @@ impl RelationalIndexLiveOverlay {
 
     fn batch_count(&self) -> usize {
         self.batches.len()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RelationalIndexQualificationProbe {
+    table: String,
+    index: String,
+    kind: RelationalIndexQualificationProbeKind,
+    key: RelationalKey,
+}
+
+enum RelationalIndexReadSelector<'a> {
+    Exact(&'a RelationalKey),
+    Prefix(&'a RelationalKey),
+}
+
+impl RelationalIndexReadSelector<'_> {
+    fn matches(&self, key: &RelationalKey) -> bool {
+        match self {
+            Self::Exact(expected) => key == *expected,
+            Self::Prefix(prefix) => key.0.starts_with(&prefix.0),
+        }
     }
 }
 
@@ -223,11 +336,209 @@ impl RelationalIndexReadView {
         self.live.encoded_bytes
     }
 
+    fn visit_exact_postings(
+        &self,
+        table: &str,
+        index: &str,
+        key: &RelationalKey,
+        limits: RelationalIndexReadLimits,
+        visit: impl FnMut(&RelationalKey) -> bool,
+    ) -> std::result::Result<RelationalIndexReadViewReport, RelationalIndexShadowError> {
+        self.visit_postings(
+            table,
+            index,
+            RelationalIndexReadSelector::Exact(key),
+            limits,
+            visit,
+        )
+    }
+
+    fn visit_prefix_postings(
+        &self,
+        table: &str,
+        index: &str,
+        prefix: &RelationalKey,
+        limits: RelationalIndexReadLimits,
+        visit: impl FnMut(&RelationalKey) -> bool,
+    ) -> std::result::Result<RelationalIndexReadViewReport, RelationalIndexShadowError> {
+        self.visit_postings(
+            table,
+            index,
+            RelationalIndexReadSelector::Prefix(prefix),
+            limits,
+            visit,
+        )
+    }
+
+    fn visit_postings(
+        &self,
+        table: &str,
+        index: &str,
+        selector: RelationalIndexReadSelector<'_>,
+        limits: RelationalIndexReadLimits,
+        mut visit: impl FnMut(&RelationalKey) -> bool,
+    ) -> std::result::Result<RelationalIndexReadViewReport, RelationalIndexShadowError> {
+        if self.is_poisoned() {
+            return Err(RelationalIndexShadowError::Corrupt(
+                "relational index read view is poisoned".to_string(),
+            ));
+        }
+        let mut rows = BTreeSet::new();
+        let mut collect = |primary_key: &RelationalKey| {
+            rows.insert(primary_key.clone());
+            true
+        };
+        let backend =
+            match (&self.backend, &selector) {
+                (
+                    RelationalIndexReadBackend::Base(reader),
+                    RelationalIndexReadSelector::Exact(key),
+                ) => RelationalIndexReadViewBackendReport::Base(reader.visit_exact_postings(
+                    table,
+                    index,
+                    key,
+                    limits,
+                    &mut collect,
+                )?),
+                (
+                    RelationalIndexReadBackend::Base(reader),
+                    RelationalIndexReadSelector::Prefix(prefix),
+                ) => RelationalIndexReadViewBackendReport::Base(reader.visit_prefix_postings(
+                    table,
+                    index,
+                    prefix,
+                    limits,
+                    &mut collect,
+                )?),
+                (
+                    RelationalIndexReadBackend::Recovered(reader),
+                    RelationalIndexReadSelector::Exact(key),
+                ) => RelationalIndexReadViewBackendReport::Recovered(reader.visit_exact_postings(
+                    table,
+                    index,
+                    key,
+                    limits,
+                    &mut collect,
+                )?),
+                (
+                    RelationalIndexReadBackend::Recovered(reader),
+                    RelationalIndexReadSelector::Prefix(prefix),
+                ) => RelationalIndexReadViewBackendReport::Recovered(
+                    reader.visit_prefix_postings(table, index, prefix, limits, &mut collect)?,
+                ),
+            };
+        let mut live_entries_visited = 0usize;
+        let mut live_entries_matched = 0usize;
+        let mut live_bytes_visited = 0usize;
+        let mut previous_epoch = self.durable_commit_epoch();
+        for batch in self.live.batches.iter() {
+            if batch.commit_epoch <= previous_epoch
+                || batch.commit_epoch > self.identity.visible_commit_epoch
+            {
+                return Err(RelationalIndexShadowError::Corrupt(format!(
+                    "relational index live batch epoch {} is outside ({previous_epoch}, {}]",
+                    batch.commit_epoch, self.identity.visible_commit_epoch
+                )));
+            }
+            previous_epoch = batch.commit_epoch;
+            live_bytes_visited = live_bytes_visited
+                .checked_add(batch.encoded_bytes)
+                .ok_or_else(|| admission("relational index live byte counter overflow"))?;
+            let total_bytes = backend
+                .bytes_read()
+                .ok_or_else(|| admission("relational index backend byte counter overflow"))?
+                .checked_add(live_bytes_visited)
+                .ok_or_else(|| admission("relational index read byte counter overflow"))?;
+            if total_bytes > limits.max_bytes.get() {
+                return Err(admission(format!(
+                    "relational index read needs {total_bytes} bytes including live changes, exceeding byte limit {}",
+                    limits.max_bytes
+                )));
+            }
+            for change in batch.changes.iter() {
+                live_entries_visited = live_entries_visited
+                    .checked_add(1)
+                    .ok_or_else(|| admission("relational index live entry counter overflow"))?;
+                if change.table != table
+                    || change.index != index
+                    || !selector.matches(&change.index_key)
+                {
+                    continue;
+                }
+                live_entries_matched = live_entries_matched
+                    .checked_add(1)
+                    .ok_or_else(|| admission("relational index matched-live counter overflow"))?;
+                match change.kind {
+                    RelationalIndexChangeKind::Delete => {
+                        rows.remove(&change.primary_key);
+                    }
+                    RelationalIndexChangeKind::Insert => {
+                        rows.insert(change.primary_key.clone());
+                    }
+                }
+                if rows.len() > limits.max_rows.get() {
+                    return Err(admission(format!(
+                        "relational index read exceeds row limit {} after live merge",
+                        limits.max_rows
+                    )));
+                }
+            }
+        }
+        let mut report = RelationalIndexReadViewReport {
+            backend,
+            live_batches_visited: self.live.batch_count(),
+            live_entries_visited,
+            live_entries_matched,
+            live_bytes_visited,
+            rows_visited: 0,
+            stopped_early: false,
+        };
+        for row in rows {
+            report.rows_visited += 1;
+            if !visit(&row) {
+                report.stopped_early = true;
+                break;
+            }
+        }
+        Ok(report)
+    }
+
+    fn durable_commit_epoch(&self) -> u64 {
+        match &self.backend {
+            RelationalIndexReadBackend::Base(reader) => reader.manifest().source_commit_epoch,
+            RelationalIndexReadBackend::Recovered(reader) => {
+                reader.manifest().recovered_commit_epoch
+            }
+        }
+    }
+
     fn base_manifest(&self) -> &RelationalIndexShadowManifest {
         match &self.backend {
             RelationalIndexReadBackend::Base(reader) => reader.manifest(),
             RelationalIndexReadBackend::Recovered(reader) => reader.base_manifest(),
         }
+    }
+}
+
+fn admission(message: impl Into<String>) -> RelationalIndexShadowError {
+    RelationalIndexShadowError::Admission(message.into())
+}
+
+fn qualification_probe_error(
+    ordinal: usize,
+    table: &str,
+    index: &str,
+    error: RelationalIndexShadowError,
+) -> SkeinError {
+    let context = format!(
+        "relational index qualification probe {ordinal} on {table}.{index} failed: {error}"
+    );
+    match error {
+        RelationalIndexShadowError::Corrupt(_) => SkeinError::StorageIntegrity(context),
+        RelationalIndexShadowError::Admission(_)
+        | RelationalIndexShadowError::Durability(_)
+        | RelationalIndexShadowError::MissingIndex { .. }
+        | RelationalIndexShadowError::StaleGeneration { .. } => SkeinError::Storage(context),
     }
 }
 
@@ -245,6 +556,131 @@ fn relational_index_schema_digest(manifest: &RelationalIndexShadowManifest) -> S
 fn hash_bounded_bytes(hasher: &mut IntegrityHasher, bytes: &[u8]) {
     hasher.update(&(bytes.len() as u64).to_le_bytes());
     hasher.update(bytes);
+}
+
+struct RelationalIndexDefinition {
+    name: String,
+    columns: Vec<String>,
+    primary: bool,
+}
+
+fn relational_index_definitions(schema: &RelationalTableSchema) -> Vec<RelationalIndexDefinition> {
+    let mut definitions =
+        Vec::with_capacity(1 + schema.unique_constraints.len() + schema.indexes.len());
+    definitions.push(RelationalIndexDefinition {
+        name: RELATIONAL_PRIMARY_INDEX_NAME.to_string(),
+        columns: schema.primary_key.clone(),
+        primary: true,
+    });
+    definitions.extend(
+        schema
+            .unique_constraints
+            .iter()
+            .enumerate()
+            .map(|(ordinal, columns)| RelationalIndexDefinition {
+                name: format!("__unique_{ordinal}"),
+                columns: columns.clone(),
+                primary: false,
+            }),
+    );
+    definitions.extend(
+        schema
+            .indexes
+            .iter()
+            .map(|index| RelationalIndexDefinition {
+                name: index.name.clone(),
+                columns: index.columns.clone(),
+                primary: false,
+            }),
+    );
+    definitions
+}
+
+fn relational_index_key(
+    schema: &RelationalTableSchema,
+    values: &[RelationalValue],
+    columns: &[String],
+) -> RelationalKey {
+    RelationalKey(
+        columns
+            .iter()
+            .map(|column| {
+                let position = schema
+                    .column_position(column)
+                    .expect("validated relational index column");
+                values[position].clone()
+            })
+            .collect(),
+    )
+}
+
+fn push_qualification_probe(
+    probes: &mut Vec<RelationalIndexQualificationProbe>,
+    unique: &mut BTreeSet<RelationalIndexQualificationProbe>,
+    probe: RelationalIndexQualificationProbe,
+    max_probes: usize,
+) -> bool {
+    if unique.contains(&probe) {
+        return true;
+    }
+    if probes.len() >= max_probes {
+        return false;
+    }
+    unique.insert(probe.clone());
+    probes.push(probe);
+    true
+}
+
+fn relational_keys_digest(keys: &[RelationalKey]) -> String {
+    let mut hasher = IntegrityHasher::new();
+    hasher.update(b"skein-relational-index-qualification-keys-v1\0");
+    hasher.update(&(keys.len() as u64).to_le_bytes());
+    for key in keys {
+        hasher.update(&(key.0.len() as u64).to_le_bytes());
+        for value in &key.0 {
+            hash_relational_value(&mut hasher, value);
+        }
+    }
+    hasher.finish().sha256.to_string()
+}
+
+fn hash_relational_value(hasher: &mut IntegrityHasher, value: &RelationalValue) {
+    match value {
+        RelationalValue::Null => hasher.update(&[0]),
+        RelationalValue::Boolean(value) => hasher.update(&[1, u8::from(*value)]),
+        RelationalValue::BigInt(value) => {
+            hasher.update(&[2]);
+            hasher.update(&value.to_le_bytes());
+        }
+        RelationalValue::DoublePrecision(value) => {
+            hasher.update(&[3]);
+            hasher.update(&value.to_bits().to_le_bytes());
+        }
+        RelationalValue::Text(value) => {
+            hasher.update(&[4]);
+            hash_bounded_bytes(hasher, value.as_bytes());
+        }
+        RelationalValue::Bytea(value) => {
+            hasher.update(&[5]);
+            hash_bounded_bytes(hasher, value);
+        }
+        RelationalValue::Overflow(reference) => {
+            hasher.update(&[6, relational_scalar_type_tag(reference.scalar_type)]);
+            hash_bounded_bytes(hasher, reference.digest.as_bytes());
+            hasher.update(&(reference.compressed_bytes as u64).to_le_bytes());
+            hasher.update(&(reference.uncompressed_bytes as u64).to_le_bytes());
+        }
+    }
+}
+
+const fn relational_scalar_type_tag(scalar_type: RelationalScalarType) -> u8 {
+    match scalar_type {
+        RelationalScalarType::Boolean => 0,
+        RelationalScalarType::BigInt => 1,
+        RelationalScalarType::DoublePrecision => 2,
+        RelationalScalarType::Text => 3,
+        RelationalScalarType::Bytea => 4,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -715,6 +1151,221 @@ impl GraphStore {
         self.relational_index_shadow.recovery_report.as_ref()
     }
 
+    /// Differentially checks the pinned demand-paged relational index view
+    /// against the current materialized oracle without changing SQL routing.
+    pub fn qualify_relational_index_read_view(
+        &self,
+        options: RelationalIndexViewQualificationOptions,
+    ) -> crate::Result<RelationalIndexViewQualificationReport> {
+        let view = self
+            .relational_index_shadow
+            .current_read_view(self.commit_epoch)
+            .ok_or_else(|| {
+                SkeinError::Storage(format!(
+                    "relational index read view is unavailable at commit epoch {}",
+                    self.commit_epoch
+                ))
+            })?;
+        let tables_discovered = self.relational_state.table_schemas().count();
+        let indexes_discovered = self
+            .relational_state
+            .table_schemas()
+            .map(|schema| relational_index_definitions(schema).len())
+            .sum();
+        let mut probes = Vec::new();
+        let mut unique_probes = BTreeSet::new();
+        let mut truncated = tables_discovered > options.max_tables.get();
+        let tables_sampled = tables_discovered.min(options.max_tables.get());
+        let mut rows_sampled = 0usize;
+        'tables: for schema in self
+            .relational_state
+            .table_schemas()
+            .take(options.max_tables.get())
+        {
+            let definitions = relational_index_definitions(schema);
+            for (primary_key, row) in self
+                .relational_state
+                .rows(&schema.name)
+                .take(options.max_rows_per_table.get())
+            {
+                rows_sampled = rows_sampled.checked_add(1).ok_or_else(|| {
+                    SkeinError::Storage(
+                        "relational index qualification row sample counter overflow".to_string(),
+                    )
+                })?;
+                for definition in &definitions {
+                    let key = if definition.primary {
+                        primary_key.clone()
+                    } else {
+                        relational_index_key(schema, row.values(), &definition.columns)
+                    };
+                    if !push_qualification_probe(
+                        &mut probes,
+                        &mut unique_probes,
+                        RelationalIndexQualificationProbe {
+                            table: schema.name.clone(),
+                            index: definition.name.clone(),
+                            kind: RelationalIndexQualificationProbeKind::Exact,
+                            key: key.clone(),
+                        },
+                        options.max_probes.get(),
+                    ) {
+                        truncated = true;
+                        break 'tables;
+                    }
+                    if !definition.primary && definition.columns.len() > 1 {
+                        for prefix_len in 1..definition.columns.len() {
+                            if !push_qualification_probe(
+                                &mut probes,
+                                &mut unique_probes,
+                                RelationalIndexQualificationProbe {
+                                    table: schema.name.clone(),
+                                    index: definition.name.clone(),
+                                    kind: RelationalIndexQualificationProbeKind::LeadingPrefix,
+                                    key: RelationalKey(key.0[..prefix_len].to_vec()),
+                                },
+                                options.max_probes.get(),
+                            ) {
+                                truncated = true;
+                                break 'tables;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let indexes_probed = probes
+            .iter()
+            .map(|probe| (probe.table.as_str(), probe.index.as_str()))
+            .collect::<BTreeSet<_>>()
+            .len();
+        let mut probe_reports = Vec::with_capacity(probes.len());
+        let mut mismatches = 0usize;
+        for (ordinal, probe) in probes.into_iter().enumerate() {
+            let mut candidate = Vec::new();
+            let read = match probe.kind {
+                RelationalIndexQualificationProbeKind::Exact => view.visit_exact_postings(
+                    &probe.table,
+                    &probe.index,
+                    &probe.key,
+                    options.read_limits,
+                    |primary_key| {
+                        candidate.push(primary_key.clone());
+                        true
+                    },
+                ),
+                RelationalIndexQualificationProbeKind::LeadingPrefix => view.visit_prefix_postings(
+                    &probe.table,
+                    &probe.index,
+                    &probe.key,
+                    options.read_limits,
+                    |primary_key| {
+                        candidate.push(primary_key.clone());
+                        true
+                    },
+                ),
+            }
+            .map_err(|error| {
+                qualification_probe_error(ordinal, &probe.table, &probe.index, error)
+            })?;
+            candidate.sort();
+            candidate.dedup();
+            let oracle = self.relational_index_oracle_rows(&probe, options.read_limits)?;
+            let matched = candidate == oracle;
+            mismatches += usize::from(!matched);
+            probe_reports.push(RelationalIndexQualificationProbeReport {
+                ordinal,
+                table: probe.table,
+                index: probe.index,
+                kind: probe.kind,
+                candidate_rows: candidate.len(),
+                oracle_rows: oracle.len(),
+                candidate_digest: relational_keys_digest(&candidate),
+                oracle_digest: relational_keys_digest(&oracle),
+                matched,
+                read,
+            });
+        }
+        let identity = view.identity();
+        let ready = mismatches == 0 && !truncated && indexes_probed == indexes_discovered;
+        Ok(RelationalIndexViewQualificationReport {
+            protocol: RELATIONAL_INDEX_VIEW_QUALIFICATION_PROTOCOL,
+            base_generation: identity.base_generation,
+            delta_generation: identity.delta_generation,
+            base_commit_epoch: identity.base_commit_epoch,
+            visible_commit_epoch: identity.visible_commit_epoch,
+            schema_digest: identity.schema_digest.to_string(),
+            tables_discovered,
+            tables_sampled,
+            rows_sampled,
+            indexes_discovered,
+            indexes_probed,
+            probes: probe_reports,
+            mismatches,
+            truncated,
+            ready,
+        })
+    }
+
+    fn relational_index_oracle_rows(
+        &self,
+        probe: &RelationalIndexQualificationProbe,
+        limits: RelationalIndexReadLimits,
+    ) -> crate::Result<Vec<RelationalKey>> {
+        let mut rows = if probe.index == RELATIONAL_PRIMARY_INDEX_NAME {
+            self.relational_state
+                .row(&probe.table, &probe.key)
+                .map(|_| vec![probe.key.clone()])
+                .unwrap_or_default()
+        } else {
+            match probe.kind {
+                RelationalIndexQualificationProbeKind::Exact => self
+                    .relational_state
+                    .index_prefix_lookup(
+                        &probe.table,
+                        &probe.index,
+                        &probe.key,
+                        limits.max_rows.get().saturating_add(1),
+                    )
+                    .ok_or_else(|| {
+                        SkeinError::Storage(format!(
+                            "relational index qualification oracle is missing {}.{}",
+                            probe.table, probe.index
+                        ))
+                    })?
+                    .into_iter()
+                    .cloned()
+                    .collect(),
+                RelationalIndexQualificationProbeKind::LeadingPrefix => self
+                    .relational_state
+                    .index_prefix_lookup(
+                        &probe.table,
+                        &probe.index,
+                        &probe.key,
+                        limits.max_rows.get().saturating_add(1),
+                    )
+                    .ok_or_else(|| {
+                        SkeinError::Storage(format!(
+                            "relational index qualification oracle is missing {}.{}",
+                            probe.table, probe.index
+                        ))
+                    })?
+                    .into_iter()
+                    .cloned()
+                    .collect(),
+            }
+        };
+        if rows.len() > limits.max_rows.get() {
+            return Err(SkeinError::Storage(format!(
+                "relational index qualification oracle exceeds row limit {}",
+                limits.max_rows
+            )));
+        }
+        rows.sort();
+        rows.dedup();
+        Ok(rows)
+    }
+
     pub(super) fn stage_recovered_relational_transaction(
         &mut self,
         transaction: RelationalTransaction,
@@ -1030,6 +1681,28 @@ mod tests {
             store
                 .checkpoint(&catalog)
                 .expect("checkpoint recovery base");
+            let base_qualification = store
+                .qualify_relational_index_read_view(
+                    RelationalIndexViewQualificationOptions::default(),
+                )
+                .expect("qualify base relational index view");
+            assert_qualification_ready(&base_qualification, 1, 4);
+            assert!(base_qualification.probes.iter().any(|probe| {
+                probe.kind == RelationalIndexQualificationProbeKind::LeadingPrefix
+                    && matches!(
+                        probe.read.backend,
+                        RelationalIndexReadViewBackendReport::Base(_)
+                    )
+            }));
+            let truncated = store
+                .qualify_relational_index_read_view(RelationalIndexViewQualificationOptions {
+                    max_probes: NonZeroUsize::new(1).unwrap(),
+                    ..RelationalIndexViewQualificationOptions::default()
+                })
+                .expect("bound qualification probe count");
+            assert!(truncated.truncated);
+            assert!(!truncated.ready);
+            assert_eq!(truncated.probes.len(), 1);
             let pinned = store.snapshot();
             let pinned_view = current_index_view(&pinned);
             store
@@ -1051,7 +1724,7 @@ mod tests {
             assert_eq!(live_view.kind(), RelationalIndexReadViewKind::Base);
             assert_eq!(live_view.identity().visible_commit_epoch, 2);
             assert_eq!(live_view.live_batch_count(), 1);
-            assert_eq!(live_view.live_entry_count(), 2);
+            assert_eq!(live_view.live_entry_count(), 4);
             assert!(live_view.live_encoded_bytes() > 0);
             assert_eq!(pinned_view.identity().visible_commit_epoch, 1);
             assert_eq!(pinned_view.live_batch_count(), 0);
@@ -1061,18 +1734,63 @@ mod tests {
                 RelationalIndexShadowRecoveryStatus::LiveCurrent {
                     visible_commit_epoch: 2,
                     live_batches: 1,
-                    live_entries: 2,
+                    live_entries: 4,
                     ..
                 }
             ));
+            let inserted_qualification = store
+                .qualify_relational_index_read_view(
+                    RelationalIndexViewQualificationOptions::default(),
+                )
+                .expect("qualify relational index view with live insert");
+            assert_qualification_ready(&inserted_qualification, 2, 4);
+            assert!(inserted_qualification
+                .probes
+                .iter()
+                .all(|probe| probe.read.live_entries_visited == 4));
+
+            store
+                .commit_relational_transaction(
+                    &mut catalog,
+                    RelationalTransaction {
+                        writes: vec![RelationalWrite::DeleteByPrimaryKey {
+                            table: "documents".to_string(),
+                            keys: vec![RelationalKey(vec![RelationalValue::Text(
+                                "doc-1".to_string(),
+                            )])],
+                        }],
+                    },
+                )
+                .expect("append relational delete after checkpoint");
+            let deleted_qualification = store
+                .qualify_relational_index_read_view(
+                    RelationalIndexViewQualificationOptions::default(),
+                )
+                .expect("qualify relational index view with live delete");
+            assert_qualification_ready(&deleted_qualification, 3, 4);
+            assert!(deleted_qualification
+                .probes
+                .iter()
+                .all(|probe| probe.read.live_entries_visited == 8));
+            assert!(deleted_qualification.probes.iter().any(|probe| {
+                probe.kind == RelationalIndexQualificationProbeKind::LeadingPrefix
+                    && probe.candidate_rows == 1
+                    && probe.oracle_rows == 1
+            }));
 
             store
                 .create_node(&mut catalog, "Document", Default::default())
                 .expect("commit graph-only WAL after checkpoint");
             let graph_advanced_view = current_index_view(&store);
-            assert_eq!(graph_advanced_view.identity().visible_commit_epoch, 3);
-            assert_eq!(graph_advanced_view.live_batch_count(), 1);
-            assert_eq!(graph_advanced_view.live_entry_count(), 2);
+            assert_eq!(graph_advanced_view.identity().visible_commit_epoch, 4);
+            assert_eq!(graph_advanced_view.live_batch_count(), 2);
+            assert_eq!(graph_advanced_view.live_entry_count(), 8);
+            let graph_qualification = store
+                .qualify_relational_index_read_view(
+                    RelationalIndexViewQualificationOptions::default(),
+                )
+                .expect("qualify graph-advanced relational index view");
+            assert_qualification_ready(&graph_qualification, 4, 4);
         }
         {
             let mut catalog = Catalog::default();
@@ -1083,27 +1801,39 @@ mod tests {
                 replay,
             )
             .expect("replay relational WAL and publish index deltas");
-            assert_eq!(store.relational_state().row_count("documents"), 2);
+            assert_eq!(store.relational_state().row_count("documents"), 1);
             assert!(matches!(
                 store.relational_index_shadow_recovery_status(),
                 RelationalIndexShadowRecoveryStatus::WalRecovered {
                     base_commit_epoch: 1,
-                    recovered_commit_epoch: 3,
+                    recovered_commit_epoch: 4,
                     delta_pages: 1,
-                    delta_entries: 2,
+                    delta_entries: 8,
                     ..
                 }
             ));
             let report = store
                 .relational_index_recovery_report()
                 .expect("recovery evidence report");
-            assert_eq!(report.delta_entries, 2);
+            assert_eq!(report.delta_entries, 8);
             assert!(report.peak_dirty_bytes > 0);
             let view = current_index_view(&store);
             assert_eq!(view.kind(), RelationalIndexReadViewKind::Recovered);
             assert!(view.identity().delta_generation.is_some());
             assert_eq!(view.identity().base_commit_epoch, 1);
-            assert_eq!(view.identity().visible_commit_epoch, 3);
+            assert_eq!(view.identity().visible_commit_epoch, 4);
+            let recovered_qualification = store
+                .qualify_relational_index_read_view(
+                    RelationalIndexViewQualificationOptions::default(),
+                )
+                .expect("qualify recovered relational index view");
+            assert_qualification_ready(&recovered_qualification, 4, 4);
+            assert!(recovered_qualification.probes.iter().all(|probe| {
+                matches!(
+                    probe.read.backend,
+                    RelationalIndexReadViewBackendReport::Recovered(_)
+                )
+            }));
             assert!(path
                 .join(skein_storage::RELATIONAL_INDEX_RECOVERY_MANIFEST_FILE)
                 .exists());
@@ -1249,13 +1979,20 @@ mod tests {
                         },
                     ],
                     primary_key: vec!["id".to_string()],
-                    unique_constraints: Vec::new(),
+                    unique_constraints: vec![vec!["id".to_string()]],
                     foreign_keys: Vec::new(),
-                    indexes: vec![RelationalIndexSchema {
-                        name: "documents_owner_idx".to_string(),
-                        columns: vec!["owner".to_string()],
-                        unique: false,
-                    }],
+                    indexes: vec![
+                        RelationalIndexSchema {
+                            name: "documents_owner_idx".to_string(),
+                            columns: vec!["owner".to_string()],
+                            unique: false,
+                        },
+                        RelationalIndexSchema {
+                            name: "documents_owner_id_idx".to_string(),
+                            columns: vec!["owner".to_string(), "id".to_string()],
+                            unique: false,
+                        },
+                    ],
                 }),
                 RelationalWrite::Insert {
                     table: "documents".to_string(),
@@ -1280,5 +2017,31 @@ mod tests {
                     store.relational_index_shadow_recovery_status()
                 )
             })
+    }
+
+    fn assert_qualification_ready(
+        report: &RelationalIndexViewQualificationReport,
+        visible_commit_epoch: u64,
+        indexes: usize,
+    ) {
+        assert_eq!(
+            report.protocol,
+            RELATIONAL_INDEX_VIEW_QUALIFICATION_PROTOCOL
+        );
+        assert_eq!(report.visible_commit_epoch, visible_commit_epoch);
+        assert_eq!(report.tables_discovered, 1);
+        assert_eq!(report.tables_sampled, 1);
+        assert!(report.rows_sampled > 0);
+        assert_eq!(report.indexes_discovered, indexes);
+        assert_eq!(report.indexes_probed, indexes);
+        assert_eq!(report.mismatches, 0);
+        assert!(!report.truncated);
+        assert!(report.ready);
+        assert!(!report.probes.is_empty());
+        assert!(report.probes.iter().all(|probe| {
+            probe.matched
+                && probe.candidate_rows == probe.oracle_rows
+                && probe.candidate_digest == probe.oracle_digest
+        }));
     }
 }

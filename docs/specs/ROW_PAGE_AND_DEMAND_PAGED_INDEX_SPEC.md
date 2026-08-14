@@ -148,8 +148,21 @@ adding a batch. DDL, relational snapshot replacement, poisoned backing pages,
 epoch discontinuity, or exhausted live admission removes the current view and
 records an explicit unavailable status; canonical WAL publication still
 succeeds, but no reader may continue from stale postings. This read view is
-still non-serving until its base-plus-recovery-plus-live merge is
-differentially qualified and SQL activation lands separately.
+still non-serving until SQL activation lands separately.
+
+`GraphStore::qualify_relational_index_read_view` is the bounded typed evidence
+path for that activation boundary. It samples a configured maximum number of
+tables and rows, generates exact probes for every sampled primary, unique, and
+secondary index, and generates every leading prefix for sampled composite
+indexes. Each probe merges the pinned base, recovery-delta, and live batches
+under the production page, byte, row, and tree-height read limits, then compares
+the ordered logical row locators with the current materialized relational
+oracle. Reports expose immutable view identity, physical read evidence, live
+work, row counts, and SHA-256 result digests without exposing sampled key
+values. Missing views, corrupt pages, and admission failures return errors;
+semantic differences, incomplete index coverage, or exhausted qualification
+budgets return `ready = false`. This API does not route SQL or introduce a
+business-specific lookup surface.
 
 ## Identities and terminology
 
