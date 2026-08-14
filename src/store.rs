@@ -2034,7 +2034,9 @@ impl GraphStore {
             relational_mutation_limits: self.relational_mutation_limits,
             relational_overflow_config: self.relational_overflow_config,
             columnar_shadow: self.columnar_shadow.clone(),
-            relational_index_shadow: self.relational_index_shadow.clone(),
+            relational_index_shadow: self
+                .relational_index_shadow
+                .snapshot_at_epoch(self.commit_epoch),
             runtime_governor: self.runtime_governor.clone(),
             durable: None,
         }

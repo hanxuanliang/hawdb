@@ -653,6 +653,10 @@ impl RelationalIndexRecoveryReader {
         &self.manifest
     }
 
+    pub fn base_manifest(&self) -> &super::RelationalIndexShadowManifest {
+        self.base.manifest()
+    }
+
     pub fn is_poisoned(&self) -> bool {
         self.poisoned.load(Ordering::Acquire) || self.base.is_poisoned()
     }

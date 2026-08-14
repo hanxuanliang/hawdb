@@ -458,6 +458,10 @@ impl DurableStore {
         &self.root_path
     }
 
+    pub(super) fn store_id(&self) -> StoreId {
+        self.store_id
+    }
+
     pub(super) fn begin_wal_sync_group(&mut self) -> Result<bool> {
         if self.durability != DurabilityPolicy::SyncOnEveryWrite {
             return Ok(false);
