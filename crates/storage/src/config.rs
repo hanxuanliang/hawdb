@@ -36,6 +36,32 @@ pub enum StorageResidencyMode {
     OutOfCore,
 }
 
+/// Selects the relational-index implementation used by one database handle.
+///
+/// Persistent index publication and demand-paged reads advance together
+/// through this state machine. Keeping them in one mode prevents callers from
+/// selecting a reader that can never have a published generation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RelationalIndexMode {
+    /// Keep materialized relational indexes as the only serving path.
+    #[default]
+    Materialized,
+    /// Publish and recover persistent index generations without serving reads.
+    Shadow,
+    /// Publish persistent generations and use them for eligible SQL reads.
+    DemandPaged,
+}
+
+impl RelationalIndexMode {
+    pub const fn publishes_persistent_indexes(self) -> bool {
+        !matches!(self, Self::Materialized)
+    }
+
+    pub const fn serves_demand_paged_reads(self) -> bool {
+        matches!(self, Self::DemandPaged)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalReplayConfig {
     pub recovery_mode: RecoveryMode,
@@ -53,10 +79,8 @@ pub struct WalReplayConfig {
     /// publish a column-group catalog under `column-groups/` and recovery
     /// validates it. Off by default; reads are never served from the shadow.
     pub graph_columnar_shadow_checkpoint: bool,
-    /// Derived relational index-page shadow. Checkpoints publish a
-    /// generation-fenced fixed-slot tree. The library facade controls SQL
-    /// read activation independently. Off by default.
-    pub relational_index_shadow_checkpoint: bool,
+    /// Persistent relational-index publication and read activation mode.
+    pub relational_index_mode: RelationalIndexMode,
 }
 
 impl Default for WalReplayConfig {
@@ -74,7 +98,7 @@ impl Default for WalReplayConfig {
             auto_materialize_checkpoint_bytes: DEFAULT_AUTO_MATERIALIZE_CHECKPOINT_BYTES,
             max_out_of_core_delta_bytes: Some(DEFAULT_MAX_OUT_OF_CORE_DELTA_BYTES),
             graph_columnar_shadow_checkpoint: false,
-            relational_index_shadow_checkpoint: false,
+            relational_index_mode: RelationalIndexMode::default(),
         }
     }
 }
@@ -91,6 +115,16 @@ mod tests {
         );
         assert_eq!(RecoveryMode::default(), RecoveryMode::Strict);
         assert_eq!(DurableCompression::default(), DurableCompression::Zstd);
+        assert_eq!(
+            RelationalIndexMode::default(),
+            RelationalIndexMode::Materialized
+        );
+        assert!(!RelationalIndexMode::Materialized.publishes_persistent_indexes());
+        assert!(!RelationalIndexMode::Materialized.serves_demand_paged_reads());
+        assert!(RelationalIndexMode::Shadow.publishes_persistent_indexes());
+        assert!(!RelationalIndexMode::Shadow.serves_demand_paged_reads());
+        assert!(RelationalIndexMode::DemandPaged.publishes_persistent_indexes());
+        assert!(RelationalIndexMode::DemandPaged.serves_demand_paged_reads());
         let replay = WalReplayConfig::default();
         assert_eq!(replay.max_entries, Some(DEFAULT_MAX_WAL_REPLAY_ENTRIES));
         assert_eq!(replay.max_bytes, Some(DEFAULT_MAX_WAL_REPLAY_BYTES));

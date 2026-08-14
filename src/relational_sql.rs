@@ -687,8 +687,7 @@ mod tests {
             std::process::id()
         ));
         let config = DatabaseConfig {
-            relational_index_shadow_checkpoint: true,
-            relational_index_demand_reads: true,
+            relational_index_mode: skein_storage::RelationalIndexMode::DemandPaged,
             ..DatabaseConfig::default()
         };
         let published_generation;
@@ -878,8 +877,7 @@ mod tests {
                 &path,
                 DurabilityPolicy::default(),
                 DatabaseConfig {
-                    relational_index_shadow_checkpoint: true,
-                    relational_index_demand_reads: true,
+                    relational_index_mode: skein_storage::RelationalIndexMode::DemandPaged,
                     ..DatabaseConfig::default()
                 },
             )

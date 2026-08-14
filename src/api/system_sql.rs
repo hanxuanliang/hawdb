@@ -123,7 +123,7 @@ pub(crate) struct SystemRuntimeSnapshot {
     max_read_result_rows: Option<usize>,
     max_read_result_payload_bytes: Option<usize>,
     storage_residency_mode: StorageResidencyMode,
-    relational_index_demand_reads: bool,
+    relational_index_mode: skein_storage::RelationalIndexMode,
     runtime_capabilities: RuntimeCapabilities,
 }
 
@@ -134,7 +134,7 @@ impl SystemRuntimeSnapshot {
             max_read_result_rows: config.max_read_result_rows,
             max_read_result_payload_bytes: config.max_read_result_payload_bytes,
             storage_residency_mode: config.storage_residency_mode,
-            relational_index_demand_reads: config.relational_index_demand_reads,
+            relational_index_mode: config.relational_index_mode,
             runtime_capabilities: config.runtime_capabilities,
         }
     }
@@ -1265,8 +1265,10 @@ fn runtime_status_rows(context: &SystemSqlContext<'_>) -> Vec<Row> {
             ),
         ),
         (
-            "relational_index_demand_reads".to_string(),
-            Value::Bool(context.runtime.relational_index_demand_reads),
+            "relational_index_mode".to_string(),
+            Value::String(
+                relational_index_mode_name(context.runtime.relational_index_mode).to_string(),
+            ),
         ),
     ])]
 }
@@ -2124,7 +2126,7 @@ fn table_columns(table: SystemTable) -> &'static [&'static str] {
             "max_read_result_rows",
             "max_read_result_payload_bytes",
             "storage_residency_mode",
-            "relational_index_demand_reads",
+            "relational_index_mode",
         ],
         SystemTable::RuntimeCapabilities => &["capability", "enabled"],
         SystemTable::GraphStatistics => &[
@@ -2319,6 +2321,14 @@ const fn storage_residency_mode_name(mode: StorageResidencyMode) -> &'static str
         StorageResidencyMode::Auto => "auto",
         StorageResidencyMode::Materialized => "materialized",
         StorageResidencyMode::OutOfCore => "out_of_core",
+    }
+}
+
+const fn relational_index_mode_name(mode: skein_storage::RelationalIndexMode) -> &'static str {
+    match mode {
+        skein_storage::RelationalIndexMode::Materialized => "materialized",
+        skein_storage::RelationalIndexMode::Shadow => "shadow",
+        skein_storage::RelationalIndexMode::DemandPaged => "demand_paged",
     }
 }
 

@@ -1618,7 +1618,7 @@ mod tests {
             std::process::id()
         ));
         let replay = WalReplayConfig {
-            relational_index_shadow_checkpoint: true,
+            relational_index_mode: skein_storage::RelationalIndexMode::Shadow,
             ..WalReplayConfig::default()
         };
         let published_identity;
@@ -1757,7 +1757,7 @@ mod tests {
             std::process::id()
         ));
         let replay = WalReplayConfig {
-            relational_index_shadow_checkpoint: true,
+            relational_index_mode: skein_storage::RelationalIndexMode::Shadow,
             ..WalReplayConfig::default()
         };
         {
@@ -1949,7 +1949,7 @@ mod tests {
             std::process::id()
         ));
         let replay = WalReplayConfig {
-            relational_index_shadow_checkpoint: true,
+            relational_index_mode: skein_storage::RelationalIndexMode::Shadow,
             ..WalReplayConfig::default()
         };
         {

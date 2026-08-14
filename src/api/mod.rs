@@ -265,13 +265,8 @@ pub struct DatabaseConfig {
     /// byte-for-byte unchanged and no shadow directory exists. Reads are
     /// never served from the shadow.
     pub graph_columnar_shadow_checkpoint: bool,
-    /// Derived relational index-page shadow double-write. Off by default;
-    /// query activation is controlled independently.
-    pub relational_index_shadow_checkpoint: bool,
-    /// Use a generation-pinned demand-paged relational index view for SQL
-    /// index access when available. Missing or admission-rejected optional
-    /// views fall back observably to the canonical materialized path.
-    pub relational_index_demand_reads: bool,
+    /// Persistent relational-index publication and read activation mode.
+    pub relational_index_mode: skein_storage::RelationalIndexMode,
     pub max_search_projection_change_log_entries: Option<usize>,
     pub max_plan_cache_entries: Option<usize>,
     pub slow_query_log_capacity: usize,
@@ -345,7 +340,7 @@ fn relational_index_read_mode<'a>(
     config: &DatabaseConfig,
     store: &'a GraphStore,
 ) -> crate::relational_sql::RelationalIndexReadMode<'a> {
-    if config.relational_index_demand_reads {
+    if config.relational_index_mode.serves_demand_paged_reads() {
         crate::relational_sql::RelationalIndexReadMode::DemandPaged(store)
     } else {
         crate::relational_sql::RelationalIndexReadMode::Materialized
@@ -374,8 +369,7 @@ impl Default for DatabaseConfig {
                 skein_storage::DEFAULT_AUTO_MATERIALIZE_CHECKPOINT_BYTES,
             max_out_of_core_delta_bytes: Some(skein_storage::DEFAULT_MAX_OUT_OF_CORE_DELTA_BYTES),
             graph_columnar_shadow_checkpoint: false,
-            relational_index_shadow_checkpoint: false,
-            relational_index_demand_reads: false,
+            relational_index_mode: skein_storage::RelationalIndexMode::default(),
             max_search_projection_change_log_entries: Some(
                 DEFAULT_SEARCH_PROJECTION_CHANGE_LOG_MAX_ENTRIES,
             ),
@@ -755,7 +749,7 @@ impl Database {
             auto_materialize_checkpoint_bytes: config.auto_materialize_checkpoint_bytes,
             max_out_of_core_delta_bytes: config.max_out_of_core_delta_bytes,
             graph_columnar_shadow_checkpoint: config.graph_columnar_shadow_checkpoint,
-            relational_index_shadow_checkpoint: config.relational_index_shadow_checkpoint,
+            relational_index_mode: config.relational_index_mode,
         };
         let mut store = if config.read_only {
             GraphStore::open_read_only_with_durability_and_replay_config(
@@ -18475,7 +18469,11 @@ fn execute_database_transaction_sql(
             sql_text,
             parameters,
             &state.relational_state,
-            if runtime.config.relational_index_demand_reads {
+            if runtime
+                .config
+                .relational_index_mode
+                .serves_demand_paged_reads()
+            {
                 crate::relational_sql::RelationalIndexReadMode::TransactionWorkspace
             } else {
                 crate::relational_sql::RelationalIndexReadMode::Materialized

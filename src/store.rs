@@ -1779,7 +1779,9 @@ impl GraphStore {
             relational_overflow_config: RelationalOverflowConfig::default(),
             columnar_shadow: ColumnarShadowState::default(),
             relational_index_shadow: RelationalIndexShadowState::new(
-                replay_config.relational_index_shadow_checkpoint,
+                replay_config
+                    .relational_index_mode
+                    .publishes_persistent_indexes(),
             ),
             runtime_governor: None,
             durable: Some(durable),

@@ -163,8 +163,10 @@ budgets return `ready = false`. This API does not introduce a business-specific
 lookup surface.
 
 PostgreSQL SQL activation is controlled by
-`DatabaseConfig::relational_index_demand_reads` and is disabled by default as
-the rollback mode. Primary-key, unique, leading secondary-prefix, and index
+`DatabaseConfig::relational_index_mode`. `Materialized` is the default rollback
+mode, `Shadow` publishes and qualifies persistent generations without serving
+them, and `DemandPaged` selects them for eligible reads. Primary-key, unique,
+leading secondary-prefix, and index
 nested-loop probes consume logical row locators from one generation-pinned
 view and hydrate rows from the same relational snapshot. One statement-wide
 ledger bounds logical pages, logical bytes, result locators, and tree height
