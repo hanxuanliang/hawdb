@@ -86,6 +86,91 @@ and algorithms outside active routes are not implied backlog items.
   - Accept an in-memory result only when route-bound evidence proves it remains
     within admission; do not weaken the blocking-operator memory limit.
 
+## P1: Persistent Row And Index Storage
+
+The immutable relational index codec, generation-fenced shadow publisher,
+demand reader, bounded page-cache integration, and WAL recovery delta are
+implemented as non-serving evidence paths. The remaining work below activates
+those foundations without allowing a stale index or a database-sized resident
+set to become a correctness dependency.
+
+- [ ] Pin generation-bound relational index read views and merge live changes.
+  - Retain one immutable read view binding the base generation, base and
+    recovered commit epochs, schema digest, recovery-delta pages, and a bounded
+    COW overlay for relational mutations committed after open.
+  - Capture live index changes from the transaction apply result instead of
+    independently interpreting WAL syntax.
+  - Bound the live overlay by entries and bytes. DDL, relational snapshot
+    replacement, or exhausted admission makes the view explicitly unavailable;
+    no reader may continue from stale postings.
+  - Extend `SkeinIndexRecovery.tla` for recovery-to-live continuity, pinned
+    readers, and fail-closed invalidation.
+
+- [ ] Activate demand-paged relational indexes through PostgreSQL SQL.
+  - Differentially qualify exact, unique, leading composite-prefix, and join
+    probes against the materialized oracle across base, recovery-delta, and
+    live-delta state before changing query routing.
+  - Keep SQL as the production entrypoint. The executor consumes bounded row
+    locators from the pinned index view; do not add route-specific public APIs.
+  - Missing, unavailable, or admission-rejected optional query indexes may use
+    an observable canonical fallback while it exists. Corruption, immutable
+    identity mismatch, or generation mismatch poisons the selected view and
+    fails closed.
+  - Report generation, epoch, logical and physical page bytes, cache results,
+    delta work, and fallback reason in query evidence. Keep one rollback mode
+    until business-shaped activation evidence passes.
+
+- [ ] Make persistent relational indexes authoritative.
+  - Publish row identity, primary, unique, secondary, and foreign-key support
+    roots with one schema epoch and manifest generation.
+  - Validate uniqueness, UPSERT conflicts, and foreign keys through the pinned
+    base-plus-delta view before removing materialized postings.
+  - Extend `SkeinIndexPublication.tla` for canonical uniqueness and row/index
+    epoch agreement.
+  - Remove normal-open `rebuild_indexes()` only after required constraint roots
+    fail writable open when missing, stale, or corrupt. Index-open I/O and
+    mandatory residency must remain independent of leaf and posting counts.
+
+- [ ] Implement the canonical relational row-page runtime.
+  - Add the v1 row-page codec, bounded slot directory, ordered primary-key
+    bounds, requested-field decoding, and overflow descriptors with strict
+    encode/decode symmetry and corruption rejection.
+  - Publish dirty COW pages into fresh generations and replace the manifest
+    only after all referenced pages are durable. Reject stale publishers and
+    preserve reader-pinned cross-generation page references.
+  - Recover from the published root plus a bounded WAL dirty overlay without
+    skipping durable WAL or scanning all row pages during open.
+  - Add concrete publication traces and crash-point tests that refine
+    `SkeinCowPagePublication.tla`; the protocol model alone is not runtime
+    completion evidence.
+
+- [ ] Demand-page relational rows and large values.
+  - Support primary-key point reads, admitted ordered pages, and bounded range
+    cursors through the shared byte-bounded page cache.
+  - Enforce row, page, byte, pin, tree-height, and cancellation limits. Pin
+    lifetime is at most one cursor window or pipeline wave.
+  - Decode only required fields. Reading a projected overflow field hydrates
+    only that value; an unprojected text, JSON, binary, or vector payload must
+    not be read, decoded, or cloned.
+
+- [ ] Activate canonical row pages for the first Mem relational tables.
+  - Qualify `content_documents` and `thread_messages` first, then
+    `content_chunks` and `content_anchors`, using the frozen PostgreSQL statement
+    corpus and one pinned graph-plus-relational epoch.
+  - Require checkpoint/reopen, WAL replay, corruption, cancellation, locking,
+    cold/warm latency, RSS, page-fault, and write-amplification evidence under
+    the 512 MiB desktop profile before enabling the path by default.
+  - Keep rollback at the reader-selection boundary so disabling the new path
+    does not require rewriting canonical bytes.
+
+- [ ] Persist and activate the remaining canonical graph indexes.
+  - Publish stable-id, composite-property, relationship-property, forward
+    adjacency, and reverse adjacency roots with the canonical graph epoch.
+  - Activate each index class independently after differential, recovery,
+    cache-budget, and production-shaped evidence; derived BM25, vector,
+    statistics, analytics, and optional columnar projections remain outside
+    canonical recovery.
+
 ## P1: PostgreSQL-Dialect Relational Content Store
 
 This work reopens a deliberately deferred boundary: selected durable row and
