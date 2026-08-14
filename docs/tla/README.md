@@ -438,28 +438,41 @@ relational-index recovery, uniqueness validation from disk, multilevel root
 navigation, or cache-capacity accounting; those remain owned by the row-page,
 index-recovery, and page-cache obligations.
 
-`SkeinRelationalIndexShadowPublication.tla` narrows the next format stage to a
-non-serving relational shadow. It models the cross-platform publication lock,
-generation-specific fixed-slot page artifact, durable-before-visible
-manifest replacement, stale expected-generation rejection, crash-orphaned
-artifacts, exact generation/epoch open, cold page residency, and on-demand
-corruption. Old generation artifacts remain available to already-open handles.
-The model deliberately does not allow SQL execution to consume the shadow;
-production activation still requires WAL delta recovery and differential read
-evidence.
+`SkeinRelationalIndexShadowPublication.tla` models the generation-aligned but
+non-authoritative relational index candidate. Candidate fixed-slot pages become
+durable before the generation-specific candidate manifest, and a canonical
+checkpoint may select that generation only after the candidate is complete.
+Canonical publication may also succeed without a candidate, so admission
+failure and crash-orphaned future candidates cannot replace or disable the
+selected checkpoint. Exact generation/epoch open leaves page slots cold. A
+corrupt candidate is isolated from canonical open in `Shadow` mode, while an
+explicitly selected `DemandPaged` integrity failure fails the indexed read
+closed. Old selected generations remain available to already-open handles.
+The model does not make the candidate a uniqueness or foreign-key oracle;
+canonical manifest binding and required constraint roots remain obligations of
+the later authoritative publication stage.
 
-`SkeinRelationalIndexDemandRead.tla` models the non-serving demand-reader
-stage. Opening a reader keeps every page cold. A lookup loads only its ordered
-root/leaf/posting path while independently enforcing page, byte, and row
-budgets. Emitted row locators are always an ordered prefix of the materialized
-oracle; only a complete successful traversal equals the complete oracle, and
+The configured instance uses two non-zero generations, one non-zero commit
+epoch, and one demand-loaded page. This is sufficient to cover a selected old
+handle while a newer checkpoint wins, a future candidate abandoned before
+checkpoint publication, checkpoint publication without a candidate, exact
+generation/epoch selection, and both manifest and first-page corruption.
+
+`SkeinRelationalIndexDemandRead.tla` models the generation-pinned demand-reader
+mechanics independently from SQL activation. Opening a reader keeps every page
+cold. A lookup loads only its ordered root/leaf/posting path while independently
+enforcing page, byte, and row budgets. Emitted row locators are always an
+ordered prefix of the materialized oracle; only a complete successful
+traversal equals the complete oracle, and
 an early-stop success is explicitly marked. Admission failure may leave
 provisional rows that the caller must discard, while page corruption poisons
-only the shadow reader. SQL shadow selection remains false in every modeled
-state.
+only the candidate reader. SQL selection, statement-wide budgets, and
+materialized fallback classification are covered by runtime tests rather than
+this page-traversal model.
 
-`SkeinIndexRecovery.tla` models the next non-serving recovery layer. Canonical
-commits append ordered logical changes after one checkpoint base. Recovery
+`SkeinIndexRecovery.tla` models recovery and live-delta mechanics independently
+from SQL activation. Canonical commits append ordered logical changes after one
+checkpoint base. Recovery
 replays that prefix into a finite dirty overlay, flushes immutable delta pages,
 and publishes a unique candidate generation only after the complete replay is
 durable. It checks WAL/oracle equivalence, overlay capacity, base-plus-delta

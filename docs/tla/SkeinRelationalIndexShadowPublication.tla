@@ -2,11 +2,13 @@
 EXTENDS Integers, Naturals, FiniteSets
 
 (***************************************************************************)
-(* A relational index shadow is a generation-specific, rebuildable page    *)
-(* artifact. One cross-platform file lock serializes builders. Pages become *)
-(* durable before a fixed manifest is atomically replaced. Normal reads do  *)
-(* not consume the shadow; a diagnostic reader opens only an exact          *)
-(* generation/epoch fence and leaves page slots cold.                       *)
+(* Relational index candidates are generation-specific, rebuildable files. *)
+(* Candidate pages and their root manifest become durable before a matching *)
+(* canonical checkpoint may select that generation. The canonical checkpoint *)
+(* does not reverse-reference a non-authoritative candidate, so candidate    *)
+(* admission failure, corruption, or a crash orphan never prevents canonical *)
+(* recovery. A DemandPaged integrity failure fails the selected read closed, *)
+(* while Shadow mode only records candidate unavailability.                  *)
 (***************************************************************************)
 
 CONSTANT MaxGeneration, MaxEpoch, MaxPage
@@ -18,20 +20,30 @@ ASSUME /\ MaxGeneration \in Nat \ {0}
 Generations == 0..MaxGeneration
 Epochs == 0..MaxEpoch
 Pages == 1..MaxPage
-BuildPhases == {"idle", "building", "durable"}
+CandidateIds == [generation : Generations, epoch : Epochs]
+BuildPhases == {"idle", "building", "pages_durable", "candidate_durable"}
+SelectionModes == {"none", "shadow", "demand"}
 ReadStates == {"idle", "reading", "succeeded", "failed"}
 
+Candidate(generation, epoch) ==
+    [generation |-> generation, epoch |-> epoch]
+
 VARIABLES
-    publishedGeneration,
-    publishedEpoch,
-    publishedHistory,
+    canonicalGeneration,
+    canonicalEpoch,
+    canonicalHistory,
     buildPhase,
     buildGeneration,
     buildEpoch,
-    buildExpectedPrevious,
     durableArtifacts,
-    staleRequestRejected,
+    durableCandidateManifests,
+    abandonedCandidates,
+    corruptCandidateManifests,
+    canonicalOpen,
+    candidateUnavailable,
+    demandReadFailed,
     handleOpen,
+    selectionMode,
     handleGeneration,
     handleEpoch,
     queriesStarted,
@@ -42,16 +54,21 @@ VARIABLES
     poisoned
 
 vars == <<
-    publishedGeneration,
-    publishedEpoch,
-    publishedHistory,
+    canonicalGeneration,
+    canonicalEpoch,
+    canonicalHistory,
     buildPhase,
     buildGeneration,
     buildEpoch,
-    buildExpectedPrevious,
     durableArtifacts,
-    staleRequestRejected,
+    durableCandidateManifests,
+    abandonedCandidates,
+    corruptCandidateManifests,
+    canonicalOpen,
+    candidateUnavailable,
+    demandReadFailed,
     handleOpen,
+    selectionMode,
     handleGeneration,
     handleEpoch,
     queriesStarted,
@@ -63,16 +80,21 @@ vars == <<
 >>
 
 Init ==
-    /\ publishedGeneration = 0
-    /\ publishedEpoch = 0
-    /\ publishedHistory = {0}
+    /\ canonicalGeneration = 0
+    /\ canonicalEpoch = 0
+    /\ canonicalHistory = {Candidate(0, 0)}
     /\ buildPhase = "idle"
     /\ buildGeneration = 0
     /\ buildEpoch = 0
-    /\ buildExpectedPrevious = 0
     /\ durableArtifacts = {}
-    /\ staleRequestRejected = FALSE
+    /\ durableCandidateManifests = {}
+    /\ abandonedCandidates = {}
+    /\ corruptCandidateManifests = {}
+    /\ canonicalOpen = FALSE
+    /\ candidateUnavailable = FALSE
+    /\ demandReadFailed = FALSE
     /\ handleOpen = FALSE
+    /\ selectionMode = "none"
     /\ handleGeneration = 0
     /\ handleEpoch = 0
     /\ queriesStarted = FALSE
@@ -82,21 +104,153 @@ Init ==
     /\ requiredPage = 0
     /\ poisoned = FALSE
 
-RejectStaleRequest ==
+BeginCandidate ==
     /\ buildPhase = "idle"
-    /\ \E expected \in Generations:
-        /\ expected # publishedGeneration
-        /\ buildExpectedPrevious' = expected
-    /\ staleRequestRejected' = TRUE
+    /\ canonicalGeneration < MaxGeneration
+    /\ \E generation \in (canonicalGeneration + 1)..MaxGeneration,
+          epoch \in canonicalEpoch..MaxEpoch:
+        /\ buildGeneration' = generation
+        /\ buildEpoch' = epoch
+    /\ buildPhase' = "building"
     /\ UNCHANGED <<
-        publishedGeneration,
-        publishedEpoch,
-        publishedHistory,
+        canonicalGeneration,
+        canonicalEpoch,
+        canonicalHistory,
+        durableArtifacts,
+        durableCandidateManifests,
+        abandonedCandidates,
+        corruptCandidateManifests,
+        canonicalOpen,
+        candidateUnavailable,
+        demandReadFailed,
+        handleOpen,
+        selectionMode,
+        handleGeneration,
+        handleEpoch,
+        queriesStarted,
+        loadedPages,
+        corruptPages,
+        readState,
+        requiredPage,
+        poisoned
+        >>
+
+PersistCandidatePages ==
+    /\ buildPhase = "building"
+    /\ buildPhase' = "pages_durable"
+    /\ durableArtifacts' = durableArtifacts \cup {buildGeneration}
+    /\ UNCHANGED <<
+        canonicalGeneration,
+        canonicalEpoch,
+        canonicalHistory,
+        buildGeneration,
+        buildEpoch,
+        durableCandidateManifests,
+        abandonedCandidates,
+        corruptCandidateManifests,
+        canonicalOpen,
+        candidateUnavailable,
+        demandReadFailed,
+        handleOpen,
+        selectionMode,
+        handleGeneration,
+        handleEpoch,
+        queriesStarted,
+        loadedPages,
+        corruptPages,
+        readState,
+        requiredPage,
+        poisoned
+        >>
+
+PersistCandidateManifest ==
+    /\ buildPhase = "pages_durable"
+    /\ buildGeneration \in durableArtifacts
+    /\ buildPhase' = "candidate_durable"
+    /\ durableCandidateManifests' =
+        durableCandidateManifests \cup {Candidate(buildGeneration, buildEpoch)}
+    /\ UNCHANGED <<
+        canonicalGeneration,
+        canonicalEpoch,
+        canonicalHistory,
+        buildGeneration,
+        buildEpoch,
+        durableArtifacts,
+        abandonedCandidates,
+        corruptCandidateManifests,
+        canonicalOpen,
+        candidateUnavailable,
+        demandReadFailed,
+        handleOpen,
+        selectionMode,
+        handleGeneration,
+        handleEpoch,
+        queriesStarted,
+        loadedPages,
+        corruptPages,
+        readState,
+        requiredPage,
+        poisoned
+        >>
+
+PublishCheckpointWithCandidate ==
+    /\ buildPhase = "candidate_durable"
+    /\ Candidate(buildGeneration, buildEpoch) \in durableCandidateManifests
+    /\ buildGeneration > canonicalGeneration
+    /\ buildEpoch >= canonicalEpoch
+    /\ canonicalGeneration' = buildGeneration
+    /\ canonicalEpoch' = buildEpoch
+    /\ canonicalHistory' =
+        canonicalHistory \cup {Candidate(buildGeneration, buildEpoch)}
+    /\ buildPhase' = "idle"
+    /\ buildGeneration' = 0
+    /\ buildEpoch' = 0
+    /\ UNCHANGED <<
+        durableArtifacts,
+        durableCandidateManifests,
+        abandonedCandidates,
+        corruptCandidateManifests,
+        canonicalOpen,
+        candidateUnavailable,
+        demandReadFailed,
+        handleOpen,
+        selectionMode,
+        handleGeneration,
+        handleEpoch,
+        queriesStarted,
+        loadedPages,
+        corruptPages,
+        readState,
+        requiredPage,
+        poisoned
+        >>
+
+(***************************************************************************)
+(* Canonical checkpoint publication is independent from a non-authoritative *)
+(* candidate. This is the admission/error path used by Shadow and            *)
+(* DemandPaged while the materialized constraint oracle still exists.        *)
+(***************************************************************************)
+PublishCheckpointWithoutCandidate ==
+    /\ buildPhase = "idle"
+    /\ canonicalGeneration < MaxGeneration
+    /\ \E generation \in (canonicalGeneration + 1)..MaxGeneration,
+          epoch \in canonicalEpoch..MaxEpoch:
+        /\ canonicalGeneration' = generation
+        /\ canonicalEpoch' = epoch
+        /\ canonicalHistory' = canonicalHistory \cup {Candidate(generation, epoch)}
+    /\ UNCHANGED <<
         buildPhase,
         buildGeneration,
         buildEpoch,
         durableArtifacts,
+        durableCandidateManifests,
+        abandonedCandidates,
+        corruptCandidateManifests,
+        canonicalOpen,
+        candidateUnavailable,
+        demandReadFailed,
         handleOpen,
+        selectionMode,
         handleGeneration,
         handleEpoch,
         queriesStarted,
@@ -107,22 +261,25 @@ RejectStaleRequest ==
         poisoned
         >>
 
-BeginBuild ==
-    /\ buildPhase = "idle"
-    /\ publishedGeneration < MaxGeneration
-    /\ \E generation \in (publishedGeneration + 1)..MaxGeneration:
-        /\ buildGeneration' = generation
-    /\ \E epoch \in Epochs:
-        /\ buildEpoch' = epoch
-    /\ buildExpectedPrevious' = publishedGeneration
-    /\ buildPhase' = "building"
-    /\ staleRequestRejected' = FALSE
+CrashBeforeCheckpoint ==
+    /\ buildPhase # "idle"
+    /\ abandonedCandidates' =
+        abandonedCandidates \cup {Candidate(buildGeneration, buildEpoch)}
+    /\ buildPhase' = "idle"
+    /\ buildGeneration' = 0
+    /\ buildEpoch' = 0
     /\ UNCHANGED <<
-        publishedGeneration,
-        publishedEpoch,
-        publishedHistory,
+        canonicalGeneration,
+        canonicalEpoch,
+        canonicalHistory,
         durableArtifacts,
+        durableCandidateManifests,
+        corruptCandidateManifests,
+        canonicalOpen,
+        candidateUnavailable,
+        demandReadFailed,
         handleOpen,
+        selectionMode,
         handleGeneration,
         handleEpoch,
         queriesStarted,
@@ -133,45 +290,24 @@ BeginBuild ==
         poisoned
         >>
 
-PersistGenerationPages ==
-    /\ buildPhase = "building"
-    /\ buildPhase' = "durable"
-    /\ durableArtifacts' = durableArtifacts \cup {buildGeneration}
+OpenCanonical ==
+    /\ ~canonicalOpen
+    /\ canonicalOpen' = TRUE
+    /\ candidateUnavailable' = FALSE
+    /\ demandReadFailed' = FALSE
     /\ UNCHANGED <<
-        publishedGeneration,
-        publishedEpoch,
-        publishedHistory,
+        canonicalGeneration,
+        canonicalEpoch,
+        canonicalHistory,
+        buildPhase,
         buildGeneration,
         buildEpoch,
-        buildExpectedPrevious,
-        staleRequestRejected,
-        handleOpen,
-        handleGeneration,
-        handleEpoch,
-        queriesStarted,
-        loadedPages,
-        corruptPages,
-        readState,
-        requiredPage,
-        poisoned
-        >>
-
-PublishManifest ==
-    /\ buildPhase = "durable"
-    /\ buildExpectedPrevious = publishedGeneration
-    /\ buildGeneration > publishedGeneration
-    /\ buildGeneration \in durableArtifacts
-    /\ publishedGeneration' = buildGeneration
-    /\ publishedEpoch' = buildEpoch
-    /\ publishedHistory' = publishedHistory \cup {buildGeneration}
-    /\ buildPhase' = "idle"
-    /\ buildGeneration' = 0
-    /\ buildEpoch' = 0
-    /\ buildExpectedPrevious' = publishedGeneration'
-    /\ UNCHANGED <<
         durableArtifacts,
-        staleRequestRejected,
+        durableCandidateManifests,
+        abandonedCandidates,
+        corruptCandidateManifests,
         handleOpen,
+        selectionMode,
         handleGeneration,
         handleEpoch,
         queriesStarted,
@@ -182,73 +318,181 @@ PublishManifest ==
         poisoned
         >>
 
-CrashBeforeManifest ==
-    /\ buildPhase # "idle"
-    /\ buildPhase' = "idle"
-    /\ buildGeneration' = 0
-    /\ buildEpoch' = 0
-    /\ buildExpectedPrevious' = publishedGeneration
-    /\ UNCHANGED <<
-        publishedGeneration,
-        publishedEpoch,
-        publishedHistory,
-        durableArtifacts,
-        staleRequestRejected,
-        handleOpen,
-        handleGeneration,
-        handleEpoch,
-        queriesStarted,
-        loadedPages,
-        corruptPages,
-        readState,
-        requiredPage,
-        poisoned
-        >>
-
-OpenExactShadow ==
+OpenExactCandidate ==
+    /\ canonicalOpen
     /\ ~handleOpen
-    /\ publishedGeneration # 0
-    /\ publishedGeneration \in durableArtifacts
+    /\ Candidate(canonicalGeneration, canonicalEpoch)
+        \in durableCandidateManifests \ corruptCandidateManifests
+    /\ \E mode \in {"shadow", "demand"}: selectionMode' = mode
     /\ handleOpen' = TRUE
-    /\ handleGeneration' = publishedGeneration
-    /\ handleEpoch' = publishedEpoch
+    /\ handleGeneration' = canonicalGeneration
+    /\ handleEpoch' = canonicalEpoch
+    /\ candidateUnavailable' = FALSE
+    /\ demandReadFailed' = FALSE
     /\ queriesStarted' = FALSE
     /\ loadedPages' = {}
     /\ readState' = "idle"
     /\ requiredPage' = 0
     /\ poisoned' = FALSE
     /\ UNCHANGED <<
-        publishedGeneration,
-        publishedEpoch,
-        publishedHistory,
+        canonicalGeneration,
+        canonicalEpoch,
+        canonicalHistory,
         buildPhase,
         buildGeneration,
         buildEpoch,
-        buildExpectedPrevious,
         durableArtifacts,
-        staleRequestRejected,
+        durableCandidateManifests,
+        abandonedCandidates,
+        corruptCandidateManifests,
+        canonicalOpen,
         corruptPages
+        >>
+
+ObserveMissingCandidate ==
+    /\ canonicalOpen
+    /\ ~handleOpen
+    /\ Candidate(canonicalGeneration, canonicalEpoch)
+        \notin durableCandidateManifests
+    /\ \E mode \in {"shadow", "demand"}: selectionMode' = mode
+    /\ candidateUnavailable' = TRUE
+    /\ demandReadFailed' = FALSE
+    /\ UNCHANGED <<
+        canonicalGeneration,
+        canonicalEpoch,
+        canonicalHistory,
+        buildPhase,
+        buildGeneration,
+        buildEpoch,
+        durableArtifacts,
+        durableCandidateManifests,
+        abandonedCandidates,
+        corruptCandidateManifests,
+        canonicalOpen,
+        handleOpen,
+        handleGeneration,
+        handleEpoch,
+        queriesStarted,
+        loadedPages,
+        corruptPages,
+        readState,
+        requiredPage,
+        poisoned
+        >>
+
+CorruptCandidateManifest ==
+    /\ \E candidate \in durableCandidateManifests:
+        corruptCandidateManifests' = corruptCandidateManifests \cup {candidate}
+    /\ UNCHANGED <<
+        canonicalGeneration,
+        canonicalEpoch,
+        canonicalHistory,
+        buildPhase,
+        buildGeneration,
+        buildEpoch,
+        durableArtifacts,
+        durableCandidateManifests,
+        abandonedCandidates,
+        canonicalOpen,
+        candidateUnavailable,
+        demandReadFailed,
+        handleOpen,
+        selectionMode,
+        handleGeneration,
+        handleEpoch,
+        queriesStarted,
+        loadedPages,
+        corruptPages,
+        readState,
+        requiredPage,
+        poisoned
+        >>
+
+RejectCorruptShadowCandidate ==
+    /\ canonicalOpen
+    /\ ~handleOpen
+    /\ Candidate(canonicalGeneration, canonicalEpoch)
+        \in corruptCandidateManifests
+    /\ selectionMode' = "shadow"
+    /\ candidateUnavailable' = TRUE
+    /\ demandReadFailed' = FALSE
+    /\ UNCHANGED <<
+        canonicalGeneration,
+        canonicalEpoch,
+        canonicalHistory,
+        buildPhase,
+        buildGeneration,
+        buildEpoch,
+        durableArtifacts,
+        durableCandidateManifests,
+        abandonedCandidates,
+        corruptCandidateManifests,
+        canonicalOpen,
+        handleOpen,
+        handleGeneration,
+        handleEpoch,
+        queriesStarted,
+        loadedPages,
+        corruptPages,
+        readState,
+        requiredPage,
+        poisoned
+        >>
+
+RejectCorruptDemandCandidate ==
+    /\ canonicalOpen
+    /\ ~handleOpen
+    /\ Candidate(canonicalGeneration, canonicalEpoch)
+        \in corruptCandidateManifests
+    /\ selectionMode' = "demand"
+    /\ candidateUnavailable' = TRUE
+    /\ demandReadFailed' = TRUE
+    /\ UNCHANGED <<
+        canonicalGeneration,
+        canonicalEpoch,
+        canonicalHistory,
+        buildPhase,
+        buildGeneration,
+        buildEpoch,
+        durableArtifacts,
+        durableCandidateManifests,
+        abandonedCandidates,
+        corruptCandidateManifests,
+        canonicalOpen,
+        handleOpen,
+        handleGeneration,
+        handleEpoch,
+        queriesStarted,
+        loadedPages,
+        corruptPages,
+        readState,
+        requiredPage,
+        poisoned
         >>
 
 BeginPageRead ==
     /\ handleOpen
     /\ ~poisoned
     /\ readState = "idle"
-    /\ \E page \in Pages:
-        /\ requiredPage' = page
+    /\ \E page \in Pages: requiredPage' = page
     /\ queriesStarted' = TRUE
     /\ readState' = "reading"
     /\ UNCHANGED <<
-        publishedGeneration,
-        publishedEpoch,
-        publishedHistory,
+        canonicalGeneration,
+        canonicalEpoch,
+        canonicalHistory,
         buildPhase,
         buildGeneration,
         buildEpoch,
-        buildExpectedPrevious,
         durableArtifacts,
-        staleRequestRejected,
+        durableCandidateManifests,
+        abandonedCandidates,
+        corruptCandidateManifests,
+        canonicalOpen,
+        candidateUnavailable,
+        demandReadFailed,
         handleOpen,
+        selectionMode,
         handleGeneration,
         handleEpoch,
         loadedPages,
@@ -262,16 +506,21 @@ ReadHealthyPage ==
     /\ loadedPages' = loadedPages \cup {requiredPage}
     /\ readState' = "succeeded"
     /\ UNCHANGED <<
-        publishedGeneration,
-        publishedEpoch,
-        publishedHistory,
+        canonicalGeneration,
+        canonicalEpoch,
+        canonicalHistory,
         buildPhase,
         buildGeneration,
         buildEpoch,
-        buildExpectedPrevious,
         durableArtifacts,
-        staleRequestRejected,
+        durableCandidateManifests,
+        abandonedCandidates,
+        corruptCandidateManifests,
+        canonicalOpen,
+        candidateUnavailable,
+        demandReadFailed,
         handleOpen,
+        selectionMode,
         handleGeneration,
         handleEpoch,
         queriesStarted,
@@ -285,17 +534,22 @@ ReadCorruptPage ==
     /\ requiredPage \in corruptPages
     /\ readState' = "failed"
     /\ poisoned' = TRUE
+    /\ demandReadFailed' = (demandReadFailed \/ (selectionMode = "demand"))
     /\ UNCHANGED <<
-        publishedGeneration,
-        publishedEpoch,
-        publishedHistory,
+        canonicalGeneration,
+        canonicalEpoch,
+        canonicalHistory,
         buildPhase,
         buildGeneration,
         buildEpoch,
-        buildExpectedPrevious,
         durableArtifacts,
-        staleRequestRejected,
+        durableCandidateManifests,
+        abandonedCandidates,
+        corruptCandidateManifests,
+        canonicalOpen,
+        candidateUnavailable,
         handleOpen,
+        selectionMode,
         handleGeneration,
         handleEpoch,
         queriesStarted,
@@ -309,16 +563,21 @@ FinishRead ==
     /\ readState' = "idle"
     /\ requiredPage' = 0
     /\ UNCHANGED <<
-        publishedGeneration,
-        publishedEpoch,
-        publishedHistory,
+        canonicalGeneration,
+        canonicalEpoch,
+        canonicalHistory,
         buildPhase,
         buildGeneration,
         buildEpoch,
-        buildExpectedPrevious,
         durableArtifacts,
-        staleRequestRejected,
+        durableCandidateManifests,
+        abandonedCandidates,
+        corruptCandidateManifests,
+        canonicalOpen,
+        candidateUnavailable,
+        demandReadFailed,
         handleOpen,
+        selectionMode,
         handleGeneration,
         handleEpoch,
         queriesStarted,
@@ -331,16 +590,21 @@ CorruptColdPage ==
     /\ \E page \in Pages \ loadedPages:
         corruptPages' = corruptPages \cup {page}
     /\ UNCHANGED <<
-        publishedGeneration,
-        publishedEpoch,
-        publishedHistory,
+        canonicalGeneration,
+        canonicalEpoch,
+        canonicalHistory,
         buildPhase,
         buildGeneration,
         buildEpoch,
-        buildExpectedPrevious,
         durableArtifacts,
-        staleRequestRejected,
+        durableCandidateManifests,
+        abandonedCandidates,
+        corruptCandidateManifests,
+        canonicalOpen,
+        candidateUnavailable,
+        demandReadFailed,
         handleOpen,
+        selectionMode,
         handleGeneration,
         handleEpoch,
         queriesStarted,
@@ -350,9 +614,13 @@ CorruptColdPage ==
         poisoned
         >>
 
-CrashHandle ==
-    /\ handleOpen
+CrashDatabase ==
+    /\ canonicalOpen \/ handleOpen
+    /\ canonicalOpen' = FALSE
+    /\ candidateUnavailable' = FALSE
+    /\ demandReadFailed' = FALSE
     /\ handleOpen' = FALSE
+    /\ selectionMode' = "none"
     /\ handleGeneration' = 0
     /\ handleEpoch' = 0
     /\ queriesStarted' = FALSE
@@ -361,43 +629,55 @@ CrashHandle ==
     /\ requiredPage' = 0
     /\ poisoned' = FALSE
     /\ UNCHANGED <<
-        publishedGeneration,
-        publishedEpoch,
-        publishedHistory,
+        canonicalGeneration,
+        canonicalEpoch,
+        canonicalHistory,
         buildPhase,
         buildGeneration,
         buildEpoch,
-        buildExpectedPrevious,
         durableArtifacts,
-        staleRequestRejected,
+        durableCandidateManifests,
+        abandonedCandidates,
+        corruptCandidateManifests,
         corruptPages
         >>
 
 Next ==
-    \/ RejectStaleRequest
-    \/ BeginBuild
-    \/ PersistGenerationPages
-    \/ PublishManifest
-    \/ CrashBeforeManifest
-    \/ OpenExactShadow
+    \/ BeginCandidate
+    \/ PersistCandidatePages
+    \/ PersistCandidateManifest
+    \/ PublishCheckpointWithCandidate
+    \/ PublishCheckpointWithoutCandidate
+    \/ CrashBeforeCheckpoint
+    \/ OpenCanonical
+    \/ OpenExactCandidate
+    \/ ObserveMissingCandidate
+    \/ CorruptCandidateManifest
+    \/ RejectCorruptShadowCandidate
+    \/ RejectCorruptDemandCandidate
     \/ BeginPageRead
     \/ ReadHealthyPage
     \/ ReadCorruptPage
     \/ FinishRead
     \/ CorruptColdPage
-    \/ CrashHandle
+    \/ CrashDatabase
 
 TypeOK ==
-    /\ publishedGeneration \in Generations
-    /\ publishedEpoch \in Epochs
-    /\ publishedHistory \subseteq Generations
+    /\ canonicalGeneration \in Generations
+    /\ canonicalEpoch \in Epochs
+    /\ canonicalHistory \subseteq CandidateIds
     /\ buildPhase \in BuildPhases
     /\ buildGeneration \in Generations
     /\ buildEpoch \in Epochs
-    /\ buildExpectedPrevious \in Generations
     /\ durableArtifacts \subseteq (1..MaxGeneration)
-    /\ staleRequestRejected \in BOOLEAN
+    /\ durableCandidateManifests \subseteq CandidateIds
+    /\ abandonedCandidates \subseteq CandidateIds
+    /\ corruptCandidateManifests \subseteq durableCandidateManifests
+    /\ canonicalOpen \in BOOLEAN
+    /\ candidateUnavailable \in BOOLEAN
+    /\ demandReadFailed \in BOOLEAN
     /\ handleOpen \in BOOLEAN
+    /\ selectionMode \in SelectionModes
     /\ handleGeneration \in Generations
     /\ handleEpoch \in Epochs
     /\ queriesStarted \in BOOLEAN
@@ -407,22 +687,21 @@ TypeOK ==
     /\ requiredPage \in 0..MaxPage
     /\ poisoned \in BOOLEAN
 
-PublishedManifestHasDurablePages ==
-    publishedGeneration # 0 => publishedGeneration \in durableArtifacts
+CandidateManifestHasDurablePages ==
+    \A candidate \in durableCandidateManifests:
+        candidate.generation \in durableArtifacts
 
-PublishedGenerationNeverRegresses ==
-    /\ publishedGeneration \in publishedHistory
-    /\ \A generation \in publishedHistory:
-        generation <= publishedGeneration
+CanonicalGenerationNeverRegresses ==
+    /\ Candidate(canonicalGeneration, canonicalEpoch) \in canonicalHistory
+    /\ \A candidate \in canonicalHistory:
+        candidate.generation <= canonicalGeneration
 
-BuildOwnsPublishedBase ==
-    buildPhase # "idle" => buildExpectedPrevious = publishedGeneration
-
-OpenHandlePinsDurableGeneration ==
+OpenHandlePinsSelectedCandidate ==
     handleOpen =>
-        /\ handleGeneration \in publishedHistory
-        /\ handleGeneration \in durableArtifacts
-        /\ handleGeneration <= publishedGeneration
+        /\ canonicalOpen
+        /\ Candidate(handleGeneration, handleEpoch) \in canonicalHistory
+        /\ Candidate(handleGeneration, handleEpoch) \in durableCandidateManifests
+        /\ handleGeneration <= canonicalGeneration
 
 OpenDoesNotWarmPages ==
     handleOpen /\ ~queriesStarted => loadedPages = {}
@@ -433,8 +712,19 @@ SuccessfulReadVerifiedPage ==
         /\ requiredPage \notin corruptPages
         /\ ~poisoned
 
-CorruptionPoisonsOnlyShadowHandle ==
-    poisoned => /\ handleOpen /\ readState = "failed"
+CandidateFailurePreservesCanonicalOpen ==
+    (candidateUnavailable \/ demandReadFailed) => canonicalOpen
+
+DemandIntegrityFailureFailsClosed ==
+    demandReadFailed =>
+        /\ selectionMode = "demand"
+        /\ canonicalOpen
+
+CorruptionPoisonsOnlyCandidateHandle ==
+    poisoned =>
+        /\ canonicalOpen
+        /\ handleOpen
+        /\ readState = "failed"
 
 Spec == Init /\ [][Next]_vars
 

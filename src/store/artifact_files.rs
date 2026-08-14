@@ -85,6 +85,20 @@ pub(super) fn parse_property_projection_manifest_generation_file(name: &str) -> 
         .ok()
 }
 
+fn parse_relational_index_artifact_generation_file(name: &str) -> Option<u64> {
+    name.strip_prefix("relational-index-shadow-")?
+        .strip_suffix(".pages.skein")?
+        .parse()
+        .ok()
+}
+
+fn parse_relational_index_manifest_generation_file(name: &str) -> Option<u64> {
+    name.strip_prefix("relational-index-shadow-")?
+        .strip_suffix(".manifest.skein")?
+        .parse()
+        .ok()
+}
+
 pub(super) fn storage_generation_for_file(name: &str) -> Option<u64> {
     parse_generation_file(name, "checkpoint.")
         .or_else(|| parse_generation_file(name, "wal."))
@@ -97,6 +111,8 @@ pub(super) fn storage_generation_for_file(name: &str) -> Option<u64> {
         .or_else(|| parse_property_spill_manifest_generation_file(name))
         .or_else(|| parse_generation_file(name, "property-index."))
         .or_else(|| parse_property_projection_manifest_generation_file(name))
+        .or_else(|| parse_relational_index_artifact_generation_file(name))
+        .or_else(|| parse_relational_index_manifest_generation_file(name))
 }
 
 fn parse_checkpoint_staging_generation(name: &str) -> Option<u64> {

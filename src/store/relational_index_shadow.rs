@@ -8,9 +8,10 @@
 use super::{GraphStore, SkeinError};
 use skein_integrity::{IntegrityHasher, Sha256Digest};
 use skein_storage::{
-    RelationalIndexChange, RelationalIndexChangeCapture, RelationalIndexChangeCaptureLimits,
-    RelationalIndexChangeKind, RelationalIndexReadLimits, RelationalIndexReadReport,
-    RelationalIndexRecoveryBuilder, RelationalIndexRecoveryConfig,
+    relational_index_shadow_manifest_generation_file, RelationalIndexChange,
+    RelationalIndexChangeCapture, RelationalIndexChangeCaptureLimits, RelationalIndexChangeKind,
+    RelationalIndexGenerationIdentity, RelationalIndexMode, RelationalIndexReadLimits,
+    RelationalIndexReadReport, RelationalIndexRecoveryBuilder, RelationalIndexRecoveryConfig,
     RelationalIndexRecoveryReadReport, RelationalIndexRecoveryReader,
     RelationalIndexRecoveryReport, RelationalIndexShadowBuildReport, RelationalIndexShadowConfig,
     RelationalIndexShadowError, RelationalIndexShadowManifest, RelationalIndexShadowReader,
@@ -785,6 +786,12 @@ pub struct RelationalIndexShadowCheckpointReport {
     pub error: Option<String>,
 }
 
+#[derive(Debug)]
+pub(super) struct PreparedRelationalIndexCandidate {
+    pub(super) candidate: Option<RelationalIndexShadowBuildReport>,
+    pub(super) report: RelationalIndexShadowCheckpointReport,
+}
+
 impl RelationalIndexShadowCheckpointReport {
     fn published(report: RelationalIndexShadowBuildReport) -> Self {
         Self {
@@ -856,6 +863,11 @@ pub enum RelationalIndexShadowRecoveryStatus {
         recovered_commit_epoch: u64,
         reason: String,
     },
+    CandidateUnavailable {
+        generation: u64,
+        source_commit_epoch: u64,
+        reason: String,
+    },
     Stale {
         generation: u64,
         source_commit_epoch: u64,
@@ -875,7 +887,7 @@ pub enum RelationalIndexShadowRecoveryStatus {
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct RelationalIndexShadowState {
-    enabled: bool,
+    mode: RelationalIndexMode,
     expected_previous_generation: Option<u64>,
     checkpoint_report: Option<RelationalIndexShadowCheckpointReport>,
     recovery_builder: Option<RelationalIndexRecoveryBuilder>,
@@ -883,13 +895,14 @@ pub(super) struct RelationalIndexShadowState {
     recovery_status: RelationalIndexShadowRecoveryStatus,
     read_view: Option<Arc<RelationalIndexReadView>>,
     live_limits: RelationalIndexChangeCaptureLimits,
+    generation_binding: Option<RelationalIndexGenerationIdentity>,
 }
 
 impl RelationalIndexShadowState {
-    pub(super) fn new(enabled: bool) -> Self {
+    pub(super) fn new(mode: RelationalIndexMode) -> Self {
         Self {
-            enabled,
-            recovery_status: if enabled {
+            mode,
+            recovery_status: if mode.publishes_persistent_indexes() {
                 RelationalIndexShadowRecoveryStatus::Missing
             } else {
                 RelationalIndexShadowRecoveryStatus::Disabled
@@ -902,6 +915,28 @@ impl RelationalIndexShadowState {
         self.read_view
             .as_ref()
             .filter(|view| view.identity().visible_commit_epoch == commit_epoch)
+    }
+
+    fn selected_read_failure(&self) -> Option<RelationalIndexShadowError> {
+        if !self.mode.serves_demand_paged_reads() {
+            return None;
+        }
+        match &self.recovery_status {
+            RelationalIndexShadowRecoveryStatus::Stale {
+                generation,
+                source_commit_epoch,
+                checkpoint_generation,
+                checkpoint_commit_epoch,
+            } => Some(RelationalIndexShadowError::Corrupt(format!(
+                "relational index generation/epoch {generation}/{source_commit_epoch} does not match checkpoint {checkpoint_generation}/{checkpoint_commit_epoch}"
+            ))),
+            RelationalIndexShadowRecoveryStatus::DiscardedInvalid { error }
+            | RelationalIndexShadowRecoveryStatus::InvalidWritable { error }
+            | RelationalIndexShadowRecoveryStatus::InvalidReadOnly { error } => {
+                Some(RelationalIndexShadowError::Corrupt(error.clone()))
+            }
+            _ => None,
+        }
     }
 
     pub(super) fn snapshot_at_epoch(&self, commit_epoch: u64) -> Self {
@@ -937,6 +972,111 @@ pub(super) struct RelationalIndexLiveUnavailable {
 }
 
 impl GraphStore {
+    pub(super) fn prepare_relational_index_candidate(
+        &self,
+        generation: u64,
+        source_commit_epoch: u64,
+    ) -> Option<PreparedRelationalIndexCandidate> {
+        if !self
+            .relational_index_shadow
+            .mode
+            .publishes_persistent_indexes()
+        {
+            return None;
+        }
+        let result = self.durable.as_ref().map_or_else(
+            || {
+                Err(RelationalIndexShadowError::Durability(
+                    "relational index checkpoint requires a durable store".to_string(),
+                ))
+            },
+            |durable| {
+                RelationalIndexShadowWriter::new(RelationalIndexShadowConfig::default())
+                    .publish_generation(
+                        durable.root_path(),
+                        &self.relational_state,
+                        generation,
+                        source_commit_epoch,
+                    )
+            },
+        );
+        Some(match result {
+            Ok(candidate) => PreparedRelationalIndexCandidate {
+                report: RelationalIndexShadowCheckpointReport::published(candidate.clone()),
+                candidate: Some(candidate),
+            },
+            Err(error) => PreparedRelationalIndexCandidate {
+                candidate: None,
+                report: RelationalIndexShadowCheckpointReport::failed(
+                    generation,
+                    source_commit_epoch,
+                    error.to_string(),
+                ),
+            },
+        })
+    }
+
+    pub(super) fn install_prepared_relational_index_candidate(
+        &mut self,
+        prepared: Option<PreparedRelationalIndexCandidate>,
+    ) {
+        let Some(prepared) = prepared else {
+            return;
+        };
+        let Some(report) = prepared.candidate else {
+            self.relational_index_shadow.generation_binding = None;
+            self.relational_index_shadow.recovery_builder = None;
+            self.relational_index_shadow.recovery_report = None;
+            self.relational_index_shadow.read_view = None;
+            self.relational_index_shadow.recovery_status =
+                RelationalIndexShadowRecoveryStatus::CandidateUnavailable {
+                    generation: prepared.report.generation,
+                    source_commit_epoch: prepared.report.source_commit_epoch,
+                    reason: prepared.report.error.clone().unwrap_or_else(|| {
+                        "relational index candidate was not published".to_string()
+                    }),
+                };
+            self.relational_index_shadow.checkpoint_report = Some(prepared.report);
+            return;
+        };
+        self.relational_index_shadow.generation_binding = Some(RelationalIndexGenerationIdentity {
+            generation: report.generation,
+            source_commit_epoch: report.source_commit_epoch,
+        });
+        self.relational_index_shadow.expected_previous_generation = Some(report.generation);
+        self.relational_index_shadow.recovery_builder = None;
+        self.relational_index_shadow.recovery_report = None;
+        match self.open_base_relational_index_read_view() {
+            Ok(view) => {
+                self.relational_index_shadow.read_view = Some(view);
+                self.relational_index_shadow.recovery_status =
+                    RelationalIndexShadowRecoveryStatus::CheckpointReady {
+                        generation: report.generation,
+                        source_commit_epoch: report.source_commit_epoch,
+                        index_roots: report.index_roots,
+                        page_count: report.pages_written,
+                    };
+                self.relational_index_shadow.checkpoint_report =
+                    Some(RelationalIndexShadowCheckpointReport::published(report));
+            }
+            Err(error) => {
+                self.relational_index_shadow.read_view = None;
+                self.relational_index_shadow.recovery_status =
+                    RelationalIndexShadowRecoveryStatus::InvalidWritable {
+                        error: format!(
+                            "published relational index candidate could not be pinned: {error}"
+                        ),
+                    };
+                self.relational_index_shadow.checkpoint_report =
+                    Some(RelationalIndexShadowCheckpointReport::failed(
+                        report.generation,
+                        report.source_commit_epoch,
+                        error.to_string(),
+                    ));
+            }
+        }
+    }
+
     fn open_base_relational_index_read_view(
         &self,
     ) -> Result<Arc<RelationalIndexReadView>, skein_storage::RelationalIndexShadowError> {
@@ -945,14 +1085,22 @@ impl GraphStore {
                 "relational index read view requires a durable store".to_string(),
             )
         })?;
-        RelationalIndexShadowReader::open_latest_with_cache(
-            durable.root_path(),
-            RelationalIndexShadowConfig::default(),
-            Arc::clone(&durable.segment_cache),
-            durable.store_id(),
-        )
-        .map(RelationalIndexReadView::from_base)
-        .map(Arc::new)
+        let reader = match self.relational_index_shadow.generation_binding {
+            Some(binding) => RelationalIndexShadowReader::open_generation_with_cache(
+                durable.root_path(),
+                binding,
+                RelationalIndexShadowConfig::default(),
+                Arc::clone(&durable.segment_cache),
+                durable.store_id(),
+            ),
+            None => RelationalIndexShadowReader::open_latest_with_cache(
+                durable.root_path(),
+                RelationalIndexShadowConfig::default(),
+                Arc::clone(&durable.segment_cache),
+                durable.store_id(),
+            ),
+        };
+        reader.map(RelationalIndexReadView::from_base).map(Arc::new)
     }
 
     fn open_recovered_relational_index_read_view(
@@ -964,16 +1112,28 @@ impl GraphStore {
                 "relational index read view requires a durable store".to_string(),
             )
         })?;
-        RelationalIndexRecoveryReader::open_latest_with_cache(
-            durable.root_path(),
-            recovered_commit_epoch,
-            RelationalIndexShadowConfig::default(),
-            RelationalIndexRecoveryConfig::default(),
-            Arc::clone(&durable.segment_cache),
-            durable.store_id(),
-        )
-        .map(RelationalIndexReadView::from_recovered)
-        .map(Arc::new)
+        let reader = match self.relational_index_shadow.generation_binding {
+            Some(binding) => RelationalIndexRecoveryReader::open_generation_with_cache(
+                durable.root_path(),
+                binding,
+                recovered_commit_epoch,
+                RelationalIndexShadowConfig::default(),
+                RelationalIndexRecoveryConfig::default(),
+                Arc::clone(&durable.segment_cache),
+                durable.store_id(),
+            ),
+            None => RelationalIndexRecoveryReader::open_latest_with_cache(
+                durable.root_path(),
+                recovered_commit_epoch,
+                RelationalIndexShadowConfig::default(),
+                RelationalIndexRecoveryConfig::default(),
+                Arc::clone(&durable.segment_cache),
+                durable.store_id(),
+            ),
+        };
+        reader
+            .map(RelationalIndexReadView::from_recovered)
+            .map(Arc::new)
     }
 
     pub(super) fn relational_index_live_capture_limits(
@@ -1041,7 +1201,11 @@ impl GraphStore {
     }
 
     pub(super) fn mount_relational_index_shadow_for_recovery(&mut self) {
-        if !self.relational_index_shadow.enabled {
+        if !self
+            .relational_index_shadow
+            .mode
+            .publishes_persistent_indexes()
+        {
             return;
         }
         let Some(durable) = self.durable.as_ref() else {
@@ -1051,7 +1215,25 @@ impl GraphStore {
         let checkpoint_generation = durable.checkpoint_epoch;
         let checkpoint_commit_epoch = durable.checkpoint_commit_epoch;
         let read_only = durable.read_only;
-        let manifest_path = root.join(RELATIONAL_INDEX_SHADOW_MANIFEST_FILE);
+        let generation_binding = RelationalIndexGenerationIdentity {
+            generation: checkpoint_generation,
+            source_commit_epoch: checkpoint_commit_epoch,
+        };
+        let generation_manifest_path = root.join(relational_index_shadow_manifest_generation_file(
+            generation_binding.generation,
+        ));
+        self.relational_index_shadow.generation_binding = generation_manifest_path
+            .exists()
+            .then_some(generation_binding);
+        let generation_aligned = self.relational_index_shadow.generation_binding.is_some();
+        let manifest_path = self.relational_index_shadow.generation_binding.map_or_else(
+            || root.join(RELATIONAL_INDEX_SHADOW_MANIFEST_FILE),
+            |binding| {
+                root.join(relational_index_shadow_manifest_generation_file(
+                    binding.generation,
+                ))
+            },
+        );
         if !manifest_path.exists() {
             self.relational_index_shadow.recovery_status =
                 RelationalIndexShadowRecoveryStatus::Missing;
@@ -1110,22 +1292,44 @@ impl GraphStore {
                         };
                 } else {
                     self.relational_index_shadow.read_view = None;
+                    let error = format!(
+                        "index generation/epoch {}/{} is ahead of checkpoint {checkpoint_generation}/{checkpoint_commit_epoch}",
+                        manifest.generation, manifest.source_commit_epoch
+                    );
+                    if generation_aligned {
+                        self.reject_invalid_generation_aligned_index(read_only, error);
+                    } else {
+                        self.discard_invalid_relational_index_shadow(
+                            &manifest_path,
+                            read_only,
+                            error,
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                if generation_aligned {
+                    self.reject_invalid_generation_aligned_index(read_only, error.to_string());
+                } else {
                     self.discard_invalid_relational_index_shadow(
                         &manifest_path,
                         read_only,
-                        format!(
-                            "shadow generation/epoch {}/{} is ahead of checkpoint {checkpoint_generation}/{checkpoint_commit_epoch}",
-                            manifest.generation, manifest.source_commit_epoch
-                        ),
+                        error.to_string(),
                     );
                 }
             }
-            Err(error) => self.discard_invalid_relational_index_shadow(
-                &manifest_path,
-                read_only,
-                error.to_string(),
-            ),
         }
+    }
+
+    fn reject_invalid_generation_aligned_index(&mut self, read_only: bool, error: String) {
+        self.relational_index_shadow.expected_previous_generation = None;
+        self.relational_index_shadow.recovery_builder = None;
+        self.relational_index_shadow.read_view = None;
+        self.relational_index_shadow.recovery_status = if read_only {
+            RelationalIndexShadowRecoveryStatus::InvalidReadOnly { error }
+        } else {
+            RelationalIndexShadowRecoveryStatus::InvalidWritable { error }
+        };
     }
 
     fn discard_invalid_relational_index_shadow(
@@ -1160,66 +1364,6 @@ impl GraphStore {
         }
     }
 
-    pub(super) fn record_relational_index_shadow_checkpoint(
-        &mut self,
-        generation: u64,
-        source_commit_epoch: u64,
-    ) {
-        if !self.relational_index_shadow.enabled {
-            return;
-        }
-        let Some(durable) = self.durable.as_ref() else {
-            return;
-        };
-        let result = RelationalIndexShadowWriter::new(RelationalIndexShadowConfig::default())
-            .publish(
-                durable.root_path(),
-                &self.relational_state,
-                generation,
-                source_commit_epoch,
-                self.relational_index_shadow.expected_previous_generation,
-            );
-        match result {
-            Ok(report) => {
-                self.relational_index_shadow.recovery_builder = None;
-                self.relational_index_shadow.recovery_report = None;
-                self.relational_index_shadow.expected_previous_generation = Some(report.generation);
-                match self.open_base_relational_index_read_view() {
-                    Ok(view) => {
-                        self.relational_index_shadow.read_view = Some(view);
-                        self.relational_index_shadow.recovery_status =
-                            RelationalIndexShadowRecoveryStatus::CheckpointReady {
-                                generation: report.generation,
-                                source_commit_epoch: report.source_commit_epoch,
-                                index_roots: report.index_roots,
-                                page_count: report.pages_written,
-                            };
-                    }
-                    Err(error) => {
-                        self.relational_index_shadow.read_view = None;
-                        self.relational_index_shadow.recovery_status =
-                            RelationalIndexShadowRecoveryStatus::InvalidWritable {
-                                error: format!(
-                                    "published relational index shadow could not be pinned: {error}"
-                                ),
-                            };
-                    }
-                }
-                self.relational_index_shadow.checkpoint_report =
-                    Some(RelationalIndexShadowCheckpointReport::published(report));
-            }
-            Err(error) => {
-                self.relational_index_shadow.read_view = None;
-                self.relational_index_shadow.checkpoint_report =
-                    Some(RelationalIndexShadowCheckpointReport::failed(
-                        generation,
-                        source_commit_epoch,
-                        error.to_string(),
-                    ));
-            }
-        }
-    }
-
     pub fn relational_index_shadow_checkpoint_report(
         &self,
     ) -> Option<&RelationalIndexShadowCheckpointReport> {
@@ -1243,9 +1387,16 @@ impl GraphStore {
         visit: impl FnMut(&RelationalKey) -> bool,
     ) -> Option<std::result::Result<RelationalIndexReadViewReport, RelationalIndexShadowError>>
     {
-        self.relational_index_shadow
+        match self
+            .relational_index_shadow
             .current_read_view(self.commit_epoch)
-            .map(|view| view.visit_prefix_postings(table, index, prefix, limits, visit))
+        {
+            Some(view) => Some(view.visit_prefix_postings(table, index, prefix, limits, visit)),
+            None => self
+                .relational_index_shadow
+                .selected_read_failure()
+                .map(Err),
+        }
     }
 
     /// Differentially checks the pinned demand-paged relational index view
@@ -1608,7 +1759,7 @@ mod tests {
     };
 
     #[test]
-    fn checkpoint_double_writes_relational_index_shadow_without_serving_it() {
+    fn checkpoint_aligns_relational_index_candidate_without_making_it_canonical() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1684,7 +1835,18 @@ mod tests {
                 RelationalIndexShadowCheckpointStatus::Published
             );
             assert_eq!(report.index_roots, 2);
-            assert!(path.join(RELATIONAL_INDEX_SHADOW_MANIFEST_FILE).exists());
+            assert!(path
+                .join(relational_index_shadow_manifest_generation_file(
+                    report.generation
+                ))
+                .exists());
+            let checkpoint = store
+                .durable
+                .as_ref()
+                .expect("durable store")
+                .read_checkpoint_text(replay)
+                .expect("read generation checkpoint");
+            assert!(!checkpoint.contains("relational_index_manifest_"));
             let view = current_index_view(&store);
             assert_eq!(view.kind(), RelationalIndexReadViewKind::Base);
             assert_eq!(view.identity().base_generation, report.generation);
@@ -1716,8 +1878,76 @@ mod tests {
             assert_eq!(store.relational_state().row_count("documents"), 1);
         }
 
-        std::fs::write(path.join(RELATIONAL_INDEX_SHADOW_MANIFEST_FILE), b"corrupt")
-            .expect("corrupt derived manifest");
+        std::fs::write(
+            path.join(relational_index_shadow_manifest_generation_file(
+                published_identity.base_generation,
+            )),
+            b"corrupt",
+        )
+        .expect("corrupt generation-aligned manifest");
+        {
+            let mut catalog = Catalog::default();
+            let store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay,
+            )
+            .expect("shadow corruption must not reject canonical open");
+            assert!(matches!(
+                store.relational_index_shadow_recovery_status(),
+                RelationalIndexShadowRecoveryStatus::InvalidWritable { .. }
+            ));
+            assert_eq!(store.relational_state().row_count("documents"), 1);
+        }
+        {
+            let mut catalog = Catalog::default();
+            let store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                WalReplayConfig {
+                    relational_index_mode: skein_storage::RelationalIndexMode::DemandPaged,
+                    ..WalReplayConfig::default()
+                },
+            )
+            .expect("canonical open remains available for a lazily selected reader");
+            let error = store
+                .visit_relational_index_read_view_prefix(
+                    "documents",
+                    "documents_owner_idx",
+                    &RelationalKey(vec![RelationalValue::Text("owner-1".to_string())]),
+                    RelationalIndexReadLimits::default(),
+                    |_| true,
+                )
+                .expect("demand mode must retain a fail-closed selected result")
+                .expect_err("selected corrupt generation must not fall back");
+            assert!(matches!(error, RelationalIndexShadowError::Corrupt(_)));
+        }
+        std::fs::remove_dir_all(path).expect("remove shadow checkpoint fixture");
+    }
+
+    #[test]
+    fn candidate_admission_failure_never_fails_the_canonical_checkpoint() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "skein-store-relational-index-candidate-admission-{}-{nonce}",
+            std::process::id()
+        ));
+        let replay = WalReplayConfig {
+            relational_index_mode: skein_storage::RelationalIndexMode::Shadow,
+            ..WalReplayConfig::default()
+        };
+        let oversized_id = "x".repeat(
+            RelationalIndexShadowConfig::default()
+                .page_limits
+                .max_key_bytes
+                .get()
+                + 1,
+        );
         {
             let mut catalog = Catalog::default();
             let mut store = GraphStore::open_with_durability_and_replay_config(
@@ -1726,24 +1956,148 @@ mod tests {
                 DurabilityPolicy::default(),
                 replay,
             )
-            .expect("canonical open must survive corrupt non-serving shadow");
-            assert!(matches!(
-                store.relational_index_shadow_recovery_status(),
-                RelationalIndexShadowRecoveryStatus::DiscardedInvalid { .. }
-            ));
-            assert_eq!(store.relational_state().row_count("documents"), 1);
+            .expect("open shadow-enabled store");
+            store
+                .commit_relational_transaction(
+                    &mut catalog,
+                    create_recovery_documents_table(&oversized_id),
+                )
+                .expect("commit oversized canonical row");
             store
                 .checkpoint(&catalog)
-                .expect("rebuild discarded shadow");
-            assert_eq!(
-                store
-                    .relational_index_shadow_checkpoint_report()
-                    .expect("rebuild report")
-                    .status,
-                RelationalIndexShadowCheckpointStatus::Published
-            );
+                .expect("candidate admission must not fail canonical checkpoint");
+            let report = store
+                .relational_index_shadow_checkpoint_report()
+                .expect("candidate failure report");
+            assert_eq!(report.status, RelationalIndexShadowCheckpointStatus::Failed);
+            assert!(matches!(
+                store.relational_index_shadow_recovery_status(),
+                RelationalIndexShadowRecoveryStatus::CandidateUnavailable { .. }
+            ));
+            let generation = store
+                .durable
+                .as_ref()
+                .expect("durable store")
+                .checkpoint_epoch;
+            assert!(!path
+                .join(relational_index_shadow_manifest_generation_file(generation))
+                .exists());
+            assert!(!path
+                .join(skein_storage::relational_index_shadow_artifact_file(
+                    generation
+                ))
+                .exists());
+            assert_eq!(store.relational_state().row_count("documents"), 1);
         }
-        std::fs::remove_dir_all(path).expect("remove shadow checkpoint fixture");
+        {
+            let mut catalog = Catalog::default();
+            let store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay,
+            )
+            .expect("canonical checkpoint must reopen without its shadow candidate");
+            assert_eq!(
+                store.relational_index_shadow_recovery_status(),
+                &RelationalIndexShadowRecoveryStatus::Missing
+            );
+            assert_eq!(store.relational_state().row_count("documents"), 1);
+        }
+        std::fs::remove_dir_all(path).expect("remove candidate admission fixture");
+    }
+
+    #[test]
+    fn abandoned_future_candidate_never_replaces_the_selected_generation() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "skein-store-relational-index-abandoned-candidate-{}-{nonce}",
+            std::process::id()
+        ));
+        let replay = WalReplayConfig {
+            relational_index_mode: skein_storage::RelationalIndexMode::Shadow,
+            ..WalReplayConfig::default()
+        };
+        let selected_generation;
+        let abandoned_generation;
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay,
+            )
+            .expect("open shadow-enabled store");
+            store
+                .commit_relational_transaction(
+                    &mut catalog,
+                    create_recovery_documents_table("doc-1"),
+                )
+                .expect("commit first row");
+            store.checkpoint(&catalog).expect("publish generation one");
+            selected_generation = current_index_view(&store).identity().base_generation;
+            store
+                .commit_relational_transaction(
+                    &mut catalog,
+                    RelationalTransaction {
+                        writes: vec![RelationalWrite::Insert {
+                            table: "documents".to_string(),
+                            rows: vec![skein_storage::RelationalRow::new(vec![
+                                RelationalValue::Text("doc-2".to_string()),
+                                RelationalValue::Text("owner-2".to_string()),
+                            ])],
+                            mode: skein_storage::RelationalInsertMode::Error,
+                        }],
+                    },
+                )
+                .expect("commit WAL-only second row");
+            let prepared = store
+                .prepare_checkpoint(&catalog)
+                .expect("prepare future checkpoint")
+                .expect("durable checkpoint preparation");
+            abandoned_generation = prepared.generation;
+            assert!(abandoned_generation > selected_generation);
+            assert!(path
+                .join(relational_index_shadow_manifest_generation_file(
+                    abandoned_generation,
+                ))
+                .exists());
+            drop(prepared);
+        }
+        {
+            let mut catalog = Catalog::default();
+            let store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay,
+            )
+            .expect("reopen selected checkpoint plus WAL");
+            assert_eq!(store.relational_state().row_count("documents"), 2);
+            assert_eq!(
+                current_index_view(&store).identity().base_generation,
+                selected_generation
+            );
+            assert_eq!(
+                current_index_view(&store).identity().visible_commit_epoch,
+                2
+            );
+            assert!(!path
+                .join(relational_index_shadow_manifest_generation_file(
+                    abandoned_generation,
+                ))
+                .exists());
+            assert!(!path
+                .join(skein_storage::relational_index_shadow_artifact_file(
+                    abandoned_generation,
+                ))
+                .exists());
+        }
+        std::fs::remove_dir_all(path).expect("remove abandoned candidate fixture");
     }
 
     #[test]

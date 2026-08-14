@@ -20,6 +20,7 @@ pub use codec::{
 };
 pub use index_shadow::{
     relational_index_recovery_delta_file, relational_index_shadow_artifact_file,
+    relational_index_shadow_manifest_generation_file, RelationalIndexGenerationIdentity,
     RelationalIndexReadLimits, RelationalIndexReadReport, RelationalIndexRecoveryBuilder,
     RelationalIndexRecoveryConfig, RelationalIndexRecoveryManifest,
     RelationalIndexRecoveryReadReport, RelationalIndexRecoveryReader,

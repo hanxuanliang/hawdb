@@ -9,8 +9,9 @@ use super::super::{
 };
 use super::{
     decode_bytes, decode_utf8, encode_relational_key, read_bounded_file, read_u16, read_u32,
-    read_u64, take, RelationalIndexReadLimits, RelationalIndexReadReport,
-    RelationalIndexShadowConfig, RelationalIndexShadowError, RelationalIndexShadowReader,
+    read_u64, take, RelationalIndexGenerationIdentity, RelationalIndexReadLimits,
+    RelationalIndexReadReport, RelationalIndexShadowConfig, RelationalIndexShadowError,
+    RelationalIndexShadowReader,
 };
 use crate::{
     durable_replace_file, ContentDigest, ManifestGeneration, RepresentationKind, SegmentCache,
@@ -601,6 +602,32 @@ impl RelationalIndexRecoveryReader {
         )
     }
 
+    pub fn open_generation_with_cache(
+        directory: &Path,
+        expected_base: RelationalIndexGenerationIdentity,
+        expected_recovered_commit_epoch: u64,
+        shadow_config: RelationalIndexShadowConfig,
+        recovery_config: RelationalIndexRecoveryConfig,
+        page_cache: Arc<SegmentCache>,
+        store_id: StoreId,
+    ) -> Result<Self, RelationalIndexShadowError> {
+        let base = RelationalIndexShadowReader::open_generation_with_cache(
+            directory,
+            expected_base,
+            shadow_config,
+            Arc::clone(&page_cache),
+            store_id,
+        )?;
+        Self::open_with_base(
+            directory,
+            base,
+            expected_recovered_commit_epoch,
+            recovery_config,
+            Some(page_cache),
+            store_id,
+        )
+    }
+
     fn open_latest_inner(
         directory: &Path,
         expected_recovered_commit_epoch: u64,
@@ -619,6 +646,24 @@ impl RelationalIndexRecoveryReader {
         } else {
             RelationalIndexShadowReader::open_latest(directory, shadow_config)?
         };
+        Self::open_with_base(
+            directory,
+            base,
+            expected_recovered_commit_epoch,
+            recovery_config,
+            page_cache,
+            store_id,
+        )
+    }
+
+    fn open_with_base(
+        directory: &Path,
+        base: RelationalIndexShadowReader,
+        expected_recovered_commit_epoch: u64,
+        recovery_config: RelationalIndexRecoveryConfig,
+        page_cache: Option<Arc<SegmentCache>>,
+        store_id: StoreId,
+    ) -> Result<Self, RelationalIndexShadowError> {
         let manifest_path = directory.join(RELATIONAL_INDEX_RECOVERY_MANIFEST_FILE);
         let encoded = read_bounded_file(
             &manifest_path,

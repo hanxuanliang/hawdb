@@ -2,7 +2,8 @@
 EXTENDS Naturals, Sequences, FiniteSets
 
 (***************************************************************************)
-(* A non-serving relational shadow reader opens with no resident pages.     *)
+(* A generation-pinned relational candidate reader opens with no resident  *)
+(* pages. SQL selection is owned by a separate activation boundary.         *)
 (* One lookup loads an ordered root/interior/leaf/posting path on demand,    *)
 (* applies independent page/byte/row limits, and emits only an ordered      *)
 (* prefix of the materialized-index oracle.                                 *)

@@ -140,6 +140,8 @@ pub(crate) struct PreparedCheckpoint {
     pub(super) source_scan_publication: Option<source_scan::SourceScanPublication>,
     pub(super) checkpoint_statistics: GraphStatistics,
     pub(super) checkpoint_relational_state: Option<RelationalState>,
+    pub(super) relational_index_candidate:
+        Option<super::relational_index_shadow::PreparedRelationalIndexCandidate>,
     pub(super) manifest_artifacts: CheckpointManifestArtifacts,
     pub(super) staging_path: PathBuf,
 }
@@ -1778,6 +1780,8 @@ impl DurableStore {
             property_spill_manifest_generation_file(generation),
             property_projection_artifact_generation_file(generation),
             property_projection_manifest_generation_file(generation),
+            skein_storage::relational_index_shadow_artifact_file(generation),
+            skein_storage::relational_index_shadow_manifest_generation_file(generation),
         ] {
             match fs::remove_file(self.root_path.join(file)) {
                 Ok(()) => {}

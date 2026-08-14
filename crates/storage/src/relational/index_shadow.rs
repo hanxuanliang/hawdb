@@ -54,6 +54,16 @@ pub fn relational_index_shadow_artifact_file(generation: u64) -> String {
     format!("relational-index-shadow-{generation}.pages.skein")
 }
 
+pub fn relational_index_shadow_manifest_generation_file(generation: u64) -> String {
+    format!("relational-index-shadow-{generation}.manifest.skein")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelationalIndexGenerationIdentity {
+    pub generation: u64,
+    pub source_commit_epoch: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelationalIndexShadowConfig {
     pub page_limits: ImmutableIndexPageLimits,
@@ -359,16 +369,7 @@ impl RelationalIndexShadowWriter {
                 "relational index generation must be non-zero".to_string(),
             ));
         }
-        fs::create_dir_all(directory).map_err(durability("create shadow directory"))?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(directory.join(RELATIONAL_INDEX_SHADOW_LOCK_FILE))
-            .map_err(durability("open shadow publication lock"))?;
-        lock.lock_exclusive()
-            .map_err(durability("lock shadow publication"))?;
+        let _lock = acquire_publication_lock(directory)?;
         let paths = ShadowPublicationPaths::new(directory, generation);
         let actual_previous = current_generation(&paths.manifest, self.config)?;
         if actual_previous != expected_previous_generation {
@@ -387,9 +388,34 @@ impl RelationalIndexShadowWriter {
             state,
             generation,
             source_commit_epoch,
-            expected_previous_generation,
+            Some(expected_previous_generation),
             &paths,
         );
+        if result.is_err() {
+            let _ = fs::remove_file(&paths.artifact_tmp);
+            let _ = fs::remove_file(&paths.manifest_tmp);
+        }
+        result
+    }
+
+    /// Writes one immutable candidate without changing the legacy latest
+    /// pointer. The generation-specific manifest is durable before the
+    /// canonical checkpoint with the same generation can be published.
+    pub fn publish_generation(
+        &self,
+        directory: &Path,
+        state: &RelationalState,
+        generation: u64,
+        source_commit_epoch: u64,
+    ) -> Result<RelationalIndexShadowBuildReport, RelationalIndexShadowError> {
+        if generation == 0 {
+            return Err(RelationalIndexShadowError::Admission(
+                "relational index generation must be non-zero".to_string(),
+            ));
+        }
+        let _lock = acquire_publication_lock(directory)?;
+        let paths = ShadowPublicationPaths::for_generation(directory, generation);
+        let result = self.build_and_publish(state, generation, source_commit_epoch, None, &paths);
         if result.is_err() {
             let _ = fs::remove_file(&paths.artifact_tmp);
             let _ = fs::remove_file(&paths.manifest_tmp);
@@ -402,7 +428,7 @@ impl RelationalIndexShadowWriter {
         state: &RelationalState,
         generation: u64,
         source_commit_epoch: u64,
-        expected_previous_generation: Option<u64>,
+        expected_previous_generation: Option<Option<u64>>,
         paths: &ShadowPublicationPaths,
     ) -> Result<RelationalIndexShadowBuildReport, RelationalIndexShadowError> {
         let file =
@@ -507,12 +533,14 @@ impl RelationalIndexShadowWriter {
             file.sync_all()
                 .map_err(durability("sync shadow manifest candidate"))?;
         }
-        let actual_previous = current_generation(&paths.manifest, self.config)?;
-        if actual_previous != expected_previous_generation {
-            return Err(RelationalIndexShadowError::StaleGeneration {
-                expected_previous: expected_previous_generation,
-                actual_previous,
-            });
+        if let Some(expected_previous_generation) = expected_previous_generation {
+            let actual_previous = current_generation(&paths.manifest, self.config)?;
+            if actual_previous != expected_previous_generation {
+                return Err(RelationalIndexShadowError::StaleGeneration {
+                    expected_previous: expected_previous_generation,
+                    actual_previous,
+                });
+            }
         }
         durable_replace_file(&paths.manifest_tmp, &paths.manifest)
             .map_err(durability("publish shadow manifest"))?;
@@ -528,6 +556,20 @@ impl RelationalIndexShadowWriter {
     }
 }
 
+fn acquire_publication_lock(directory: &Path) -> Result<File, RelationalIndexShadowError> {
+    fs::create_dir_all(directory).map_err(durability("create relational index directory"))?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(directory.join(RELATIONAL_INDEX_SHADOW_LOCK_FILE))
+        .map_err(durability("open relational index publication lock"))?;
+    lock.lock_exclusive()
+        .map_err(durability("lock relational index publication"))?;
+    Ok(lock)
+}
+
 struct ShadowPublicationPaths {
     artifact: PathBuf,
     artifact_tmp: PathBuf,
@@ -539,6 +581,17 @@ impl ShadowPublicationPaths {
     fn new(directory: &Path, generation: u64) -> Self {
         let artifact = directory.join(relational_index_shadow_artifact_file(generation));
         let manifest = directory.join(RELATIONAL_INDEX_SHADOW_MANIFEST_FILE);
+        Self {
+            artifact_tmp: artifact.with_extension("skein.tmp"),
+            manifest_tmp: manifest.with_extension("skein.tmp"),
+            artifact,
+            manifest,
+        }
+    }
+
+    fn for_generation(directory: &Path, generation: u64) -> Self {
+        let artifact = directory.join(relational_index_shadow_artifact_file(generation));
+        let manifest = directory.join(relational_index_shadow_manifest_generation_file(generation));
         Self {
             artifact_tmp: artifact.with_extension("skein.tmp"),
             manifest_tmp: manifest.with_extension("skein.tmp"),
@@ -582,6 +635,37 @@ impl RelationalIndexShadowReader {
         Self::open_latest_inner(directory, config, Some(page_cache), store_id)
     }
 
+    pub fn open_generation_with_cache(
+        directory: &Path,
+        expected: RelationalIndexGenerationIdentity,
+        config: RelationalIndexShadowConfig,
+        page_cache: Arc<SegmentCache>,
+        store_id: StoreId,
+    ) -> Result<Self, RelationalIndexShadowError> {
+        let manifest_path = directory.join(relational_index_shadow_manifest_generation_file(
+            expected.generation,
+        ));
+        let reader = Self::open_manifest_inner(
+            directory,
+            &manifest_path,
+            config,
+            Some(page_cache),
+            store_id,
+        )?;
+        if reader.manifest.generation != expected.generation
+            || reader.manifest.source_commit_epoch != expected.source_commit_epoch
+        {
+            return Err(RelationalIndexShadowError::Corrupt(format!(
+                "relational index generation/epoch {}/{} does not match checkpoint {}/{}",
+                reader.manifest.generation,
+                reader.manifest.source_commit_epoch,
+                expected.generation,
+                expected.source_commit_epoch,
+            )));
+        }
+        Ok(reader)
+    }
+
     fn open_latest_inner(
         directory: &Path,
         config: RelationalIndexShadowConfig,
@@ -589,10 +673,20 @@ impl RelationalIndexShadowReader {
         store_id: StoreId,
     ) -> Result<Self, RelationalIndexShadowError> {
         let manifest_path = directory.join(RELATIONAL_INDEX_SHADOW_MANIFEST_FILE);
+        Self::open_manifest_inner(directory, &manifest_path, config, page_cache, store_id)
+    }
+
+    fn open_manifest_inner(
+        directory: &Path,
+        manifest_path: &Path,
+        config: RelationalIndexShadowConfig,
+        page_cache: Option<Arc<SegmentCache>>,
+        store_id: StoreId,
+    ) -> Result<Self, RelationalIndexShadowError> {
         let encoded = read_bounded_file(
-            &manifest_path,
+            manifest_path,
             config.max_manifest_bytes.get(),
-            "relational index shadow manifest",
+            "relational index manifest",
         )?;
         let manifest = RelationalIndexShadowManifest::decode(&encoded, config)?;
         Self::from_manifest(directory, manifest, config, page_cache, store_id)

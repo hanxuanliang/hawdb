@@ -90,14 +90,36 @@ oracle into generation-specific fixed-size slots, so a `PageId` determines its
 offset without a cardinality-sized in-memory directory. Default slots are 64
 KiB, with 16 KiB admission limits for encoded keys and logical row locators, to
 bound desktop random I/O and avoid one-megabyte amplification for sparse pages.
-A bounded root manifest is replaced only after every slot is synced. A
-cross-platform publication lock serializes the expected-generation check;
-stale publishers fail and orphan generation files are ignored. Relational
-primary keys are encoded as bounded, order-preserving logical row locators,
-including composite keys. Opening the shadow verifies only its manifest fence
-and artifact length; page header and payload integrity are checked on first
-access. The sequential slot writer uses constant page-accounting metadata; it
-does not retain a page-id set or offset directory proportional to index size.
+Every checkpoint attempt writes a generation-specific page artifact and then a
+generation-specific root manifest after every slot is synced. Only after both
+candidate files are durable may the canonical checkpoint with the same
+generation and source commit epoch be published. Candidate construction is
+best effort in `Shadow` and `DemandPaged` modes: admission, I/O, or encoding
+failure is reported and removes the selected read view, but MUST NOT fail or
+replace the canonical checkpoint. A crash before canonical publication may
+leave a future candidate orphaned; normal writable open ignores and reclaims it
+through generation cleanup while recovering the selected checkpoint plus WAL.
+
+These candidates remain non-authoritative. The canonical checkpoint does not
+contain a reverse reference to their manifest and therefore remains
+self-contained when a candidate is missing or corrupt. Open considers a
+generation-specific candidate only when both its filename generation and its
+internal generation/source-epoch fence match the selected canonical
+checkpoint. A corrupt selected candidate does not prevent canonical open in
+`Shadow` mode. In `DemandPaged` mode, an integrity failure for the explicitly
+selected candidate fails the indexed statement closed instead of silently
+using materialized postings; missing or admission-unavailable candidates may
+still take the observable materialized fallback while that oracle exists.
+Binding manifest length, CRC32C, SHA-256, schema identity, and the complete
+required root set into the canonical checkpoint is a later authoritative
+publication stage.
+
+Relational primary keys are encoded as bounded, order-preserving logical row
+locators, including composite keys. Opening a valid candidate verifies only its
+manifest fence and artifact length; page header and payload integrity are
+checked on first access. The sequential slot writer uses constant
+page-accounting metadata; it does not retain a page-id set or offset directory
+proportional to index size.
 
 The relational demand reader implements step 3.
 Exact-key traversal reads one root-to-leaf path; leading composite-key prefix

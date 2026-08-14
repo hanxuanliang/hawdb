@@ -229,6 +229,8 @@ impl GraphStore {
                     .map_err(|error| SkeinError::Storage(error.to_string()))
                 })
                 .transpose()?;
+            let relational_index_candidate =
+                self.prepare_relational_index_candidate(generation, commit_epoch);
             let checkpoint_artifact = durable.write_checkpoint(
                 CheckpointImage {
                     catalog,
@@ -261,6 +263,7 @@ impl GraphStore {
                 source_scan_publication,
                 checkpoint_statistics,
                 checkpoint_relational_state,
+                relational_index_candidate,
                 manifest_artifacts: CheckpointManifestArtifacts {
                     checkpoint: checkpoint_artifact,
                     relational_checkpoint: relational_checkpoint_artifact,
@@ -369,10 +372,7 @@ impl GraphStore {
             self.full_text_property_index = CowSegmentedMap::default();
             self.relationship_property_index = CowSegmentedMap::default();
         }
-        self.record_relational_index_shadow_checkpoint(
-            prepared.generation,
-            prepared.source_commit_epoch,
-        );
+        self.install_prepared_relational_index_candidate(prepared.relational_index_candidate);
         // Derived shadow double-write: published after the row-oriented
         // checkpoint so its `source_commit_epoch` is the epoch this
         // checkpoint made durable. The checkpoint's Result reflects
