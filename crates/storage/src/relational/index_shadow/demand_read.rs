@@ -445,7 +445,7 @@ impl<'a> ReadContext<'a> {
     }
 }
 
-fn decode_relational_key(
+pub(super) fn decode_relational_key(
     encoded: &[u8],
 ) -> Result<super::RelationalKey, RelationalIndexShadowError> {
     let mut values = Vec::new();

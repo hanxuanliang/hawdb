@@ -989,6 +989,7 @@ impl GraphStore {
                 }
             }
         }
+        self.finish_relational_index_recovery();
         if let Some(durable) = &mut self.durable {
             durable.next_lsn = expected_lsn;
             durable.wal_commit_epoch = self.commit_epoch;

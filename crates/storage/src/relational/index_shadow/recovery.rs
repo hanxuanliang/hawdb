@@ -1,0 +1,1173 @@
+//! Bounded, non-serving WAL recovery deltas for relational index shadows.
+//!
+//! Delta artifacts are derived state. The base shadow and canonical WAL remain
+//! authoritative until a complete recovery manifest is published last.
+
+use super::super::{
+    RelationalIndexChange, RelationalIndexChangeCapture, RelationalIndexChangeCaptureLimits,
+    RelationalIndexChangeKind, RelationalKey,
+};
+use super::{
+    decode_bytes, decode_utf8, encode_relational_key, read_bounded_file, read_u16, read_u32,
+    read_u64, take, RelationalIndexReadLimits, RelationalIndexReadReport,
+    RelationalIndexShadowConfig, RelationalIndexShadowError, RelationalIndexShadowReader,
+};
+use crate::durable_replace_file;
+use skein_integrity::{IntegrityDigest, IntegrityHasher, Sha256Digest, SHA256_BYTES};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, File};
+use std::io::Write;
+use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+const DELTA_MANIFEST_MAGIC: &[u8; 8] = b"SKRIDXR1";
+const DELTA_PAGE_MAGIC: &[u8; 8] = b"SKRIDXD1";
+const DELTA_FORMAT_VERSION: u16 = 1;
+const DELTA_MANIFEST_HEADER_BYTES: usize = 92;
+const DELTA_PAGE_HEADER_BYTES: usize = 104;
+const DELTA_DESCRIPTOR_BYTES: usize = 68;
+const DELTA_ENTRY_FIXED_BYTES: usize = 17;
+static NEXT_DELTA_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+pub const RELATIONAL_INDEX_RECOVERY_MANIFEST_FILE: &str =
+    "relational-index-recovery.manifest.skein";
+pub const DEFAULT_RELATIONAL_INDEX_RECOVERY_DIRTY_ENTRIES: usize = 100_000;
+pub const DEFAULT_RELATIONAL_INDEX_RECOVERY_DIRTY_BYTES: usize = 8 * 1024 * 1024;
+pub const DEFAULT_RELATIONAL_INDEX_RECOVERY_PAGES: usize = 4096;
+pub const DEFAULT_RELATIONAL_INDEX_RECOVERY_MANIFEST_BYTES: usize = 1024 * 1024;
+
+pub fn relational_index_recovery_delta_file(
+    base_generation: u64,
+    delta_generation: u64,
+    ordinal: u32,
+) -> String {
+    format!("relational-index-recovery-{base_generation}-{delta_generation}-{ordinal}.delta.skein")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelationalIndexRecoveryConfig {
+    pub max_dirty_entries: NonZeroUsize,
+    pub max_dirty_bytes: NonZeroUsize,
+    pub max_delta_pages: NonZeroUsize,
+    pub max_manifest_bytes: NonZeroUsize,
+}
+
+impl Default for RelationalIndexRecoveryConfig {
+    fn default() -> Self {
+        Self {
+            max_dirty_entries: NonZeroUsize::new(DEFAULT_RELATIONAL_INDEX_RECOVERY_DIRTY_ENTRIES)
+                .expect("default recovery dirty entry limit is non-zero"),
+            max_dirty_bytes: NonZeroUsize::new(DEFAULT_RELATIONAL_INDEX_RECOVERY_DIRTY_BYTES)
+                .expect("default recovery dirty byte limit is non-zero"),
+            max_delta_pages: NonZeroUsize::new(DEFAULT_RELATIONAL_INDEX_RECOVERY_PAGES)
+                .expect("default recovery page limit is non-zero"),
+            max_manifest_bytes: NonZeroUsize::new(DEFAULT_RELATIONAL_INDEX_RECOVERY_MANIFEST_BYTES)
+                .expect("default recovery manifest limit is non-zero"),
+        }
+    }
+}
+
+impl RelationalIndexRecoveryConfig {
+    pub fn capture_limits(self) -> RelationalIndexChangeCaptureLimits {
+        RelationalIndexChangeCaptureLimits {
+            max_entries: self.max_dirty_entries,
+            max_bytes: self.max_dirty_bytes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeltaPageDescriptor {
+    ordinal: u32,
+    start_epoch: u64,
+    end_epoch: u64,
+    entry_count: u32,
+    encoded_len: u64,
+    digest: IntegrityDigest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationalIndexRecoveryManifest {
+    pub base_generation: u64,
+    pub delta_generation: u64,
+    pub base_commit_epoch: u64,
+    pub recovered_commit_epoch: u64,
+    pages: Vec<DeltaPageDescriptor>,
+}
+
+impl RelationalIndexRecoveryManifest {
+    pub fn delta_pages(&self) -> usize {
+        self.pages.len()
+    }
+
+    pub fn delta_entries(&self) -> usize {
+        self.pages
+            .iter()
+            .map(|page| page.entry_count as usize)
+            .sum()
+    }
+
+    fn encode(
+        &self,
+        config: RelationalIndexRecoveryConfig,
+    ) -> Result<Vec<u8>, RelationalIndexShadowError> {
+        validate_manifest(self, config, false)?;
+        let mut payload = Vec::with_capacity(self.pages.len() * DELTA_DESCRIPTOR_BYTES);
+        for page in &self.pages {
+            payload.extend_from_slice(&page.ordinal.to_le_bytes());
+            payload.extend_from_slice(&page.start_epoch.to_le_bytes());
+            payload.extend_from_slice(&page.end_epoch.to_le_bytes());
+            payload.extend_from_slice(&page.entry_count.to_le_bytes());
+            payload.extend_from_slice(&page.encoded_len.to_le_bytes());
+            payload.extend_from_slice(&page.digest.crc32c.get().to_le_bytes());
+            payload.extend_from_slice(page.digest.sha256.as_bytes());
+        }
+        let payload_len = u64::try_from(payload.len()).map_err(|_| {
+            RelationalIndexShadowError::Admission(
+                "recovery manifest payload length does not fit u64".to_string(),
+            )
+        })?;
+        let page_count = u32::try_from(self.pages.len()).map_err(|_| {
+            RelationalIndexShadowError::Admission(
+                "recovery manifest page count does not fit u32".to_string(),
+            )
+        })?;
+        let mut encoded = Vec::with_capacity(DELTA_MANIFEST_HEADER_BYTES + payload.len());
+        encoded.extend_from_slice(DELTA_MANIFEST_MAGIC);
+        encoded.extend_from_slice(&DELTA_FORMAT_VERSION.to_le_bytes());
+        encoded.extend_from_slice(&0_u16.to_le_bytes());
+        encoded.extend_from_slice(&self.base_generation.to_le_bytes());
+        encoded.extend_from_slice(&self.delta_generation.to_le_bytes());
+        encoded.extend_from_slice(&self.base_commit_epoch.to_le_bytes());
+        encoded.extend_from_slice(&self.recovered_commit_epoch.to_le_bytes());
+        encoded.extend_from_slice(&page_count.to_le_bytes());
+        encoded.extend_from_slice(&payload_len.to_le_bytes());
+        let mut hasher = IntegrityHasher::new();
+        hasher.update(&encoded);
+        hasher.update(&payload);
+        let digest = hasher.finish();
+        encoded.extend_from_slice(&digest.crc32c.get().to_le_bytes());
+        encoded.extend_from_slice(digest.sha256.as_bytes());
+        debug_assert_eq!(encoded.len(), DELTA_MANIFEST_HEADER_BYTES);
+        encoded.extend_from_slice(&payload);
+        if encoded.len() > config.max_manifest_bytes.get() {
+            return Err(RelationalIndexShadowError::Admission(format!(
+                "recovery manifest contains {} bytes, exceeding limit {}",
+                encoded.len(),
+                config.max_manifest_bytes
+            )));
+        }
+        Ok(encoded)
+    }
+
+    fn decode(
+        encoded: &[u8],
+        config: RelationalIndexRecoveryConfig,
+    ) -> Result<Self, RelationalIndexShadowError> {
+        if encoded.len() < DELTA_MANIFEST_HEADER_BYTES || &encoded[..8] != DELTA_MANIFEST_MAGIC {
+            return Err(RelationalIndexShadowError::Corrupt(
+                "invalid relational index recovery manifest header".to_string(),
+            ));
+        }
+        if encoded.len() > config.max_manifest_bytes.get() {
+            return Err(RelationalIndexShadowError::Admission(format!(
+                "recovery manifest contains {} bytes, exceeding limit {}",
+                encoded.len(),
+                config.max_manifest_bytes
+            )));
+        }
+        let version = read_u16(&encoded[8..10]);
+        let flags = read_u16(&encoded[10..12]);
+        if version != DELTA_FORMAT_VERSION || flags != 0 {
+            return Err(RelationalIndexShadowError::Corrupt(format!(
+                "unsupported relational index recovery manifest version {version} or flags {flags}"
+            )));
+        }
+        let base_generation = read_u64(&encoded[12..20]);
+        let delta_generation = read_u64(&encoded[20..28]);
+        let base_commit_epoch = read_u64(&encoded[28..36]);
+        let recovered_commit_epoch = read_u64(&encoded[36..44]);
+        let page_count = read_u32(&encoded[44..48]) as usize;
+        if page_count > config.max_delta_pages.get() {
+            return Err(RelationalIndexShadowError::Admission(format!(
+                "recovery manifest declares {page_count} pages, exceeding limit {}",
+                config.max_delta_pages
+            )));
+        }
+        let payload_len = usize::try_from(read_u64(&encoded[48..56])).map_err(|_| {
+            RelationalIndexShadowError::Corrupt(
+                "recovery manifest payload length overflows usize".to_string(),
+            )
+        })?;
+        let expected_len = DELTA_MANIFEST_HEADER_BYTES
+            .checked_add(payload_len)
+            .ok_or_else(|| {
+                RelationalIndexShadowError::Corrupt("recovery manifest length overflow".to_string())
+            })?;
+        if encoded.len() != expected_len
+            || payload_len != page_count.saturating_mul(DELTA_DESCRIPTOR_BYTES)
+        {
+            return Err(RelationalIndexShadowError::Corrupt(
+                "relational index recovery manifest length mismatch".to_string(),
+            ));
+        }
+        let payload = &encoded[DELTA_MANIFEST_HEADER_BYTES..];
+        let mut hasher = IntegrityHasher::new();
+        hasher.update(&encoded[..56]);
+        hasher.update(payload);
+        let digest = hasher.finish();
+        if digest.crc32c.get() != read_u32(&encoded[56..60])
+            || digest.sha256.as_bytes() != &encoded[60..92]
+        {
+            return Err(RelationalIndexShadowError::Corrupt(
+                "relational index recovery manifest checksum mismatch".to_string(),
+            ));
+        }
+        let mut pages = Vec::with_capacity(page_count);
+        let mut offset = 0usize;
+        for _ in 0..page_count {
+            let ordinal = read_u32(take(payload, &mut offset, 4, "delta ordinal")?);
+            let start_epoch = read_u64(take(payload, &mut offset, 8, "delta start epoch")?);
+            let end_epoch = read_u64(take(payload, &mut offset, 8, "delta end epoch")?);
+            let entry_count = read_u32(take(payload, &mut offset, 4, "delta entry count")?);
+            let encoded_len = read_u64(take(payload, &mut offset, 8, "delta encoded length")?);
+            let crc32c = read_u32(take(payload, &mut offset, 4, "delta CRC32C")?);
+            let sha256 = Sha256Digest::from_bytes(
+                take(payload, &mut offset, SHA256_BYTES, "delta SHA-256")?
+                    .try_into()
+                    .expect("delta SHA-256 length was checked"),
+            );
+            pages.push(DeltaPageDescriptor {
+                ordinal,
+                start_epoch,
+                end_epoch,
+                entry_count,
+                encoded_len,
+                digest: IntegrityDigest {
+                    crc32c: skein_integrity::Crc32c::new(crc32c),
+                    sha256,
+                },
+            });
+        }
+        let manifest = Self {
+            base_generation,
+            delta_generation,
+            base_commit_epoch,
+            recovered_commit_epoch,
+            pages,
+        };
+        validate_manifest(&manifest, config, true)?;
+        Ok(manifest)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct DeltaKey {
+    table: String,
+    index: String,
+    index_key: Vec<u8>,
+    primary_key: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DeltaValue {
+    kind: RelationalIndexChangeKind,
+    epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeltaEntry {
+    key: DeltaKey,
+    value: DeltaValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationalIndexRecoveryReport {
+    pub base_generation: u64,
+    pub delta_generation: u64,
+    pub base_commit_epoch: u64,
+    pub recovered_commit_epoch: u64,
+    pub delta_pages: usize,
+    pub delta_entries: usize,
+    pub artifact_bytes: u64,
+    pub manifest_bytes: u64,
+    pub flushes: usize,
+    pub peak_dirty_entries: usize,
+    pub peak_dirty_bytes: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct RelationalIndexRecoveryBuilder {
+    directory: PathBuf,
+    base_generation: u64,
+    delta_generation: u64,
+    base_commit_epoch: u64,
+    config: RelationalIndexRecoveryConfig,
+    dirty: BTreeMap<DeltaKey, DeltaValue>,
+    dirty_bytes: usize,
+    dirty_start_epoch: Option<u64>,
+    dirty_end_epoch: Option<u64>,
+    pages: Vec<DeltaPageDescriptor>,
+    artifact_bytes: u64,
+    peak_dirty_entries: usize,
+    peak_dirty_bytes: usize,
+}
+
+impl RelationalIndexRecoveryBuilder {
+    pub fn new(
+        directory: &Path,
+        base_generation: u64,
+        base_commit_epoch: u64,
+        config: RelationalIndexRecoveryConfig,
+    ) -> Result<Self, RelationalIndexShadowError> {
+        if base_generation == 0 {
+            return Err(RelationalIndexShadowError::Admission(
+                "recovery delta requires a non-zero base generation".to_string(),
+            ));
+        }
+        fs::create_dir_all(directory).map_err(|error| {
+            RelationalIndexShadowError::Durability(format!(
+                "create relational index recovery directory: {error}"
+            ))
+        })?;
+        Ok(Self {
+            directory: directory.to_path_buf(),
+            base_generation,
+            delta_generation: next_delta_generation(),
+            base_commit_epoch,
+            config,
+            dirty: BTreeMap::new(),
+            dirty_bytes: 0,
+            dirty_start_epoch: None,
+            dirty_end_epoch: None,
+            pages: Vec::new(),
+            artifact_bytes: 0,
+            peak_dirty_entries: 0,
+            peak_dirty_bytes: 0,
+        })
+    }
+
+    pub fn capture_limits(&self) -> RelationalIndexChangeCaptureLimits {
+        self.config.capture_limits()
+    }
+
+    pub fn base_commit_epoch(&self) -> u64 {
+        self.base_commit_epoch
+    }
+
+    pub fn record(
+        &mut self,
+        epoch: u64,
+        capture: RelationalIndexChangeCapture,
+    ) -> Result<(), RelationalIndexShadowError> {
+        if epoch <= self.base_commit_epoch {
+            return Err(RelationalIndexShadowError::Corrupt(format!(
+                "recovery delta epoch {epoch} is not after base epoch {}",
+                self.base_commit_epoch
+            )));
+        }
+        let RelationalIndexChangeCapture::Captured { changes, .. } = capture else {
+            let RelationalIndexChangeCapture::Invalidated { reason } = capture else {
+                unreachable!()
+            };
+            return Err(RelationalIndexShadowError::Admission(reason));
+        };
+        for change in changes {
+            let (key, value, entry_bytes) = encode_change(change, epoch)?;
+            let key_exists = self.dirty.contains_key(&key);
+            let existing_bytes = if key_exists { entry_bytes } else { 0 };
+            let next_entries = self.dirty.len() + usize::from(!key_exists);
+            let next_bytes = self
+                .dirty_bytes
+                .checked_sub(existing_bytes)
+                .and_then(|bytes| bytes.checked_add(entry_bytes))
+                .ok_or_else(|| {
+                    RelationalIndexShadowError::Admission(
+                        "recovery dirty byte accounting overflow".to_string(),
+                    )
+                })?;
+            if !self.dirty.is_empty()
+                && (next_entries > self.config.max_dirty_entries.get()
+                    || next_bytes > self.config.max_dirty_bytes.get())
+            {
+                self.flush()?;
+            }
+            if entry_bytes > self.config.max_dirty_bytes.get() {
+                return Err(RelationalIndexShadowError::Admission(format!(
+                    "one recovery delta entry needs {entry_bytes} bytes, exceeding dirty limit {}",
+                    self.config.max_dirty_bytes
+                )));
+            }
+            if let Some(previous) = self.dirty.insert(key, value) {
+                debug_assert!(previous.epoch <= epoch);
+            } else {
+                self.dirty_bytes = self.dirty_bytes.checked_add(entry_bytes).ok_or_else(|| {
+                    RelationalIndexShadowError::Admission(
+                        "recovery dirty byte accounting overflow".to_string(),
+                    )
+                })?;
+            }
+            self.dirty_start_epoch = Some(
+                self.dirty_start_epoch
+                    .map_or(epoch, |value| value.min(epoch)),
+            );
+            self.dirty_end_epoch =
+                Some(self.dirty_end_epoch.map_or(epoch, |value| value.max(epoch)));
+            self.peak_dirty_entries = self.peak_dirty_entries.max(self.dirty.len());
+            self.peak_dirty_bytes = self.peak_dirty_bytes.max(self.dirty_bytes);
+        }
+        Ok(())
+    }
+
+    pub fn finish(
+        mut self,
+        recovered_commit_epoch: u64,
+    ) -> Result<RelationalIndexRecoveryReport, RelationalIndexShadowError> {
+        if recovered_commit_epoch < self.base_commit_epoch {
+            return Err(RelationalIndexShadowError::Corrupt(format!(
+                "recovered epoch {recovered_commit_epoch} precedes base epoch {}",
+                self.base_commit_epoch
+            )));
+        }
+        self.flush()?;
+        let manifest = RelationalIndexRecoveryManifest {
+            base_generation: self.base_generation,
+            delta_generation: self.delta_generation,
+            base_commit_epoch: self.base_commit_epoch,
+            recovered_commit_epoch,
+            pages: self.pages,
+        };
+        let encoded_manifest = manifest.encode(self.config)?;
+        let manifest_path = self.directory.join(RELATIONAL_INDEX_RECOVERY_MANIFEST_FILE);
+        let manifest_tmp = manifest_path.with_extension("skein.tmp");
+        write_synced(&manifest_tmp, &encoded_manifest, "write recovery manifest")?;
+        durable_replace_file(&manifest_tmp, &manifest_path).map_err(|error| {
+            RelationalIndexShadowError::Durability(format!(
+                "publish relational index recovery manifest: {error}"
+            ))
+        })?;
+        Ok(RelationalIndexRecoveryReport {
+            base_generation: manifest.base_generation,
+            delta_generation: manifest.delta_generation,
+            base_commit_epoch: manifest.base_commit_epoch,
+            recovered_commit_epoch: manifest.recovered_commit_epoch,
+            delta_pages: manifest.pages.len(),
+            delta_entries: manifest.delta_entries(),
+            artifact_bytes: self.artifact_bytes,
+            manifest_bytes: encoded_manifest.len() as u64,
+            flushes: manifest.pages.len(),
+            peak_dirty_entries: self.peak_dirty_entries,
+            peak_dirty_bytes: self.peak_dirty_bytes,
+        })
+    }
+
+    fn flush(&mut self) -> Result<(), RelationalIndexShadowError> {
+        if self.dirty.is_empty() {
+            return Ok(());
+        }
+        if self.pages.len() >= self.config.max_delta_pages.get() {
+            return Err(RelationalIndexShadowError::Admission(format!(
+                "recovery delta needs more than {} pages",
+                self.config.max_delta_pages
+            )));
+        }
+        let ordinal = u32::try_from(self.pages.len()).map_err(|_| {
+            RelationalIndexShadowError::Admission(
+                "recovery delta page ordinal does not fit u32".to_string(),
+            )
+        })?;
+        let entry_count = u32::try_from(self.dirty.len()).map_err(|_| {
+            RelationalIndexShadowError::Admission(
+                "recovery delta entry count does not fit u32".to_string(),
+            )
+        })?;
+        let start_epoch = self
+            .dirty_start_epoch
+            .expect("non-empty dirty overlay has a start epoch");
+        let end_epoch = self
+            .dirty_end_epoch
+            .expect("non-empty dirty overlay has an end epoch");
+        let final_path = self.directory.join(relational_index_recovery_delta_file(
+            self.base_generation,
+            self.delta_generation,
+            ordinal,
+        ));
+        let tmp_path = final_path.with_extension("skein.tmp");
+        let (encoded_len, digest) = write_delta_page(
+            &tmp_path,
+            DeltaPageWrite {
+                base_generation: self.base_generation,
+                delta_generation: self.delta_generation,
+                base_commit_epoch: self.base_commit_epoch,
+                ordinal,
+                start_epoch,
+                end_epoch,
+                entry_count,
+                payload_bytes: self.dirty_bytes,
+                entries: &self.dirty,
+            },
+            self.config,
+        )?;
+        durable_replace_file(&tmp_path, &final_path).map_err(|error| {
+            RelationalIndexShadowError::Durability(format!(
+                "publish relational index recovery delta page: {error}"
+            ))
+        })?;
+        self.pages.push(DeltaPageDescriptor {
+            ordinal,
+            start_epoch,
+            end_epoch,
+            entry_count,
+            encoded_len,
+            digest,
+        });
+        self.artifact_bytes = self.artifact_bytes.saturating_add(encoded_len);
+        self.dirty.clear();
+        self.dirty_bytes = 0;
+        self.dirty_start_epoch = None;
+        self.dirty_end_epoch = None;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationalIndexRecoveryReadReport {
+    pub base: RelationalIndexReadReport,
+    pub delta_pages_read: usize,
+    pub delta_bytes_read: usize,
+    pub delta_entries_visited: usize,
+    pub rows_visited: usize,
+    pub stopped_early: bool,
+}
+
+pub struct RelationalIndexRecoveryReader {
+    base: RelationalIndexShadowReader,
+    manifest: RelationalIndexRecoveryManifest,
+    config: RelationalIndexRecoveryConfig,
+    poisoned: AtomicBool,
+}
+
+impl RelationalIndexRecoveryReader {
+    pub fn open_latest(
+        directory: &Path,
+        expected_recovered_commit_epoch: u64,
+        shadow_config: RelationalIndexShadowConfig,
+        recovery_config: RelationalIndexRecoveryConfig,
+    ) -> Result<Self, RelationalIndexShadowError> {
+        let base = RelationalIndexShadowReader::open_latest(directory, shadow_config)?;
+        let manifest_path = directory.join(RELATIONAL_INDEX_RECOVERY_MANIFEST_FILE);
+        let encoded = read_bounded_file(
+            &manifest_path,
+            recovery_config.max_manifest_bytes.get(),
+            "relational index recovery manifest",
+        )?;
+        let manifest = RelationalIndexRecoveryManifest::decode(&encoded, recovery_config)?;
+        if manifest.base_generation != base.manifest().generation
+            || manifest.base_commit_epoch != base.manifest().source_commit_epoch
+            || manifest.recovered_commit_epoch != expected_recovered_commit_epoch
+        {
+            return Err(RelationalIndexShadowError::Corrupt(format!(
+                "recovery manifest fence {}/{}/{} does not match base {}/{} and recovered epoch {expected_recovered_commit_epoch}",
+                manifest.base_generation,
+                manifest.base_commit_epoch,
+                manifest.recovered_commit_epoch,
+                base.manifest().generation,
+                base.manifest().source_commit_epoch
+            )));
+        }
+        Ok(Self {
+            base,
+            manifest,
+            config: recovery_config,
+            poisoned: AtomicBool::new(false),
+        })
+    }
+
+    pub fn manifest(&self) -> &RelationalIndexRecoveryManifest {
+        &self.manifest
+    }
+
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire) || self.base.is_poisoned()
+    }
+
+    pub fn visit_exact_postings(
+        &self,
+        table: &str,
+        index: &str,
+        key: &RelationalKey,
+        limits: RelationalIndexReadLimits,
+        visit: impl FnMut(&RelationalKey) -> bool,
+    ) -> Result<RelationalIndexRecoveryReadReport, RelationalIndexShadowError> {
+        let encoded_key = encode_relational_key(key)?;
+        self.visit_merged(
+            table,
+            index,
+            limits,
+            |candidate| candidate == encoded_key,
+            |base, visit| base.visit_exact_postings(table, index, key, limits, visit),
+            visit,
+        )
+    }
+
+    pub fn visit_prefix_postings(
+        &self,
+        table: &str,
+        index: &str,
+        prefix: &RelationalKey,
+        limits: RelationalIndexReadLimits,
+        visit: impl FnMut(&RelationalKey) -> bool,
+    ) -> Result<RelationalIndexRecoveryReadReport, RelationalIndexShadowError> {
+        let encoded_prefix = encode_relational_key(prefix)?;
+        self.visit_merged(
+            table,
+            index,
+            limits,
+            |candidate| candidate.starts_with(&encoded_prefix),
+            |base, visit| base.visit_prefix_postings(table, index, prefix, limits, visit),
+            visit,
+        )
+    }
+
+    fn visit_merged(
+        &self,
+        table: &str,
+        index: &str,
+        limits: RelationalIndexReadLimits,
+        matches_key: impl Fn(&[u8]) -> bool,
+        read_base: impl FnOnce(
+            &RelationalIndexShadowReader,
+            &mut dyn FnMut(&RelationalKey) -> bool,
+        ) -> Result<RelationalIndexReadReport, RelationalIndexShadowError>,
+        mut visit: impl FnMut(&RelationalKey) -> bool,
+    ) -> Result<RelationalIndexRecoveryReadReport, RelationalIndexShadowError> {
+        if self.is_poisoned() {
+            return Err(RelationalIndexShadowError::Corrupt(
+                "relational index recovery reader is poisoned".to_string(),
+            ));
+        }
+        let mut rows = BTreeSet::new();
+        let mut collect = |key: &RelationalKey| {
+            rows.insert(key.clone());
+            true
+        };
+        let base = read_base(&self.base, &mut collect)?;
+        let mut report = RelationalIndexRecoveryReadReport {
+            base,
+            delta_pages_read: 0,
+            delta_bytes_read: 0,
+            delta_entries_visited: 0,
+            rows_visited: 0,
+            stopped_early: false,
+        };
+        for descriptor in &self.manifest.pages {
+            let total_pages = report
+                .base
+                .pages_read
+                .checked_add(report.delta_pages_read)
+                .ok_or_else(|| admission("recovery read page counter overflow"))?;
+            if total_pages >= limits.max_pages.get() {
+                return Err(admission(format!(
+                    "recovery index lookup exceeds page limit {}",
+                    limits.max_pages
+                )));
+            }
+            let encoded_len = usize::try_from(descriptor.encoded_len)
+                .map_err(|_| corrupt("recovery delta encoded length overflows usize"))?;
+            let total_bytes = report
+                .base
+                .bytes_read
+                .checked_add(report.delta_bytes_read)
+                .and_then(|bytes| bytes.checked_add(encoded_len))
+                .ok_or_else(|| admission("recovery read byte counter overflow"))?;
+            if total_bytes > limits.max_bytes.get() {
+                return Err(admission(format!(
+                    "recovery index lookup needs {total_bytes} bytes, exceeding byte limit {}",
+                    limits.max_bytes
+                )));
+            }
+            self.visit_page(descriptor, |entry| {
+                report.delta_entries_visited = report
+                    .delta_entries_visited
+                    .checked_add(1)
+                    .ok_or_else(|| admission("recovery delta entry counter overflow"))?;
+                if entry.key.table != table
+                    || entry.key.index != index
+                    || !matches_key(&entry.key.index_key)
+                {
+                    return Ok(());
+                }
+                let primary_key = super::demand_read::decode_relational_key(&entry.key.primary_key)
+                    .inspect_err(|_| self.poison())?;
+                match entry.value.kind {
+                    RelationalIndexChangeKind::Delete => {
+                        rows.remove(&primary_key);
+                    }
+                    RelationalIndexChangeKind::Insert => {
+                        rows.insert(primary_key);
+                    }
+                }
+                if rows.len() > limits.max_rows.get() {
+                    return Err(admission(format!(
+                        "recovery index lookup exceeds row limit {}",
+                        limits.max_rows
+                    )));
+                }
+                Ok(())
+            })?;
+            report.delta_pages_read += 1;
+            report.delta_bytes_read += encoded_len;
+        }
+        for row in rows {
+            report.rows_visited += 1;
+            if !visit(&row) {
+                report.stopped_early = true;
+                break;
+            }
+        }
+        Ok(report)
+    }
+
+    fn visit_page(
+        &self,
+        descriptor: &DeltaPageDescriptor,
+        visit: impl FnMut(DeltaEntry) -> Result<(), RelationalIndexShadowError>,
+    ) -> Result<(), RelationalIndexShadowError> {
+        let path = self
+            .base
+            .directory
+            .join(relational_index_recovery_delta_file(
+                self.manifest.base_generation,
+                self.manifest.delta_generation,
+                descriptor.ordinal,
+            ));
+        let result = read_bounded_file(
+            &path,
+            self.config.max_dirty_bytes.get() + DELTA_PAGE_HEADER_BYTES,
+            "relational index recovery delta page",
+        )
+        .and_then(|encoded| {
+            if encoded.len() as u64 != descriptor.encoded_len {
+                return Err(corrupt(
+                    "recovery delta page length disagrees with manifest",
+                ));
+            }
+            let digest = digest_encoded_delta_page(&encoded)?;
+            if digest != descriptor.digest {
+                return Err(corrupt(
+                    "recovery delta page digest disagrees with manifest",
+                ));
+            }
+            decode_delta_page(
+                &encoded,
+                self.manifest.base_generation,
+                self.manifest.delta_generation,
+                self.manifest.base_commit_epoch,
+                descriptor,
+                self.config,
+                visit,
+            )
+        });
+        if result.as_ref().is_err_and(should_poison) {
+            self.poison();
+        }
+        result
+    }
+
+    fn poison(&self) {
+        self.poisoned.store(true, Ordering::Release);
+    }
+}
+
+fn encode_change(
+    change: RelationalIndexChange,
+    epoch: u64,
+) -> Result<(DeltaKey, DeltaValue, usize), RelationalIndexShadowError> {
+    let key = DeltaKey {
+        table: change.table,
+        index: change.index,
+        index_key: encode_relational_key(&change.index_key)?,
+        primary_key: encode_relational_key(&change.primary_key)?,
+    };
+    let encoded_bytes = delta_entry_bytes(&key)?;
+    Ok((
+        key,
+        DeltaValue {
+            kind: change.kind,
+            epoch,
+        },
+        encoded_bytes,
+    ))
+}
+
+fn delta_entry_bytes(key: &DeltaKey) -> Result<usize, RelationalIndexShadowError> {
+    DELTA_ENTRY_FIXED_BYTES
+        .checked_add(key.table.len())
+        .and_then(|bytes| bytes.checked_add(key.index.len()))
+        .and_then(|bytes| bytes.checked_add(key.index_key.len()))
+        .and_then(|bytes| bytes.checked_add(key.primary_key.len()))
+        .ok_or_else(|| {
+            RelationalIndexShadowError::Admission(
+                "recovery delta entry length overflow".to_string(),
+            )
+        })
+}
+
+struct DeltaPageWrite<'a> {
+    base_generation: u64,
+    delta_generation: u64,
+    base_commit_epoch: u64,
+    ordinal: u32,
+    start_epoch: u64,
+    end_epoch: u64,
+    entry_count: u32,
+    payload_bytes: usize,
+    entries: &'a BTreeMap<DeltaKey, DeltaValue>,
+}
+
+fn write_delta_page(
+    path: &Path,
+    page: DeltaPageWrite<'_>,
+    config: RelationalIndexRecoveryConfig,
+) -> Result<(u64, IntegrityDigest), RelationalIndexShadowError> {
+    if page.payload_bytes > config.max_dirty_bytes.get()
+        || page.entries.len() != page.entry_count as usize
+    {
+        return Err(RelationalIndexShadowError::Admission(format!(
+            "recovery delta page payload contains {} bytes, exceeding limit {} or disagreeing with its entry count",
+            page.payload_bytes,
+            config.max_dirty_bytes
+        )));
+    }
+    let payload_len = u64::try_from(page.payload_bytes).map_err(|_| {
+        RelationalIndexShadowError::Admission(
+            "recovery delta payload length does not fit u64".to_string(),
+        )
+    })?;
+    let mut prefix = Vec::with_capacity(68);
+    prefix.extend_from_slice(DELTA_PAGE_MAGIC);
+    prefix.extend_from_slice(&DELTA_FORMAT_VERSION.to_le_bytes());
+    prefix.extend_from_slice(&0_u16.to_le_bytes());
+    prefix.extend_from_slice(&page.base_generation.to_le_bytes());
+    prefix.extend_from_slice(&page.delta_generation.to_le_bytes());
+    prefix.extend_from_slice(&page.base_commit_epoch.to_le_bytes());
+    prefix.extend_from_slice(&page.ordinal.to_le_bytes());
+    prefix.extend_from_slice(&page.start_epoch.to_le_bytes());
+    prefix.extend_from_slice(&page.end_epoch.to_le_bytes());
+    prefix.extend_from_slice(&page.entry_count.to_le_bytes());
+    prefix.extend_from_slice(&payload_len.to_le_bytes());
+    debug_assert_eq!(prefix.len(), 68);
+    let mut hasher = IntegrityHasher::new();
+    hasher.update(&prefix);
+    update_delta_entries_digest(&mut hasher, page.entries)?;
+    let digest = hasher.finish();
+    let mut header = prefix;
+    header.extend_from_slice(&digest.crc32c.get().to_le_bytes());
+    header.extend_from_slice(digest.sha256.as_bytes());
+    debug_assert_eq!(header.len(), DELTA_PAGE_HEADER_BYTES);
+
+    let mut file = File::create(path).map_err(|error| {
+        RelationalIndexShadowError::Durability(format!(
+            "create relational index recovery delta page: {error}"
+        ))
+    })?;
+    let mut artifact_hasher = IntegrityHasher::new();
+    file.write_all(&header).map_err(|error| {
+        RelationalIndexShadowError::Durability(format!(
+            "write relational index recovery delta header: {error}"
+        ))
+    })?;
+    artifact_hasher.update(&header);
+    write_delta_entries(&mut file, &mut artifact_hasher, page.entries)?;
+    file.sync_all().map_err(|error| {
+        RelationalIndexShadowError::Durability(format!(
+            "sync relational index recovery delta page: {error}"
+        ))
+    })?;
+    let encoded_len = (DELTA_PAGE_HEADER_BYTES as u64)
+        .checked_add(payload_len)
+        .ok_or_else(|| {
+            RelationalIndexShadowError::Admission(
+                "recovery delta encoded length overflow".to_string(),
+            )
+        })?;
+    Ok((encoded_len, artifact_hasher.finish()))
+}
+
+fn update_delta_entries_digest(
+    hasher: &mut IntegrityHasher,
+    entries: &BTreeMap<DeltaKey, DeltaValue>,
+) -> Result<(), RelationalIndexShadowError> {
+    for (key, value) in entries {
+        let kind = [delta_kind_tag(value.kind)];
+        hasher.update(&kind);
+        update_length_prefixed_digest(hasher, key.table.as_bytes())?;
+        update_length_prefixed_digest(hasher, key.index.as_bytes())?;
+        update_length_prefixed_digest(hasher, &key.index_key)?;
+        update_length_prefixed_digest(hasher, &key.primary_key)?;
+    }
+    Ok(())
+}
+
+fn write_delta_entries(
+    file: &mut File,
+    hasher: &mut IntegrityHasher,
+    entries: &BTreeMap<DeltaKey, DeltaValue>,
+) -> Result<(), RelationalIndexShadowError> {
+    for (key, value) in entries {
+        let kind = [delta_kind_tag(value.kind)];
+        write_hashed(file, hasher, &kind)?;
+        write_length_prefixed(file, hasher, key.table.as_bytes())?;
+        write_length_prefixed(file, hasher, key.index.as_bytes())?;
+        write_length_prefixed(file, hasher, &key.index_key)?;
+        write_length_prefixed(file, hasher, &key.primary_key)?;
+    }
+    Ok(())
+}
+
+fn update_length_prefixed_digest(
+    hasher: &mut IntegrityHasher,
+    bytes: &[u8],
+) -> Result<(), RelationalIndexShadowError> {
+    let len = u32::try_from(bytes.len()).map_err(|_| {
+        RelationalIndexShadowError::Admission(
+            "recovery delta field length does not fit u32".to_string(),
+        )
+    })?;
+    hasher.update(&len.to_le_bytes());
+    hasher.update(bytes);
+    Ok(())
+}
+
+fn write_length_prefixed(
+    file: &mut File,
+    hasher: &mut IntegrityHasher,
+    bytes: &[u8],
+) -> Result<(), RelationalIndexShadowError> {
+    let len = u32::try_from(bytes.len()).map_err(|_| {
+        RelationalIndexShadowError::Admission(
+            "recovery delta field length does not fit u32".to_string(),
+        )
+    })?;
+    write_hashed(file, hasher, &len.to_le_bytes())?;
+    write_hashed(file, hasher, bytes)
+}
+
+fn write_hashed(
+    file: &mut File,
+    hasher: &mut IntegrityHasher,
+    bytes: &[u8],
+) -> Result<(), RelationalIndexShadowError> {
+    file.write_all(bytes).map_err(|error| {
+        RelationalIndexShadowError::Durability(format!(
+            "write relational index recovery delta entry: {error}"
+        ))
+    })?;
+    hasher.update(bytes);
+    Ok(())
+}
+
+const fn delta_kind_tag(kind: RelationalIndexChangeKind) -> u8 {
+    match kind {
+        RelationalIndexChangeKind::Delete => 0,
+        RelationalIndexChangeKind::Insert => 1,
+    }
+}
+
+fn decode_delta_page(
+    encoded: &[u8],
+    expected_base_generation: u64,
+    expected_delta_generation: u64,
+    expected_base_commit_epoch: u64,
+    descriptor: &DeltaPageDescriptor,
+    config: RelationalIndexRecoveryConfig,
+    mut visit: impl FnMut(DeltaEntry) -> Result<(), RelationalIndexShadowError>,
+) -> Result<(), RelationalIndexShadowError> {
+    if encoded.len() < DELTA_PAGE_HEADER_BYTES || &encoded[..8] != DELTA_PAGE_MAGIC {
+        return Err(corrupt("invalid relational index recovery delta header"));
+    }
+    let version = read_u16(&encoded[8..10]);
+    let flags = read_u16(&encoded[10..12]);
+    let base_generation = read_u64(&encoded[12..20]);
+    let delta_generation = read_u64(&encoded[20..28]);
+    let base_commit_epoch = read_u64(&encoded[28..36]);
+    let ordinal = read_u32(&encoded[36..40]);
+    let start_epoch = read_u64(&encoded[40..48]);
+    let end_epoch = read_u64(&encoded[48..56]);
+    let entry_count = read_u32(&encoded[56..60]);
+    let payload_len = usize::try_from(read_u64(&encoded[60..68]))
+        .map_err(|_| corrupt("recovery delta payload length overflows usize"))?;
+    if version != DELTA_FORMAT_VERSION
+        || flags != 0
+        || base_generation != expected_base_generation
+        || delta_generation != expected_delta_generation
+        || base_commit_epoch != expected_base_commit_epoch
+        || ordinal != descriptor.ordinal
+        || start_epoch != descriptor.start_epoch
+        || end_epoch != descriptor.end_epoch
+        || entry_count != descriptor.entry_count
+    {
+        return Err(corrupt("recovery delta page fence disagrees with manifest"));
+    }
+    if payload_len > config.max_dirty_bytes.get()
+        || encoded.len() != DELTA_PAGE_HEADER_BYTES.saturating_add(payload_len)
+    {
+        return Err(corrupt("recovery delta page payload length mismatch"));
+    }
+    let payload = &encoded[DELTA_PAGE_HEADER_BYTES..];
+    let mut hasher = IntegrityHasher::new();
+    hasher.update(&encoded[..68]);
+    hasher.update(payload);
+    let digest = hasher.finish();
+    if digest.crc32c.get() != read_u32(&encoded[68..72])
+        || digest.sha256.as_bytes() != &encoded[72..104]
+    {
+        return Err(corrupt("recovery delta page checksum mismatch"));
+    }
+    let mut offset = 0usize;
+    let mut previous_key = None;
+    for _ in 0..entry_count {
+        let kind = match *payload
+            .get(offset)
+            .ok_or_else(|| corrupt("truncated recovery delta operation"))?
+        {
+            0 => RelationalIndexChangeKind::Delete,
+            1 => RelationalIndexChangeKind::Insert,
+            value => return Err(corrupt(format!("unknown recovery delta operation {value}"))),
+        };
+        offset += 1;
+        let (table, next) = decode_bytes(payload, offset, 64 * 1024, "delta table")?;
+        offset = next;
+        let (index, next) = decode_bytes(payload, offset, 64 * 1024, "delta index")?;
+        offset = next;
+        let (index_key, next) = decode_bytes(
+            payload,
+            offset,
+            config.max_dirty_bytes.get(),
+            "delta index key",
+        )?;
+        offset = next;
+        let (primary_key, next) = decode_bytes(
+            payload,
+            offset,
+            config.max_dirty_bytes.get(),
+            "delta primary key",
+        )?;
+        offset = next;
+        let entry = DeltaEntry {
+            key: DeltaKey {
+                table: decode_utf8(table, "delta table")?,
+                index: decode_utf8(index, "delta index")?,
+                index_key: index_key.to_vec(),
+                primary_key: primary_key.to_vec(),
+            },
+            value: DeltaValue {
+                kind,
+                epoch: end_epoch,
+            },
+        };
+        if previous_key
+            .as_ref()
+            .is_some_and(|previous| previous >= &entry.key)
+        {
+            return Err(corrupt("recovery delta entries are not strictly ordered"));
+        }
+        previous_key = Some(entry.key.clone());
+        visit(entry)?;
+    }
+    if offset != payload.len() {
+        return Err(corrupt("recovery delta entries contain trailing bytes"));
+    }
+    Ok(())
+}
+
+fn digest_encoded_delta_page(
+    encoded: &[u8],
+) -> Result<IntegrityDigest, RelationalIndexShadowError> {
+    if encoded.len() < DELTA_PAGE_HEADER_BYTES {
+        return Err(corrupt("truncated recovery delta page"));
+    }
+    let mut hasher = IntegrityHasher::new();
+    hasher.update(encoded);
+    Ok(hasher.finish())
+}
+
+fn validate_manifest(
+    manifest: &RelationalIndexRecoveryManifest,
+    config: RelationalIndexRecoveryConfig,
+    corrupt_input: bool,
+) -> Result<(), RelationalIndexShadowError> {
+    let fail = |message: String| {
+        if corrupt_input {
+            RelationalIndexShadowError::Corrupt(message)
+        } else {
+            RelationalIndexShadowError::Admission(message)
+        }
+    };
+    if manifest.base_generation == 0
+        || manifest.delta_generation == 0
+        || manifest.recovered_commit_epoch < manifest.base_commit_epoch
+        || manifest.pages.len() > config.max_delta_pages.get()
+    {
+        return Err(fail(
+            "invalid relational index recovery manifest fence".to_string(),
+        ));
+    }
+    let mut previous_end = manifest.base_commit_epoch;
+    for (position, page) in manifest.pages.iter().enumerate() {
+        if page.ordinal as usize != position
+            || page.entry_count == 0
+            || page.start_epoch <= manifest.base_commit_epoch
+            || page.start_epoch > page.end_epoch
+            || page.start_epoch < previous_end
+            || page.end_epoch > manifest.recovered_commit_epoch
+            || page.encoded_len < DELTA_PAGE_HEADER_BYTES as u64
+            || page.encoded_len > (DELTA_PAGE_HEADER_BYTES + config.max_dirty_bytes.get()) as u64
+        {
+            return Err(fail(format!(
+                "invalid relational index recovery delta descriptor at ordinal {position}"
+            )));
+        }
+        previous_end = page.end_epoch;
+    }
+    Ok(())
+}
+
+fn next_delta_generation() -> u64 {
+    let clock = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let sequence = NEXT_DELTA_GENERATION.fetch_add(1, Ordering::Relaxed);
+    let generation = clock.rotate_left(17) ^ sequence ^ ((std::process::id() as u64) << 32);
+    generation.max(1)
+}
+
+fn write_synced(
+    path: &Path,
+    encoded: &[u8],
+    context: &str,
+) -> Result<(), RelationalIndexShadowError> {
+    let mut file = File::create(path)
+        .map_err(|error| RelationalIndexShadowError::Durability(format!("{context}: {error}")))?;
+    file.write_all(encoded)
+        .map_err(|error| RelationalIndexShadowError::Durability(format!("{context}: {error}")))?;
+    file.sync_all()
+        .map_err(|error| RelationalIndexShadowError::Durability(format!("{context}: {error}")))
+}
+
+fn admission(message: impl Into<String>) -> RelationalIndexShadowError {
+    RelationalIndexShadowError::Admission(message.into())
+}
+
+fn corrupt(message: impl Into<String>) -> RelationalIndexShadowError {
+    RelationalIndexShadowError::Corrupt(message.into())
+}
+
+fn should_poison(error: &RelationalIndexShadowError) -> bool {
+    matches!(
+        error,
+        RelationalIndexShadowError::Corrupt(_) | RelationalIndexShadowError::Durability(_)
+    )
+}

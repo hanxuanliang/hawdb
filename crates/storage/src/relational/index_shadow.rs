@@ -18,11 +18,21 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 mod demand_read;
+mod recovery;
 
 pub use demand_read::{
     RelationalIndexReadLimits, RelationalIndexReadReport, DEFAULT_RELATIONAL_INDEX_READ_BYTES,
     DEFAULT_RELATIONAL_INDEX_READ_PAGES, DEFAULT_RELATIONAL_INDEX_READ_ROWS,
     DEFAULT_RELATIONAL_INDEX_READ_TREE_HEIGHT,
+};
+pub use recovery::{
+    relational_index_recovery_delta_file, RelationalIndexRecoveryBuilder,
+    RelationalIndexRecoveryConfig, RelationalIndexRecoveryManifest,
+    RelationalIndexRecoveryReadReport, RelationalIndexRecoveryReader,
+    RelationalIndexRecoveryReport, DEFAULT_RELATIONAL_INDEX_RECOVERY_DIRTY_BYTES,
+    DEFAULT_RELATIONAL_INDEX_RECOVERY_DIRTY_ENTRIES,
+    DEFAULT_RELATIONAL_INDEX_RECOVERY_MANIFEST_BYTES, DEFAULT_RELATIONAL_INDEX_RECOVERY_PAGES,
+    RELATIONAL_INDEX_RECOVERY_MANIFEST_FILE,
 };
 
 const MANIFEST_MAGIC: &[u8; 8] = b"SKRIDXM1";

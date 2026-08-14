@@ -19,15 +19,21 @@ pub use codec::{
     encode_relational_wal_batch, RelationalCheckpoint, RelationalDecodeLimits, RelationalWalBatch,
 };
 pub use index_shadow::{
-    relational_index_shadow_artifact_file, RelationalIndexReadLimits, RelationalIndexReadReport,
-    RelationalIndexRootDescriptor, RelationalIndexShadowBuildReport, RelationalIndexShadowConfig,
-    RelationalIndexShadowError, RelationalIndexShadowManifest, RelationalIndexShadowReader,
-    RelationalIndexShadowWriter, DEFAULT_RELATIONAL_INDEX_READ_BYTES,
+    relational_index_recovery_delta_file, relational_index_shadow_artifact_file,
+    RelationalIndexReadLimits, RelationalIndexReadReport, RelationalIndexRecoveryBuilder,
+    RelationalIndexRecoveryConfig, RelationalIndexRecoveryManifest,
+    RelationalIndexRecoveryReadReport, RelationalIndexRecoveryReader,
+    RelationalIndexRecoveryReport, RelationalIndexRootDescriptor, RelationalIndexShadowBuildReport,
+    RelationalIndexShadowConfig, RelationalIndexShadowError, RelationalIndexShadowManifest,
+    RelationalIndexShadowReader, RelationalIndexShadowWriter, DEFAULT_RELATIONAL_INDEX_READ_BYTES,
     DEFAULT_RELATIONAL_INDEX_READ_PAGES, DEFAULT_RELATIONAL_INDEX_READ_ROWS,
-    DEFAULT_RELATIONAL_INDEX_READ_TREE_HEIGHT,
+    DEFAULT_RELATIONAL_INDEX_READ_TREE_HEIGHT, DEFAULT_RELATIONAL_INDEX_RECOVERY_DIRTY_BYTES,
+    DEFAULT_RELATIONAL_INDEX_RECOVERY_DIRTY_ENTRIES,
+    DEFAULT_RELATIONAL_INDEX_RECOVERY_MANIFEST_BYTES, DEFAULT_RELATIONAL_INDEX_RECOVERY_PAGES,
     DEFAULT_RELATIONAL_INDEX_SHADOW_BUILD_METADATA_BYTES,
     DEFAULT_RELATIONAL_INDEX_SHADOW_MANIFEST_BYTES, DEFAULT_RELATIONAL_INDEX_SHADOW_ROOTS,
-    RELATIONAL_INDEX_SHADOW_MANIFEST_FILE, RELATIONAL_PRIMARY_INDEX_NAME,
+    RELATIONAL_INDEX_RECOVERY_MANIFEST_FILE, RELATIONAL_INDEX_SHADOW_MANIFEST_FILE,
+    RELATIONAL_PRIMARY_INDEX_NAME,
 };
 pub use overflow::{
     RelationalHydrationBudget, RelationalOverflowConfig, RelationalOverflowRef,
@@ -36,6 +42,8 @@ pub use overflow::{
 
 pub const DEFAULT_MAX_RELATIONAL_MUTATION_ROWS: usize = 100_000;
 pub const DEFAULT_MAX_RELATIONAL_MUTATION_BYTES: usize = 64 * 1024 * 1024;
+pub const DEFAULT_MAX_RELATIONAL_INDEX_CHANGES: usize = 100_000;
+pub const DEFAULT_MAX_RELATIONAL_INDEX_CHANGE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelationalMutationLimits {
@@ -50,6 +58,23 @@ impl Default for RelationalMutationLimits {
                 .expect("default relational mutation row limit is non-zero"),
             max_payload_bytes: NonZeroUsize::new(DEFAULT_MAX_RELATIONAL_MUTATION_BYTES)
                 .expect("default relational mutation byte limit is non-zero"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelationalIndexChangeCaptureLimits {
+    pub max_entries: NonZeroUsize,
+    pub max_bytes: NonZeroUsize,
+}
+
+impl Default for RelationalIndexChangeCaptureLimits {
+    fn default() -> Self {
+        Self {
+            max_entries: NonZeroUsize::new(DEFAULT_MAX_RELATIONAL_INDEX_CHANGES)
+                .expect("default relational index change limit is non-zero"),
+            max_bytes: NonZeroUsize::new(DEFAULT_MAX_RELATIONAL_INDEX_CHANGE_BYTES)
+                .expect("default relational index change byte limit is non-zero"),
         }
     }
 }
@@ -211,6 +236,32 @@ pub struct RelationalKey(pub Vec<RelationalValue>);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationalRow {
     values: Arc<[RelationalValue]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelationalIndexChangeKind {
+    Delete,
+    Insert,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationalIndexChange {
+    pub table: String,
+    pub index: String,
+    pub index_key: RelationalKey,
+    pub primary_key: RelationalKey,
+    pub kind: RelationalIndexChangeKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelationalIndexChangeCapture {
+    Captured {
+        changes: Vec<RelationalIndexChange>,
+        encoded_bytes: usize,
+    },
+    Invalidated {
+        reason: String,
+    },
 }
 
 impl RelationalRow {
@@ -701,6 +752,23 @@ impl RelationalState {
     ) -> Result<Self, RelationalError> {
         admit_transaction(&transaction, limits)?;
         apply_transaction(self, transaction, limits, overflow_config)
+    }
+
+    pub fn stage_transaction_with_index_changes(
+        &self,
+        transaction: RelationalTransaction,
+        limits: RelationalMutationLimits,
+        overflow_config: RelationalOverflowConfig,
+        capture_limits: RelationalIndexChangeCaptureLimits,
+    ) -> Result<(Self, RelationalIndexChangeCapture), RelationalError> {
+        admit_transaction(&transaction, limits)?;
+        apply_transaction_with_index_changes(
+            self,
+            transaction,
+            limits,
+            overflow_config,
+            capture_limits,
+        )
     }
 
     pub fn table_schema(&self, table: &str) -> Option<&RelationalTableSchema> {
@@ -1211,6 +1279,37 @@ fn apply_transaction(
     limits: RelationalMutationLimits,
     overflow_config: RelationalOverflowConfig,
 ) -> Result<RelationalState, RelationalError> {
+    apply_transaction_inner(state, transaction, limits, overflow_config, None)
+        .map(|(state, _)| state)
+}
+
+fn apply_transaction_with_index_changes(
+    state: &RelationalState,
+    transaction: RelationalTransaction,
+    limits: RelationalMutationLimits,
+    overflow_config: RelationalOverflowConfig,
+    capture_limits: RelationalIndexChangeCaptureLimits,
+) -> Result<(RelationalState, RelationalIndexChangeCapture), RelationalError> {
+    let (state, capture) = apply_transaction_inner(
+        state,
+        transaction,
+        limits,
+        overflow_config,
+        Some(capture_limits),
+    )?;
+    Ok((
+        state,
+        capture.expect("index change capture was requested for this transaction"),
+    ))
+}
+
+fn apply_transaction_inner(
+    state: &RelationalState,
+    transaction: RelationalTransaction,
+    limits: RelationalMutationLimits,
+    overflow_config: RelationalOverflowConfig,
+    capture_limits: Option<RelationalIndexChangeCaptureLimits>,
+) -> Result<(RelationalState, Option<RelationalIndexChangeCapture>), RelationalError> {
     let mut next = state.clone();
     let mut touched = BTreeSet::new();
     let mut changed_keys = BTreeMap::<String, BTreeSet<RelationalKey>>::new();
@@ -1439,7 +1538,16 @@ fn apply_transaction(
         }
     }
     validate_foreign_keys_incremental(state, &next, &changed_keys, &full_index_rebuild)?;
-    Ok(next)
+    let capture = capture_limits.map(|capture_limits| {
+        capture_relational_index_changes(
+            state,
+            &next,
+            &changed_keys,
+            &full_index_rebuild,
+            capture_limits,
+        )
+    });
+    Ok((next, capture))
 }
 
 fn apply_upsert(
@@ -2038,6 +2146,200 @@ fn refresh_indexes_for_keys(
         }
     }
     Ok(())
+}
+
+fn capture_relational_index_changes(
+    previous: &RelationalState,
+    next: &RelationalState,
+    changed_keys: &BTreeMap<String, BTreeSet<RelationalKey>>,
+    full_index_rebuild: &BTreeSet<String>,
+    limits: RelationalIndexChangeCaptureLimits,
+) -> RelationalIndexChangeCapture {
+    if !full_index_rebuild.is_empty() {
+        return RelationalIndexChangeCapture::Invalidated {
+            reason: format!(
+                "schema-changing WAL requires new index roots for tables {}",
+                full_index_rebuild
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        };
+    }
+
+    let mut changes = Vec::new();
+    let mut encoded_bytes = 0usize;
+    for (table, keys) in changed_keys {
+        let Some(schema) = next
+            .schemas
+            .get(table)
+            .or_else(|| previous.schemas.get(table))
+        else {
+            return RelationalIndexChangeCapture::Invalidated {
+                reason: format!("changed table {table} has no relational schema"),
+            };
+        };
+        let previous_segment = previous.segments.get(table);
+        let next_segment = next.segments.get(table);
+        let mut indexes = schema.indexes.clone();
+        for (ordinal, columns) in schema.unique_constraints.iter().enumerate() {
+            indexes.push(RelationalIndexSchema {
+                name: format!("__unique_{ordinal}"),
+                columns: columns.clone(),
+                unique: true,
+            });
+        }
+
+        for primary_key in keys {
+            let previous_row = previous_segment.and_then(|segment| segment.rows.get(primary_key));
+            let next_row = next_segment.and_then(|segment| segment.rows.get(primary_key));
+            if previous_row.is_some() != next_row.is_some()
+                && !push_captured_index_change(
+                    &mut changes,
+                    &mut encoded_bytes,
+                    limits,
+                    RelationalIndexChange {
+                        table: table.clone(),
+                        index: index_shadow::RELATIONAL_PRIMARY_INDEX_NAME.to_string(),
+                        index_key: primary_key.clone(),
+                        primary_key: primary_key.clone(),
+                        kind: if next_row.is_some() {
+                            RelationalIndexChangeKind::Insert
+                        } else {
+                            RelationalIndexChangeKind::Delete
+                        },
+                    },
+                )
+            {
+                return capture_limit_invalidated(limits);
+            }
+
+            for index in &indexes {
+                let positions = match column_positions(schema, &index.columns) {
+                    Ok(positions) => positions,
+                    Err(error) => {
+                        return RelationalIndexChangeCapture::Invalidated {
+                            reason: error.to_string(),
+                        };
+                    }
+                };
+                let previous_index_key = previous_row
+                    .map(|row| row_key(row, &positions))
+                    .filter(|key| index_includes_key(index, key));
+                let next_index_key = next_row
+                    .map(|row| row_key(row, &positions))
+                    .filter(|key| index_includes_key(index, key));
+                if previous_index_key == next_index_key {
+                    continue;
+                }
+                if let Some(index_key) = previous_index_key
+                    && !push_captured_index_change(
+                        &mut changes,
+                        &mut encoded_bytes,
+                        limits,
+                        RelationalIndexChange {
+                            table: table.clone(),
+                            index: index.name.clone(),
+                            index_key,
+                            primary_key: primary_key.clone(),
+                            kind: RelationalIndexChangeKind::Delete,
+                        },
+                    )
+                {
+                    return capture_limit_invalidated(limits);
+                }
+                if let Some(index_key) = next_index_key
+                    && !push_captured_index_change(
+                        &mut changes,
+                        &mut encoded_bytes,
+                        limits,
+                        RelationalIndexChange {
+                            table: table.clone(),
+                            index: index.name.clone(),
+                            index_key,
+                            primary_key: primary_key.clone(),
+                            kind: RelationalIndexChangeKind::Insert,
+                        },
+                    )
+                {
+                    return capture_limit_invalidated(limits);
+                }
+            }
+        }
+    }
+    RelationalIndexChangeCapture::Captured {
+        changes,
+        encoded_bytes,
+    }
+}
+
+fn index_includes_key(index: &RelationalIndexSchema, key: &RelationalKey) -> bool {
+    !index.unique
+        || !key
+            .0
+            .iter()
+            .any(|value| matches!(value, RelationalValue::Null))
+}
+
+fn push_captured_index_change(
+    changes: &mut Vec<RelationalIndexChange>,
+    encoded_bytes: &mut usize,
+    limits: RelationalIndexChangeCaptureLimits,
+    change: RelationalIndexChange,
+) -> bool {
+    let Some(change_bytes) = estimated_index_change_encoding_bytes(&change) else {
+        return false;
+    };
+    let Some(next_bytes) = encoded_bytes.checked_add(change_bytes) else {
+        return false;
+    };
+    if changes.len() >= limits.max_entries.get() || next_bytes > limits.max_bytes.get() {
+        return false;
+    }
+    changes.push(change);
+    *encoded_bytes = next_bytes;
+    true
+}
+
+fn capture_limit_invalidated(
+    limits: RelationalIndexChangeCaptureLimits,
+) -> RelationalIndexChangeCapture {
+    RelationalIndexChangeCapture::Invalidated {
+        reason: format!(
+            "relational index WAL delta cannot be encoded within capture limits: max_entries={}, max_bytes={}",
+            limits.max_entries, limits.max_bytes
+        ),
+    }
+}
+
+fn estimated_index_change_encoding_bytes(change: &RelationalIndexChange) -> Option<usize> {
+    const FIXED_BYTES: usize = 1 + 4 * 4;
+    FIXED_BYTES
+        .checked_add(change.table.len())?
+        .checked_add(change.index.len())?
+        .checked_add(estimated_relational_key_encoding_bytes(&change.index_key)?)?
+        .checked_add(estimated_relational_key_encoding_bytes(
+            &change.primary_key,
+        )?)
+}
+
+fn estimated_relational_key_encoding_bytes(key: &RelationalKey) -> Option<usize> {
+    key.0.iter().try_fold(0usize, |bytes, value| {
+        let value_bytes = match value {
+            RelationalValue::Null => 1,
+            RelationalValue::Boolean(_) => 2,
+            RelationalValue::BigInt(_) | RelationalValue::DoublePrecision(_) => 9,
+            RelationalValue::Text(value) => 3usize
+                .checked_add(value.as_bytes().iter().filter(|byte| **byte == 0).count())?
+                .checked_add(value.len())?,
+            RelationalValue::Bytea(value) => 3usize
+                .checked_add(value.iter().filter(|byte| **byte == 0).count())?
+                .checked_add(value.len())?,
+            RelationalValue::Overflow(_) => return None,
+        };
+        bytes.checked_add(value_bytes)
+    })
 }
 
 fn validate_foreign_keys(state: &RelationalState) -> Result<(), RelationalError> {

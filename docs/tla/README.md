@@ -425,6 +425,16 @@ provisional rows that the caller must discard, while page corruption poisons
 only the shadow reader. SQL shadow selection remains false in every modeled
 state.
 
+`SkeinIndexRecovery.tla` models the next non-serving recovery layer. Canonical
+commits append ordered logical changes after one checkpoint base. Recovery
+replays that prefix into a finite dirty overlay, flushes immutable delta pages,
+and publishes a unique candidate generation only after the complete replay is
+durable. It checks WAL/oracle equivalence, overlay capacity, base-plus-delta
+merge equivalence, candidate-generation isolation, publish-last visibility,
+and fail-closed schema invalidation. `CrashCandidate` discards only unpublished
+candidate state; the previously published manifest and canonical WAL remain
+unchanged. Production SQL selection is still false in every modeled state.
+
 ## Derived Source Segment Publication
 
 `SkeinSourceSegmentPublication.tla` models Source scan sidecars, including the

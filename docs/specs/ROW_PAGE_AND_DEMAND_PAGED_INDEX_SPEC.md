@@ -113,6 +113,29 @@ while structural, checksum, generation, and row-locator corruption does. The
 shadow remains non-serving until WAL delta recovery and production activation
 land separately.
 
+The relational recovery-delta path implements step 4 without activating SQL.
+Relational apply emits the final insert/delete change for each affected
+`(index identity, encoded index key, encoded primary key)` tuple while it is
+already visiting the transaction's bounded changed-key set. It does not scan
+the base index or infer changes independently from WAL syntax. Recovery
+coalesces those tuples in an entry- and byte-bounded ordered overlay. A full
+overlay is streamed directly to a checksummed immutable delta page without a
+second cardinality-sized encoding buffer. Each replay attempt uses a unique
+delta generation, so candidate pages never overwrite files referenced by the
+previous recovery manifest. The base generation, base commit epoch, delta
+generation, ordered page epoch ranges, recovered commit epoch, lengths,
+CRC32C, and SHA-256 digests are published in one manifest only after strict
+WAL replay completes. Crashes before that replacement leave the prior
+manifest intact and new pages orphaned.
+
+Point and leading-prefix differential reads merge the cold base with delta
+pages in epoch order and suppress duplicate row locators under the same read
+page, byte, and row budgets. This reader remains evidence-only. A
+schema-changing relational WAL record or relational snapshot invalidates the
+candidate because its schema digest/root set no longer matches the checkpoint;
+normal open continues from canonical checkpoint plus WAL and records
+`RecoveryUnavailable` rather than performing an unbounded startup backfill.
+
 ## Identities and terminology
 
 - **Commit epoch**: monotonically increasing visibility identity; one atomic
@@ -249,6 +272,14 @@ not the target open path.
    complete rebuild at the recovered commit epoch.
 5. A crash during recovery-delta flush leaves either the previous selected
    root plus replayable WAL or a completely published newer recovery root.
+
+The current non-serving implementation satisfies these rules for DML whose
+checkpoint schema fence remains unchanged. DDL and relational snapshot WAL
+records deliberately make the shadow unavailable. They do not weaken
+canonical recovery and MUST NOT trigger an implicit full index rebuild in this
+path. Production activation therefore remains a separate gate and may fall
+back to the existing materialized oracle until a later checkpoint publishes
+new roots for the changed schema.
 
 ### Integrity boundary
 
@@ -399,8 +430,9 @@ boundaries and MUST land before their corresponding production activation:
   generation-fenced publication, stale-builder rejection, cold open, on-demand
   leaf loading, and corrupt-page fail-closed behavior. Canonical uniqueness is
   still outside this first projection slice.
-- planned `SkeinIndexRecovery.tla`: base root plus ordered WAL delta equivalence,
-  bounded flush, crash recovery, and no partial replay visibility.
+- `SkeinIndexRecovery.tla`: base root plus ordered WAL delta equivalence,
+  bounded dirty overlays, immutable candidate generations, crash recovery,
+  schema invalidation, and no partial replay visibility.
 - planned `SkeinPageCacheAdmission.tla`: resident/pinned/dirty accounting, eviction,
   cancellation, foreground reserve, and background progress.
 

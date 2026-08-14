@@ -649,13 +649,7 @@ impl GraphStore {
                         batch.epoch
                     )));
                 }
-                self.relational_state = self
-                    .relational_state
-                    .stage_transaction(
-                        batch.transaction,
-                        self.relational_mutation_limits,
-                        self.relational_overflow_config,
-                    )
+                self.stage_recovered_relational_transaction(batch.transaction, expected_epoch)
                     .map_err(|error| SkeinError::Storage(error.to_string()))?;
             }
             WalOp::RelationalSnapshot { record } => {
@@ -669,6 +663,10 @@ impl GraphStore {
                         checkpoint.epoch
                     )));
                 }
+                self.invalidate_relational_index_recovery(
+                    expected_epoch,
+                    "relational snapshot WAL replaces the complete index schema and rows",
+                );
                 self.relational_state = checkpoint.state;
             }
             WalOp::Batch(ops) => {

@@ -1260,6 +1260,15 @@ impl Database {
         self.store.relational_index_shadow_recovery_status()
     }
 
+    /// Resource and publication evidence for WAL index deltas derived during
+    /// the most recent open. SQL remains on the materialized oracle until the
+    /// separate production activation gate is enabled.
+    pub fn relational_index_recovery_report(
+        &self,
+    ) -> Option<&skein_storage::RelationalIndexRecoveryReport> {
+        self.store.relational_index_recovery_report()
+    }
+
     pub fn storage_pressure_snapshot(&self) -> StoragePressureSnapshot {
         let oldest_reader_epoch = self
             .reader_pins

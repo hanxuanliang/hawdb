@@ -1521,6 +1521,334 @@ fn relational_index_shadow_demand_reads_match_materialized_oracle() {
     std::fs::remove_dir_all(directory).expect("remove demand-read fixture");
 }
 
+#[test]
+fn relational_index_wal_deltas_merge_with_cold_base_and_stay_bounded() {
+    let base = RelationalState::default()
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![
+                    RelationalWrite::CreateTable(RelationalTableSchema {
+                        name: "documents".to_string(),
+                        columns: vec![
+                            text_column("id", false),
+                            text_column("owner", false),
+                            RelationalColumnSchema {
+                                name: "rank".to_string(),
+                                scalar_type: RelationalScalarType::BigInt,
+                                nullable: false,
+                                default: None,
+                            },
+                        ],
+                        primary_key: vec!["id".to_string()],
+                        unique_constraints: Vec::new(),
+                        foreign_keys: Vec::new(),
+                        indexes: vec![
+                            RelationalIndexSchema {
+                                name: "documents_owner_idx".to_string(),
+                                columns: vec!["owner".to_string()],
+                                unique: false,
+                            },
+                            RelationalIndexSchema {
+                                name: "documents_owner_rank_idx".to_string(),
+                                columns: vec!["owner".to_string(), "rank".to_string()],
+                                unique: false,
+                            },
+                        ],
+                    }),
+                    RelationalWrite::Insert {
+                        table: "documents".to_string(),
+                        rows: vec![
+                            recovery_document_row("doc-001", "owner-a", 1),
+                            recovery_document_row("doc-002", "owner-b", 2),
+                            recovery_document_row("doc-003", "owner-a", 3),
+                        ],
+                        mode: RelationalInsertMode::Error,
+                    },
+                ],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("build recovery base");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "skein-relational-index-recovery-{}-{nonce}",
+        std::process::id()
+    ));
+    let shadow_config = RelationalIndexShadowConfig {
+        page_limits: crate::ImmutableIndexPageLimits {
+            max_page_bytes: std::num::NonZeroUsize::new(1024).unwrap(),
+            max_entries: std::num::NonZeroUsize::new(2).unwrap(),
+            max_inline_postings: std::num::NonZeroUsize::new(2).unwrap(),
+            ..crate::ImmutableIndexPageLimits::default()
+        },
+        ..RelationalIndexShadowConfig::default()
+    };
+    RelationalIndexShadowWriter::new(shadow_config)
+        .publish(&directory, &base, 1, 1, None)
+        .expect("publish recovery base");
+    let recovery_config = RelationalIndexRecoveryConfig {
+        max_dirty_entries: std::num::NonZeroUsize::new(5).unwrap(),
+        max_dirty_bytes: std::num::NonZeroUsize::new(4096).unwrap(),
+        max_delta_pages: std::num::NonZeroUsize::new(16).unwrap(),
+        max_manifest_bytes: std::num::NonZeroUsize::new(4096).unwrap(),
+    };
+    let mut builder = RelationalIndexRecoveryBuilder::new(&directory, 1, 1, recovery_config)
+        .expect("create recovery delta builder");
+    let mut state = base;
+    let transactions = [
+        RelationalTransaction {
+            writes: vec![RelationalWrite::UpdateWhere {
+                table: "documents".to_string(),
+                assignments: vec![RelationalUpdateAssignment {
+                    column: "owner".to_string(),
+                    value: RelationalUpdateValue::Value(RelationalValue::Text(
+                        "owner-b".to_string(),
+                    )),
+                }],
+                predicate: RelationalPredicate::Compare {
+                    column: "id".to_string(),
+                    op: RelationalComparisonOp::Eq,
+                    value: RelationalValue::Text("doc-001".to_string()),
+                },
+            }],
+        },
+        RelationalTransaction {
+            writes: vec![RelationalWrite::DeleteByPrimaryKey {
+                table: "documents".to_string(),
+                keys: vec![RelationalKey(vec![RelationalValue::Text(
+                    "doc-002".to_string(),
+                )])],
+            }],
+        },
+        RelationalTransaction {
+            writes: vec![RelationalWrite::Insert {
+                table: "documents".to_string(),
+                rows: vec![recovery_document_row("doc-004", "owner-a", 4)],
+                mode: RelationalInsertMode::Error,
+            }],
+        },
+    ];
+    for (offset, transaction) in transactions.into_iter().enumerate() {
+        let epoch = 2 + offset as u64;
+        let (next, capture) = state
+            .stage_transaction_with_index_changes(
+                transaction,
+                RelationalMutationLimits::default(),
+                RelationalOverflowConfig::default(),
+                builder.capture_limits(),
+            )
+            .expect("stage recovered relational transaction");
+        builder
+            .record(epoch, capture)
+            .expect("record bounded recovery delta");
+        state = next;
+    }
+    let report = builder.finish(4).expect("publish recovery delta manifest");
+    assert!(report.delta_pages >= 2);
+    assert!(report.delta_entries >= 7);
+    assert!(report.peak_dirty_entries <= recovery_config.max_dirty_entries.get());
+    assert!(report.peak_dirty_bytes <= recovery_config.max_dirty_bytes.get());
+
+    let reader =
+        RelationalIndexRecoveryReader::open_latest(&directory, 4, shadow_config, recovery_config)
+            .expect("open fenced recovery reader");
+    for (index, key) in [
+        (
+            "documents_owner_idx",
+            RelationalKey(vec![RelationalValue::Text("owner-a".to_string())]),
+        ),
+        (
+            "documents_owner_idx",
+            RelationalKey(vec![RelationalValue::Text("owner-b".to_string())]),
+        ),
+    ] {
+        let expected = state
+            .index_lookup("documents", index, &key)
+            .map(|posting| posting.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let mut actual = Vec::new();
+        let read_report = reader
+            .visit_exact_postings(
+                "documents",
+                index,
+                &key,
+                RelationalIndexReadLimits::default(),
+                |primary_key| {
+                    actual.push(primary_key.clone());
+                    true
+                },
+            )
+            .expect("merge exact base and recovery deltas");
+        assert_eq!(actual, expected);
+        assert_eq!(read_report.rows_visited, expected.len());
+        assert_eq!(read_report.delta_pages_read, report.delta_pages);
+    }
+
+    let owner_prefix = RelationalKey(vec![RelationalValue::Text("owner-a".to_string())]);
+    let expected_prefix = state
+        .index_prefix_lookup(
+            "documents",
+            "documents_owner_rank_idx",
+            &owner_prefix,
+            usize::MAX,
+        )
+        .expect("materialized recovery prefix")
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut actual_prefix = Vec::new();
+    reader
+        .visit_prefix_postings(
+            "documents",
+            "documents_owner_rank_idx",
+            &owner_prefix,
+            RelationalIndexReadLimits::default(),
+            |primary_key| {
+                actual_prefix.push(primary_key.clone());
+                true
+            },
+        )
+        .expect("merge prefix base and recovery deltas");
+    assert_eq!(actual_prefix, expected_prefix);
+    assert!(RelationalIndexRecoveryReader::open_latest(
+        &directory,
+        5,
+        shadow_config,
+        recovery_config,
+    )
+    .is_err());
+
+    let crash_config = RelationalIndexRecoveryConfig {
+        max_dirty_entries: std::num::NonZeroUsize::new(1).unwrap(),
+        ..recovery_config
+    };
+    let mut abandoned = RelationalIndexRecoveryBuilder::new(&directory, 1, 1, crash_config)
+        .expect("create abandoned recovery builder");
+    abandoned
+        .record(
+            5,
+            RelationalIndexChangeCapture::Captured {
+                changes: vec![
+                    RelationalIndexChange {
+                        table: "documents".to_string(),
+                        index: RELATIONAL_PRIMARY_INDEX_NAME.to_string(),
+                        index_key: RelationalKey(vec![RelationalValue::Text(
+                            "orphan-1".to_string(),
+                        )]),
+                        primary_key: RelationalKey(vec![RelationalValue::Text(
+                            "orphan-1".to_string(),
+                        )]),
+                        kind: RelationalIndexChangeKind::Insert,
+                    },
+                    RelationalIndexChange {
+                        table: "documents".to_string(),
+                        index: RELATIONAL_PRIMARY_INDEX_NAME.to_string(),
+                        index_key: RelationalKey(vec![RelationalValue::Text(
+                            "orphan-2".to_string(),
+                        )]),
+                        primary_key: RelationalKey(vec![RelationalValue::Text(
+                            "orphan-2".to_string(),
+                        )]),
+                        kind: RelationalIndexChangeKind::Insert,
+                    },
+                ],
+                encoded_bytes: 0,
+            },
+        )
+        .expect("flush one immutable but unpublished delta generation");
+    drop(abandoned);
+    let old_reader =
+        RelationalIndexRecoveryReader::open_latest(&directory, 4, shadow_config, recovery_config)
+            .expect("abandoned delta generation must not replace the old manifest");
+    let mut old_rows = Vec::new();
+    old_reader
+        .visit_exact_postings(
+            "documents",
+            "documents_owner_idx",
+            &owner_prefix,
+            RelationalIndexReadLimits::default(),
+            |key| {
+                old_rows.push(key.clone());
+                true
+            },
+        )
+        .expect("old manifest remains readable after candidate crash");
+    assert_eq!(
+        old_rows,
+        state
+            .index_lookup("documents", "documents_owner_idx", &owner_prefix)
+            .expect("materialized old owner posting")
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+
+    let first_delta = directory.join(relational_index_recovery_delta_file(
+        1,
+        report.delta_generation,
+        0,
+    ));
+    let mut encoded = std::fs::read(&first_delta).expect("read first recovery delta");
+    let last = encoded.last_mut().expect("recovery delta is not empty");
+    *last ^= 1;
+    std::fs::write(&first_delta, encoded).expect("corrupt recovery delta");
+    let corrupt_reader =
+        RelationalIndexRecoveryReader::open_latest(&directory, 4, shadow_config, recovery_config)
+            .expect("cold recovery open does not read delta pages");
+    assert!(matches!(
+        corrupt_reader.visit_exact_postings(
+            "documents",
+            "documents_owner_idx",
+            &owner_prefix,
+            RelationalIndexReadLimits::default(),
+            |_| true,
+        ),
+        Err(RelationalIndexShadowError::Corrupt(_))
+    ));
+    assert!(corrupt_reader.is_poisoned());
+
+    std::fs::remove_dir_all(directory).expect("remove recovery delta fixture");
+}
+
+#[test]
+fn schema_changing_relational_wal_invalidates_incremental_index_capture() {
+    let (state, capture) = RelationalState::default()
+        .stage_transaction_with_index_changes(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::CreateTable(RelationalTableSchema {
+                    name: "documents".to_string(),
+                    columns: vec![text_column("id", false)],
+                    primary_key: vec!["id".to_string()],
+                    unique_constraints: Vec::new(),
+                    foreign_keys: Vec::new(),
+                    indexes: Vec::new(),
+                })],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            RelationalIndexChangeCaptureLimits::default(),
+        )
+        .expect("schema transaction remains canonically valid");
+    assert!(state.table_schema("documents").is_some());
+    assert!(matches!(
+        capture,
+        RelationalIndexChangeCapture::Invalidated { reason }
+            if reason.contains("schema-changing WAL")
+    ));
+}
+
+fn recovery_document_row(id: &str, owner: &str, rank: i64) -> RelationalRow {
+    RelationalRow::new(vec![
+        RelationalValue::Text(id.to_string()),
+        RelationalValue::Text(owner.to_string()),
+        RelationalValue::BigInt(rank),
+    ])
+}
+
 fn create_content_tables() -> RelationalTransaction {
     RelationalTransaction {
         writes: vec![
