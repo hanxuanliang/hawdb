@@ -97,9 +97,6 @@ a stale index or a database-sized resident set to become a correctness
 dependency.
 
 - [ ] Implement the canonical relational row-page runtime.
-  - Add the v1 row-page codec, bounded slot directory, ordered primary-key
-    bounds, requested-field decoding, and overflow descriptors with strict
-    encode/decode symmetry and corruption rejection.
   - Publish dirty COW pages into fresh generations and replace the manifest
     only after all referenced pages are durable. Reject stale publishers and
     preserve reader-pinned cross-generation page references.

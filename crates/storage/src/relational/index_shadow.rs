@@ -1,3 +1,6 @@
+use super::ordered_key::{
+    encode_ordered_relational_key, encode_ordered_relational_value, OrderedRelationalKeyError,
+};
 use super::{
     RelationalError, RelationalForeignKeySchema, RelationalIndexRole, RelationalKey,
     RelationalReferentialAction, RelationalScalarType, RelationalState, RelationalTableSchema,
@@ -438,6 +441,12 @@ impl From<ImmutableIndexPageError> for RelationalIndexShadowError {
     }
 }
 
+impl From<OrderedRelationalKeyError> for RelationalIndexShadowError {
+    fn from(error: OrderedRelationalKeyError) -> Self {
+        Self::Corrupt(error.to_string())
+    }
+}
+
 pub struct RelationalIndexShadowWriter {
     config: RelationalIndexShadowConfig,
 }
@@ -564,7 +573,7 @@ impl RelationalIndexShadowWriter {
                 );
                 if definition.role == RelationalIndexRole::Primary {
                     for (primary_key, _) in segment.rows.iter() {
-                        let encoded = encode_relational_key(primary_key)?;
+                        let encoded = encode_ordered_relational_key(primary_key)?;
                         tree.push(IndexLeafEntry {
                             key: encoded.clone(),
                             posting: IndexLeafPosting::Inline(vec![IndexRowId::new(encoded)]),
@@ -1678,63 +1687,7 @@ fn max_page_payload(limits: ImmutableIndexPageLimits) -> Result<usize, Relationa
 }
 
 fn encode_relational_key(key: &RelationalKey) -> Result<Vec<u8>, RelationalIndexShadowError> {
-    let mut encoded = Vec::new();
-    for value in &key.0 {
-        encode_ordered_value(&mut encoded, value)?;
-    }
-    Ok(encoded)
-}
-
-fn encode_ordered_value(
-    encoded: &mut Vec<u8>,
-    value: &RelationalValue,
-) -> Result<(), RelationalIndexShadowError> {
-    match value {
-        RelationalValue::Null => encoded.push(0),
-        RelationalValue::Boolean(value) => {
-            encoded.push(1);
-            encoded.push(u8::from(*value));
-        }
-        RelationalValue::BigInt(value) => {
-            encoded.push(2);
-            encoded.extend_from_slice(&((*value as u64) ^ (1_u64 << 63)).to_be_bytes());
-        }
-        RelationalValue::DoublePrecision(value) => {
-            encoded.push(3);
-            let bits = value.to_bits();
-            let ordered = if bits >> 63 == 0 {
-                bits ^ (1_u64 << 63)
-            } else {
-                !bits
-            };
-            encoded.extend_from_slice(&ordered.to_be_bytes());
-        }
-        RelationalValue::Text(value) => {
-            encoded.push(4);
-            encode_escaped_bytes(encoded, value.as_bytes());
-        }
-        RelationalValue::Bytea(value) => {
-            encoded.push(5);
-            encode_escaped_bytes(encoded, value);
-        }
-        RelationalValue::Overflow(_) => {
-            return Err(RelationalIndexShadowError::Corrupt(
-                "indexed relational values must not use overflow references".to_string(),
-            ))
-        }
-    }
-    Ok(())
-}
-
-fn encode_escaped_bytes(encoded: &mut Vec<u8>, value: &[u8]) {
-    for byte in value {
-        if *byte == 0 {
-            encoded.extend_from_slice(&[0, 255]);
-        } else {
-            encoded.push(*byte);
-        }
-    }
-    encoded.extend_from_slice(&[0, 0]);
+    encode_ordered_relational_key(key).map_err(Into::into)
 }
 
 fn relational_schema_digest(
@@ -1749,7 +1702,7 @@ fn relational_schema_digest(
         encoded.push(u8::from(column.nullable));
         encoded.push(u8::from(column.default.is_some()));
         if let Some(default) = &column.default {
-            encode_ordered_value(&mut encoded, default)?;
+            encode_ordered_relational_value(&mut encoded, default)?;
         }
     }
     encode_string_list(&mut encoded, &schema.primary_key)?;
@@ -2336,62 +2289,5 @@ mod tests {
                 if message.contains("root-set digest mismatch")
         ));
         assert!(decode_relational_index_role(0).is_err());
-    }
-
-    #[test]
-    fn relational_key_encoding_preserves_total_order() {
-        let values = vec![
-            RelationalValue::Null,
-            RelationalValue::Boolean(false),
-            RelationalValue::Boolean(true),
-            RelationalValue::BigInt(i64::MIN),
-            RelationalValue::BigInt(-1),
-            RelationalValue::BigInt(0),
-            RelationalValue::BigInt(i64::MAX),
-            RelationalValue::DoublePrecision(f64::from_bits(u64::MAX)),
-            RelationalValue::DoublePrecision(f64::NEG_INFINITY),
-            RelationalValue::DoublePrecision(-0.0),
-            RelationalValue::DoublePrecision(0.0),
-            RelationalValue::DoublePrecision(f64::INFINITY),
-            RelationalValue::DoublePrecision(f64::NAN),
-            RelationalValue::Text(String::new()),
-            RelationalValue::Text("a".to_string()),
-            RelationalValue::Text("a\0b".to_string()),
-            RelationalValue::Text("aa".to_string()),
-            RelationalValue::Bytea(Vec::new()),
-            RelationalValue::Bytea(vec![0]),
-            RelationalValue::Bytea(vec![0, 1]),
-            RelationalValue::Bytea(vec![1]),
-        ];
-        assert!(values.windows(2).all(|pair| pair[0] < pair[1]));
-        let encoded = values
-            .iter()
-            .map(|value| encode_relational_key(&RelationalKey(vec![value.clone()])).unwrap())
-            .collect::<Vec<_>>();
-        assert!(encoded.windows(2).all(|pair| pair[0] < pair[1]));
-    }
-
-    #[test]
-    fn composite_key_encoding_is_prefix_safe() {
-        let keys = [
-            RelationalKey(vec![
-                RelationalValue::Text("a".to_string()),
-                RelationalValue::BigInt(1),
-            ]),
-            RelationalKey(vec![
-                RelationalValue::Text("a\0".to_string()),
-                RelationalValue::BigInt(0),
-            ]),
-            RelationalKey(vec![
-                RelationalValue::Text("aa".to_string()),
-                RelationalValue::BigInt(-1),
-            ]),
-        ];
-        assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
-        let encoded = keys
-            .iter()
-            .map(|key| encode_relational_key(key).unwrap())
-            .collect::<Vec<_>>();
-        assert!(encoded.windows(2).all(|pair| pair[0] < pair[1]));
     }
 }

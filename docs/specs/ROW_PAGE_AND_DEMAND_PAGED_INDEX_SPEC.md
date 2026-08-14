@@ -335,6 +335,60 @@ remove materialized postings or make row pages demand-resident.
 6. A mutation creates new immutable page images or bounded dirty pages; it
    MUST NOT mutate a page visible to a pinned reader.
 
+### Relational row-page v1 codec
+
+The canonical relational leaf codec is implemented independently from serving
+and publication. The byte representation is `SKINROW1`, version `1`, and uses
+one fixed 140-byte header followed by exact-length variable regions:
+
+```text
+header
+lower primary-key bound
+upper primary-key bound
+row slot directory
+ordered primary-key payload
+encoded row payload
+```
+
+The header stores the manifest generation, source commit epoch, non-zero page
+identity, row and column counts, region lengths, schema SHA-256 digest, CRC32C,
+and SHA-256. Generation and commit epoch are independent identities; both are
+non-zero, while their agreement with a selected root is enforced by the later
+publication protocol rather than by numeric comparison.
+
+Each 16-byte row slot stores `(key_offset, key_length, row_offset, row_length)`
+as little-endian `u32` values relative to its key and row payload regions. Slots
+and both payloads MUST be contiguous, gap-free, non-overlapping, and cover their
+regions exactly. Keys use the same reversible, order-preserving encoding as
+persistent relational indexes. They MUST be strictly increasing, and the first
+and last slot keys MUST equal the header bounds. These properties permit binary
+search without decoding row values.
+
+Each row starts with a column count and an 8-byte slot per value. A value slot
+stores its payload offset and length. Value slots also cover their payload
+exactly. A projected decode validates the selected row's complete value-slot
+shape but materializes only the requested, strictly increasing column ordinals.
+It does not decode any other row in the page. Full decode is the symmetric
+validation path used by tests, scrub, and tooling.
+
+Inline values use fixed tags plus bounded length prefixes. An overflow value
+stores the existing logical descriptor as `(scalar type, compressed length,
+uncompressed length, SHA-256 digest)`. The digest is the immutable location
+identity; a publication-generation overflow manifest resolves it to a physical
+extent, so page bytes do not embed a stale file offset. Overflow descriptors
+are valid only for `TEXT` and `BYTEA`. Unknown tags, invalid UTF-8, invalid
+ordered keys, impossible lengths, non-canonical digests supplied to the
+encoder, checksum mismatches, non-zero fixed-slot tails, and trailing bytes
+fail closed.
+
+The default codec envelope is one MiB and 256 rows, matching the current COW
+row-page split target. It separately limits columns, key bytes, row bytes,
+inline-value bytes, logical overflow bytes, and projected-field count. The
+encoder applies the same limits as the decoder and rejects a page before
+accumulating payload beyond the page budget. The codec is not yet a serving or
+recovery path; publication, root selection, WAL overlays, cache admission, and
+large-value hydration remain separate activation stages.
+
 ### Graph layout
 
 1. Nodes and relationships MUST use stable ids and independently addressable
@@ -636,6 +690,12 @@ commit acknowledgment does not depend on projection freshness.
 `SkeinTransactionConcurrency.tla` already owns the transaction-level subset
 of this contract. The remaining model names below are planned ownership
 boundaries and MUST land before their corresponding production activation:
+
+The row-page codec is a pure byte transformation and does not add a visible
+state transition. Its current evidence is exact round-trip, ordered-key
+differential, projected-decode, shared-limit, and corruption testing. The first
+stateful use of these bytes remains owned by `SkeinCowPagePublication.tla` and
+MUST add concrete runtime refinement traces when publication is implemented.
 
 - `SkeinTransactionConcurrency.tla`: logical lock namespaces, compatibility,
   wait-for deadlocks, escalation, savepoint release, and durable publication.

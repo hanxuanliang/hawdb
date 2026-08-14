@@ -12,7 +12,9 @@ use std::sync::Arc;
 mod codec;
 mod constraints;
 mod index_shadow;
+mod ordered_key;
 mod overflow;
+mod row_page;
 
 pub use codec::{
     decode_relational_checkpoint, decode_relational_checkpoint_file,
@@ -46,6 +48,14 @@ pub use index_shadow::{
 pub use overflow::{
     RelationalHydrationBudget, RelationalOverflowConfig, RelationalOverflowRef,
     DEFAULT_MAX_RELATIONAL_HYDRATION_BYTES, DEFAULT_RELATIONAL_OVERFLOW_THRESHOLD_BYTES,
+};
+pub use row_page::{
+    ImmutableRelationalRowPage, RelationalProjectedField, RelationalProjectedRow,
+    RelationalRowPageEntry, RelationalRowPageError, RelationalRowPageId, RelationalRowPageLimits,
+    RelationalRowPageView, DEFAULT_RELATIONAL_ROW_PAGE_BYTES, DEFAULT_RELATIONAL_ROW_PAGE_COLUMNS,
+    DEFAULT_RELATIONAL_ROW_PAGE_INLINE_VALUE_BYTES, DEFAULT_RELATIONAL_ROW_PAGE_KEY_BYTES,
+    DEFAULT_RELATIONAL_ROW_PAGE_ROWS, DEFAULT_RELATIONAL_ROW_PAGE_ROW_BYTES,
+    DEFAULT_RELATIONAL_ROW_PAGE_VALUE_BYTES,
 };
 
 pub const DEFAULT_MAX_RELATIONAL_MUTATION_ROWS: usize = 100_000;

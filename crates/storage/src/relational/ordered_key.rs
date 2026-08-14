@@ -1,0 +1,356 @@
+use super::{RelationalKey, RelationalValue};
+use std::fmt;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum OrderedRelationalKeyError {
+    UnsupportedOverflow,
+    Corrupt(String),
+}
+
+impl fmt::Display for OrderedRelationalKeyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedOverflow => {
+                formatter.write_str("ordered relational keys must not contain overflow references")
+            }
+            Self::Corrupt(message) => {
+                write!(formatter, "corrupt ordered relational key: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for OrderedRelationalKeyError {}
+
+pub(super) fn encode_ordered_relational_key(
+    key: &RelationalKey,
+) -> Result<Vec<u8>, OrderedRelationalKeyError> {
+    if key.0.is_empty() {
+        return Err(OrderedRelationalKeyError::Corrupt(
+            "key contains no values".to_string(),
+        ));
+    }
+    let mut encoded = Vec::new();
+    for value in &key.0 {
+        encode_ordered_relational_value(&mut encoded, value)?;
+    }
+    Ok(encoded)
+}
+
+pub(super) fn encode_ordered_relational_value(
+    encoded: &mut Vec<u8>,
+    value: &RelationalValue,
+) -> Result<(), OrderedRelationalKeyError> {
+    match value {
+        RelationalValue::Null => encoded.push(0),
+        RelationalValue::Boolean(value) => {
+            encoded.push(1);
+            encoded.push(u8::from(*value));
+        }
+        RelationalValue::BigInt(value) => {
+            encoded.push(2);
+            encoded.extend_from_slice(&((*value as u64) ^ (1_u64 << 63)).to_be_bytes());
+        }
+        RelationalValue::DoublePrecision(value) => {
+            encoded.push(3);
+            let bits = value.to_bits();
+            let ordered = if bits >> 63 == 0 {
+                bits ^ (1_u64 << 63)
+            } else {
+                !bits
+            };
+            encoded.extend_from_slice(&ordered.to_be_bytes());
+        }
+        RelationalValue::Text(value) => {
+            encoded.push(4);
+            encode_escaped_bytes(encoded, value.as_bytes());
+        }
+        RelationalValue::Bytea(value) => {
+            encoded.push(5);
+            encode_escaped_bytes(encoded, value);
+        }
+        RelationalValue::Overflow(_) => {
+            return Err(OrderedRelationalKeyError::UnsupportedOverflow);
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_ordered_relational_key(
+    encoded: &[u8],
+) -> Result<(), OrderedRelationalKeyError> {
+    let mut decoder = OrderedKeyDecoder::new(encoded);
+    let mut values = 0usize;
+    while !decoder.is_empty() {
+        decoder.skip_value()?;
+        values = values.checked_add(1).ok_or_else(|| {
+            OrderedRelationalKeyError::Corrupt("value count overflow".to_string())
+        })?;
+    }
+    if values == 0 {
+        return Err(OrderedRelationalKeyError::Corrupt(
+            "key contains no values".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn decode_ordered_relational_key(
+    encoded: &[u8],
+) -> Result<RelationalKey, OrderedRelationalKeyError> {
+    let mut decoder = OrderedKeyDecoder::new(encoded);
+    let mut values = Vec::new();
+    while !decoder.is_empty() {
+        values.push(decoder.value()?);
+    }
+    if values.is_empty() {
+        return Err(OrderedRelationalKeyError::Corrupt(
+            "key contains no values".to_string(),
+        ));
+    }
+    Ok(RelationalKey(values))
+}
+
+fn encode_escaped_bytes(encoded: &mut Vec<u8>, value: &[u8]) {
+    for byte in value {
+        if *byte == 0 {
+            encoded.extend_from_slice(&[0, 255]);
+        } else {
+            encoded.push(*byte);
+        }
+    }
+    encoded.extend_from_slice(&[0, 0]);
+}
+
+struct OrderedKeyDecoder<'a> {
+    encoded: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> OrderedKeyDecoder<'a> {
+    fn new(encoded: &'a [u8]) -> Self {
+        Self { encoded, offset: 0 }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.offset == self.encoded.len()
+    }
+
+    fn value(&mut self) -> Result<RelationalValue, OrderedRelationalKeyError> {
+        match self.byte("value tag")? {
+            0 => Ok(RelationalValue::Null),
+            1 => match self.byte("boolean value")? {
+                0 => Ok(RelationalValue::Boolean(false)),
+                1 => Ok(RelationalValue::Boolean(true)),
+                tag => Err(OrderedRelationalKeyError::Corrupt(format!(
+                    "invalid boolean tag {tag}"
+                ))),
+            },
+            2 => {
+                let ordered = u64::from_be_bytes(self.fixed("BIGINT value")?);
+                Ok(RelationalValue::BigInt((ordered ^ (1_u64 << 63)) as i64))
+            }
+            3 => {
+                let ordered = u64::from_be_bytes(self.fixed("DOUBLE PRECISION value")?);
+                let bits = if ordered >> 63 == 1 {
+                    ordered ^ (1_u64 << 63)
+                } else {
+                    !ordered
+                };
+                Ok(RelationalValue::DoublePrecision(f64::from_bits(bits)))
+            }
+            4 => {
+                let bytes = self.escaped_bytes(true)?;
+                Ok(RelationalValue::Text(String::from_utf8(bytes).map_err(
+                    |error| {
+                        OrderedRelationalKeyError::Corrupt(format!(
+                            "TEXT key is not valid UTF-8: {error}"
+                        ))
+                    },
+                )?))
+            }
+            5 => Ok(RelationalValue::Bytea(self.escaped_bytes(true)?)),
+            tag => Err(OrderedRelationalKeyError::Corrupt(format!(
+                "invalid value tag {tag}"
+            ))),
+        }
+    }
+
+    fn skip_value(&mut self) -> Result<(), OrderedRelationalKeyError> {
+        match self.byte("value tag")? {
+            0 => Ok(()),
+            1 => match self.byte("boolean value")? {
+                0 | 1 => Ok(()),
+                tag => Err(OrderedRelationalKeyError::Corrupt(format!(
+                    "invalid boolean tag {tag}"
+                ))),
+            },
+            2 => self.skip_fixed(8, "BIGINT value"),
+            3 => self.skip_fixed(8, "DOUBLE PRECISION value"),
+            4 | 5 => self.escaped_bytes(false).map(|_| ()),
+            tag => Err(OrderedRelationalKeyError::Corrupt(format!(
+                "invalid value tag {tag}"
+            ))),
+        }
+    }
+
+    fn escaped_bytes(&mut self, materialize: bool) -> Result<Vec<u8>, OrderedRelationalKeyError> {
+        let mut decoded = Vec::new();
+        loop {
+            let byte = self.byte("escaped key value")?;
+            if byte != 0 {
+                if materialize {
+                    decoded.push(byte);
+                }
+                continue;
+            }
+            match self.byte("escaped key terminator")? {
+                0 => return Ok(decoded),
+                255 => {
+                    if materialize {
+                        decoded.push(0);
+                    }
+                }
+                tag => {
+                    return Err(OrderedRelationalKeyError::Corrupt(format!(
+                        "invalid escaped key tag {tag}"
+                    )));
+                }
+            }
+        }
+    }
+
+    fn byte(&mut self, context: &str) -> Result<u8, OrderedRelationalKeyError> {
+        let byte =
+            self.encoded.get(self.offset).copied().ok_or_else(|| {
+                OrderedRelationalKeyError::Corrupt(format!("truncated {context}"))
+            })?;
+        self.offset += 1;
+        Ok(byte)
+    }
+
+    fn fixed<const N: usize>(
+        &mut self,
+        context: &str,
+    ) -> Result<[u8; N], OrderedRelationalKeyError> {
+        let end = self.offset.checked_add(N).ok_or_else(|| {
+            OrderedRelationalKeyError::Corrupt(format!("{context} length overflow"))
+        })?;
+        let bytes = self
+            .encoded
+            .get(self.offset..end)
+            .ok_or_else(|| OrderedRelationalKeyError::Corrupt(format!("truncated {context}")))?;
+        self.offset = end;
+        Ok(bytes
+            .try_into()
+            .expect("ordered key field has fixed length"))
+    }
+
+    fn skip_fixed(
+        &mut self,
+        length: usize,
+        context: &str,
+    ) -> Result<(), OrderedRelationalKeyError> {
+        let end = self.offset.checked_add(length).ok_or_else(|| {
+            OrderedRelationalKeyError::Corrupt(format!("{context} length overflow"))
+        })?;
+        if end > self.encoded.len() {
+            return Err(OrderedRelationalKeyError::Corrupt(format!(
+                "truncated {context}"
+            )));
+        }
+        self.offset = end;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codec_is_reversible_and_order_preserving() {
+        let values = vec![
+            RelationalValue::Null,
+            RelationalValue::Boolean(false),
+            RelationalValue::Boolean(true),
+            RelationalValue::BigInt(i64::MIN),
+            RelationalValue::BigInt(-1),
+            RelationalValue::BigInt(0),
+            RelationalValue::BigInt(i64::MAX),
+            RelationalValue::DoublePrecision(f64::from_bits(u64::MAX)),
+            RelationalValue::DoublePrecision(f64::NEG_INFINITY),
+            RelationalValue::DoublePrecision(-0.0),
+            RelationalValue::DoublePrecision(0.0),
+            RelationalValue::DoublePrecision(f64::INFINITY),
+            RelationalValue::DoublePrecision(f64::NAN),
+            RelationalValue::Text(String::new()),
+            RelationalValue::Text("a".to_string()),
+            RelationalValue::Text("a\0b".to_string()),
+            RelationalValue::Text("aa".to_string()),
+            RelationalValue::Bytea(Vec::new()),
+            RelationalValue::Bytea(vec![0]),
+            RelationalValue::Bytea(vec![0, 1]),
+            RelationalValue::Bytea(vec![1]),
+        ];
+        assert!(values.windows(2).all(|pair| pair[0] < pair[1]));
+        let keys = values
+            .into_iter()
+            .map(|value| RelationalKey(vec![value]))
+            .collect::<Vec<_>>();
+        let encoded = keys
+            .iter()
+            .map(encode_ordered_relational_key)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(encoded.windows(2).all(|pair| pair[0] < pair[1]));
+        for (expected, encoded) in keys.iter().zip(&encoded) {
+            validate_ordered_relational_key(encoded).unwrap();
+            assert_eq!(decode_ordered_relational_key(encoded).unwrap(), *expected);
+        }
+    }
+
+    #[test]
+    fn composite_keys_round_trip_and_are_prefix_safe() {
+        let keys = [
+            RelationalKey(vec![
+                RelationalValue::Text("a".to_string()),
+                RelationalValue::BigInt(1),
+            ]),
+            RelationalKey(vec![
+                RelationalValue::Text("a\0".to_string()),
+                RelationalValue::BigInt(0),
+            ]),
+            RelationalKey(vec![
+                RelationalValue::Text("aa".to_string()),
+                RelationalValue::BigInt(-1),
+            ]),
+        ];
+        assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
+        let encoded = keys
+            .iter()
+            .map(encode_ordered_relational_key)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(encoded.windows(2).all(|pair| pair[0] < pair[1]));
+        for (expected, encoded) in keys.iter().zip(&encoded) {
+            assert_eq!(decode_ordered_relational_key(encoded).unwrap(), *expected);
+        }
+    }
+
+    #[test]
+    fn invalid_encodings_fail_closed() {
+        for encoded in [
+            &[][..],
+            &[1][..],
+            &[1, 2][..],
+            &[2, 0][..],
+            &[4, b'a', 0][..],
+            &[4, 0, 1][..],
+            &[7][..],
+        ] {
+            assert!(validate_ordered_relational_key(encoded).is_err());
+            assert!(decode_ordered_relational_key(encoded).is_err());
+        }
+    }
+}
