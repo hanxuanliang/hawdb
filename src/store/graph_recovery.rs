@@ -100,7 +100,7 @@ impl GraphStore {
         for op in ops {
             self.apply_wal_op(catalog, op)?;
         }
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(())
     }
 
@@ -216,7 +216,7 @@ impl GraphStore {
         for op in ops {
             self.apply_wal_op(catalog, op)?;
         }
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(())
     }
 

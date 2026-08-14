@@ -2058,7 +2058,7 @@ impl GraphStore {
             durable.append_project_graph(name, &definition)?;
         }
         self.apply_project_graph_definition(name.to_string(), definition);
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(())
     }
 

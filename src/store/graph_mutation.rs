@@ -22,7 +22,7 @@ impl GraphStore {
         }
         self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         self.apply_create_node(catalog, id, label_id, properties);
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(id)
     }
 
@@ -55,7 +55,7 @@ impl GraphStore {
                 for op in ops {
                     self.apply_wal_op(catalog, op)?;
                 }
-                self.commit_epoch += 1;
+                self.finish_non_relational_commit();
             }
             return Ok((id, false));
         }
@@ -76,7 +76,7 @@ impl GraphStore {
         }
         self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         self.apply_create_node(catalog, id, label_id, properties);
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok((id, true))
     }
 
@@ -114,7 +114,7 @@ impl GraphStore {
             durable.append_create_relationship(id, source, target, rel_type, &properties)?;
         }
         self.apply_create_relationship(id, source, target, rel_type_id, properties);
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(id)
     }
 
@@ -173,7 +173,7 @@ impl GraphStore {
         for op in ops {
             self.apply_wal_op(catalog, op)?;
         }
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(rows)
     }
 
@@ -250,7 +250,7 @@ impl GraphStore {
             for op in ops {
                 self.apply_wal_op(catalog, op)?;
             }
-            self.commit_epoch += 1;
+            self.finish_non_relational_commit();
         }
         Ok(rows)
     }
@@ -371,7 +371,7 @@ impl GraphStore {
             for op in ops {
                 self.apply_wal_op(catalog, op)?;
             }
-            self.commit_epoch += 1;
+            self.finish_non_relational_commit();
         }
         Ok(rows)
     }
@@ -481,7 +481,7 @@ impl GraphStore {
             for op in ops {
                 self.apply_wal_op(catalog, op)?;
             }
-            self.commit_epoch += 1;
+            self.finish_non_relational_commit();
         }
         Ok(rows)
     }
@@ -592,7 +592,7 @@ impl GraphStore {
             for op in ops {
                 self.apply_wal_op(catalog, op)?;
             }
-            self.commit_epoch += 1;
+            self.finish_non_relational_commit();
         }
         Ok(rows)
     }
@@ -633,7 +633,7 @@ impl GraphStore {
         for op in ops {
             self.apply_wal_op(catalog, op)?;
         }
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(ids)
     }
 
@@ -697,7 +697,7 @@ impl GraphStore {
                 self.apply_set_node_property(catalog, id, property, value);
             }
         }
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(ids)
     }
 
@@ -729,7 +729,7 @@ impl GraphStore {
         for op in ops {
             self.apply_wal_op(catalog, op)?;
         }
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(ids)
     }
 
@@ -770,7 +770,7 @@ impl GraphStore {
         for op in ops {
             self.apply_wal_op(catalog, op)?;
         }
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(ids.to_vec())
     }
 
@@ -824,7 +824,7 @@ impl GraphStore {
         for op in ops {
             self.apply_wal_op(catalog, op)?;
         }
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(ids)
     }
 
@@ -857,7 +857,7 @@ impl GraphStore {
         for op in ops {
             self.apply_wal_op(catalog, op)?;
         }
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(ids.to_vec())
     }
 
@@ -930,7 +930,7 @@ impl GraphStore {
         for op in ops {
             self.apply_wal_op(catalog, op)?;
         }
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(ids)
     }
 
@@ -952,7 +952,7 @@ impl GraphStore {
         for op in ops {
             self.apply_wal_op(catalog, op)?;
         }
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(ids)
     }
 
@@ -1209,7 +1209,7 @@ impl GraphStore {
         for op in ops {
             self.apply_wal_op(catalog, op)?;
         }
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(ids)
     }
 
@@ -1256,7 +1256,7 @@ impl GraphStore {
             rel_type_id,
             request.rel_properties,
         );
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok((source, relationship, target))
     }
 
@@ -1301,7 +1301,7 @@ impl GraphStore {
         for op in ops {
             self.apply_wal_op(catalog, op)?;
         }
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok((source, relationship, target, true))
     }
 

@@ -7,6 +7,7 @@
 use super::GraphStore;
 use skein_integrity::{IntegrityHasher, Sha256Digest};
 use skein_storage::{
+    RelationalIndexChange, RelationalIndexChangeCapture, RelationalIndexChangeCaptureLimits,
     RelationalIndexRecoveryBuilder, RelationalIndexRecoveryConfig, RelationalIndexRecoveryReader,
     RelationalIndexRecoveryReport, RelationalIndexShadowBuildReport, RelationalIndexShadowConfig,
     RelationalIndexShadowManifest, RelationalIndexShadowReader, RelationalIndexShadowWriter,
@@ -29,9 +30,81 @@ pub(crate) struct RelationalIndexReadViewIdentity {
     pub schema_digest: Sha256Digest,
 }
 
+#[derive(Clone)]
 enum RelationalIndexReadBackend {
-    Base(RelationalIndexShadowReader),
-    Recovered(RelationalIndexRecoveryReader),
+    Base(Arc<RelationalIndexShadowReader>),
+    Recovered(Arc<RelationalIndexRecoveryReader>),
+}
+
+#[derive(Debug)]
+struct RelationalIndexLiveBatch {
+    _commit_epoch: u64,
+    _changes: Arc<[RelationalIndexChange]>,
+    _encoded_bytes: usize,
+}
+
+#[derive(Debug, Clone)]
+struct RelationalIndexLiveOverlay {
+    batches: Arc<Vec<Arc<RelationalIndexLiveBatch>>>,
+    entry_count: usize,
+    encoded_bytes: usize,
+}
+
+impl RelationalIndexLiveOverlay {
+    fn empty() -> Self {
+        Self {
+            batches: Arc::new(Vec::new()),
+            entry_count: 0,
+            encoded_bytes: 0,
+        }
+    }
+
+    fn append(
+        &self,
+        commit_epoch: u64,
+        capture: RelationalIndexChangeCapture,
+        limits: RelationalIndexChangeCaptureLimits,
+    ) -> Result<Self, String> {
+        let (changes, encoded_bytes) = match capture {
+            RelationalIndexChangeCapture::Captured {
+                changes,
+                encoded_bytes,
+            } => (changes, encoded_bytes),
+            RelationalIndexChangeCapture::Invalidated { reason } => return Err(reason),
+        };
+        let entry_count = self
+            .entry_count
+            .checked_add(changes.len())
+            .ok_or_else(|| "relational index live entry accounting overflow".to_string())?;
+        let total_bytes = self
+            .encoded_bytes
+            .checked_add(encoded_bytes)
+            .ok_or_else(|| "relational index live byte accounting overflow".to_string())?;
+        if entry_count > limits.max_entries.get() || total_bytes > limits.max_bytes.get() {
+            return Err(format!(
+                "relational index live overlay exceeds max_entries={} or max_bytes={}",
+                limits.max_entries, limits.max_bytes
+            ));
+        }
+        if changes.is_empty() {
+            return Ok(self.clone());
+        }
+        let mut batches = Arc::clone(&self.batches);
+        Arc::make_mut(&mut batches).push(Arc::new(RelationalIndexLiveBatch {
+            _commit_epoch: commit_epoch,
+            _changes: Arc::from(changes),
+            _encoded_bytes: encoded_bytes,
+        }));
+        Ok(Self {
+            batches,
+            entry_count,
+            encoded_bytes: total_bytes,
+        })
+    }
+
+    fn batch_count(&self) -> usize {
+        self.batches.len()
+    }
 }
 
 /// One immutable, generation-bound relational index view.
@@ -42,6 +115,7 @@ enum RelationalIndexReadBackend {
 pub(crate) struct RelationalIndexReadView {
     identity: RelationalIndexReadViewIdentity,
     backend: RelationalIndexReadBackend,
+    live: RelationalIndexLiveOverlay,
 }
 
 impl fmt::Debug for RelationalIndexReadView {
@@ -66,7 +140,8 @@ impl RelationalIndexReadView {
                 visible_commit_epoch: manifest.source_commit_epoch,
                 schema_digest: relational_index_schema_digest(manifest),
             },
-            backend: RelationalIndexReadBackend::Base(reader),
+            backend: RelationalIndexReadBackend::Base(Arc::new(reader)),
+            live: RelationalIndexLiveOverlay::empty(),
         }
     }
 
@@ -81,7 +156,8 @@ impl RelationalIndexReadView {
                 visible_commit_epoch: recovered.recovered_commit_epoch,
                 schema_digest: relational_index_schema_digest(base),
             },
-            backend: RelationalIndexReadBackend::Recovered(reader),
+            backend: RelationalIndexReadBackend::Recovered(Arc::new(reader)),
+            live: RelationalIndexLiveOverlay::empty(),
         }
     }
 
@@ -101,6 +177,50 @@ impl RelationalIndexReadView {
             RelationalIndexReadBackend::Base(reader) => reader.is_poisoned(),
             RelationalIndexReadBackend::Recovered(reader) => reader.is_poisoned(),
         }
+    }
+
+    fn advance(
+        &self,
+        next_commit_epoch: u64,
+        capture: Option<RelationalIndexChangeCapture>,
+        limits: RelationalIndexChangeCaptureLimits,
+    ) -> Result<Self, String> {
+        let expected = self
+            .identity
+            .visible_commit_epoch
+            .checked_add(1)
+            .ok_or_else(|| "relational index read-view epoch overflow".to_string())?;
+        if next_commit_epoch != expected {
+            return Err(format!(
+                "relational index read view expected commit epoch {expected}, got {next_commit_epoch}"
+            ));
+        }
+        if self.is_poisoned() {
+            return Err("relational index read view is poisoned".to_string());
+        }
+        let live = capture.map_or_else(
+            || Ok(self.live.clone()),
+            |capture| self.live.append(next_commit_epoch, capture, limits),
+        )?;
+        let mut identity = self.identity;
+        identity.visible_commit_epoch = next_commit_epoch;
+        Ok(Self {
+            identity,
+            backend: self.backend.clone(),
+            live,
+        })
+    }
+
+    fn live_batch_count(&self) -> usize {
+        self.live.batch_count()
+    }
+
+    fn live_entry_count(&self) -> usize {
+        self.live.entry_count
+    }
+
+    fn live_encoded_bytes(&self) -> usize {
+        self.live.encoded_bytes
     }
 
     fn base_manifest(&self) -> &RelationalIndexShadowManifest {
@@ -195,6 +315,22 @@ pub enum RelationalIndexShadowRecoveryStatus {
         delta_entries: usize,
         peak_dirty_bytes: usize,
     },
+    LiveCurrent {
+        base_generation: u64,
+        delta_generation: Option<u64>,
+        base_commit_epoch: u64,
+        visible_commit_epoch: u64,
+        live_batches: usize,
+        live_entries: usize,
+        live_bytes: usize,
+    },
+    LiveUnavailable {
+        base_generation: u64,
+        base_commit_epoch: u64,
+        last_visible_commit_epoch: u64,
+        failed_commit_epoch: u64,
+        reason: String,
+    },
     RecoveryUnavailable {
         base_generation: u64,
         base_commit_epoch: u64,
@@ -227,6 +363,7 @@ pub(super) struct RelationalIndexShadowState {
     recovery_report: Option<RelationalIndexRecoveryReport>,
     recovery_status: RelationalIndexShadowRecoveryStatus,
     read_view: Option<Arc<RelationalIndexReadView>>,
+    live_limits: RelationalIndexChangeCaptureLimits,
 }
 
 impl RelationalIndexShadowState {
@@ -254,6 +391,30 @@ impl RelationalIndexShadowState {
         snapshot.recovery_builder = None;
         snapshot
     }
+
+    fn stage_live_publication(
+        &self,
+        current_epoch: u64,
+        next_epoch: u64,
+        capture: Option<RelationalIndexChangeCapture>,
+    ) -> Option<Result<Arc<RelationalIndexReadView>, RelationalIndexLiveUnavailable>> {
+        let view = self.current_read_view(current_epoch)?;
+        Some(
+            view.advance(next_epoch, capture, self.live_limits)
+                .map(Arc::new)
+                .map_err(|reason| RelationalIndexLiveUnavailable {
+                    identity: view.identity(),
+                    failed_commit_epoch: next_epoch,
+                    reason,
+                }),
+        )
+    }
+}
+
+pub(super) struct RelationalIndexLiveUnavailable {
+    identity: RelationalIndexReadViewIdentity,
+    failed_commit_epoch: u64,
+    reason: String,
 }
 
 impl GraphStore {
@@ -294,6 +455,70 @@ impl GraphStore {
         )
         .map(RelationalIndexReadView::from_recovered)
         .map(Arc::new)
+    }
+
+    pub(super) fn relational_index_live_capture_limits(
+        &self,
+    ) -> Option<RelationalIndexChangeCaptureLimits> {
+        self.relational_index_shadow
+            .current_read_view(self.commit_epoch)
+            .map(|_| self.relational_index_shadow.live_limits)
+    }
+
+    pub(super) fn stage_relational_index_live_publication(
+        &self,
+        next_epoch: u64,
+        capture: Option<RelationalIndexChangeCapture>,
+    ) -> Option<Result<Arc<RelationalIndexReadView>, RelationalIndexLiveUnavailable>> {
+        self.relational_index_shadow
+            .stage_live_publication(self.commit_epoch, next_epoch, capture)
+    }
+
+    pub(super) fn publish_relational_index_live_view(
+        &mut self,
+        publication: Option<Result<Arc<RelationalIndexReadView>, RelationalIndexLiveUnavailable>>,
+    ) {
+        match publication {
+            None => {}
+            Some(Ok(view)) => {
+                let identity = view.identity();
+                self.relational_index_shadow.recovery_status =
+                    RelationalIndexShadowRecoveryStatus::LiveCurrent {
+                        base_generation: identity.base_generation,
+                        delta_generation: identity.delta_generation,
+                        base_commit_epoch: identity.base_commit_epoch,
+                        visible_commit_epoch: identity.visible_commit_epoch,
+                        live_batches: view.live_batch_count(),
+                        live_entries: view.live_entry_count(),
+                        live_bytes: view.live_encoded_bytes(),
+                    };
+                self.relational_index_shadow.read_view = Some(view);
+            }
+            Some(Err(unavailable)) => {
+                self.relational_index_shadow.read_view = None;
+                self.relational_index_shadow.recovery_status =
+                    RelationalIndexShadowRecoveryStatus::LiveUnavailable {
+                        base_generation: unavailable.identity.base_generation,
+                        base_commit_epoch: unavailable.identity.base_commit_epoch,
+                        last_visible_commit_epoch: unavailable.identity.visible_commit_epoch,
+                        failed_commit_epoch: unavailable.failed_commit_epoch,
+                        reason: unavailable.reason,
+                    };
+            }
+        }
+    }
+
+    /// Completes one already-durable non-relational commit.
+    ///
+    /// Callers invoke this only after applying the canonical graph or catalog
+    /// mutation. Relational index contents do not change, but their immutable
+    /// read view must advance to the same global commit epoch so a later
+    /// snapshot cannot combine graph state with a stale relational identity.
+    pub(super) fn finish_non_relational_commit(&mut self) {
+        let next_commit_epoch = self.commit_epoch + 1;
+        let publication = self.stage_relational_index_live_publication(next_commit_epoch, None);
+        self.commit_epoch = next_commit_epoch;
+        self.publish_relational_index_live_view(publication);
     }
 
     pub(super) fn mount_relational_index_shadow_for_recovery(&mut self) {
@@ -629,9 +854,9 @@ mod tests {
     use super::*;
     use crate::schema::Catalog;
     use skein_storage::{
-        DurabilityPolicy, RelationalColumnSchema, RelationalIndexSchema, RelationalScalarType,
-        RelationalTableSchema, RelationalTransaction, RelationalValue, RelationalWrite,
-        WalReplayConfig,
+        DurabilityPolicy, RelationalColumnSchema, RelationalIndexChangeKind, RelationalIndexSchema,
+        RelationalKey, RelationalScalarType, RelationalTableSchema, RelationalTransaction,
+        RelationalValue, RelationalWrite, WalReplayConfig,
     };
 
     #[test]
@@ -805,6 +1030,8 @@ mod tests {
             store
                 .checkpoint(&catalog)
                 .expect("checkpoint recovery base");
+            let pinned = store.snapshot();
+            let pinned_view = current_index_view(&pinned);
             store
                 .commit_relational_transaction(
                     &mut catalog,
@@ -820,10 +1047,32 @@ mod tests {
                     },
                 )
                 .expect("append relational WAL after checkpoint");
-            assert!(store
-                .relational_index_shadow
-                .current_read_view(store.commit_epoch)
-                .is_none());
+            let live_view = current_index_view(&store);
+            assert_eq!(live_view.kind(), RelationalIndexReadViewKind::Base);
+            assert_eq!(live_view.identity().visible_commit_epoch, 2);
+            assert_eq!(live_view.live_batch_count(), 1);
+            assert_eq!(live_view.live_entry_count(), 2);
+            assert!(live_view.live_encoded_bytes() > 0);
+            assert_eq!(pinned_view.identity().visible_commit_epoch, 1);
+            assert_eq!(pinned_view.live_batch_count(), 0);
+            assert!(!Arc::ptr_eq(pinned_view, live_view));
+            assert!(matches!(
+                store.relational_index_shadow_recovery_status(),
+                RelationalIndexShadowRecoveryStatus::LiveCurrent {
+                    visible_commit_epoch: 2,
+                    live_batches: 1,
+                    live_entries: 2,
+                    ..
+                }
+            ));
+
+            store
+                .create_node(&mut catalog, "Document", Default::default())
+                .expect("commit graph-only WAL after checkpoint");
+            let graph_advanced_view = current_index_view(&store);
+            assert_eq!(graph_advanced_view.identity().visible_commit_epoch, 3);
+            assert_eq!(graph_advanced_view.live_batch_count(), 1);
+            assert_eq!(graph_advanced_view.live_entry_count(), 2);
         }
         {
             let mut catalog = Catalog::default();
@@ -839,7 +1088,7 @@ mod tests {
                 store.relational_index_shadow_recovery_status(),
                 RelationalIndexShadowRecoveryStatus::WalRecovered {
                     base_commit_epoch: 1,
-                    recovered_commit_epoch: 2,
+                    recovered_commit_epoch: 3,
                     delta_pages: 1,
                     delta_entries: 2,
                     ..
@@ -854,7 +1103,7 @@ mod tests {
             assert_eq!(view.kind(), RelationalIndexReadViewKind::Recovered);
             assert!(view.identity().delta_generation.is_some());
             assert_eq!(view.identity().base_commit_epoch, 1);
-            assert_eq!(view.identity().visible_commit_epoch, 2);
+            assert_eq!(view.identity().visible_commit_epoch, 3);
             assert!(path
                 .join(skein_storage::RELATIONAL_INDEX_RECOVERY_MANIFEST_FILE)
                 .exists());
@@ -907,6 +1156,19 @@ mod tests {
                     },
                 )
                 .expect("append schema-changing relational WAL");
+            assert!(matches!(
+                store.relational_index_shadow_recovery_status(),
+                RelationalIndexShadowRecoveryStatus::LiveUnavailable {
+                    last_visible_commit_epoch: 1,
+                    failed_commit_epoch: 2,
+                    reason,
+                    ..
+                } if reason.contains("schema-changing WAL")
+            ));
+            assert!(store
+                .relational_index_shadow
+                .current_read_view(store.commit_epoch)
+                .is_none());
         }
         {
             let mut catalog = Catalog::default();
@@ -936,6 +1198,35 @@ mod tests {
                 .is_none());
         }
         std::fs::remove_dir_all(path).expect("remove schema recovery fixture");
+    }
+
+    #[test]
+    fn live_relational_index_overlay_fails_closed_at_its_cumulative_budget() {
+        let change = RelationalIndexChange {
+            table: "documents".to_string(),
+            index: "documents_owner_idx".to_string(),
+            index_key: RelationalKey(vec![RelationalValue::Text("owner-1".to_string())]),
+            primary_key: RelationalKey(vec![RelationalValue::Text("doc-1".to_string())]),
+            kind: RelationalIndexChangeKind::Insert,
+        };
+        let limits = RelationalIndexChangeCaptureLimits {
+            max_entries: std::num::NonZeroUsize::new(1).unwrap(),
+            max_bytes: std::num::NonZeroUsize::new(1_024).unwrap(),
+        };
+
+        let result = RelationalIndexLiveOverlay::empty().append(
+            1,
+            RelationalIndexChangeCapture::Captured {
+                changes: vec![change.clone(), change],
+                encoded_bytes: 128,
+            },
+            limits,
+        );
+
+        assert!(matches!(
+            result,
+            Err(reason) if reason.contains("max_entries=1")
+        ));
     }
 
     fn create_recovery_documents_table(first_id: &str) -> RelationalTransaction {
@@ -982,6 +1273,12 @@ mod tests {
         store
             .relational_index_shadow
             .current_read_view(store.commit_epoch)
-            .expect("store has a generation-pinned relational index view")
+            .unwrap_or_else(|| {
+                panic!(
+                    "store at epoch {} has no generation-pinned relational index view: {:?}",
+                    store.commit_epoch,
+                    store.relational_index_shadow_recovery_status()
+                )
+            })
     }
 }

@@ -13,7 +13,7 @@ impl GraphStore {
             }])?;
         }
         let id = catalog.get_or_create_label(label);
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(id)
     }
 
@@ -31,7 +31,7 @@ impl GraphStore {
             }])?;
         }
         let id = catalog.get_or_create_rel_type(rel_type);
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(id)
     }
 
@@ -46,7 +46,7 @@ impl GraphStore {
         }
         catalog.get_or_create_label(name);
         let id = catalog.get_or_create_table(TableKind::Node, name);
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(id)
     }
 
@@ -65,7 +65,7 @@ impl GraphStore {
         }
         catalog.get_or_create_rel_type(name);
         let id = catalog.get_or_create_table(TableKind::Relationship, name);
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(id)
     }
 
@@ -93,7 +93,7 @@ impl GraphStore {
             }])?;
         }
         let id = catalog.get_or_create_property(table_id, property, value_type, nullable);
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(id)
     }
 
@@ -125,7 +125,7 @@ impl GraphStore {
             }])?;
         }
         catalog.set_table_state(id, state);
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok((id, true))
     }
 
@@ -174,7 +174,7 @@ impl GraphStore {
             }])?;
         }
         catalog.set_property_state(id, state);
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok((id, true))
     }
 
@@ -421,7 +421,7 @@ impl GraphStore {
         for op in ops {
             self.apply_schema_maintenance_op(catalog, op);
         }
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(actions)
     }
 
@@ -586,7 +586,7 @@ impl GraphStore {
         }
         let id = catalog.get_or_create_property_index(label_id, property);
         self.backfill_property_index(catalog, label_id, property);
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(id)
     }
 
@@ -613,7 +613,7 @@ impl GraphStore {
         }
         let id = catalog.get_or_create_composite_property_index(label_id, properties);
         self.rebuild_composite_property_index_for_descriptor(id, label_id, properties);
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(id)
     }
 
@@ -637,7 +637,7 @@ impl GraphStore {
         let id =
             catalog.get_or_create_property_index_with_kind(label_id, property, IndexKind::Range);
         self.backfill_property_index(catalog, label_id, property);
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(id)
     }
 
@@ -662,7 +662,7 @@ impl GraphStore {
         let id =
             catalog.get_or_create_property_index_with_kind(label_id, property, IndexKind::FullText);
         self.rebuild_full_text_property_index_for_descriptor(label_id, property);
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(id)
     }
 
@@ -805,7 +805,7 @@ impl GraphStore {
             }])?;
         }
         let id = catalog.get_or_create_unique_constraint(label_id, property);
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(id)
     }
 
@@ -827,7 +827,7 @@ impl GraphStore {
             }])?;
         }
         let id = catalog.get_or_create_node_property_exists_constraint(label_id, property);
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(id)
     }
 
@@ -851,7 +851,7 @@ impl GraphStore {
         }
         let id =
             catalog.get_or_create_relationship_property_exists_constraint(rel_type_id, property);
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(id)
     }
 
@@ -873,7 +873,7 @@ impl GraphStore {
             }])?;
         }
         let id = catalog.get_or_create_relationship_unique_constraint(rel_type_id, property);
-        self.commit_epoch += 1;
+        self.finish_non_relational_commit();
         Ok(id)
     }
 

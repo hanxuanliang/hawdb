@@ -464,9 +464,12 @@ replays that prefix into a finite dirty overlay, flushes immutable delta pages,
 and publishes a unique candidate generation only after the complete replay is
 durable. It checks WAL/oracle equivalence, overlay capacity, base-plus-delta
 merge equivalence, candidate-generation isolation, publish-last visibility,
-and fail-closed schema invalidation. `CrashCandidate` discards only unpublished
-candidate state; the previously published manifest and canonical WAL remain
-unchanged. Production SQL selection is still false in every modeled state.
+and fail-closed schema invalidation. After recovery publication, the model also
+checks a bounded immutable live-change sequence, graph-only epoch advancement,
+base-plus-live equivalence, retained pinned-reader state, and fail-closed live
+capture invalidation. `CrashCandidate` discards only unpublished candidate
+state; the previously published manifest and canonical WAL remain unchanged.
+Production SQL selection is still false in every modeled state.
 
 `SkeinPageCacheAdmission.tla` models the clean immutable page-cache boundary
 used by relational base and recovery-delta readers. The cache capacity is a

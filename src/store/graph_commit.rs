@@ -1701,17 +1701,36 @@ impl GraphStore {
             captured_graph_ops.extend(ops.iter().cloned());
         }
         let mut staged_relational_state = None;
+        let mut staged_relational_index_capture = None;
+        let next_commit_epoch = self
+            .commit_epoch
+            .checked_add(1)
+            .ok_or_else(|| SkeinError::Storage("commit epoch overflow".to_string()))?;
         if let Some(transaction) = relational_transaction.filter(|value| !value.writes.is_empty()) {
-            staged_relational_state = Some(
-                self.relational_state
-                    .stage_transaction(
+            if let Some(capture_limits) = self.relational_index_live_capture_limits() {
+                let (next, capture) = self
+                    .relational_state
+                    .stage_transaction_with_index_changes(
                         transaction.clone(),
                         self.relational_mutation_limits,
                         self.relational_overflow_config,
+                        capture_limits,
                     )
-                    .map_err(|error| SkeinError::Storage(error.to_string()))?,
-            );
-            let record = encode_relational_wal_batch(self.commit_epoch + 1, &transaction)
+                    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                staged_relational_state = Some(next);
+                staged_relational_index_capture = Some(capture);
+            } else {
+                staged_relational_state = Some(
+                    self.relational_state
+                        .stage_transaction(
+                            transaction.clone(),
+                            self.relational_mutation_limits,
+                            self.relational_overflow_config,
+                        )
+                        .map_err(|error| SkeinError::Storage(error.to_string()))?,
+                );
+            }
+            let record = encode_relational_wal_batch(next_commit_epoch, &transaction)
                 .map_err(|error| SkeinError::Storage(error.to_string()))?;
             ops.push(WalOp::Relational {
                 record: Arc::from(record),
@@ -1720,6 +1739,10 @@ impl GraphStore {
         if ops.is_empty() {
             return Ok(MutationSummary { rows });
         }
+        let staged_relational_index_publication = self.stage_relational_index_live_publication(
+            next_commit_epoch,
+            staged_relational_index_capture,
+        );
         self.validate_constraints_for_ops(&working_catalog, &ops)?;
         if let Some(durable) = &mut self.durable {
             if preserve_single_create_wal
@@ -1735,7 +1758,7 @@ impl GraphStore {
             }
         }
         *catalog = working_catalog;
-        self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
+        self.record_search_projection_graph_changes_for_ops(catalog, next_commit_epoch, &ops);
         for op in ops {
             if matches!(op, WalOp::Relational { .. }) {
                 self.relational_state = staged_relational_state
@@ -1745,7 +1768,8 @@ impl GraphStore {
                 self.apply_wal_op(catalog, op)?;
             }
         }
-        self.commit_epoch += 1;
+        self.commit_epoch = next_commit_epoch;
+        self.publish_relational_index_live_view(staged_relational_index_publication);
         Ok(MutationSummary { rows })
     }
 

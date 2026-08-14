@@ -6,13 +6,17 @@ EXTENDS Naturals, Sequences, FiniteSets
 (* into a bounded dirty overlay. Full overlays become immutable candidate    *)
 (* delta pages. Candidate generations are never allowed to replace files     *)
 (* selected by an older manifest, and become visible only after replay is    *)
-(* complete and the new manifest is published.                               *)
+(* complete and the new manifest is published. A published base/recovery     *)
+(* view then advances through bounded immutable live batches. Graph-only     *)
+(* commits advance its epoch without adding entries; capture invalidation    *)
+(* removes the current view instead of serving stale postings.               *)
 (***************************************************************************)
 
-CONSTANT MaxEpoch, DirtyBudget, MaxAttempts
+CONSTANT MaxEpoch, DirtyBudget, LiveBudget, MaxAttempts
 
 ASSUME /\ MaxEpoch \in Nat \ {0}
        /\ DirtyBudget \in Nat \ {0}
+       /\ LiveBudget \in Nat \ {0}
        /\ MaxAttempts \in Nat \ {0}
 
 Keys == 1..2
@@ -61,6 +65,13 @@ VARIABLES
     publishedEpoch,
     publishedPages,
     publishedState,
+    liveViewAvailable,
+    liveViewEpoch,
+    liveViewState,
+    liveChanges,
+    readerPinned,
+    readerEpoch,
+    readerState,
     schemaInvalidated,
     sqlUsesRecoveredIndex
 
@@ -82,6 +93,13 @@ vars == <<
     publishedEpoch,
     publishedPages,
     publishedState,
+    liveViewAvailable,
+    liveViewEpoch,
+    liveViewState,
+    liveChanges,
+    readerPinned,
+    readerEpoch,
+    readerState,
     schemaInvalidated,
     sqlUsesRecoveredIndex
 >>
@@ -104,11 +122,19 @@ Init ==
     /\ publishedEpoch = BaseEpoch
     /\ publishedPages = <<>>
     /\ publishedState = BaseState
+    /\ liveViewAvailable = TRUE
+    /\ liveViewEpoch = BaseEpoch
+    /\ liveViewState = BaseState
+    /\ liveChanges = <<>>
+    /\ readerPinned = FALSE
+    /\ readerEpoch = BaseEpoch
+    /\ readerState = BaseState
     /\ schemaInvalidated = FALSE
     /\ sqlUsesRecoveredIndex = FALSE
 
 CommitInsert ==
     /\ phase = "idle"
+    /\ publishedGeneration = 0
     /\ commitEpoch < MaxEpoch
     /\ \E key \in Keys:
         /\ canonicalState' = canonicalState \cup {key}
@@ -118,12 +144,14 @@ CommitInsert ==
         phase, nextGeneration, candidateGeneration, candidateEpoch,
         replayCursor, recoveredState, dirtyKeys, dirtyValues,
         candidatePages, durableCandidateGenerations, publishedGeneration,
-        publishedEpoch, publishedPages, publishedState, schemaInvalidated,
-        sqlUsesRecoveredIndex
+        publishedEpoch, publishedPages, publishedState, liveViewAvailable,
+        liveViewEpoch, liveViewState, liveChanges, readerPinned, readerEpoch,
+        readerState, schemaInvalidated, sqlUsesRecoveredIndex
         >>
 
 CommitDelete ==
     /\ phase = "idle"
+    /\ publishedGeneration = 0
     /\ commitEpoch < MaxEpoch
     /\ \E key \in Keys:
         /\ canonicalState' = canonicalState \ {key}
@@ -133,8 +161,9 @@ CommitDelete ==
         phase, nextGeneration, candidateGeneration, candidateEpoch,
         replayCursor, recoveredState, dirtyKeys, dirtyValues,
         candidatePages, durableCandidateGenerations, publishedGeneration,
-        publishedEpoch, publishedPages, publishedState, schemaInvalidated,
-        sqlUsesRecoveredIndex
+        publishedEpoch, publishedPages, publishedState, liveViewAvailable,
+        liveViewEpoch, liveViewState, liveChanges, readerPinned, readerEpoch,
+        readerState, schemaInvalidated, sqlUsesRecoveredIndex
         >>
 
 BeginRecovery ==
@@ -154,7 +183,8 @@ BeginRecovery ==
     /\ UNCHANGED <<
         canonicalState, commitEpoch, wal, durableCandidateGenerations,
         publishedGeneration, publishedEpoch, publishedPages, publishedState,
-        sqlUsesRecoveredIndex
+        liveViewAvailable, liveViewEpoch, liveViewState, liveChanges,
+        readerPinned, readerEpoch, readerState, sqlUsesRecoveredIndex
         >>
 
 ReplayNext ==
@@ -171,8 +201,9 @@ ReplayNext ==
         canonicalState, commitEpoch, wal, phase, nextGeneration,
         candidateGeneration, candidateEpoch, candidatePages,
         durableCandidateGenerations, publishedGeneration, publishedEpoch,
-        publishedPages, publishedState, schemaInvalidated,
-        sqlUsesRecoveredIndex
+        publishedPages, publishedState, liveViewAvailable, liveViewEpoch,
+        liveViewState, liveChanges, readerPinned, readerEpoch, readerState,
+        schemaInvalidated, sqlUsesRecoveredIndex
         >>
 
 FlushDirty ==
@@ -188,8 +219,9 @@ FlushDirty ==
         canonicalState, commitEpoch, wal, phase, nextGeneration,
         candidateGeneration, candidateEpoch, replayCursor, recoveredState,
         durableCandidateGenerations, publishedGeneration, publishedEpoch,
-        publishedPages, publishedState, schemaInvalidated,
-        sqlUsesRecoveredIndex
+        publishedPages, publishedState, liveViewAvailable, liveViewEpoch,
+        liveViewState, liveChanges, readerPinned, readerEpoch, readerState,
+        schemaInvalidated, sqlUsesRecoveredIndex
         >>
 
 FinishReplay ==
@@ -204,8 +236,9 @@ FinishReplay ==
         canonicalState, commitEpoch, wal, nextGeneration,
         candidateGeneration, candidateEpoch, replayCursor, recoveredState,
         dirtyKeys, dirtyValues, candidatePages, publishedGeneration,
-        publishedEpoch, publishedPages, publishedState, schemaInvalidated,
-        sqlUsesRecoveredIndex
+        publishedEpoch, publishedPages, publishedState, liveViewAvailable,
+        liveViewEpoch, liveViewState, liveChanges, readerPinned, readerEpoch,
+        readerState, schemaInvalidated, sqlUsesRecoveredIndex
         >>
 
 PublishManifest ==
@@ -217,11 +250,16 @@ PublishManifest ==
     /\ publishedEpoch' = candidateEpoch
     /\ publishedPages' = candidatePages
     /\ publishedState' = ApplyPages(BaseState, candidatePages)
+    /\ liveViewAvailable' = TRUE
+    /\ liveViewEpoch' = candidateEpoch
+    /\ liveViewState' = ApplyPages(BaseState, candidatePages)
+    /\ liveChanges' = <<>>
     /\ UNCHANGED <<
         canonicalState, commitEpoch, wal, nextGeneration,
         candidateGeneration, candidateEpoch, replayCursor, recoveredState,
         dirtyKeys, dirtyValues, candidatePages, durableCandidateGenerations,
-        schemaInvalidated, sqlUsesRecoveredIndex
+        readerPinned, readerEpoch, readerState, schemaInvalidated,
+        sqlUsesRecoveredIndex
         >>
 
 InvalidateSchema ==
@@ -233,7 +271,8 @@ InvalidateSchema ==
         candidateGeneration, candidateEpoch, replayCursor, recoveredState,
         dirtyKeys, dirtyValues, candidatePages, durableCandidateGenerations,
         publishedGeneration, publishedEpoch, publishedPages, publishedState,
-        sqlUsesRecoveredIndex
+        liveViewAvailable, liveViewEpoch, liveViewState, liveChanges,
+        readerPinned, readerEpoch, readerState, sqlUsesRecoveredIndex
         >>
 
 CrashCandidate ==
@@ -250,7 +289,125 @@ CrashCandidate ==
     /\ UNCHANGED <<
         canonicalState, commitEpoch, wal, nextGeneration,
         durableCandidateGenerations, publishedGeneration, publishedEpoch,
-        publishedPages, publishedState, sqlUsesRecoveredIndex
+        publishedPages, publishedState, liveViewAvailable, liveViewEpoch,
+        liveViewState, liveChanges, readerPinned, readerEpoch, readerState,
+        sqlUsesRecoveredIndex
+        >>
+
+LiveCommitInsert ==
+    /\ phase = "idle"
+    /\ publishedGeneration # 0
+    /\ liveViewAvailable
+    /\ liveViewEpoch = commitEpoch
+    /\ commitEpoch < MaxEpoch
+    /\ Len(liveChanges) < LiveBudget
+    /\ \E key \in Keys:
+        /\ canonicalState' = canonicalState \cup {key}
+        /\ wal' = Append(wal, [key |-> key, present |-> TRUE])
+        /\ liveChanges' = Append(
+            liveChanges,
+            [key |-> key, present |-> TRUE, epoch |-> commitEpoch + 1]
+            )
+    /\ commitEpoch' = commitEpoch + 1
+    /\ liveViewEpoch' = commitEpoch + 1
+    /\ liveViewState' = canonicalState'
+    /\ UNCHANGED <<
+        phase, nextGeneration, candidateGeneration, candidateEpoch,
+        replayCursor, recoveredState, dirtyKeys, dirtyValues, candidatePages,
+        durableCandidateGenerations, publishedGeneration, publishedEpoch,
+        publishedPages, publishedState, liveViewAvailable, readerPinned,
+        readerEpoch, readerState, schemaInvalidated, sqlUsesRecoveredIndex
+        >>
+
+LiveCommitDelete ==
+    /\ phase = "idle"
+    /\ publishedGeneration # 0
+    /\ liveViewAvailable
+    /\ liveViewEpoch = commitEpoch
+    /\ commitEpoch < MaxEpoch
+    /\ Len(liveChanges) < LiveBudget
+    /\ \E key \in Keys:
+        /\ canonicalState' = canonicalState \ {key}
+        /\ wal' = Append(wal, [key |-> key, present |-> FALSE])
+        /\ liveChanges' = Append(
+            liveChanges,
+            [key |-> key, present |-> FALSE, epoch |-> commitEpoch + 1]
+            )
+    /\ commitEpoch' = commitEpoch + 1
+    /\ liveViewEpoch' = commitEpoch + 1
+    /\ liveViewState' = canonicalState'
+    /\ UNCHANGED <<
+        phase, nextGeneration, candidateGeneration, candidateEpoch,
+        replayCursor, recoveredState, dirtyKeys, dirtyValues, candidatePages,
+        durableCandidateGenerations, publishedGeneration, publishedEpoch,
+        publishedPages, publishedState, liveViewAvailable, readerPinned,
+        readerEpoch, readerState, schemaInvalidated, sqlUsesRecoveredIndex
+        >>
+
+GraphOnlyCommit ==
+    /\ phase = "idle"
+    /\ publishedGeneration # 0
+    /\ liveViewAvailable
+    /\ liveViewEpoch = commitEpoch
+    /\ commitEpoch < MaxEpoch
+    /\ commitEpoch' = commitEpoch + 1
+    /\ liveViewEpoch' = commitEpoch + 1
+    /\ UNCHANGED <<
+        canonicalState, wal, phase, nextGeneration, candidateGeneration,
+        candidateEpoch, replayCursor, recoveredState, dirtyKeys, dirtyValues,
+        candidatePages, durableCandidateGenerations, publishedGeneration,
+        publishedEpoch, publishedPages, publishedState, liveViewAvailable,
+        liveViewState, liveChanges, readerPinned, readerEpoch, readerState,
+        schemaInvalidated, sqlUsesRecoveredIndex
+        >>
+
+InvalidateLiveCommit ==
+    /\ phase = "idle"
+    /\ publishedGeneration # 0
+    /\ liveViewAvailable
+    /\ liveViewEpoch = commitEpoch
+    /\ commitEpoch < MaxEpoch
+    /\ \E key \in Keys:
+        /\ canonicalState' = canonicalState \cup {key}
+        /\ wal' = Append(wal, [key |-> key, present |-> TRUE])
+    /\ commitEpoch' = commitEpoch + 1
+    /\ liveViewAvailable' = FALSE
+    /\ UNCHANGED <<
+        phase, nextGeneration, candidateGeneration, candidateEpoch,
+        replayCursor, recoveredState, dirtyKeys, dirtyValues, candidatePages,
+        durableCandidateGenerations, publishedGeneration, publishedEpoch,
+        publishedPages, publishedState, liveViewEpoch, liveViewState,
+        liveChanges, readerPinned, readerEpoch, readerState,
+        schemaInvalidated, sqlUsesRecoveredIndex
+        >>
+
+PinLiveView ==
+    /\ phase = "idle"
+    /\ ~readerPinned
+    /\ liveViewAvailable
+    /\ liveViewEpoch = commitEpoch
+    /\ readerPinned' = TRUE
+    /\ readerEpoch' = liveViewEpoch
+    /\ readerState' = liveViewState
+    /\ UNCHANGED <<
+        canonicalState, commitEpoch, wal, phase, nextGeneration,
+        candidateGeneration, candidateEpoch, replayCursor, recoveredState,
+        dirtyKeys, dirtyValues, candidatePages, durableCandidateGenerations,
+        publishedGeneration, publishedEpoch, publishedPages, publishedState,
+        liveViewAvailable, liveViewEpoch, liveViewState, liveChanges,
+        schemaInvalidated, sqlUsesRecoveredIndex
+        >>
+
+ReleasePinnedView ==
+    /\ readerPinned
+    /\ readerPinned' = FALSE
+    /\ UNCHANGED <<
+        canonicalState, commitEpoch, wal, phase, nextGeneration,
+        candidateGeneration, candidateEpoch, replayCursor, recoveredState,
+        dirtyKeys, dirtyValues, candidatePages, durableCandidateGenerations,
+        publishedGeneration, publishedEpoch, publishedPages, publishedState,
+        liveViewAvailable, liveViewEpoch, liveViewState, liveChanges,
+        readerEpoch, readerState, schemaInvalidated, sqlUsesRecoveredIndex
         >>
 
 Next ==
@@ -263,6 +420,12 @@ Next ==
     \/ PublishManifest
     \/ InvalidateSchema
     \/ CrashCandidate
+    \/ LiveCommitInsert
+    \/ LiveCommitDelete
+    \/ GraphOnlyCommit
+    \/ InvalidateLiveCommit
+    \/ PinLiveView
+    \/ ReleasePinnedView
 
 TypeOK ==
     /\ canonicalState \subseteq Keys
@@ -282,12 +445,25 @@ TypeOK ==
     /\ publishedEpoch \in 0..MaxEpoch
     /\ publishedPages \in Seq([keys : SUBSET Keys, values : [Keys -> BOOLEAN]])
     /\ publishedState \subseteq Keys
+    /\ liveViewAvailable \in BOOLEAN
+    /\ liveViewEpoch \in 0..MaxEpoch
+    /\ liveViewState \subseteq Keys
+    /\ liveChanges \in Seq([
+        key : Keys,
+        present : BOOLEAN,
+        epoch : 1..MaxEpoch
+        ])
+    /\ readerPinned \in BOOLEAN
+    /\ readerEpoch \in 0..MaxEpoch
+    /\ readerState \subseteq Keys
     /\ schemaInvalidated \in BOOLEAN
     /\ sqlUsesRecoveredIndex \in BOOLEAN
 
 CanonicalEqualsWal == canonicalState = ApplyChanges(BaseState, wal)
 
 DirtyOverlayBounded == Cardinality(dirtyKeys) <= DirtyBudget
+
+LiveOverlayBounded == Len(liveChanges) <= LiveBudget
 
 ReplayPrefixEquivalent ==
     phase \in {"replaying", "publishing"} =>
@@ -307,6 +483,30 @@ PublishedManifestSelectsCompletePages ==
 SelectedRecoveryMatchesCanonical ==
     publishedGeneration # 0 /\ publishedEpoch = commitEpoch =>
         publishedState = canonicalState
+
+LiveViewMergeEquivalent ==
+    liveViewAvailable =>
+        liveViewState = ApplyChanges(publishedState, liveChanges)
+
+CurrentLiveViewMatchesCanonical ==
+    liveViewAvailable /\ liveViewEpoch = commitEpoch =>
+        liveViewState = canonicalState
+
+LiveChangeEpochsAreOrdered ==
+    /\ \A index \in 1..Len(liveChanges):
+        /\ publishedEpoch < liveChanges[index].epoch
+        /\ liveChanges[index].epoch <= liveViewEpoch
+    /\ \A index \in 2..Len(liveChanges):
+        liveChanges[index - 1].epoch < liveChanges[index].epoch
+
+PinnedReaderDoesNotDrift ==
+    readerPinned =>
+        /\ readerEpoch <= commitEpoch
+        /\ (liveViewAvailable /\ readerEpoch = liveViewEpoch =>
+            readerState = liveViewState)
+
+UnavailableLiveViewIsNotCurrent ==
+    ~liveViewAvailable => liveViewEpoch < commitEpoch
 
 CandidateGenerationIsIsolated ==
     phase \in {"replaying", "publishing"} =>

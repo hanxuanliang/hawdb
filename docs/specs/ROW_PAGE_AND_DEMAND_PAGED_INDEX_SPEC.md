@@ -136,6 +136,21 @@ candidate because its schema digest/root set no longer matches the checkpoint;
 normal open continues from canonical checkpoint plus WAL and records
 `RecoveryUnavailable` rather than performing an unbounded startup backfill.
 
+After a base or recovered reader is pinned, normal commits maintain one
+immutable in-process relational index read view. Its identity binds the base
+generation, optional recovery-delta generation, base and visible commit epochs,
+and schema digest. Relational DML appends transaction-apply change evidence as
+immutable `Arc`-shared live batches; publishing a newer view clones only the
+batch-pointer directory and retains the prior view for already pinned
+snapshots. The total live overlay is admitted by both raw change count and
+encoded bytes. Graph-only commits advance the view's visible epoch without
+adding a batch. DDL, relational snapshot replacement, poisoned backing pages,
+epoch discontinuity, or exhausted live admission removes the current view and
+records an explicit unavailable status; canonical WAL publication still
+succeeds, but no reader may continue from stale postings. This read view is
+still non-serving until its base-plus-recovery-plus-live merge is
+differentially qualified and SQL activation lands separately.
+
 ## Identities and terminology
 
 - **Commit epoch**: monotonically increasing visibility identity; one atomic
