@@ -85,14 +85,14 @@ pub(super) fn parse_property_projection_manifest_generation_file(name: &str) -> 
         .ok()
 }
 
-fn parse_relational_index_artifact_generation_file(name: &str) -> Option<u64> {
+pub(super) fn parse_relational_index_artifact_generation_file(name: &str) -> Option<u64> {
     name.strip_prefix("relational-index-shadow-")?
         .strip_suffix(".pages.skein")?
         .parse()
         .ok()
 }
 
-fn parse_relational_index_manifest_generation_file(name: &str) -> Option<u64> {
+pub(super) fn parse_relational_index_manifest_generation_file(name: &str) -> Option<u64> {
     name.strip_prefix("relational-index-shadow-")?
         .strip_suffix(".manifest.skein")?
         .parse()

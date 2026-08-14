@@ -713,6 +713,14 @@ impl RelationalIndexShadowReader {
         Self::open_latest_inner(directory, config, Some(page_cache), store_id)
     }
 
+    pub fn open_generation(
+        directory: &Path,
+        expected: RelationalIndexGenerationIdentity,
+        config: RelationalIndexShadowConfig,
+    ) -> Result<Self, RelationalIndexShadowError> {
+        Self::open_generation_inner(directory, expected, config, None, StoreId::default())
+    }
+
     pub fn open_generation_with_cache(
         directory: &Path,
         expected: RelationalIndexGenerationIdentity,
@@ -720,16 +728,21 @@ impl RelationalIndexShadowReader {
         page_cache: Arc<SegmentCache>,
         store_id: StoreId,
     ) -> Result<Self, RelationalIndexShadowError> {
+        Self::open_generation_inner(directory, expected, config, Some(page_cache), store_id)
+    }
+
+    fn open_generation_inner(
+        directory: &Path,
+        expected: RelationalIndexGenerationIdentity,
+        config: RelationalIndexShadowConfig,
+        page_cache: Option<Arc<SegmentCache>>,
+        store_id: StoreId,
+    ) -> Result<Self, RelationalIndexShadowError> {
         let manifest_path = directory.join(relational_index_shadow_manifest_generation_file(
             expected.generation,
         ));
-        let reader = Self::open_manifest_inner(
-            directory,
-            &manifest_path,
-            config,
-            Some(page_cache),
-            store_id,
-        )?;
+        let reader =
+            Self::open_manifest_inner(directory, &manifest_path, config, page_cache, store_id)?;
         if reader.manifest.generation != expected.generation
             || reader.manifest.source_commit_epoch != expected.source_commit_epoch
         {

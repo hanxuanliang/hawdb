@@ -90,15 +90,16 @@ and algorithms outside active routes are not implied backlog items.
 
 The immutable relational index codec, generation-fenced publisher, demand
 reader, bounded page-cache integration, WAL recovery delta, differential
-qualification, and opt-in PostgreSQL SQL execution path are implemented. The
-remaining work below makes those derived foundations canonical without
-allowing a stale index or a database-sized resident set to become a correctness
+qualification, opt-in PostgreSQL SQL execution path, and checkpoint-bound
+artifact identity with backup/restore/scrub coverage are implemented. The
+remaining work below makes those derived foundations canonical without allowing
+a stale index or a database-sized resident set to become a correctness
 dependency.
 
 - [ ] Make persistent relational indexes authoritative.
-  - Bind row identity and the exact required relational root-set digest to one
-    canonical manifest generation, including candidate length, CRC32C, and
-    SHA-256.
+  - Make the existing generation/epoch/root-set binding mandatory for writable
+    open and use the pinned view for primary-key, unique, UPSERT, and foreign-key
+    decisions before WAL publication.
   - Extend `SkeinIndexPublication.tla` for canonical uniqueness and row/index
     epoch agreement.
   - Remove normal-open `rebuild_indexes()` only after required constraint roots

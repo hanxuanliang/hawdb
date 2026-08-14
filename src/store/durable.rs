@@ -44,9 +44,10 @@ use skein_storage::{
     PersistentPropertyProjectionManifest, PersistentPropertyProjectionReader,
     PersistentPropertyProjectionWriter, ProjectedGraphDefinition, PropertySpillConfig,
     PropertySpillManifest, PropertySpillReader, RelId, RelRecord, RelationalDecodeLimits,
-    RelationalState, ScanSegmentManifest, SearchProjectionGraphChange, SegmentCache,
-    StorageBackupReport, StorageDebtController, StoragePressureSignals, StorageScrubReport,
-    StoreId, StoreStableIdMapping, WalReplayConfig, WalSyncGroupFlush, WalSyncGroupProgress,
+    RelationalIndexArtifactMetadata, RelationalIndexGenerationArtifacts, RelationalState,
+    ScanSegmentManifest, SearchProjectionGraphChange, SegmentCache, StorageBackupReport,
+    StorageDebtController, StoragePressureSignals, StorageScrubReport, StoreId,
+    StoreStableIdMapping, WalReplayConfig, WalSyncGroupFlush, WalSyncGroupProgress,
     WalSyncGroupState,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -83,6 +84,7 @@ pub(super) struct DurableStore {
     property_projection_manifest_encoded_len: Option<u64>,
     property_projection_manifest_encoded_checksum: Option<u64>,
     property_projection_manifest_encoded_sha256: Option<Sha256Digest>,
+    pub(super) relational_index_generation_artifacts: Option<RelationalIndexGenerationArtifacts>,
     pub(super) wal_generation: u64,
     pub(super) checkpoint_epoch: u64,
     pub(super) checkpoint_commit_epoch: u64,
@@ -189,6 +191,7 @@ pub(super) struct CheckpointManifestArtifacts {
     pub(super) canonical_adjacency_manifest: DurableArtifactMetadata,
     pub(super) property_spill_manifest: DurableArtifactMetadata,
     pub(super) property_projection_manifest: DurableArtifactMetadata,
+    pub(super) relational_index: Option<RelationalIndexGenerationArtifacts>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -428,6 +431,7 @@ impl DurableStore {
                 .property_projection_manifest_encoded_checksum,
             property_projection_manifest_encoded_sha256: manifest
                 .property_projection_manifest_encoded_sha256,
+            relational_index_generation_artifacts: manifest.relational_index_generation_artifacts,
             wal_generation: manifest.wal_generation,
             checkpoint_epoch: manifest.checkpoint_epoch,
             checkpoint_commit_epoch: manifest.checkpoint_commit_epoch,
@@ -549,6 +553,15 @@ impl DurableStore {
             let relational_checkpoint_path = self.root_path.join(&relational_checkpoint_name);
             if self.relational_checkpoint_encoded_len.is_some() {
                 sources.push((relational_checkpoint_name, relational_checkpoint_path));
+            }
+            if let Some(binding) = self.relational_index_generation_artifacts {
+                let page_name =
+                    skein_storage::relational_index_shadow_artifact_file(binding.generation);
+                let manifest_name = skein_storage::relational_index_shadow_manifest_generation_file(
+                    binding.generation,
+                );
+                sources.push((page_name.clone(), self.root_path.join(page_name)));
+                sources.push((manifest_name.clone(), self.root_path.join(manifest_name)));
             }
             if self.canonical_manifest_encoded_len.is_some() {
                 sources.push((
@@ -715,6 +728,48 @@ impl DurableStore {
                     "relational checkpoint epoch {} does not match manifest checkpoint commit epoch {}",
                     checkpoint.epoch, self.checkpoint_commit_epoch
                 )));
+            }
+        }
+
+        if let Some(binding) = manifest.relational_index_generation_artifacts {
+            let page_path =
+                self.root_path
+                    .join(skein_storage::relational_index_shadow_artifact_file(
+                        binding.generation,
+                    ));
+            verify_path(
+                &page_path,
+                binding.page_artifact.encoded_len,
+                binding.page_artifact.encoded_crc32c,
+                binding.page_artifact.encoded_sha256,
+                "relational index page artifact",
+            )?;
+            let generation_manifest_path = self.root_path.join(
+                skein_storage::relational_index_shadow_manifest_generation_file(binding.generation),
+            );
+            verify_path(
+                &generation_manifest_path,
+                binding.manifest_artifact.encoded_len,
+                binding.manifest_artifact.encoded_crc32c,
+                binding.manifest_artifact.encoded_sha256,
+                "relational index generation manifest",
+            )?;
+            let reader = skein_storage::RelationalIndexShadowReader::open_generation(
+                &self.root_path,
+                skein_storage::RelationalIndexGenerationIdentity {
+                    generation: binding.generation,
+                    source_commit_epoch: binding.source_commit_epoch,
+                },
+                skein_storage::RelationalIndexShadowConfig::default(),
+            )
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            if reader.manifest().catalog_schema_digest != binding.catalog_schema_digest
+                || reader.manifest().root_set_digest != binding.root_set_digest
+            {
+                return Err(SkeinError::Storage(
+                    "relational index manifest digests do not match canonical binding during scrub"
+                        .to_string(),
+                ));
             }
         }
 
@@ -1898,6 +1953,7 @@ impl DurableStore {
             canonical_adjacency_manifest,
             property_spill_manifest,
             property_projection_manifest,
+            relational_index,
         } = artifacts;
         let manifest = DurableManifest {
             checkpoint_generation: Some(generation),
@@ -1930,6 +1986,7 @@ impl DurableStore {
             property_projection_manifest_encoded_sha256: Some(
                 property_projection_manifest.encoded_sha256,
             ),
+            relational_index_generation_artifacts: relational_index,
             wal_generation: generation,
             checkpoint_epoch: generation,
             checkpoint_commit_epoch,
@@ -1975,6 +2032,7 @@ impl DurableStore {
             manifest.property_projection_manifest_encoded_checksum;
         self.property_projection_manifest_encoded_sha256 =
             manifest.property_projection_manifest_encoded_sha256;
+        self.relational_index_generation_artifacts = manifest.relational_index_generation_artifacts;
         self.wal_generation = manifest.wal_generation;
         self.checkpoint_epoch = manifest.checkpoint_epoch;
         self.checkpoint_commit_epoch = manifest.checkpoint_commit_epoch;
@@ -2063,6 +2121,7 @@ pub(super) struct DurableManifest {
     pub(super) property_projection_manifest_encoded_len: Option<u64>,
     pub(super) property_projection_manifest_encoded_checksum: Option<u64>,
     pub(super) property_projection_manifest_encoded_sha256: Option<Sha256Digest>,
+    pub(super) relational_index_generation_artifacts: Option<RelationalIndexGenerationArtifacts>,
     pub(super) wal_generation: u64,
     pub(super) checkpoint_epoch: u64,
     pub(super) checkpoint_commit_epoch: u64,
@@ -2072,6 +2131,79 @@ pub(super) struct DurableManifest {
     next_lsn: u64,
     source_scan_commit_epoch: Option<u64>,
     source_scan_descriptor_checksum: Option<u64>,
+}
+
+#[derive(Default)]
+struct RelationalIndexManifestFields {
+    generation: Option<u64>,
+    source_commit_epoch: Option<u64>,
+    catalog_schema_digest: Option<Sha256Digest>,
+    root_set_digest: Option<Sha256Digest>,
+    page_encoded_len: Option<u64>,
+    page_encoded_checksum: Option<u64>,
+    page_encoded_sha256: Option<Sha256Digest>,
+    manifest_encoded_len: Option<u64>,
+    manifest_encoded_checksum: Option<u64>,
+    manifest_encoded_sha256: Option<Sha256Digest>,
+}
+
+impl RelationalIndexManifestFields {
+    fn finish(self) -> Result<Option<RelationalIndexGenerationArtifacts>> {
+        let presence = [
+            self.generation.is_some(),
+            self.source_commit_epoch.is_some(),
+            self.catalog_schema_digest.is_some(),
+            self.root_set_digest.is_some(),
+            self.page_encoded_len.is_some(),
+            self.page_encoded_checksum.is_some(),
+            self.page_encoded_sha256.is_some(),
+            self.manifest_encoded_len.is_some(),
+            self.manifest_encoded_checksum.is_some(),
+            self.manifest_encoded_sha256.is_some(),
+        ];
+        if presence.iter().all(|present| !present) {
+            return Ok(None);
+        }
+        if !presence.iter().all(|present| *present) {
+            return Err(SkeinError::Storage(
+                "manifest relational index generation binding is incomplete".to_string(),
+            ));
+        }
+        Ok(Some(RelationalIndexGenerationArtifacts {
+            generation: self.generation.expect("complete binding has generation"),
+            source_commit_epoch: self
+                .source_commit_epoch
+                .expect("complete binding has source commit epoch"),
+            catalog_schema_digest: self
+                .catalog_schema_digest
+                .expect("complete binding has catalog schema digest"),
+            root_set_digest: self
+                .root_set_digest
+                .expect("complete binding has root-set digest"),
+            page_artifact: RelationalIndexArtifactMetadata {
+                encoded_len: self
+                    .page_encoded_len
+                    .expect("complete binding has page length"),
+                encoded_crc32c: self
+                    .page_encoded_checksum
+                    .expect("complete binding has page checksum"),
+                encoded_sha256: self
+                    .page_encoded_sha256
+                    .expect("complete binding has page SHA-256"),
+            },
+            manifest_artifact: RelationalIndexArtifactMetadata {
+                encoded_len: self
+                    .manifest_encoded_len
+                    .expect("complete binding has manifest length"),
+                encoded_crc32c: self
+                    .manifest_encoded_checksum
+                    .expect("complete binding has manifest checksum"),
+                encoded_sha256: self
+                    .manifest_encoded_sha256
+                    .expect("complete binding has manifest SHA-256"),
+            },
+        }))
+    }
 }
 
 pub(super) fn artifact_metadata_presence_consistent(
@@ -2108,6 +2240,7 @@ impl DurableManifest {
             property_projection_manifest_encoded_len: None,
             property_projection_manifest_encoded_checksum: None,
             property_projection_manifest_encoded_sha256: None,
+            relational_index_generation_artifacts: None,
             wal_generation: 0,
             checkpoint_epoch: 0,
             checkpoint_commit_epoch: 0,
@@ -2206,6 +2339,29 @@ impl DurableManifest {
                 "manifest property projections require canonical segments".to_string(),
             ));
         }
+        if let Some(binding) = self.relational_index_generation_artifacts {
+            if binding.generation == 0 {
+                return Err(SkeinError::Storage(
+                    "manifest relational index generation must be non-zero".to_string(),
+                ));
+            }
+            if binding.generation != self.checkpoint_epoch
+                || binding.source_commit_epoch != self.checkpoint_commit_epoch
+            {
+                return Err(SkeinError::Storage(format!(
+                    "manifest relational index generation/epoch {}/{} does not match checkpoint {}/{}",
+                    binding.generation,
+                    binding.source_commit_epoch,
+                    self.checkpoint_epoch,
+                    self.checkpoint_commit_epoch,
+                )));
+            }
+            if binding.manifest_artifact.encoded_len == 0 {
+                return Err(SkeinError::Storage(
+                    "manifest relational index generation manifest must not be empty".to_string(),
+                ));
+            }
+        }
         if self.wal_generation != self.checkpoint_epoch {
             return Err(SkeinError::Storage(format!(
                 "manifest WAL generation {} does not match checkpoint epoch {}",
@@ -2247,6 +2403,7 @@ impl DurableManifest {
                     || self.property_projection_manifest_encoded_len.is_some()
                     || self.property_projection_manifest_encoded_checksum.is_some()
                     || self.property_projection_manifest_encoded_sha256.is_some()
+                    || self.relational_index_generation_artifacts.is_some()
                 {
                     return Err(SkeinError::Storage(
                         "manifest without a checkpoint must describe generation zero".to_string(),
@@ -2273,6 +2430,7 @@ impl DurableManifest {
             ));
         }
         let mut manifest = Self::initial_generation();
+        let mut relational_index = RelationalIndexManifestFields::default();
         let mut seen_fields = BTreeSet::new();
         for line in lines {
             let fields = line.split('\t').collect::<Vec<_>>();
@@ -2351,6 +2509,46 @@ impl DurableManifest {
                     manifest.property_projection_manifest_encoded_sha256 =
                         parse_optional_sha256(raw, "property projection manifest encoded SHA-256")?;
                 }
+                ["relational_index_generation", raw] => {
+                    relational_index.generation =
+                        parse_optional_u64(raw, "relational index generation")?;
+                }
+                ["relational_index_source_commit_epoch", raw] => {
+                    relational_index.source_commit_epoch =
+                        parse_optional_u64(raw, "relational index source commit epoch")?;
+                }
+                ["relational_index_catalog_schema_sha256", raw] => {
+                    relational_index.catalog_schema_digest =
+                        parse_optional_sha256(raw, "relational index catalog schema SHA-256")?;
+                }
+                ["relational_index_root_set_sha256", raw] => {
+                    relational_index.root_set_digest =
+                        parse_optional_sha256(raw, "relational index root-set SHA-256")?;
+                }
+                ["relational_index_page_encoded_len", raw] => {
+                    relational_index.page_encoded_len =
+                        parse_optional_u64(raw, "relational index page encoded length")?;
+                }
+                ["relational_index_page_encoded_checksum", raw] => {
+                    relational_index.page_encoded_checksum =
+                        parse_optional_u64(raw, "relational index page encoded checksum")?;
+                }
+                ["relational_index_page_encoded_sha256", raw] => {
+                    relational_index.page_encoded_sha256 =
+                        parse_optional_sha256(raw, "relational index page encoded SHA-256")?;
+                }
+                ["relational_index_manifest_encoded_len", raw] => {
+                    relational_index.manifest_encoded_len =
+                        parse_optional_u64(raw, "relational index manifest encoded length")?;
+                }
+                ["relational_index_manifest_encoded_checksum", raw] => {
+                    relational_index.manifest_encoded_checksum =
+                        parse_optional_u64(raw, "relational index manifest encoded checksum")?;
+                }
+                ["relational_index_manifest_encoded_sha256", raw] => {
+                    relational_index.manifest_encoded_sha256 =
+                        parse_optional_sha256(raw, "relational index manifest encoded SHA-256")?;
+                }
                 ["wal_generation", raw] => {
                     manifest.wal_generation = parse_u64(raw, "WAL generation")?;
                 }
@@ -2407,6 +2605,16 @@ impl DurableManifest {
             "property_projection_manifest_encoded_len",
             "property_projection_manifest_encoded_checksum",
             "property_projection_manifest_encoded_sha256",
+            "relational_index_generation",
+            "relational_index_source_commit_epoch",
+            "relational_index_catalog_schema_sha256",
+            "relational_index_root_set_sha256",
+            "relational_index_page_encoded_len",
+            "relational_index_page_encoded_checksum",
+            "relational_index_page_encoded_sha256",
+            "relational_index_manifest_encoded_len",
+            "relational_index_manifest_encoded_checksum",
+            "relational_index_manifest_encoded_sha256",
             "wal_generation",
             "checkpoint_epoch",
             "checkpoint_commit_epoch",
@@ -2423,6 +2631,7 @@ impl DurableManifest {
                 )));
             }
         }
+        manifest.relational_index_generation_artifacts = relational_index.finish()?;
         if manifest.safe_reclaim_commit_epoch == 0 && manifest.checkpoint_commit_epoch > 0 {
             manifest.safe_reclaim_commit_epoch = safe_reclaim_commit_epoch(
                 manifest.checkpoint_commit_epoch,
@@ -2500,6 +2709,57 @@ impl DurableManifest {
         body.push_str(&format!(
             "property_projection_manifest_encoded_sha256\t{}\n",
             encode_optional_sha256(self.property_projection_manifest_encoded_sha256)
+        ));
+        let relational_index = self.relational_index_generation_artifacts;
+        body.push_str(&format!(
+            "relational_index_generation\t{}\n",
+            encode_optional_u64(relational_index.map(|binding| binding.generation))
+        ));
+        body.push_str(&format!(
+            "relational_index_source_commit_epoch\t{}\n",
+            encode_optional_u64(relational_index.map(|binding| binding.source_commit_epoch))
+        ));
+        body.push_str(&format!(
+            "relational_index_catalog_schema_sha256\t{}\n",
+            encode_optional_sha256(relational_index.map(|binding| binding.catalog_schema_digest))
+        ));
+        body.push_str(&format!(
+            "relational_index_root_set_sha256\t{}\n",
+            encode_optional_sha256(relational_index.map(|binding| binding.root_set_digest))
+        ));
+        body.push_str(&format!(
+            "relational_index_page_encoded_len\t{}\n",
+            encode_optional_u64(relational_index.map(|binding| binding.page_artifact.encoded_len))
+        ));
+        body.push_str(&format!(
+            "relational_index_page_encoded_checksum\t{}\n",
+            encode_optional_u64(
+                relational_index.map(|binding| binding.page_artifact.encoded_crc32c)
+            )
+        ));
+        body.push_str(&format!(
+            "relational_index_page_encoded_sha256\t{}\n",
+            encode_optional_sha256(
+                relational_index.map(|binding| binding.page_artifact.encoded_sha256)
+            )
+        ));
+        body.push_str(&format!(
+            "relational_index_manifest_encoded_len\t{}\n",
+            encode_optional_u64(
+                relational_index.map(|binding| binding.manifest_artifact.encoded_len)
+            )
+        ));
+        body.push_str(&format!(
+            "relational_index_manifest_encoded_checksum\t{}\n",
+            encode_optional_u64(
+                relational_index.map(|binding| binding.manifest_artifact.encoded_crc32c)
+            )
+        ));
+        body.push_str(&format!(
+            "relational_index_manifest_encoded_sha256\t{}\n",
+            encode_optional_sha256(
+                relational_index.map(|binding| binding.manifest_artifact.encoded_sha256)
+            )
         ));
         body.push_str(&format!("wal_generation\t{}\n", self.wal_generation));
         body.push_str(&format!("checkpoint_epoch\t{}\n", self.checkpoint_epoch));

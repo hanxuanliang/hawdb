@@ -7,11 +7,12 @@ EXTENDS Integers, Naturals, FiniteSets
 (* primary, unique, secondary, and foreign-key-support role required by the *)
 (* pinned catalog/schema digest. Candidate pages and their root manifest     *)
 (* become durable before a matching                                          *)
-(* canonical checkpoint may select that generation. The canonical checkpoint *)
-(* does not reverse-reference a non-authoritative candidate, so candidate    *)
-(* admission failure, corruption, or a crash orphan never prevents canonical *)
-(* recovery. A DemandPaged integrity failure fails the selected read closed, *)
-(* while Shadow mode only records candidate unavailability.                  *)
+(* canonical checkpoint may bind that exact generation. The optional binding *)
+(* records the generation/epoch, exact root set, and both artifact digests.  *)
+(* Candidate admission failure publishes no binding, while corruption or a   *)
+(* crash orphan never prevents canonical recovery in non-authoritative modes. *)
+(* A DemandPaged integrity failure fails the selected read closed, while      *)
+(* Shadow mode only records candidate unavailability.                         *)
 (***************************************************************************)
 
 CONSTANT MaxGeneration, MaxEpoch, MaxPage
@@ -42,6 +43,7 @@ VARIABLES
     canonicalGeneration,
     canonicalEpoch,
     canonicalHistory,
+    canonicalCandidateBindings,
     buildPhase,
     buildGeneration,
     buildEpoch,
@@ -68,6 +70,7 @@ vars == <<
     canonicalGeneration,
     canonicalEpoch,
     canonicalHistory,
+    canonicalCandidateBindings,
     buildPhase,
     buildGeneration,
     buildEpoch,
@@ -95,6 +98,7 @@ Init ==
     /\ canonicalGeneration = 0
     /\ canonicalEpoch = 0
     /\ canonicalHistory = {Candidate(0, 0)}
+    /\ canonicalCandidateBindings = {}
     /\ buildPhase = "idle"
     /\ buildGeneration = 0
     /\ buildEpoch = 0
@@ -129,6 +133,7 @@ BeginCandidate ==
         canonicalGeneration,
         canonicalEpoch,
         canonicalHistory,
+        canonicalCandidateBindings,
         durableArtifacts,
         durableCandidateManifests,
         exactRootSetManifests,
@@ -156,6 +161,7 @@ CompleteRequiredRootSet ==
         canonicalGeneration,
         canonicalEpoch,
         canonicalHistory,
+        canonicalCandidateBindings,
         buildGeneration,
         buildEpoch,
         durableArtifacts,
@@ -189,6 +195,7 @@ InvalidateRequiredRootSet ==
         canonicalGeneration,
         canonicalEpoch,
         canonicalHistory,
+        canonicalCandidateBindings,
         buildGeneration,
         buildEpoch,
         durableArtifacts,
@@ -221,6 +228,7 @@ PersistCandidatePages ==
         canonicalGeneration,
         canonicalEpoch,
         canonicalHistory,
+        canonicalCandidateBindings,
         buildGeneration,
         buildEpoch,
         durableCandidateManifests,
@@ -260,6 +268,7 @@ PersistCandidateManifest ==
         canonicalGeneration,
         canonicalEpoch,
         canonicalHistory,
+        canonicalCandidateBindings,
         buildGeneration,
         buildEpoch,
         durableArtifacts,
@@ -282,12 +291,15 @@ PersistCandidateManifest ==
 PublishCheckpointWithCandidate ==
     /\ buildPhase = "candidate_durable"
     /\ Candidate(buildGeneration, buildEpoch) \in durableCandidateManifests
+    /\ Candidate(buildGeneration, buildEpoch) \in exactRootSetManifests
     /\ buildGeneration > canonicalGeneration
     /\ buildEpoch >= canonicalEpoch
     /\ canonicalGeneration' = buildGeneration
     /\ canonicalEpoch' = buildEpoch
     /\ canonicalHistory' =
         canonicalHistory \cup {Candidate(buildGeneration, buildEpoch)}
+    /\ canonicalCandidateBindings' =
+        canonicalCandidateBindings \cup {Candidate(buildGeneration, buildEpoch)}
     /\ buildPhase' = "idle"
     /\ buildGeneration' = 0
     /\ buildEpoch' = 0
@@ -325,7 +337,9 @@ PublishCheckpointWithoutCandidate ==
         /\ canonicalGeneration' = generation
         /\ canonicalEpoch' = epoch
         /\ canonicalHistory' = canonicalHistory \cup {Candidate(generation, epoch)}
+        /\ Candidate(generation, epoch) \notin durableCandidateManifests
     /\ UNCHANGED <<
+        canonicalCandidateBindings,
         buildPhase,
         buildGeneration,
         buildEpoch,
@@ -360,6 +374,7 @@ CrashBeforeCheckpoint ==
         canonicalGeneration,
         canonicalEpoch,
         canonicalHistory,
+        canonicalCandidateBindings,
         durableArtifacts,
         durableCandidateManifests,
         exactRootSetManifests,
@@ -388,6 +403,7 @@ OpenCanonical ==
         canonicalGeneration,
         canonicalEpoch,
         canonicalHistory,
+        canonicalCandidateBindings,
         buildPhase,
         buildGeneration,
         buildEpoch,
@@ -413,6 +429,8 @@ OpenExactCandidate ==
     /\ ~handleOpen
     /\ Candidate(canonicalGeneration, canonicalEpoch)
         \in durableCandidateManifests \ corruptCandidateManifests
+    /\ Candidate(canonicalGeneration, canonicalEpoch)
+        \in canonicalCandidateBindings
     /\ Candidate(canonicalGeneration, canonicalEpoch) \in exactRootSetManifests
     /\ \E mode \in {"shadow", "demand"}: selectionMode' = mode
     /\ handleOpen' = TRUE
@@ -429,6 +447,7 @@ OpenExactCandidate ==
         canonicalGeneration,
         canonicalEpoch,
         canonicalHistory,
+        canonicalCandidateBindings,
         buildPhase,
         buildGeneration,
         buildEpoch,
@@ -444,8 +463,10 @@ OpenExactCandidate ==
 ObserveMissingCandidate ==
     /\ canonicalOpen
     /\ ~handleOpen
-    /\ Candidate(canonicalGeneration, canonicalEpoch)
-        \notin durableCandidateManifests
+    /\ \/ Candidate(canonicalGeneration, canonicalEpoch)
+            \notin canonicalCandidateBindings
+       \/ Candidate(canonicalGeneration, canonicalEpoch)
+            \notin durableCandidateManifests
     /\ \E mode \in {"shadow", "demand"}: selectionMode' = mode
     /\ candidateUnavailable' = TRUE
     /\ demandReadFailed' = FALSE
@@ -453,6 +474,7 @@ ObserveMissingCandidate ==
         canonicalGeneration,
         canonicalEpoch,
         canonicalHistory,
+        canonicalCandidateBindings,
         buildPhase,
         buildGeneration,
         buildEpoch,
@@ -480,6 +502,7 @@ CorruptCandidateManifest ==
         canonicalGeneration,
         canonicalEpoch,
         canonicalHistory,
+        canonicalCandidateBindings,
         buildPhase,
         buildGeneration,
         buildEpoch,
@@ -507,6 +530,8 @@ RejectCorruptShadowCandidate ==
     /\ ~handleOpen
     /\ Candidate(canonicalGeneration, canonicalEpoch)
         \in corruptCandidateManifests
+    /\ Candidate(canonicalGeneration, canonicalEpoch)
+        \in canonicalCandidateBindings
     /\ selectionMode' = "shadow"
     /\ candidateUnavailable' = TRUE
     /\ demandReadFailed' = FALSE
@@ -514,6 +539,7 @@ RejectCorruptShadowCandidate ==
         canonicalGeneration,
         canonicalEpoch,
         canonicalHistory,
+        canonicalCandidateBindings,
         buildPhase,
         buildGeneration,
         buildEpoch,
@@ -539,6 +565,8 @@ RejectCorruptDemandCandidate ==
     /\ ~handleOpen
     /\ Candidate(canonicalGeneration, canonicalEpoch)
         \in corruptCandidateManifests
+    /\ Candidate(canonicalGeneration, canonicalEpoch)
+        \in canonicalCandidateBindings
     /\ selectionMode' = "demand"
     /\ candidateUnavailable' = TRUE
     /\ demandReadFailed' = TRUE
@@ -546,6 +574,7 @@ RejectCorruptDemandCandidate ==
         canonicalGeneration,
         canonicalEpoch,
         canonicalHistory,
+        canonicalCandidateBindings,
         buildPhase,
         buildGeneration,
         buildEpoch,
@@ -577,6 +606,7 @@ BeginPageRead ==
         canonicalGeneration,
         canonicalEpoch,
         canonicalHistory,
+        canonicalCandidateBindings,
         buildPhase,
         buildGeneration,
         buildEpoch,
@@ -606,6 +636,7 @@ ReadHealthyPage ==
         canonicalGeneration,
         canonicalEpoch,
         canonicalHistory,
+        canonicalCandidateBindings,
         buildPhase,
         buildGeneration,
         buildEpoch,
@@ -637,6 +668,7 @@ ReadCorruptPage ==
         canonicalGeneration,
         canonicalEpoch,
         canonicalHistory,
+        canonicalCandidateBindings,
         buildPhase,
         buildGeneration,
         buildEpoch,
@@ -665,6 +697,7 @@ FinishRead ==
         canonicalGeneration,
         canonicalEpoch,
         canonicalHistory,
+        canonicalCandidateBindings,
         buildPhase,
         buildGeneration,
         buildEpoch,
@@ -693,6 +726,7 @@ CorruptColdPage ==
         canonicalGeneration,
         canonicalEpoch,
         canonicalHistory,
+        canonicalCandidateBindings,
         buildPhase,
         buildGeneration,
         buildEpoch,
@@ -733,6 +767,7 @@ CrashDatabase ==
         canonicalGeneration,
         canonicalEpoch,
         canonicalHistory,
+        canonicalCandidateBindings,
         buildPhase,
         buildGeneration,
         buildEpoch,
@@ -770,6 +805,7 @@ TypeOK ==
     /\ canonicalGeneration \in Generations
     /\ canonicalEpoch \in Epochs
     /\ canonicalHistory \subseteq CandidateIds
+    /\ canonicalCandidateBindings \subseteq CandidateIds
     /\ buildPhase \in BuildPhases
     /\ buildGeneration \in Generations
     /\ buildEpoch \in Epochs
@@ -796,6 +832,11 @@ CandidateManifestHasDurablePages ==
     \A candidate \in durableCandidateManifests:
         candidate.generation \in durableArtifacts
 
+CanonicalBindingHasDurableExactCandidate ==
+    /\ canonicalCandidateBindings \subseteq durableCandidateManifests
+    /\ canonicalCandidateBindings \subseteq exactRootSetManifests
+    /\ canonicalCandidateBindings \subseteq canonicalHistory
+
 CanonicalGenerationNeverRegresses ==
     /\ Candidate(canonicalGeneration, canonicalEpoch) \in canonicalHistory
     /\ \A candidate \in canonicalHistory:
@@ -806,6 +847,7 @@ OpenHandlePinsSelectedCandidate ==
         /\ canonicalOpen
         /\ Candidate(handleGeneration, handleEpoch) \in canonicalHistory
         /\ Candidate(handleGeneration, handleEpoch) \in durableCandidateManifests
+        /\ Candidate(handleGeneration, handleEpoch) \in canonicalCandidateBindings
         /\ handleGeneration <= canonicalGeneration
 
 SelectableCandidateHasExactRequiredRoots ==

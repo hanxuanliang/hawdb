@@ -441,20 +441,22 @@ index-recovery, and page-cache obligations.
 `SkeinRelationalIndexShadowPublication.tla` models the generation-aligned but
 non-authoritative relational index candidate. Candidate fixed-slot pages become
 durable before the generation-specific candidate manifest, and a canonical
-checkpoint may select that generation only after the candidate contains the
-exact root set required by the pinned catalog/schema identity. The model
-abstracts primary, unique-constraint, declared-unique, secondary, and
-foreign-key-support descriptors into one immutable logical-completeness fact;
-later physical corruption remains separate and is still detected on access.
-Canonical publication may also succeed without a candidate, so admission
-failure and crash-orphaned future candidates cannot replace or disable the
-selected checkpoint. Exact generation/epoch open leaves page slots cold. A
-corrupt candidate is isolated from canonical open in `Shadow` mode, while an
-explicitly selected `DemandPaged` integrity failure fails the indexed read
-closed. Old selected generations remain available to already-open handles.
-The model does not make the candidate a uniqueness or foreign-key oracle;
-canonical manifest binding and constraint validation from the pinned view
-remain obligations of the later authoritative publication stage.
+checkpoint may bind that generation only after the candidate contains the
+exact root set required by the pinned catalog/schema identity. The concrete
+binding additionally records the page and generation-manifest length, CRC32C,
+and SHA-256. The model abstracts primary, unique-constraint, declared-unique,
+secondary, and foreign-key-support descriptors into one immutable
+logical-completeness fact; later page corruption remains separate and is still
+detected on access or by full scrub. Canonical publication may also succeed
+without a binding, so admission failure and crash-orphaned future candidates
+cannot replace or disable the selected checkpoint. Exact bound
+generation/epoch open leaves page slots cold. A corrupt candidate is isolated
+from canonical open in `Shadow` mode, while an explicitly selected
+`DemandPaged` integrity failure fails the indexed read closed. Old selected
+generations remain available to already-open handles. The model does not make
+the binding a uniqueness or foreign-key oracle; mandatory writable-open and
+constraint validation from the pinned view remain obligations of the later
+authoritative publication stage.
 
 The configured instance uses two non-zero generations, one non-zero commit
 epoch, and one demand-loaded page. This is sufficient to cover a selected old

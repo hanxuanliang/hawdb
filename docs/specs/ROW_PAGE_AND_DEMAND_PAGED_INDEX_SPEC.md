@@ -116,23 +116,34 @@ CRC32C, and SHA-256 of both the page artifact and generation manifest. Page-file
 integrity is accumulated while fixed slots are emitted, so producing this
 identity does not reread an index-sized file or add index-cardinality-sized
 metadata. Manifest integrity is computed from the already bounded encoded
-manifest. The identity is exposed in checkpoint publication evidence, but in
-this phase it is deliberately not written into the canonical manifest.
+manifest. A successful candidate is reverse-bound by the publish-last durable
+manifest for the same checkpoint generation. Candidate failure writes an
+all-absent binding; partially present identity or artifact metadata is invalid.
 
 These candidates remain non-authoritative. The canonical checkpoint does not
-contain a reverse reference to their manifest and therefore remains
-self-contained when a candidate is missing or corrupt. Open considers a
-generation-specific candidate only when its filename generation, internal
-generation/source-epoch fence, catalog schema digest, and exact required root
-set match the selected canonical checkpoint and pinned relational schema. A
-missing, extra, renamed, re-roled, or schema-drifted root rejects the candidate.
-A corrupt selected candidate does not prevent canonical open in `Shadow` mode.
+yet depend on the optional reverse reference for canonical recovery or
+constraint enforcement. Open selects only the bound generation and verifies
+the complete bounded generation manifest bytes against its length, CRC32C, and
+SHA-256, then verifies its internal generation/source-epoch, catalog schema,
+exact root set, and page artifact length. It does not scan the page artifact to
+recompute its full digest during normal open. An unbound candidate, including a
+legacy latest-pointer manifest whose epoch happens to match the checkpoint, is
+never selected. A missing, extra, renamed,
+re-roled, schema-drifted, or manifest-corrupt root rejects the candidate. A
+corrupt selected candidate does not prevent canonical open in `Shadow` mode.
 In `DemandPaged` mode, an integrity failure for the explicitly selected
 candidate fails the indexed statement closed instead of silently using
 materialized postings; missing or admission-unavailable candidates may still
-take the observable materialized fallback while that oracle exists. Binding
-the candidate manifest length, CRC32C, SHA-256, and root-set digest into the
-canonical checkpoint is the later authoritative publication stage.
+take the observable materialized fallback while that oracle exists. Making
+the binding mandatory for writable open and constraint validation is the later
+authoritative publication stage.
+
+Backup includes exactly the bound generation page artifact and generation
+manifest, rejects unbound or extra relational-index files, and verifies their
+full length, CRC32C, and SHA-256 before restore publication. Deep scrub also
+recomputes both full artifact digests and validates their decoded identity.
+Normal generation reclamation recognizes both file names, retains the previous
+generation, and does not unlink older files while a reader epoch is pinned.
 
 Relational primary keys are encoded as bounded, order-preserving logical row
 locators, including composite keys. Opening a valid candidate verifies only its
@@ -340,6 +351,10 @@ derived projections and follow the projection contract below.
    MUST NOT silently use stale postings.
 5. Rebuild publication is compare-and-publish against its source generation.
    A stale builder cannot replace a newer root.
+6. A non-authoritative checkpoint MAY omit its relational-index binding after
+   candidate failure. A present binding MUST name the same generation and
+   source commit epoch, contain the exact catalog/root-set digests, and include
+   complete page and generation-manifest length, CRC32C, and SHA-256 metadata.
 
 ## Database open and recovery
 
@@ -559,6 +574,10 @@ boundaries and MUST land before their corresponding production activation:
   generation-fenced publication, stale-builder rejection, cold open, on-demand
   leaf loading, and corrupt-page fail-closed behavior. Canonical uniqueness is
   still outside this first projection slice.
+- `SkeinRelationalIndexShadowPublication.tla`: optional checkpoint-bound
+  relational-index identity, complete root-set publication, candidate-failure
+  isolation, cold open, and mode-specific corruption handling. The binding is
+  not yet a writable-open or constraint dependency.
 - `SkeinIndexRecovery.tla`: base root plus ordered WAL delta equivalence,
   bounded dirty overlays, immutable candidate generations, crash recovery,
   schema invalidation, no partial replay visibility, and sound exact-key

@@ -6,7 +6,8 @@ use super::{
     checkpoint_generation_file, checksum_bytes, decode_string, encode_string,
     parse_canonical_adjacency_manifest_generation_file, parse_canonical_manifest_generation_file,
     parse_generation_file, parse_property_projection_manifest_generation_file,
-    parse_property_spill_manifest_generation_file, parse_u64,
+    parse_property_spill_manifest_generation_file, parse_relational_index_artifact_generation_file,
+    parse_relational_index_manifest_generation_file, parse_u64,
     property_projection_artifact_generation_file, property_projection_manifest_generation_file,
     property_spill_artifact_generation_file, property_spill_manifest_generation_file,
     read_durable_text_bytes_with_limit, relational_checkpoint_generation_file,
@@ -19,7 +20,9 @@ use skein_integrity::{IntegrityHasher, Sha256Digest};
 use skein_storage::{
     decode_relational_checkpoint_file, durable_replace_file, CanonicalAdjacencyManifest,
     CanonicalSegmentManifest, ManifestGeneration, PersistentPropertyProjectionManifest,
-    PropertySpillManifest, RelationalDecodeLimits, StorageRestoreReport,
+    PropertySpillManifest, RelationalDecodeLimits, RelationalIndexArtifactMetadata,
+    RelationalIndexGenerationIdentity, RelationalIndexShadowConfig, RelationalIndexShadowReader,
+    StorageRestoreReport,
 };
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
@@ -195,7 +198,9 @@ fn validate_backup_file_name(name: &str) -> Result<()> {
         || parse_generation_file(name, "properties.").is_some()
         || parse_property_spill_manifest_generation_file(name).is_some()
         || parse_generation_file(name, "property-index.").is_some()
-        || parse_property_projection_manifest_generation_file(name).is_some();
+        || parse_property_projection_manifest_generation_file(name).is_some()
+        || parse_relational_index_artifact_generation_file(name).is_some()
+        || parse_relational_index_manifest_generation_file(name).is_some();
     if !allowed || Path::new(name).file_name().and_then(|value| value.to_str()) != Some(name) {
         return Err(SkeinError::Storage(format!(
             "backup contains unsupported file name: {name}"
@@ -342,6 +347,7 @@ pub(super) fn validate_backup_files(
             "backup checkpoint metadata does not match the durable manifest".to_string(),
         ));
     }
+    validate_backup_relational_index_generation(root, files, manifest)?;
     let checkpoint_text = read_durable_text_bytes_with_limit(
         &fs::read(root.join(&checkpoint_name))?,
         "checkpoint",
@@ -583,6 +589,94 @@ pub(super) fn validate_backup_files(
                     .to_string(),
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_backup_relational_index_generation(
+    root: &Path,
+    files: &[BackupFileEntry],
+    manifest: DurableManifest,
+) -> Result<()> {
+    let relational_index_files = files
+        .iter()
+        .filter(|file| {
+            parse_relational_index_artifact_generation_file(&file.name).is_some()
+                || parse_relational_index_manifest_generation_file(&file.name).is_some()
+        })
+        .collect::<Vec<_>>();
+    let Some(binding) = manifest.relational_index_generation_artifacts else {
+        if relational_index_files.is_empty() {
+            return Ok(());
+        }
+        return Err(SkeinError::Storage(
+            "backup contains relational index files without a canonical manifest binding"
+                .to_string(),
+        ));
+    };
+    let page_name = skein_storage::relational_index_shadow_artifact_file(binding.generation);
+    let generation_manifest_name =
+        skein_storage::relational_index_shadow_manifest_generation_file(binding.generation);
+    let page = files
+        .iter()
+        .find(|file| file.name == page_name)
+        .ok_or_else(|| {
+            SkeinError::Storage(format!(
+                "backup is missing bound relational index page artifact: {page_name}"
+            ))
+        })?;
+    let generation_manifest = files
+        .iter()
+        .find(|file| file.name == generation_manifest_name)
+        .ok_or_else(|| {
+            SkeinError::Storage(format!(
+                "backup is missing bound relational index generation manifest: {generation_manifest_name}"
+            ))
+        })?;
+    if relational_index_files.len() != 2 {
+        return Err(SkeinError::Storage(
+            "backup relational index files do not match the single canonical generation binding"
+                .to_string(),
+        ));
+    }
+    validate_backup_relational_index_artifact(page, binding.page_artifact, "page artifact")?;
+    validate_backup_relational_index_artifact(
+        generation_manifest,
+        binding.manifest_artifact,
+        "generation manifest",
+    )?;
+    let reader = RelationalIndexShadowReader::open_generation(
+        root,
+        RelationalIndexGenerationIdentity {
+            generation: binding.generation,
+            source_commit_epoch: binding.source_commit_epoch,
+        },
+        RelationalIndexShadowConfig::default(),
+    )
+    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+    if reader.manifest().catalog_schema_digest != binding.catalog_schema_digest
+        || reader.manifest().root_set_digest != binding.root_set_digest
+    {
+        return Err(SkeinError::Storage(
+            "backup relational index manifest digests do not match the canonical binding"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_backup_relational_index_artifact(
+    file: &BackupFileEntry,
+    expected: RelationalIndexArtifactMetadata,
+    artifact: &str,
+) -> Result<()> {
+    if file.encoded_len != expected.encoded_len
+        || file.encoded_checksum != expected.encoded_crc32c
+        || file.sha256 != expected.encoded_sha256
+    {
+        return Err(SkeinError::Storage(format!(
+            "backup relational index {artifact} does not match the canonical binding"
+        )));
     }
     Ok(())
 }

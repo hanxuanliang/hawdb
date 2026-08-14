@@ -231,6 +231,10 @@ impl GraphStore {
                 .transpose()?;
             let relational_index_candidate =
                 self.prepare_relational_index_candidate(generation, commit_epoch);
+            let relational_index = relational_index_candidate
+                .as_ref()
+                .and_then(|prepared| prepared.candidate.as_ref())
+                .map(|report| report.generation_artifacts);
             let checkpoint_artifact = durable.write_checkpoint(
                 CheckpointImage {
                     catalog,
@@ -271,6 +275,7 @@ impl GraphStore {
                     canonical_adjacency_manifest: canonical_adjacency_manifest_artifact,
                     property_spill_manifest: property_spill_manifest_artifact,
                     property_projection_manifest: property_projection_manifest_artifact,
+                    relational_index,
                 },
                 staging_path: staging_path.clone(),
             })
