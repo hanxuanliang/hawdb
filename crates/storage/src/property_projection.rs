@@ -27,6 +27,7 @@ const BLOCK_ID_BASE: u64 = 3 << 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PersistentPropertyProjectionKind {
+    Equality,
     Range,
     FullText,
 }
@@ -563,6 +564,27 @@ impl PersistentPropertyProjectionWriter {
                         continue;
                     };
                     match definition.kind {
+                        PersistentPropertyProjectionKind::Equality => {
+                            let encoded = encode_standalone_value(value)?;
+                            if encoded.len() as u64 > self.config.max_index_key_bytes.get() {
+                                definitions[*definition_index].complete = false;
+                                continue;
+                            }
+                            self.emit(
+                                EntryKey {
+                                    kind: definition.kind,
+                                    label_id: *label,
+                                    property: definition.property.clone(),
+                                    value: value.clone(),
+                                    node_id: node.id,
+                                },
+                                &mut runs,
+                                &mut chunk,
+                                &mut chunk_bytes,
+                                &mut generated_entries,
+                                &mut peak_resident_bytes,
+                            )?;
+                        }
                         PersistentPropertyProjectionKind::Range => {
                             if !is_range_value(value) {
                                 continue;
@@ -1295,6 +1317,29 @@ impl PersistentPropertyProjectionReader {
         )
     }
 
+    pub fn scan_equality_candidates(
+        &self,
+        label_id: LabelId,
+        property: &str,
+        value: &Value,
+        mut consumer: impl FnMut(
+            NodeId,
+        )
+            -> Result<CanonicalScanControl, PersistentPropertyProjectionError>,
+    ) -> Result<
+        (PersistentPropertyProjectionReadReport, CanonicalScanControl),
+        PersistentPropertyProjectionError,
+    > {
+        self.scan_candidates(
+            label_id,
+            property,
+            PersistentPropertyProjectionKind::Equality,
+            |candidate| candidate == value,
+            |block| block.min_key <= *value && *value <= block.max_key,
+            &mut consumer,
+        )
+    }
+
     pub fn scan_full_text_token_candidates(
         &self,
         label_id: LabelId,
@@ -1326,18 +1371,15 @@ impl PersistentPropertyProjectionReader {
         token: &str,
     ) -> u64 {
         let token = Value::String(token.to_string());
-        self.manifest
-            .blocks
-            .iter()
-            .filter(|block| {
-                block.kind == PersistentPropertyProjectionKind::FullText
-                    && block.label_id == label_id
-                    && block.property == property
-                    && block.min_key <= token
-                    && token <= block.max_key
-            })
-            .map(|block| u64::from(block.entry_count))
-            .sum()
+        self.blocks_for_definition(
+            PersistentPropertyProjectionKind::FullText,
+            label_id,
+            property,
+        )
+        .iter()
+        .filter(|block| block.min_key <= token && token <= block.max_key)
+        .map(|block| u64::from(block.entry_count))
+        .sum()
     }
 
     fn scan_candidates(
@@ -1361,9 +1403,7 @@ impl PersistentPropertyProjectionReader {
             ));
         }
         let mut report = PersistentPropertyProjectionReadReport::default();
-        for block in self.manifest.blocks.iter().filter(|block| {
-            block.kind == kind && block.label_id == label_id && block.property == property
-        }) {
+        for block in self.blocks_for_definition(kind, label_id, property) {
             report.blocks_considered = report.blocks_considered.saturating_add(1);
             if !block_matches(block) {
                 report.blocks_pruned = report.blocks_pruned.saturating_add(1);
@@ -1386,6 +1426,22 @@ impl PersistentPropertyProjectionReader {
             }
         }
         Ok((report, CanonicalScanControl::Continue))
+    }
+
+    fn blocks_for_definition(
+        &self,
+        kind: PersistentPropertyProjectionKind,
+        label_id: LabelId,
+        property: &str,
+    ) -> &[PersistentPropertyProjectionBlockDescriptor] {
+        let target = (kind, label_id, property);
+        let start = self.manifest.blocks.partition_point(|block| {
+            (block.kind, block.label_id, block.property.as_str()) < target
+        });
+        let length = self.manifest.blocks[start..].partition_point(|block| {
+            (block.kind, block.label_id, block.property.as_str()) == target
+        });
+        &self.manifest.blocks[start..start + length]
     }
 
     fn read_block(
@@ -1584,6 +1640,7 @@ fn block_descriptor_key(
 
 fn kind_tag(kind: PersistentPropertyProjectionKind) -> u8 {
     match kind {
+        PersistentPropertyProjectionKind::Equality => 3,
         PersistentPropertyProjectionKind::Range => 1,
         PersistentPropertyProjectionKind::FullText => 2,
     }
@@ -1595,6 +1652,7 @@ fn kind_from_tag(
     match tag {
         1 => Ok(PersistentPropertyProjectionKind::Range),
         2 => Ok(PersistentPropertyProjectionKind::FullText),
+        3 => Ok(PersistentPropertyProjectionKind::Equality),
         _ => Err(PersistentPropertyProjectionError::Corrupt(format!(
             "invalid property projection kind {tag}"
         ))),
@@ -1802,7 +1860,7 @@ mod tests {
     }
 
     #[test]
-    fn external_projection_round_trips_range_and_full_text_candidates() {
+    fn external_projection_round_trips_equality_range_and_full_text_candidates() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1821,6 +1879,12 @@ mod tests {
             ..PersistentPropertyProjectionConfig::default()
         };
         let definitions = vec![
+            PersistentPropertyProjectionDefinition {
+                label_id: LabelId(1),
+                property: "rank".to_string(),
+                kind: PersistentPropertyProjectionKind::Equality,
+                complete: false,
+            },
             PersistentPropertyProjectionDefinition {
                 label_id: LabelId(1),
                 property: "rank".to_string(),
@@ -1851,14 +1915,29 @@ mod tests {
         let manifest =
             PersistentPropertyProjectionManifest::decode(&output.manifest.encode().unwrap())
                 .unwrap();
+        let block_count = manifest.blocks.len();
+        let cache = Arc::new(SegmentCache::new(1024 * 1024));
         let reader = PersistentPropertyProjectionReader::open(
             &path,
             manifest,
-            Arc::new(SegmentCache::new(1024 * 1024)),
+            Arc::clone(&cache),
             StoreId(4),
             NonZeroU64::new(1024 * 1024).unwrap(),
         )
         .unwrap();
+        assert_eq!(cache.snapshot().resident_bytes, 0);
+        let mut equality = Vec::new();
+        let (equality_report, _) = reader
+            .scan_equality_candidates(LabelId(1), "rank", &Value::Int(20), |id| {
+                equality.push(id.0);
+                Ok(CanonicalScanControl::Continue)
+            })
+            .unwrap();
+        assert_eq!(equality, vec![2]);
+        assert_eq!(equality_report.blocks_read, 1);
+        assert!(equality_report.blocks_considered < block_count as u64);
+        assert!(equality_report.blocks_read < block_count as u64);
+        assert_eq!(cache.snapshot().entry_count, 1);
         let mut range = Vec::new();
         reader
             .scan_range_candidates(

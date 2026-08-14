@@ -6562,6 +6562,9 @@ mod tests {
                 .create_range_property_index(&mut catalog, "Memory", "rank")
                 .unwrap();
             store
+                .create_property_index(&mut catalog, "Memory", "key")
+                .unwrap();
+            store
                 .create_full_text_property_index(&mut catalog, "Memory", "content")
                 .unwrap();
             first_id = store
@@ -6569,6 +6572,7 @@ mod tests {
                     &mut catalog,
                     "Memory",
                     properties([
+                        ("key", Value::String("first".to_string())),
                         ("rank", Value::Int(10)),
                         ("content", Value::String("alpha beta".to_string())),
                     ]),
@@ -6579,6 +6583,7 @@ mod tests {
                     &mut catalog,
                     "Memory",
                     properties([
+                        ("key", Value::String("second".to_string())),
                         ("rank", Value::Int(20)),
                         ("content", Value::String("beta gamma".to_string())),
                     ]),
@@ -6589,6 +6594,7 @@ mod tests {
                     &mut catalog,
                     "Memory",
                     properties([
+                        ("key", Value::String("third".to_string())),
                         ("rank", Value::Int(30)),
                         ("content", Value::String("delta".to_string())),
                     ]),
@@ -6598,6 +6604,7 @@ mod tests {
 
             let label_id = catalog.label_id("Memory").unwrap();
             let manifest = store.persistent_property_projection_manifest().unwrap();
+            assert!(manifest.supports(label_id, "key", PersistentPropertyProjectionKind::Equality));
             assert!(manifest.supports(label_id, "rank", PersistentPropertyProjectionKind::Range));
             assert!(manifest.supports(
                 label_id,
@@ -6627,6 +6634,19 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(range_ids, vec![second_id]);
+            let mut equality_ids = Vec::new();
+            store
+                .visit_nodes_by_property_owned(
+                    label_id,
+                    "key",
+                    &[Value::String("second".to_string())],
+                    |node| {
+                        equality_ids.push(node.id);
+                        GraphScanControl::Continue
+                    },
+                )
+                .unwrap();
+            assert_eq!(equality_ids, vec![second_id]);
             let mut full_text_ids = Vec::new();
             store
                 .visit_nodes_by_full_text_property_owned(label_id, "content", "beta", |node| {
@@ -6639,6 +6659,15 @@ mod tests {
             let second_filter = PropertyFilter::IdEq {
                 value: Value::Int(second_id.0 as i64),
             };
+            store
+                .set_node_property(
+                    &mut catalog,
+                    "Memory",
+                    Some(&second_filter),
+                    "key",
+                    Value::String("updated".to_string()),
+                )
+                .unwrap();
             store
                 .set_node_property(
                     &mut catalog,
@@ -6668,6 +6697,7 @@ mod tests {
                     &mut catalog,
                     "Memory",
                     properties([
+                        ("key", Value::String("second".to_string())),
                         ("rank", Value::Int(18)),
                         ("content", Value::String("beta epsilon".to_string())),
                     ]),
@@ -6688,6 +6718,19 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(range_ids, vec![delta_id]);
+            equality_ids.clear();
+            store
+                .visit_nodes_by_property_owned(
+                    label_id,
+                    "key",
+                    &[Value::String("second".to_string())],
+                    |node| {
+                        equality_ids.push(node.id);
+                        GraphScanControl::Continue
+                    },
+                )
+                .unwrap();
+            assert_eq!(equality_ids, vec![delta_id]);
             full_text_ids.clear();
             store
                 .visit_nodes_by_full_text_property_owned(label_id, "content", "beta", |node| {
@@ -6723,6 +6766,19 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(range_ids, vec![delta_id]);
+            let mut equality_ids = Vec::new();
+            store
+                .visit_nodes_by_property_owned(
+                    label_id,
+                    "key",
+                    &[Value::String("second".to_string())],
+                    |node| {
+                        equality_ids.push(node.id);
+                        GraphScanControl::Continue
+                    },
+                )
+                .unwrap();
+            assert_eq!(equality_ids, vec![delta_id]);
         }
         {
             let mut file = OpenOptions::new()

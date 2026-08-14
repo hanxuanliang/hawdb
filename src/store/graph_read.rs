@@ -855,23 +855,67 @@ impl GraphStore {
             });
         };
         let mut seen = BTreeSet::new();
+        let equality_projection =
+            self.persistent_property_projection
+                .as_ref()
+                .filter(|projection| {
+                    projection.manifest().supports(
+                        label_id,
+                        property,
+                        PersistentPropertyProjectionKind::Equality,
+                    )
+                });
         for value in values {
             let mut graph_control = GraphScanControl::Continue;
-            let (_, canonical_control) = reader
-                .scan_nodes_by_property_control(label_id, property, value, |node| {
-                    if self.node_tombstones.contains(&node.id)
-                        || self.nodes.contains_key(&node.id)
-                        || !seen.insert(node.id)
-                    {
-                        return Ok(CanonicalScanControl::Continue);
-                    }
-                    if consumer(node) == GraphScanControl::Stop {
-                        graph_control = GraphScanControl::Stop;
-                        return Ok(CanonicalScanControl::Stop);
-                    }
-                    Ok(CanonicalScanControl::Continue)
-                })
-                .map_err(canonical_segment_error)?;
+            let canonical_control = if let Some(projection) = equality_projection {
+                let (_, control) = projection
+                    .scan_equality_candidates(label_id, property, value, |node_id| {
+                        if self.node_tombstones.contains(&node_id)
+                            || self.nodes.contains_key(&node_id)
+                            || !seen.insert(node_id)
+                        {
+                            return Ok(CanonicalScanControl::Continue);
+                        }
+                        let node = reader.get_node(node_id)?.ok_or_else(|| {
+                            PersistentPropertyProjectionError::Corrupt(format!(
+                                "property projection references missing canonical node {}",
+                                node_id.0
+                            ))
+                        })?;
+                        if !node.labels.contains(&label_id)
+                            || node.properties.get(property) != Some(value)
+                        {
+                            return Err(PersistentPropertyProjectionError::Corrupt(format!(
+                                "property projection candidate {} fails its canonical equality predicate",
+                                node_id.0
+                            )));
+                        }
+                        if consumer(node) == GraphScanControl::Stop {
+                            graph_control = GraphScanControl::Stop;
+                            return Ok(CanonicalScanControl::Stop);
+                        }
+                        Ok(CanonicalScanControl::Continue)
+                    })
+                    .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+                control
+            } else {
+                let (_, control) = reader
+                    .scan_nodes_by_property_control(label_id, property, value, |node| {
+                        if self.node_tombstones.contains(&node.id)
+                            || self.nodes.contains_key(&node.id)
+                            || !seen.insert(node.id)
+                        {
+                            return Ok(CanonicalScanControl::Continue);
+                        }
+                        if consumer(node) == GraphScanControl::Stop {
+                            graph_control = GraphScanControl::Stop;
+                            return Ok(CanonicalScanControl::Stop);
+                        }
+                        Ok(CanonicalScanControl::Continue)
+                    })
+                    .map_err(canonical_segment_error)?;
+                control
+            };
             if canonical_control == CanonicalScanControl::Stop {
                 return Ok(graph_control);
             }

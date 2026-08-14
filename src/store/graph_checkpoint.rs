@@ -120,18 +120,18 @@ impl GraphStore {
         });
         let property_projection_definitions = catalog
             .property_indexes()
-            .filter_map(|index| {
+            .map(|index| {
                 let kind = match index.kind {
+                    IndexKind::Equality => PersistentPropertyProjectionKind::Equality,
                     IndexKind::Range => PersistentPropertyProjectionKind::Range,
                     IndexKind::FullText => PersistentPropertyProjectionKind::FullText,
-                    IndexKind::Equality => return None,
                 };
-                Some(PersistentPropertyProjectionDefinition {
+                PersistentPropertyProjectionDefinition {
                     label_id: index.label_id,
                     property: index.property.clone(),
                     kind,
                     complete: false,
-                })
+                }
             })
             .collect::<Vec<_>>();
         let merged_relationships = self.canonical_base.as_ref().map(|_| {

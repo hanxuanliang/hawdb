@@ -19,6 +19,7 @@ readonly specifications=(
   SkeinGossipDelivery
   SkeinSystemSchemaUpgrade
   SkeinPropertyIndexPruning
+  SkeinIndexPublication
   SkeinProjectionDurability
   SkeinCompactionVisibility
   SkeinColumnGroupManifest

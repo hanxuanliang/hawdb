@@ -51,9 +51,12 @@ Non-goals:
 
 The current implementation already provides immutable COW row collections,
 reader generation pins, strict WAL recovery, generation-scoped segment range
-reads, and a byte-bounded digest-verified cache. Relational index postings are
-currently rebuilt from all rows when a checkpoint is opened. Graph indexes are
-also materialized as in-memory COW collections.
+reads, and a byte-bounded digest-verified cache. Equality, range, and full-text
+graph-property indexes have a checkpoint-generation projection whose payload
+blocks remain cold until a query needs them; post-checkpoint WAL changes stay
+in the COW overlay and are merged at read time. Relational, composite-property,
+constraint, and remaining graph index state is still materialized or rebuilt
+in memory and remains migration work.
 
 The migration defined here is incremental:
 
@@ -64,6 +67,13 @@ The migration defined here is incremental:
 5. activate canonical row-page reads only after separate evidence.
 
 No phase may silently serve a mixture of row data and stale index roots.
+
+The equality graph-property projection is the first activated slice of step 4.
+Its manifest is generation/epoch fenced and size bounded, opening its reader
+does not populate the segment cache, and a lookup reads only key-overlapping
+blocks. It is a rebuildable query index, not the uniqueness oracle. Missing or
+incomplete projection coverage uses the canonical bounded scan; corruption in
+a selected block fails closed.
 
 ## Identities and terminology
 
@@ -347,8 +357,10 @@ boundaries and MUST land before their corresponding production activation:
   wait-for deadlocks, escalation, savepoint release, and durable publication.
 - planned `SkeinCowPagePublication.tla`: WAL ordering, immutable page publication,
   reader pins, crash recovery, and reclamation.
-- planned `SkeinIndexPublication.tla`: row/index generation agreement, uniqueness,
-  failed publication, rebuild publication, and stale-root rejection.
+- `SkeinIndexPublication.tla`: atomic row/index root agreement, durable and
+  generation-fenced publication, stale-builder rejection, cold open, on-demand
+  leaf loading, and corrupt-page fail-closed behavior. Canonical uniqueness is
+  still outside this first projection slice.
 - planned `SkeinIndexRecovery.tla`: base root plus ordered WAL delta equivalence,
   bounded flush, crash recovery, and no partial replay visibility.
 - planned `SkeinPageCacheAdmission.tla`: resident/pinned/dirty accounting, eviction,
