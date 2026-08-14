@@ -255,6 +255,31 @@ adjacency-range lock. Statement rollback releases locks obtained after its
 savepoint. Commit, rollback, cancellation, timeout, and panic release all
 transaction locks.
 
+Graph mutation locking uses a two-pass COW protocol. The first pass stages the
+mutation only in the transaction-private workspace and captures its exact WAL
+footprint. Skein restores that statement workspace, acquires the derived
+logical identities, and deterministically replays the statement. Node and
+relationship ID allocation locks prevent two pinned snapshots from allocating
+the same physical identity. Shared node-delete guards held by relationship
+creation conflict with an exclusive guard held by node deletion. Typed incoming
+and outgoing adjacency locks protect the posting groups changed by relationship
+create/delete. Label and relationship-type locks cover uniqueness and other
+catalog constraints; schema changes and any footprint that cannot be derived
+completely use the database lock.
+
+The concrete graph identities are valid only for the snapshot used by the
+first pass. If the published epoch advances before a newly derived lock set is
+admitted, Skein rejects the transaction instead of refreshing and replaying
+against an uncovered access set. A property write covered by a uniqueness
+constraint takes exclusive constraint-subject coverage; a non-unique property
+write retains shared subject coverage plus its exclusive entity lock.
+
+A bounded lock timeout restores the statement's prior lock set and leaves the
+transaction usable. A deadlock victim or lock-budget rejection aborts the whole
+transaction and releases all locks. A failure during either staging or replay
+restores the statement's graph workspace and prior lock set. Successful
+statements retain their logical locks until commit or transaction rollback.
+
 Row locks remain correct while index pages are evicted or physically rewritten
 because lock identities never contain a `PageId`, file offset, or cache lease.
 

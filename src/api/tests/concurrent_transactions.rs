@@ -140,6 +140,215 @@ fn pessimistic_transaction_blocks_other_writers_with_a_bounded_wait() {
 }
 
 #[test]
+fn disjoint_graph_node_updates_can_stage_concurrently() {
+    let db = Database::new().into_concurrent();
+    db.query("CREATE (:Memory {id: 1, state: 'before'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 2, state: 'before'})")
+        .unwrap();
+    let mut first = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_secs(1),
+        ))
+        .unwrap();
+    let mut second = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_secs(1),
+        ))
+        .unwrap();
+
+    first
+        .query("MATCH (m:Memory) WHERE id(m) = 0 SET m.state = 'first'")
+        .unwrap();
+    second
+        .query("MATCH (m:Memory) WHERE id(m) = 1 SET m.other_state = 'second'")
+        .unwrap();
+    first.commit().unwrap();
+    second.commit().unwrap();
+
+    let rows = db
+        .query("MATCH (m:Memory) RETURN m.id AS id ORDER BY id")
+        .unwrap()
+        .rows;
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
+fn graph_create_allocation_lock_prevents_duplicate_physical_ids() {
+    let db = Database::new().into_concurrent();
+    let mut owner = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_secs(1),
+        ))
+        .unwrap();
+    owner.query("CREATE (:Memory {id: 1})").unwrap();
+
+    let mut waiter = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_millis(25),
+        ))
+        .unwrap();
+    let error = waiter.query("CREATE (:Memory {id: 2})").unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("transaction lock wait timed out"));
+    owner.commit().unwrap();
+}
+
+#[test]
+fn graph_unique_property_updates_serialize_by_constraint_subject() {
+    let db = Database::new().into_concurrent();
+    db.query("CREATE CONSTRAINT ON :Memory(slug) ASSERT UNIQUE")
+        .unwrap();
+    db.query("CREATE (:Memory {slug: 'first'})").unwrap();
+    db.query("CREATE (:Memory {slug: 'second'})").unwrap();
+    let mut owner = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_secs(1),
+        ))
+        .unwrap();
+    owner
+        .query("MATCH (m:Memory) WHERE id(m) = 0 SET m.slug = 'shared'")
+        .unwrap();
+
+    let mut waiter = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_millis(25),
+        ))
+        .unwrap();
+    let error = waiter
+        .query("MATCH (m:Memory) WHERE id(m) = 1 SET m.slug = 'shared'")
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("transaction lock wait timed out"));
+    owner.rollback();
+}
+
+#[test]
+fn graph_lock_derivation_rejects_a_changed_snapshot() {
+    let db = Database::new().into_concurrent();
+    db.query("CREATE (:Memory {id: 1, state: 'before'})")
+        .unwrap();
+    let mut stale = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_secs(1),
+        ))
+        .unwrap();
+
+    db.query("CREATE (:Entity {id: 2})").unwrap();
+
+    let error = stale
+        .query("MATCH (m:Memory) WHERE m.id = 1 SET m.state = 'after'")
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("cannot acquire a graph lock after its snapshot changed"));
+}
+
+#[test]
+fn relationship_creation_conflicts_with_endpoint_delete_guard() {
+    let db = Database::new().into_concurrent();
+    db.query("CREATE (:Memory {id: 'source'})").unwrap();
+    db.query("CREATE (:Entity {id: 'target'})").unwrap();
+    let mut deleter = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_secs(1),
+        ))
+        .unwrap();
+    deleter
+        .query("MATCH (m:Memory {id: 'source'}) DETACH DELETE m")
+        .unwrap();
+
+    let mut creator = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_millis(25),
+        ))
+        .unwrap();
+    let error = creator
+        .query("MATCH (m:Memory {id: 'source'}), (e:Entity {id: 'target'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("transaction lock wait timed out"));
+    deleter.rollback();
+}
+
+#[test]
+fn failed_graph_statement_restores_workspace_and_statement_locks() {
+    let db = Database::new().into_concurrent();
+    db.query("CREATE CONSTRAINT ON :Memory(id) ASSERT UNIQUE")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'existing'})").unwrap();
+    let mut transaction = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_secs(1),
+        ))
+        .unwrap();
+    transaction
+        .query("CREATE (:Entity {id: 'retained'})")
+        .unwrap();
+
+    let error = transaction
+        .query("CREATE (:Memory {id: 'existing'})")
+        .unwrap_err();
+    assert!(error.to_string().contains("unique constraint violation"));
+    assert_eq!(
+        transaction
+            .query("MATCH (e:Entity {id: 'retained'}) RETURN e.id AS id")
+            .unwrap()
+            .rows
+            .len(),
+        1
+    );
+    transaction.rollback();
+}
+
+#[test]
+fn graph_lock_failure_restores_the_failed_statement_only() {
+    let db = Database::new().into_concurrent();
+    db.query("CREATE (:Memory {id: 'one', state: 'before'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'two', state: 'before'})")
+        .unwrap();
+    let mut owner = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_secs(1),
+        ))
+        .unwrap();
+    owner
+        .query("MATCH (m:Memory) WHERE id(m) = 0 SET m.state = 'owner'")
+        .unwrap();
+
+    let mut waiter = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_millis(25),
+        ))
+        .unwrap();
+    waiter
+        .query("MATCH (m:Memory) WHERE id(m) = 1 SET m.state = 'retained'")
+        .unwrap();
+    let error = waiter
+        .query("MATCH (m:Memory) WHERE id(m) = 0 SET m.state = 'discarded'")
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("transaction lock wait timed out"));
+    waiter.commit().unwrap();
+
+    owner.rollback();
+    let rows = db
+        .query("MATCH (m:Memory) RETURN m.state AS state ORDER BY m.id")
+        .unwrap()
+        .rows;
+    assert_eq!(rows[0].get("state"), Some(&Value::String("before".into())));
+    assert_eq!(
+        rows[1].get("state"),
+        Some(&Value::String("retained".into()))
+    );
+}
+
+#[test]
 fn disjoint_primary_key_point_locks_allow_both_pessimistic_writers_to_commit() {
     let db = Database::new().into_concurrent();
     db.query_sql("CREATE TABLE public.messages (id BIGINT PRIMARY KEY, body TEXT NOT NULL)")

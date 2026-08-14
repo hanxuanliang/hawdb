@@ -31,11 +31,12 @@ use crate::store::{
     restore_storage_backup, AdjacencyConsistencyReport, AdjacencyConsolidationPlan,
     AdjacencyConsolidationReport, AdjacencyDirection, AdjacencyLayout,
     BasicStatisticsConsistencyReport, DegreeStatisticsConsistencyReport,
-    DistinctValueStatisticsConsistencyReport, DurabilityPolicy, GraphMutationTransaction,
-    GraphSnapshotNodeImport, GraphSnapshotRelationshipImport, GraphStore, NodeId, NodeRecord,
-    PreparedCheckpoint, PropertyIndexConsistencyReport, PropertyIndexProjectionRebuildAction,
-    PublishedReadView, RecoveryMode, RelId, RelRecord, SchemaMaintenanceAction,
-    SegmentCacheSnapshot, SkeinSnapshotRowsImport, StorageBackupReport, StoragePressureSnapshot,
+    DistinctValueStatisticsConsistencyReport, DurabilityPolicy, GraphMutationLockFootprint,
+    GraphMutationSavepoint, GraphMutationTransaction, GraphSnapshotNodeImport,
+    GraphSnapshotRelationshipImport, GraphStore, NodeId, NodeRecord, PreparedCheckpoint,
+    PropertyIndexConsistencyReport, PropertyIndexProjectionRebuildAction, PublishedReadView,
+    RecoveryMode, RelId, RelRecord, SchemaMaintenanceAction, SegmentCacheSnapshot,
+    SkeinSnapshotRowsImport, StorageBackupReport, StoragePressureSnapshot,
     StorageReclamationWatermark, StorageRecoveryReport, StorageRestoreReport, StorageScrubReport,
     StoreStableIdMapping, WalReplayConfig,
 };
@@ -511,7 +512,7 @@ pub struct DatabaseTransaction<'a> {
 }
 
 #[derive(Debug)]
-struct DatabaseTransactionRuntime {
+pub(super) struct DatabaseTransactionRuntime {
     optimizer: CascadesOptimizer,
     plan_cache: SharedState<PlanCache>,
     optimizer_planning_cache: SharedState<OptimizerPlanningCache>,
@@ -520,10 +521,16 @@ struct DatabaseTransactionRuntime {
 }
 
 #[derive(Debug)]
-struct DatabaseTransactionState {
+pub(super) struct DatabaseTransactionState {
     graph_transaction: Option<GraphMutationTransaction>,
     relational_transaction: skein_storage::RelationalTransaction,
     relational_state: skein_storage::RelationalState,
+}
+
+pub(super) struct GraphTransactionStatementOutcome {
+    pub(crate) output: QueryOutput,
+    pub(crate) savepoint: Option<GraphMutationSavepoint>,
+    pub(crate) lock_footprint: GraphMutationLockFootprint,
 }
 
 #[derive(Debug)]
@@ -18042,6 +18049,13 @@ impl DatabaseTransactionState {
         self.relational_transaction.writes.clear();
     }
 
+    pub(crate) fn restore_graph_statement(&mut self, savepoint: GraphMutationSavepoint) {
+        self.graph_transaction
+            .as_mut()
+            .expect("database transaction must own a graph workspace")
+            .restore(savepoint);
+    }
+
     fn take_for_commit(&mut self) -> Self {
         Self {
             graph_transaction: self.graph_transaction.take(),
@@ -18058,7 +18072,7 @@ fn execute_graph_transaction_statement(
     cypher_text: &str,
     statement: &cypher::Statement,
     parameters: &BTreeMap<String, Value>,
-) -> Result<QueryOutput> {
+) -> Result<GraphTransactionStatementOutcome> {
     query_work_request_for_statement(system_variables, statement)?;
     let optimizer_search =
         query_statement_variables_for_statement(system_variables, statement)?.optimizer_search;
@@ -18102,39 +18116,39 @@ fn execute_graph_transaction_statement(
             },
             _ => runtime.config.mutation_limits,
         };
-        let mut return_savepoint = is_mutation_return.then(|| transaction.savepoint());
-        let staged = if is_mutation_return {
-            transaction.stage_mutation_without_commit_rows(mutation, mutation_limits)
-        } else {
-            transaction.stage_mutation_with_limits(mutation, mutation_limits)
-        };
-        let summary = match staged {
-            Ok(summary) => summary,
+        let statement_savepoint = transaction.savepoint();
+        let execution = (|| {
+            let staged = if is_mutation_return {
+                transaction.stage_mutation_without_commit_rows(mutation, mutation_limits)
+            } else {
+                transaction.stage_mutation_with_limits(mutation, mutation_limits)
+            };
+            let summary = staged?;
+            let returned_rows = executor::project_staged_mutation_return_rows(
+                &optimized.physical_plan,
+                transaction.catalog(),
+                transaction.store(),
+                &summary.rows,
+                runtime.config.mutation_limits,
+            )?;
+            Ok((
+                QueryOutput {
+                    rows: returned_rows.unwrap_or_default(),
+                },
+                transaction.lock_footprint_since(&statement_savepoint)?,
+            ))
+        })();
+        return match execution {
+            Ok((output, lock_footprint)) => Ok(GraphTransactionStatementOutcome {
+                output,
+                lock_footprint,
+                savepoint: Some(statement_savepoint),
+            }),
             Err(error) => {
-                if let Some(savepoint) = return_savepoint.take() {
-                    transaction.restore(savepoint);
-                }
-                return Err(error);
+                transaction.restore(statement_savepoint);
+                Err(error)
             }
         };
-        let returned_rows = match executor::project_staged_mutation_return_rows(
-            &optimized.physical_plan,
-            transaction.catalog(),
-            transaction.store(),
-            &summary.rows,
-            runtime.config.mutation_limits,
-        ) {
-            Ok(rows) => rows,
-            Err(error) => {
-                if let Some(savepoint) = return_savepoint.take() {
-                    transaction.restore(savepoint);
-                }
-                return Err(error);
-            }
-        };
-        return Ok(QueryOutput {
-            rows: returned_rows.unwrap_or_default(),
-        });
     }
 
     let query_result = {
@@ -18155,7 +18169,11 @@ fn execute_graph_transaction_statement(
         })
     };
     transaction.store().poison_on_storage_error(&query_result);
-    query_result
+    query_result.map(|output| GraphTransactionStatementOutcome {
+        output,
+        savepoint: None,
+        lock_footprint: GraphMutationLockFootprint::default(),
+    })
 }
 
 fn execute_database_transaction_query(
@@ -18164,6 +18182,40 @@ fn execute_database_transaction_query(
     cypher_text: &str,
     parameters: &BTreeMap<String, Value>,
 ) -> Result<QueryOutput> {
+    let statement = cypher::parse(cypher_text)?;
+    let body = statement_body(&statement);
+    if matches!(body, cypher::Statement::SetSystemVariable(_)) {
+        reject_system_variable_parameters(parameters)?;
+        return Err(SkeinError::Execution(
+            "SET system variable is not allowed inside a transaction".to_string(),
+        ));
+    }
+    if matches!(body, cypher::Statement::Explain(_)) {
+        return Err(SkeinError::Execution(
+            "EXPLAIN is not allowed inside a transaction".to_string(),
+        ));
+    }
+    let transaction = state
+        .graph_transaction
+        .as_mut()
+        .expect("database transaction must own a graph workspace");
+    execute_graph_transaction_statement(
+        runtime,
+        transaction,
+        &runtime.system_variables,
+        cypher_text,
+        &statement,
+        parameters,
+    )
+    .map(|outcome| outcome.output)
+}
+
+pub(super) fn execute_concurrent_graph_transaction_query(
+    runtime: &DatabaseTransactionRuntime,
+    state: &mut DatabaseTransactionState,
+    cypher_text: &str,
+    parameters: &BTreeMap<String, Value>,
+) -> Result<GraphTransactionStatementOutcome> {
     let statement = cypher::parse(cypher_text)?;
     let body = statement_body(&statement);
     if matches!(body, cypher::Statement::SetSystemVariable(_)) {
@@ -18523,6 +18575,7 @@ impl DatabaseSession<'_> {
                     statement,
                     parameters,
                 )
+                .map(|outcome| outcome.output)
             }
             _ => {
                 query_work_request_for_statement(&self.system_variables, &statement)?;

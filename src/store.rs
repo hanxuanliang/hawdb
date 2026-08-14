@@ -521,6 +521,30 @@ pub(crate) struct GraphMutationSavepoint {
     row_len: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct GraphAdjacencyLockIdentity {
+    pub(crate) node_id: NodeId,
+    pub(crate) rel_type: Option<RelTypeId>,
+    pub(crate) direction: AdjacencyDirection,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct GraphMutationLockFootprint {
+    pub(crate) requires_database_lock: bool,
+    pub(crate) allocates_node_ids: bool,
+    pub(crate) allocates_relationship_ids: bool,
+    pub(crate) node_label_names: BTreeSet<String>,
+    pub(crate) exclusive_node_label_names: BTreeSet<String>,
+    pub(crate) node_label_read_names: BTreeSet<String>,
+    pub(crate) relationship_type_names: BTreeSet<String>,
+    pub(crate) exclusive_relationship_type_names: BTreeSet<String>,
+    pub(crate) node_writes: BTreeSet<NodeId>,
+    pub(crate) relationship_writes: BTreeSet<RelId>,
+    pub(crate) node_delete_guard_reads: BTreeSet<NodeId>,
+    pub(crate) node_delete_guard_writes: BTreeSet<NodeId>,
+    pub(crate) adjacency_writes: BTreeSet<GraphAdjacencyLockIdentity>,
+}
+
 fn ensure_mutation_commit_limits(
     ops: &[WalOp],
     rows: &[BTreeMap<String, Value>],
@@ -1207,6 +1231,21 @@ impl GraphMutationTransaction {
         self.rows.truncate(savepoint.row_len);
     }
 
+    pub(crate) fn lock_footprint_since(
+        &self,
+        savepoint: &GraphMutationSavepoint,
+    ) -> Result<GraphMutationLockFootprint> {
+        let mut footprint = GraphMutationLockFootprint::default();
+        collect_graph_lock_footprint(
+            &self.catalog,
+            &savepoint.store,
+            &self.store,
+            &self.ops[savepoint.op_len..],
+            &mut footprint,
+        )?;
+        Ok(footprint)
+    }
+
     pub(crate) fn stage_mutation_with_limits(
         &mut self,
         mutation: GraphMutation,
@@ -1244,6 +1283,188 @@ impl GraphMutationTransaction {
         }
         Ok(summary)
     }
+}
+
+fn collect_graph_lock_footprint(
+    catalog: &Catalog,
+    before: &GraphStore,
+    store: &GraphStore,
+    ops: &[WalOp],
+    footprint: &mut GraphMutationLockFootprint,
+) -> Result<()> {
+    for op in ops {
+        match op {
+            WalOp::CreateNode { id, label, .. } => {
+                footprint.allocates_node_ids = true;
+                footprint.node_writes.insert(*id);
+                footprint.node_label_names.insert(label.clone());
+                footprint.exclusive_node_label_names.insert(label.clone());
+            }
+            WalOp::CreateRelationship {
+                id,
+                source,
+                target,
+                rel_type,
+                ..
+            } => {
+                footprint.allocates_relationship_ids = true;
+                footprint.relationship_writes.insert(*id);
+                footprint.relationship_type_names.insert(rel_type.clone());
+                footprint
+                    .exclusive_relationship_type_names
+                    .insert(rel_type.clone());
+                for endpoint in [*source, *target] {
+                    for label_id in store
+                        .node_owned(endpoint)?
+                        .into_iter()
+                        .flat_map(|node| node.labels)
+                    {
+                        if let Some(label) = catalog.label_name(label_id) {
+                            footprint.node_label_read_names.insert(label.to_string());
+                        }
+                    }
+                }
+                record_relationship_endpoint_locks(
+                    footprint,
+                    *source,
+                    *target,
+                    catalog.rel_type_id(rel_type),
+                );
+            }
+            WalOp::SetNodeProperty { id, property, .. } => {
+                footprint.node_writes.insert(*id);
+                for label_id in store
+                    .node_owned(*id)?
+                    .into_iter()
+                    .flat_map(|node| node.labels)
+                {
+                    if let Some(label) = catalog.label_name(label_id) {
+                        footprint.node_label_names.insert(label.to_string());
+                        if catalog.unique_constraints().any(|constraint| {
+                            constraint.subject == crate::schema::ConstraintSubject::Node(label_id)
+                                && constraint.property == *property
+                        }) {
+                            footprint
+                                .exclusive_node_label_names
+                                .insert(label.to_string());
+                        }
+                    }
+                }
+            }
+            WalOp::SetRelationshipProperty { id, property, .. } => {
+                footprint.relationship_writes.insert(*id);
+                if let Some(relationship) = store.relationship_owned(*id)?
+                    && let Some(rel_type) = catalog.rel_type_name(relationship.rel_type)
+                {
+                    footprint
+                        .relationship_type_names
+                        .insert(rel_type.to_string());
+                    if catalog.relationship_unique_constraints().any(|constraint| {
+                        constraint.subject
+                            == crate::schema::ConstraintSubject::Relationship(relationship.rel_type)
+                            && constraint.property == *property
+                    }) {
+                        footprint
+                            .exclusive_relationship_type_names
+                            .insert(rel_type.to_string());
+                    }
+                }
+            }
+            WalOp::DeleteNode { id } => {
+                footprint.node_writes.insert(*id);
+                footprint.node_delete_guard_writes.insert(*id);
+                for label_id in before
+                    .node_owned(*id)?
+                    .into_iter()
+                    .flat_map(|node| node.labels)
+                {
+                    if let Some(label) = catalog.label_name(label_id) {
+                        footprint.node_label_names.insert(label.to_string());
+                    }
+                }
+            }
+            WalOp::DeleteRelationship { id } => {
+                footprint.relationship_writes.insert(*id);
+                let relationship = before.relationship_owned(*id)?.ok_or_else(|| {
+                    SkeinError::Execution(format!(
+                        "deleted relationship {} is missing while deriving transaction locks",
+                        id.0
+                    ))
+                })?;
+                if let Some(rel_type) = catalog.rel_type_name(relationship.rel_type) {
+                    footprint
+                        .relationship_type_names
+                        .insert(rel_type.to_string());
+                }
+                for endpoint in [relationship.source, relationship.target] {
+                    for label_id in before
+                        .node_owned(endpoint)?
+                        .into_iter()
+                        .flat_map(|node| node.labels)
+                    {
+                        if let Some(label) = catalog.label_name(label_id) {
+                            footprint.node_label_read_names.insert(label.to_string());
+                        }
+                    }
+                }
+                record_relationship_endpoint_locks(
+                    footprint,
+                    relationship.source,
+                    relationship.target,
+                    Some(relationship.rel_type),
+                );
+            }
+            WalOp::Batch(ops) => {
+                collect_graph_lock_footprint(catalog, before, store, ops, footprint)?
+            }
+            WalOp::CreateNodeLabel { .. }
+            | WalOp::CreateRelationshipType { .. }
+            | WalOp::CreateNodeTable { .. }
+            | WalOp::CreateRelationshipTable { .. }
+            | WalOp::CreateProperty { .. }
+            | WalOp::AlterTableState { .. }
+            | WalOp::AlterPropertyState { .. }
+            | WalOp::GcTableDescriptor { .. }
+            | WalOp::GcPropertyDescriptor { .. }
+            | WalOp::CreateIndex { .. }
+            | WalOp::CreateCompositeIndex { .. }
+            | WalOp::CreateRangeIndex { .. }
+            | WalOp::CreateFullTextIndex { .. }
+            | WalOp::CreateUniqueConstraint { .. }
+            | WalOp::CreateNodePropertyExistsConstraint { .. }
+            | WalOp::CreateRelationshipUniqueConstraint { .. }
+            | WalOp::CreateRelationshipPropertyExistsConstraint { .. }
+            | WalOp::ProjectGraph { .. }
+            | WalOp::MarkInitialImportSource { .. }
+            | WalOp::Relational { .. }
+            | WalOp::RelationalSnapshot { .. } => footprint.requires_database_lock = true,
+        }
+    }
+    Ok(())
+}
+
+fn record_relationship_endpoint_locks(
+    footprint: &mut GraphMutationLockFootprint,
+    source: NodeId,
+    target: NodeId,
+    rel_type: Option<RelTypeId>,
+) {
+    footprint.node_delete_guard_reads.insert(source);
+    footprint.node_delete_guard_reads.insert(target);
+    footprint
+        .adjacency_writes
+        .insert(GraphAdjacencyLockIdentity {
+            node_id: source,
+            rel_type,
+            direction: AdjacencyDirection::Outgoing,
+        });
+    footprint
+        .adjacency_writes
+        .insert(GraphAdjacencyLockIdentity {
+            node_id: target,
+            rel_type,
+            direction: AdjacencyDirection::Incoming,
+        });
 }
 
 fn compact_transaction_graph_ops(ops: Vec<WalOp>) -> Vec<WalOp> {

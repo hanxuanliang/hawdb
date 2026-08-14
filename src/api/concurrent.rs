@@ -12,12 +12,13 @@ pub use self::group_commit::{
 };
 use super::system_sql;
 use super::transaction_locks::{
-    LockMode, LockRequest, LockTarget, DEFAULT_LOCK_ESCALATION_ENTRIES_PER_TABLE,
+    GraphAdjacencyDirection, GraphAllocationKind, LockMode, LockRequest, LockTarget,
+    DEFAULT_LOCK_ESCALATION_ENTRIES_PER_TABLE,
 };
 use super::{
-    commit_database_transaction_state, execute_database_transaction_query,
-    execute_database_transaction_sql, statement_body, Database, DatabaseConfig,
-    DatabaseReadTransaction, DatabaseTransactionRuntime, DatabaseTransactionState, QueryOutput,
+    commit_database_transaction_state, execute_concurrent_graph_transaction_query,
+    execute_database_transaction_sql, Database, DatabaseConfig, DatabaseReadTransaction,
+    DatabaseTransactionRuntime, DatabaseTransactionState, QueryOutput,
 };
 use crate::error::{Result, SkeinError};
 use crate::sql::{
@@ -266,25 +267,59 @@ impl ConcurrentDatabaseTransaction {
         parameters: &BTreeMap<String, Value>,
     ) -> Result<QueryOutput> {
         self.ensure_active()?;
-        if self.options.mode == ConcurrentTransactionMode::Pessimistic {
-            let statement = crate::cypher::parse(cypher_text)?;
-            let mode = if cypher_statement_is_read_only(statement_body(&statement)) {
-                LockMode::Shared
-            } else {
-                LockMode::Exclusive
-            };
-            self.acquire_locks(&[LockRequest::database(mode)])?;
-        }
-        let result = execute_database_transaction_query(
+        let lock_savepoint = (self.options.mode == ConcurrentTransactionMode::Pessimistic)
+            .then(|| self.inner.locks.savepoint(self.transaction_id))
+            .transpose()?;
+        let execution = execute_concurrent_graph_transaction_query(
             &self.runtime,
             &mut self.state,
             cypher_text,
             parameters,
         );
-        if result.is_ok() {
+        let outcome = match execution {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if let Some(lock_savepoint) = lock_savepoint {
+                    self.inner
+                        .locks
+                        .restore(self.transaction_id, lock_savepoint);
+                }
+                return Err(error);
+            }
+        };
+        if self.options.mode == ConcurrentTransactionMode::Pessimistic {
+            let requests = graph_lock_requests(&outcome.lock_footprint);
+            if requests.is_empty() {
+                self.successful_statements = self.successful_statements.saturating_add(1);
+                return Ok(outcome.output);
+            }
+            let graph_savepoint = outcome
+                .savepoint
+                .expect("a staged graph mutation must retain its statement savepoint");
+            self.state.restore_graph_statement(graph_savepoint);
+            self.acquire_graph_statement_locks(&requests, lock_savepoint.clone())?;
+            let replayed = execute_concurrent_graph_transaction_query(
+                &self.runtime,
+                &mut self.state,
+                cypher_text,
+                parameters,
+            );
+            let replayed = match replayed {
+                Ok(replayed) => replayed,
+                Err(error) => {
+                    if let Some(lock_savepoint) = lock_savepoint {
+                        self.inner
+                            .locks
+                            .restore(self.transaction_id, lock_savepoint);
+                    }
+                    return Err(error);
+                }
+            };
             self.successful_statements = self.successful_statements.saturating_add(1);
+            return Ok(replayed.output);
         }
-        result
+        self.successful_statements = self.successful_statements.saturating_add(1);
+        Ok(outcome.output)
     }
 
     pub fn query_sql(&mut self, sql_text: &str) -> Result<QueryOutput> {
@@ -395,6 +430,57 @@ impl ConcurrentDatabaseTransaction {
         Ok(())
     }
 
+    fn acquire_graph_statement_locks(
+        &mut self,
+        requests: &[LockRequest],
+        lock_savepoint: Option<coordinator::LockSavepoint>,
+    ) -> Result<()> {
+        let started = Instant::now();
+        let inner = Arc::clone(&self.inner);
+        let requests_already_covered = inner.locks.covers_all(self.transaction_id, requests)?;
+        if let Err(error) = inner.locks.acquire(
+            self.transaction_id,
+            requests,
+            started,
+            self.options.lock_timeout,
+        ) {
+            if let Some(lock_savepoint) = lock_savepoint {
+                inner.locks.restore(self.transaction_id, lock_savepoint);
+            }
+            if error.to_string().contains("deadlock detected")
+                || error.to_string().contains("resource budget exceeded")
+            {
+                self.abort_after_lock_failure(error.to_string());
+            }
+            return Err(error);
+        }
+
+        let database = match inner.commits.lock() {
+            Ok(database) => database,
+            Err(error) => {
+                self.abort_after_lock_failure(error.to_string());
+                return Err(error);
+            }
+        };
+        let current_epoch = database.commit_epoch();
+        if current_epoch != self.base_commit_epoch && !requests_already_covered {
+            // The requests were derived by executing the statement against the
+            // pinned snapshot. Refreshing here could change the matched graph
+            // entities and make that access set incomplete. Fail closed and let
+            // the caller retry from a new transaction instead.
+            let error = SkeinError::Execution(format!(
+                "pessimistic transaction {} cannot acquire a graph lock after its snapshot changed from commit epoch {} to {}; retry the transaction",
+                self.transaction_id, self.base_commit_epoch, current_epoch
+            ));
+            drop(database);
+            self.inner.locks.release(self.transaction_id);
+            self.state.rollback();
+            self.abort_reason = Some(error.to_string());
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn abort_after_lock_failure(&mut self, reason: String) {
         self.state.rollback();
         self.abort_reason = Some(reason);
@@ -453,6 +539,93 @@ fn reject_optimistic_locking_select(sql_text: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn graph_lock_requests(footprint: &crate::store::GraphMutationLockFootprint) -> Vec<LockRequest> {
+    if footprint.requires_database_lock {
+        return vec![LockRequest::database(LockMode::Exclusive)];
+    }
+    let mut requests = Vec::new();
+    if footprint.allocates_node_ids {
+        requests.push(LockRequest::graph_allocation(GraphAllocationKind::Node));
+    }
+    if footprint.allocates_relationship_ids {
+        requests.push(LockRequest::graph_allocation(
+            GraphAllocationKind::Relationship,
+        ));
+    }
+    requests.extend(footprint.node_label_names.iter().cloned().map(|label| {
+        LockRequest::graph_label(
+            if footprint.exclusive_node_label_names.contains(&label) {
+                LockMode::Exclusive
+            } else {
+                LockMode::Shared
+            },
+            label,
+        )
+    }));
+    requests.extend(
+        footprint
+            .node_label_read_names
+            .difference(&footprint.node_label_names)
+            .cloned()
+            .map(|label| LockRequest::graph_label(LockMode::Shared, label)),
+    );
+    requests.extend(
+        footprint
+            .relationship_type_names
+            .iter()
+            .cloned()
+            .map(|rel_type| {
+                LockRequest::graph_relationship_type(
+                    if footprint
+                        .exclusive_relationship_type_names
+                        .contains(&rel_type)
+                    {
+                        LockMode::Exclusive
+                    } else {
+                        LockMode::Shared
+                    },
+                    rel_type,
+                )
+            }),
+    );
+    requests.extend(
+        footprint
+            .node_writes
+            .iter()
+            .map(|id| LockRequest::graph_node(LockMode::Exclusive, id.0)),
+    );
+    requests.extend(
+        footprint
+            .relationship_writes
+            .iter()
+            .map(|id| LockRequest::graph_relationship(LockMode::Exclusive, id.0)),
+    );
+    requests.extend(
+        footprint
+            .node_delete_guard_reads
+            .difference(&footprint.node_delete_guard_writes)
+            .map(|id| LockRequest::graph_node_delete_guard(LockMode::Shared, id.0)),
+    );
+    requests.extend(
+        footprint
+            .node_delete_guard_writes
+            .iter()
+            .map(|id| LockRequest::graph_node_delete_guard(LockMode::Exclusive, id.0)),
+    );
+    requests.extend(footprint.adjacency_writes.iter().map(|adjacency| {
+        LockRequest::graph_adjacency(
+            LockMode::Exclusive,
+            adjacency.node_id.0,
+            adjacency.rel_type.map(|rel_type| rel_type.0),
+            match adjacency.direction {
+                crate::store::AdjacencyDirection::Outgoing => GraphAdjacencyDirection::Outgoing,
+                crate::store::AdjacencyDirection::Incoming => GraphAdjacencyDirection::Incoming,
+            },
+        )
+    }));
+    requests
 }
 
 impl Drop for ConcurrentDatabaseTransaction {
@@ -1022,25 +1195,6 @@ fn upper_is_before_lower(upper: &Bound<RelationalKey>, lower: &Bound<RelationalK
         (Bound::Included(upper), Bound::Excluded(lower))
         | (Bound::Excluded(upper), Bound::Included(lower))
         | (Bound::Excluded(upper), Bound::Excluded(lower)) => upper <= lower,
-    }
-}
-
-fn cypher_statement_is_read_only(statement: &crate::cypher::Statement) -> bool {
-    match statement {
-        crate::cypher::Statement::CypherQuery(query) => {
-            cypher_statement_is_read_only(&query.statement)
-        }
-        crate::cypher::Statement::Explain(explain) => {
-            cypher_statement_is_read_only(&explain.statement)
-        }
-        crate::cypher::Statement::GraphAlgorithm(_)
-        | crate::cypher::Statement::MatchNodesReturn(_)
-        | crate::cypher::Statement::MatchOptionalRelationshipCountSum(_)
-        | crate::cypher::Statement::MatchReturn(_)
-        | crate::cypher::Statement::MatchThreadRepairStats(_)
-        | crate::cypher::Statement::ShortestPathReturn(_)
-        | crate::cypher::Statement::VectorSearch(_) => true,
-        _ => false,
     }
 }
 

@@ -182,12 +182,34 @@ optimistic transaction stale, even when the two write sets are disjoint.
 A pessimistic concurrent transaction obtains locks before statement execution.
 Supported relational primary-key lookups and inserts may use shared or
 exclusive point/range spans. Statements whose complete access span cannot be
-derived conservatively use a database-wide lock. Cypher statements currently
-use that database-wide fallback. Lock waits are bounded, a wait-for graph
-selects the current waiter as the deadlock victim, and abort or drop releases
-all owned locks and dependencies. These mechanisms provide the documented lock
-compatibility and publication invariants; they MUST NOT be advertised as a
-general serializable isolation level.
+derived conservatively use a database-wide lock. Graph mutations are first
+staged in a COW statement workspace to derive concrete node, relationship,
+allocation, node-delete-guard, and typed adjacency identities. The workspace is
+then restored, the normalized lock set is acquired, and the statement is
+replayed under those locks. Label and relationship-type locks prevent a stale
+snapshot from bypassing constraint validation while disjoint entity locks
+still permit concurrent writes. Schema mutations and unsupported access shapes
+retain the database-wide fallback. Ordinary graph reads remain pinned snapshot
+reads and acquire no logical lock.
+
+Because graph lock identities are derived from the pinned snapshot's concrete
+matches, Skein MUST NOT refresh that snapshot after derivation. If publication
+advances before a newly derived graph lock set is admitted, the transaction
+fails closed and must be retried. Property writes covered by a uniqueness
+constraint acquire an exclusive label or relationship-type lock; ordinary
+property writes use shared constraint-subject coverage and retain disjoint
+entity concurrency.
+
+Every graph mutation statement owns a graph-workspace and lock-table savepoint;
+read-only statements do not construct an unused graph snapshot. An execution
+error or bounded lock timeout restores both mutation savepoints, preserving
+earlier successful statements and their locks. Deadlock and lock-budget errors
+abort the transaction and release every lock because continuing after either
+failure would violate the bounded-resource or wait-for-graph contract. Lock
+waits are bounded, and abort or drop releases all owned locks and dependencies.
+These mechanisms provide the documented lock compatibility and publication
+invariants; they MUST NOT be advertised as a general serializable isolation
+level.
 
 A transaction-private graph and relational workspace provides read-your-own-
 writes. Graph and relational mutations publish atomically in one commit. A
@@ -211,6 +233,9 @@ queries remain out of scope.
 | Reader pins delay obsolete-generation reclamation | `ReaderPins`, `GraphStore::storage_reclamation_watermark` | `read_transaction_pins_checkpoint_manifest_until_drop`, `out_of_core_reader_pin_retains_its_canonical_generation_until_drop` |
 | Optimistic writers use coarse first-committer-wins validation | `ConcurrentDatabaseTransaction::commit`, `GraphStore::commit_mutation_transaction_and_relational` | `optimistic_transactions_prepare_in_parallel_and_reject_the_stale_committer` |
 | Pessimistic point/range locks preserve compatibility | `LockManager`, `LockTable` | `disjoint_primary_key_point_locks_allow_both_pessimistic_writers_to_commit`, `shared_primary_key_range_blocks_phantoms_but_not_the_excluded_boundary` |
+| Graph entity, uniqueness-subject, and adjacency locks preserve constraints and endpoint lifetime while allowing disjoint writes | `GraphMutationTransaction::lock_footprint_since`, `graph_lock_requests` | `disjoint_graph_node_updates_can_stage_concurrently`, `graph_unique_property_updates_serialize_by_constraint_subject`, `relationship_creation_conflicts_with_endpoint_delete_guard`, `graph_create_allocation_lock_prevents_duplicate_physical_ids` |
+| Graph access-set derivation never refreshes to a different snapshot | `ConcurrentDatabaseTransaction::acquire_graph_statement_locks` | `graph_lock_derivation_rejects_a_changed_snapshot` |
+| A failed graph statement restores only its workspace and lock delta | `GraphMutationSavepoint`, `LockSavepoint` | `failed_graph_statement_restores_workspace_and_statement_locks`, `graph_lock_failure_restores_the_failed_statement_only`, `statement_savepoint_restores_replaced_lock_and_budget` |
 | Deadlock victims terminate and release dependencies | `WaitForGraph`, `ConcurrentDatabaseTransaction::abort_after_lock_failure` | `point_lock_upgrade_cycle_selects_one_deadlock_victim`, `wait_for_graph_detects_a_cycle_with_multiple_blockers` |
 | Uncommitted work is private and a durable commit becomes visible atomically | `DatabaseTransactionState`, `CommitSequencer` | `optimistic_transaction_reads_its_private_workspace`, `SkeinTransactionConcurrency.tla` |
 

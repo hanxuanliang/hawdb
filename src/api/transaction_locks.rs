@@ -20,6 +20,18 @@ pub(crate) enum LockNamespace {
     RelationalIndex { table: String, columns: Vec<String> },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum GraphAllocationKind {
+    Node,
+    Relationship,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum GraphAdjacencyDirection {
+    Outgoing,
+    Incoming,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LockTarget {
     Database,
@@ -30,6 +42,29 @@ pub(crate) enum LockTarget {
         namespace: LockNamespace,
         lower: Bound<RelationalKey>,
         upper: Bound<RelationalKey>,
+    },
+    GraphAllocation {
+        kind: GraphAllocationKind,
+    },
+    GraphLabel {
+        label: String,
+    },
+    GraphRelationshipType {
+        rel_type: String,
+    },
+    GraphNode {
+        node_id: u64,
+    },
+    GraphRelationship {
+        relationship_id: u64,
+    },
+    GraphNodeDeleteGuard {
+        node_id: u64,
+    },
+    GraphAdjacency {
+        node_id: u64,
+        rel_type: Option<u32>,
+        direction: GraphAdjacencyDirection,
     },
 }
 
@@ -87,6 +122,68 @@ impl LockRequest {
                 },
                 lower,
                 upper,
+            },
+        }
+    }
+
+    pub(crate) fn graph_allocation(kind: GraphAllocationKind) -> Self {
+        Self {
+            mode: LockMode::Exclusive,
+            target: LockTarget::GraphAllocation { kind },
+        }
+    }
+
+    pub(crate) fn graph_node(mode: LockMode, node_id: u64) -> Self {
+        Self {
+            mode,
+            target: LockTarget::GraphNode { node_id },
+        }
+    }
+
+    pub(crate) fn graph_label(mode: LockMode, label: impl Into<String>) -> Self {
+        Self {
+            mode,
+            target: LockTarget::GraphLabel {
+                label: label.into(),
+            },
+        }
+    }
+
+    pub(crate) fn graph_relationship_type(mode: LockMode, rel_type: impl Into<String>) -> Self {
+        Self {
+            mode,
+            target: LockTarget::GraphRelationshipType {
+                rel_type: rel_type.into(),
+            },
+        }
+    }
+
+    pub(crate) fn graph_relationship(mode: LockMode, relationship_id: u64) -> Self {
+        Self {
+            mode,
+            target: LockTarget::GraphRelationship { relationship_id },
+        }
+    }
+
+    pub(crate) fn graph_node_delete_guard(mode: LockMode, node_id: u64) -> Self {
+        Self {
+            mode,
+            target: LockTarget::GraphNodeDeleteGuard { node_id },
+        }
+    }
+
+    pub(crate) fn graph_adjacency(
+        mode: LockMode,
+        node_id: u64,
+        rel_type: Option<u32>,
+        direction: GraphAdjacencyDirection,
+    ) -> Self {
+        Self {
+            mode,
+            target: LockTarget::GraphAdjacency {
+                node_id,
+                rel_type,
+                direction,
             },
         }
     }
@@ -154,35 +251,61 @@ impl LockTable {
         transaction_id: u64,
         request: LockRequest,
     ) -> LockRequest {
-        let LockTarget::RelationalRange { namespace, .. } = &request.target else {
-            return request;
-        };
-        let table = relational_namespace_table(namespace);
-        let narrow_locks = self
-            .locks
-            .iter()
-            .filter(|held| {
-                held.transaction_id == transaction_id
-                    && matches!(
-                        &held.request.target,
-                        LockTarget::RelationalRange { namespace, .. }
-                            if relational_namespace_table(namespace) == table
-                    )
-            })
-            .collect::<Vec<_>>();
-        if narrow_locks.len().saturating_add(1) <= self.limits.escalation_entries_per_table {
-            return request;
+        match &request.target {
+            LockTarget::RelationalRange { namespace, .. } => {
+                let table = relational_namespace_table(namespace);
+                let narrow_locks = self
+                    .locks
+                    .iter()
+                    .filter(|held| {
+                        held.transaction_id == transaction_id
+                            && matches!(
+                                &held.request.target,
+                                LockTarget::RelationalRange { namespace, .. }
+                                    if relational_namespace_table(namespace) == table
+                            )
+                    })
+                    .collect::<Vec<_>>();
+                if narrow_locks.len().saturating_add(1) <= self.limits.escalation_entries_per_table
+                {
+                    return request;
+                }
+                let mode = covering_mode(request.mode, &narrow_locks);
+                LockRequest::relational_table(mode, table.to_string())
+            }
+            LockTarget::GraphAdjacency {
+                node_id,
+                rel_type: Some(_),
+                direction,
+            } => {
+                let narrow_locks = self
+                    .locks
+                    .iter()
+                    .filter(|held| {
+                        held.transaction_id == transaction_id
+                            && matches!(
+                                held.request.target,
+                                LockTarget::GraphAdjacency {
+                                    node_id: held_node_id,
+                                    rel_type: Some(_),
+                                    direction: held_direction,
+                                } if held_node_id == *node_id && held_direction == *direction
+                            )
+                    })
+                    .collect::<Vec<_>>();
+                if narrow_locks.len().saturating_add(1) <= self.limits.escalation_entries_per_table
+                {
+                    return request;
+                }
+                LockRequest::graph_adjacency(
+                    covering_mode(request.mode, &narrow_locks),
+                    *node_id,
+                    None,
+                    *direction,
+                )
+            }
+            _ => request,
         }
-        let mode = if request.mode == LockMode::Exclusive
-            || narrow_locks
-                .iter()
-                .any(|held| held.request.mode == LockMode::Exclusive)
-        {
-            LockMode::Exclusive
-        } else {
-            LockMode::Shared
-        };
-        LockRequest::relational_table(mode, table.to_string())
     }
 
     pub(crate) fn grant(&mut self, transaction_id: u64, request: LockRequest) -> Result<()> {
@@ -247,6 +370,24 @@ impl LockTable {
         self.estimated_bytes = self.locks.iter().map(held_lock_estimated_bytes).sum();
     }
 
+    pub(crate) fn savepoint(&self, transaction_id: u64) -> Vec<LockRequest> {
+        self.locks
+            .iter()
+            .filter(|held| held.transaction_id == transaction_id)
+            .map(|held| held.request.clone())
+            .collect()
+    }
+
+    pub(crate) fn restore_transaction(&mut self, transaction_id: u64, requests: Vec<LockRequest>) {
+        self.release_transaction(transaction_id);
+        self.locks
+            .extend(requests.into_iter().map(|request| HeldLock {
+                transaction_id,
+                request,
+            }));
+        self.estimated_bytes = self.locks.iter().map(held_lock_estimated_bytes).sum();
+    }
+
     #[cfg(test)]
     fn lock_count(&self) -> usize {
         self.locks.len()
@@ -265,6 +406,18 @@ fn held_lock_estimated_bytes(held: &HeldLock) -> usize {
     lock_request_estimated_bytes(&held.request)
 }
 
+fn covering_mode(requested: LockMode, held: &[&HeldLock]) -> LockMode {
+    if requested == LockMode::Exclusive
+        || held
+            .iter()
+            .any(|held| held.request.mode == LockMode::Exclusive)
+    {
+        LockMode::Exclusive
+    } else {
+        LockMode::Shared
+    }
+}
+
 fn lock_request_estimated_bytes(request: &LockRequest) -> usize {
     size_of::<HeldLock>().saturating_add(match &request.target {
         LockTarget::Database => 0,
@@ -276,6 +429,13 @@ fn lock_request_estimated_bytes(request: &LockRequest) -> usize {
         } => lock_namespace_estimated_bytes(namespace)
             .saturating_add(bound_estimated_bytes(lower))
             .saturating_add(bound_estimated_bytes(upper)),
+        LockTarget::GraphAllocation { .. }
+        | LockTarget::GraphNode { .. }
+        | LockTarget::GraphRelationship { .. }
+        | LockTarget::GraphNodeDeleteGuard { .. }
+        | LockTarget::GraphAdjacency { .. } => 0,
+        LockTarget::GraphLabel { label } => label.len(),
+        LockTarget::GraphRelationshipType { rel_type } => rel_type.len(),
     })
 }
 
@@ -402,6 +562,49 @@ fn target_covers(held: &LockTarget, requested: &LockTarget) -> bool {
                 && lower_bound_covers(held_lower, requested_lower)
                 && upper_bound_covers(held_upper, requested_upper)
         }
+        (
+            LockTarget::GraphAllocation { kind: held },
+            LockTarget::GraphAllocation { kind: requested },
+        ) => held == requested,
+        (LockTarget::GraphLabel { label: held }, LockTarget::GraphLabel { label: requested }) => {
+            held == requested
+        }
+        (
+            LockTarget::GraphRelationshipType { rel_type: held },
+            LockTarget::GraphRelationshipType {
+                rel_type: requested,
+            },
+        ) => held == requested,
+        (LockTarget::GraphNode { node_id: held }, LockTarget::GraphNode { node_id: requested })
+        | (
+            LockTarget::GraphNodeDeleteGuard { node_id: held },
+            LockTarget::GraphNodeDeleteGuard { node_id: requested },
+        ) => held == requested,
+        (
+            LockTarget::GraphRelationship {
+                relationship_id: held,
+            },
+            LockTarget::GraphRelationship {
+                relationship_id: requested,
+            },
+        ) => held == requested,
+        (
+            LockTarget::GraphAdjacency {
+                node_id: held_node,
+                rel_type: held_type,
+                direction: held_direction,
+            },
+            LockTarget::GraphAdjacency {
+                node_id: requested_node,
+                rel_type: requested_type,
+                direction: requested_direction,
+            },
+        ) => {
+            held_node == requested_node
+                && held_direction == requested_direction
+                && (held_type.is_none() || held_type == requested_type)
+        }
+        _ => false,
     }
 }
 
@@ -454,6 +657,47 @@ fn targets_overlap(left: &LockTarget, right: &LockTarget) -> bool {
                 && !upper_is_before_lower(left_upper, right_lower)
                 && !upper_is_before_lower(right_upper, left_lower)
         }
+        (
+            LockTarget::GraphAllocation { kind: left },
+            LockTarget::GraphAllocation { kind: right },
+        ) => left == right,
+        (LockTarget::GraphLabel { label: left }, LockTarget::GraphLabel { label: right }) => {
+            left == right
+        }
+        (
+            LockTarget::GraphRelationshipType { rel_type: left },
+            LockTarget::GraphRelationshipType { rel_type: right },
+        ) => left == right,
+        (LockTarget::GraphNode { node_id: left }, LockTarget::GraphNode { node_id: right })
+        | (
+            LockTarget::GraphNodeDeleteGuard { node_id: left },
+            LockTarget::GraphNodeDeleteGuard { node_id: right },
+        ) => left == right,
+        (
+            LockTarget::GraphRelationship {
+                relationship_id: left,
+            },
+            LockTarget::GraphRelationship {
+                relationship_id: right,
+            },
+        ) => left == right,
+        (
+            LockTarget::GraphAdjacency {
+                node_id: left_node,
+                rel_type: left_type,
+                direction: left_direction,
+            },
+            LockTarget::GraphAdjacency {
+                node_id: right_node,
+                rel_type: right_type,
+                direction: right_direction,
+            },
+        ) => {
+            left_node == right_node
+                && left_direction == right_direction
+                && (left_type.is_none() || right_type.is_none() || left_type == right_type)
+        }
+        _ => false,
     }
 }
 
@@ -464,6 +708,12 @@ fn relational_namespace_table(namespace: &LockNamespace) -> &str {
 }
 
 fn lock_target_cmp(left: &LockTarget, right: &LockTarget) -> Ordering {
+    let left_rank = lock_target_rank(left);
+    let right_rank = lock_target_rank(right);
+    let rank_order = left_rank.cmp(&right_rank);
+    if rank_order != Ordering::Equal {
+        return rank_order;
+    }
     match (left, right) {
         (LockTarget::Database, LockTarget::Database) => Ordering::Equal,
         (LockTarget::Database, _) => Ordering::Less,
@@ -491,6 +741,61 @@ fn lock_target_cmp(left: &LockTarget, right: &LockTarget) -> Ordering {
             .cmp(right_namespace)
             .then_with(|| bound_cmp(left_lower, right_lower))
             .then_with(|| bound_cmp(left_upper, right_upper)),
+        (
+            LockTarget::GraphAllocation { kind: left },
+            LockTarget::GraphAllocation { kind: right },
+        ) => left.cmp(right),
+        (LockTarget::GraphLabel { label: left }, LockTarget::GraphLabel { label: right }) => {
+            left.cmp(right)
+        }
+        (
+            LockTarget::GraphRelationshipType { rel_type: left },
+            LockTarget::GraphRelationshipType { rel_type: right },
+        ) => left.cmp(right),
+        (LockTarget::GraphNode { node_id: left }, LockTarget::GraphNode { node_id: right })
+        | (
+            LockTarget::GraphRelationship {
+                relationship_id: left,
+            },
+            LockTarget::GraphRelationship {
+                relationship_id: right,
+            },
+        )
+        | (
+            LockTarget::GraphNodeDeleteGuard { node_id: left },
+            LockTarget::GraphNodeDeleteGuard { node_id: right },
+        ) => left.cmp(right),
+        (
+            LockTarget::GraphAdjacency {
+                node_id: left_node,
+                rel_type: left_type,
+                direction: left_direction,
+            },
+            LockTarget::GraphAdjacency {
+                node_id: right_node,
+                rel_type: right_type,
+                direction: right_direction,
+            },
+        ) => left_node
+            .cmp(right_node)
+            .then(left_direction.cmp(right_direction))
+            .then(left_type.cmp(right_type)),
+        _ => Ordering::Equal,
+    }
+}
+
+fn lock_target_rank(target: &LockTarget) -> u8 {
+    match target {
+        LockTarget::Database => 0,
+        LockTarget::RelationalTable { .. } => 1,
+        LockTarget::RelationalRange { .. } => 2,
+        LockTarget::GraphAllocation { .. } => 3,
+        LockTarget::GraphLabel { .. } => 4,
+        LockTarget::GraphRelationshipType { .. } => 5,
+        LockTarget::GraphNode { .. } => 6,
+        LockTarget::GraphNodeDeleteGuard { .. } => 7,
+        LockTarget::GraphRelationship { .. } => 8,
+        LockTarget::GraphAdjacency { .. } => 9,
     }
 }
 
@@ -582,6 +887,79 @@ mod tests {
                 )
             )
             .is_empty());
+    }
+
+    #[test]
+    fn graph_entity_and_adjacency_locks_conflict_only_on_logical_identity() {
+        let mut table = LockTable::default();
+        table
+            .grant(1, LockRequest::graph_node(LockMode::Exclusive, 7))
+            .unwrap();
+        table
+            .grant(
+                1,
+                LockRequest::graph_adjacency(
+                    LockMode::Exclusive,
+                    7,
+                    None,
+                    GraphAdjacencyDirection::Outgoing,
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(
+            table.blockers(2, &LockRequest::graph_node(LockMode::Exclusive, 7)),
+            BTreeSet::from([1])
+        );
+        assert!(table
+            .blockers(2, &LockRequest::graph_node(LockMode::Exclusive, 8))
+            .is_empty());
+        assert_eq!(
+            table.blockers(
+                2,
+                &LockRequest::graph_adjacency(
+                    LockMode::Exclusive,
+                    7,
+                    Some(3),
+                    GraphAdjacencyDirection::Outgoing,
+                )
+            ),
+            BTreeSet::from([1])
+        );
+        assert!(table
+            .blockers(
+                2,
+                &LockRequest::graph_adjacency(
+                    LockMode::Exclusive,
+                    7,
+                    Some(3),
+                    GraphAdjacencyDirection::Incoming,
+                )
+            )
+            .is_empty());
+    }
+
+    #[test]
+    fn statement_savepoint_restores_replaced_lock_and_budget() {
+        let mut table = LockTable::default();
+        let original = LockRequest::graph_node(LockMode::Shared, 7);
+        table.grant(1, original.clone()).unwrap();
+        let savepoint = table.savepoint(1);
+        let original_bytes = table.estimated_bytes;
+
+        table
+            .grant(1, LockRequest::graph_node(LockMode::Exclusive, 7))
+            .unwrap();
+        table
+            .grant(1, LockRequest::graph_node(LockMode::Exclusive, 8))
+            .unwrap();
+        table.restore_transaction(1, savepoint);
+
+        assert_eq!(table.lock_count(), 1);
+        assert_eq!(table.estimated_bytes, original_bytes);
+        assert!(table.covers_all(1, &[original]));
+        assert!(!table.covers_all(1, &[LockRequest::graph_node(LockMode::Exclusive, 7)]));
+        assert!(!table.covers_all(1, &[LockRequest::graph_node(LockMode::Shared, 8)]));
     }
 
     #[test]

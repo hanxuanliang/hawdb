@@ -626,6 +626,11 @@ pub(super) struct LockManager {
     available: Condvar,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct LockSavepoint {
+    requests: Vec<LockRequest>,
+}
+
 #[derive(Debug, Default)]
 struct LockManagerState {
     locks: LockTable,
@@ -633,6 +638,25 @@ struct LockManagerState {
 }
 
 impl LockManager {
+    pub(super) fn savepoint(&self, transaction_id: u64) -> Result<LockSavepoint> {
+        Ok(LockSavepoint {
+            requests: self.lock_state()?.locks.savepoint(transaction_id),
+        })
+    }
+
+    pub(super) fn restore(&self, transaction_id: u64, savepoint: LockSavepoint) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state
+            .locks
+            .restore_transaction(transaction_id, savepoint.requests);
+        state.wait_for.clear_waiter(transaction_id);
+        drop(state);
+        self.available.notify_all();
+    }
+
     pub(super) fn covers_all(&self, transaction_id: u64, requests: &[LockRequest]) -> Result<bool> {
         Ok(self
             .lock_state()?
