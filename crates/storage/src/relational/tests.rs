@@ -1464,6 +1464,123 @@ fn relational_index_shadow_demand_reads_match_materialized_oracle() {
     ));
     assert!(!reader.is_poisoned());
 
+    let page_cache = std::sync::Arc::new(crate::SegmentCache::new(16 * 1024));
+    let cached_reader = RelationalIndexShadowReader::open_latest_with_cache(
+        &directory,
+        config,
+        std::sync::Arc::clone(&page_cache),
+        crate::StoreId(41),
+    )
+    .expect("open demand-read fixture with an empty page cache");
+    assert_eq!(page_cache.snapshot().resident_bytes, 0);
+    let mut cold = Vec::new();
+    let cold_report = cached_reader
+        .visit_exact_postings(
+            "documents",
+            "documents_owner_idx",
+            &owner,
+            RelationalIndexReadLimits::default(),
+            |key| {
+                cold.push(key.clone());
+                true
+            },
+        )
+        .expect("cold cached index lookup");
+    assert_eq!(cold, expected_exact);
+    assert_eq!(cold_report.cache_hits, 0);
+    assert_eq!(cold_report.cache_misses, cold_report.pages_read);
+    assert_eq!(cold_report.file_pages_read, cold_report.pages_read);
+    assert_eq!(cold_report.file_bytes_read, cold_report.bytes_read);
+    assert_eq!(page_cache.snapshot().pinned_bytes, 0);
+
+    let mut warm = Vec::new();
+    let warm_report = cached_reader
+        .visit_exact_postings(
+            "documents",
+            "documents_owner_idx",
+            &owner,
+            RelationalIndexReadLimits::default(),
+            |key| {
+                warm.push(key.clone());
+                true
+            },
+        )
+        .expect("warm cached index lookup");
+    assert_eq!(warm, expected_exact);
+    assert_eq!(warm_report.cache_hits, warm_report.pages_read);
+    assert_eq!(warm_report.cache_misses, 0);
+    assert_eq!(warm_report.file_pages_read, 0);
+    assert_eq!(warm_report.file_bytes_read, 0);
+    assert_eq!(page_cache.snapshot().pinned_bytes, 0);
+
+    let callback_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = cached_reader.visit_exact_postings(
+            "documents",
+            "documents_owner_idx",
+            &owner,
+            RelationalIndexReadLimits::default(),
+            |_| panic!("stop the cached cursor"),
+        );
+    }));
+    assert!(callback_panic.is_err());
+    assert_eq!(page_cache.snapshot().pinned_bytes, 0);
+    assert!(!cached_reader.is_poisoned());
+
+    let evicting_cache = std::sync::Arc::new(crate::SegmentCache::new(2 * 1024));
+    let evicting_reader = RelationalIndexShadowReader::open_latest_with_cache(
+        &directory,
+        config,
+        std::sync::Arc::clone(&evicting_cache),
+        crate::StoreId(43),
+    )
+    .expect("open demand-read fixture with an evicting cache");
+    let mut evicted = Vec::new();
+    evicting_reader
+        .visit_exact_postings(
+            "documents",
+            "documents_owner_idx",
+            &owner,
+            RelationalIndexReadLimits::default(),
+            |key| {
+                evicted.push(key.clone());
+                true
+            },
+        )
+        .expect("index traversal remains correct while cold pages are evicted");
+    assert_eq!(evicted, expected_exact);
+    let eviction = evicting_cache.snapshot();
+    assert!(eviction.eviction_count > 0);
+    assert!(eviction.resident_bytes <= eviction.capacity_bytes);
+    assert_eq!(eviction.pinned_bytes, 0);
+
+    let undersized_cache = std::sync::Arc::new(crate::SegmentCache::new(512));
+    let uncached_reader = RelationalIndexShadowReader::open_latest_with_cache(
+        &directory,
+        config,
+        std::sync::Arc::clone(&undersized_cache),
+        crate::StoreId(42),
+    )
+    .expect("open demand-read fixture with an undersized cache");
+    let mut uncached = Vec::new();
+    let uncached_report = uncached_reader
+        .visit_exact_postings(
+            "documents",
+            "documents_owner_idx",
+            &owner,
+            RelationalIndexReadLimits::default(),
+            |key| {
+                uncached.push(key.clone());
+                true
+            },
+        )
+        .expect("cache admission rejection falls back to bounded positioned reads");
+    assert_eq!(uncached, expected_exact);
+    assert_eq!(
+        uncached_report.cache_admission_rejections,
+        uncached_report.pages_read
+    );
+    assert_eq!(undersized_cache.snapshot().resident_bytes, 0);
+
     let root_descriptor = reader
         .manifest()
         .root("documents", "documents_owner_idx")
@@ -1714,6 +1831,63 @@ fn relational_index_wal_deltas_merge_with_cold_base_and_stay_bounded() {
         )
         .expect("merge prefix base and recovery deltas");
     assert_eq!(actual_prefix, expected_prefix);
+
+    let page_cache = std::sync::Arc::new(crate::SegmentCache::new(64 * 1024));
+    let cached_reader = RelationalIndexRecoveryReader::open_latest_with_cache(
+        &directory,
+        4,
+        shadow_config,
+        recovery_config,
+        std::sync::Arc::clone(&page_cache),
+        crate::StoreId(73),
+    )
+    .expect("open recovery reader with a shared empty page cache");
+    assert_eq!(page_cache.snapshot().resident_bytes, 0);
+    let mut cold_rows = Vec::new();
+    let cold_report = cached_reader
+        .visit_exact_postings(
+            "documents",
+            "documents_owner_idx",
+            &owner_prefix,
+            RelationalIndexReadLimits::default(),
+            |primary_key| {
+                cold_rows.push(primary_key.clone());
+                true
+            },
+        )
+        .expect("cold recovery read uses positioned base and delta reads");
+    let expected_cold_rows = state
+        .index_lookup("documents", "documents_owner_idx", &owner_prefix)
+        .expect("materialized owner-a posting")
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(cold_rows, expected_cold_rows);
+    assert_eq!(cold_report.base.cache_misses, cold_report.base.pages_read);
+    assert_eq!(cold_report.delta_cache_misses, report.delta_pages);
+    assert_eq!(cold_report.delta_file_pages_read, report.delta_pages);
+    assert_eq!(page_cache.snapshot().pinned_bytes, 0);
+
+    let mut warm_rows = Vec::new();
+    let warm_report = cached_reader
+        .visit_exact_postings(
+            "documents",
+            "documents_owner_idx",
+            &owner_prefix,
+            RelationalIndexReadLimits::default(),
+            |primary_key| {
+                warm_rows.push(primary_key.clone());
+                true
+            },
+        )
+        .expect("warm recovery read reuses base and delta pages");
+    assert_eq!(warm_rows, expected_cold_rows);
+    assert_eq!(warm_report.base.cache_hits, warm_report.base.pages_read);
+    assert_eq!(warm_report.base.file_pages_read, 0);
+    assert_eq!(warm_report.delta_cache_hits, report.delta_pages);
+    assert_eq!(warm_report.delta_file_pages_read, 0);
+    assert_eq!(page_cache.snapshot().pinned_bytes, 0);
+
     assert!(RelationalIndexRecoveryReader::open_latest(
         &directory,
         5,

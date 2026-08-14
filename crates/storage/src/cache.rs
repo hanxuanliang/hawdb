@@ -23,6 +23,16 @@ pub enum RepresentationKind {
     RelationshipSegment,
     PropertySegment,
     AdjacencySegment,
+    RelationalIndexPageSlot,
+    RelationalIndexRecoveryDelta,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct SegmentCacheIdentity {
+    pub(crate) store_id: StoreId,
+    pub(crate) manifest_generation: ManifestGeneration,
+    pub(crate) segment_id: u64,
+    pub(crate) representation: RepresentationKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -32,6 +42,17 @@ pub struct SegmentCacheKey {
     pub segment_id: u64,
     pub content_digest: ContentDigest,
     pub representation: RepresentationKind,
+}
+
+impl SegmentCacheKey {
+    pub(crate) const fn identity(self) -> SegmentCacheIdentity {
+        SegmentCacheIdentity {
+            store_id: self.store_id,
+            manifest_generation: self.manifest_generation,
+            segment_id: self.segment_id,
+            representation: self.representation,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -58,6 +79,10 @@ pub enum SegmentCacheError {
     DigestCollision {
         key: SegmentCacheKey,
     },
+    IdentityCollision {
+        requested_key: SegmentCacheKey,
+        resident_digest: ContentDigest,
+    },
     EntryTooLarge {
         entry_bytes: u64,
         capacity_bytes: u64,
@@ -82,6 +107,17 @@ impl Display for SegmentCacheError {
                 formatter,
                 "segment cache key collision for generation {} segment {}",
                 key.manifest_generation.0, key.segment_id
+            ),
+            Self::IdentityCollision {
+                requested_key,
+                resident_digest,
+            } => write!(
+                formatter,
+                "segment cache immutable identity collision for generation {} segment {}: resident digest {}, requested digest {}",
+                requested_key.manifest_generation.0,
+                requested_key.segment_id,
+                resident_digest.0,
+                requested_key.content_digest.0
             ),
             Self::EntryTooLarge {
                 entry_bytes,
@@ -133,8 +169,8 @@ pub struct SegmentCache {
 struct SegmentCacheInner {
     capacity_bytes: u64,
     resident_bytes: u64,
-    entries: BTreeMap<SegmentCacheKey, SegmentCacheEntry>,
-    clock: VecDeque<SegmentCacheKey>,
+    entries: BTreeMap<SegmentCacheIdentity, SegmentCacheEntry>,
+    clock: VecDeque<SegmentCacheIdentity>,
     hit_count: u64,
     miss_count: u64,
     insertion_count: u64,
@@ -145,6 +181,7 @@ struct SegmentCacheInner {
 
 #[derive(Debug)]
 struct SegmentCacheEntry {
+    key: SegmentCacheKey,
     bytes: Arc<[u8]>,
     referenced: bool,
 }
@@ -169,7 +206,28 @@ impl SegmentCache {
 
     pub fn get(&self, key: &SegmentCacheKey) -> Option<SegmentCacheLease> {
         let mut inner = self.lock();
-        let bytes = match inner.entries.get_mut(key) {
+        let bytes = match inner.entries.get_mut(&key.identity()) {
+            Some(entry) if entry.key.content_digest == key.content_digest => {
+                entry.referenced = true;
+                Arc::clone(&entry.bytes)
+            }
+            Some(_) | None => {
+                inner.miss_count = inner.miss_count.saturating_add(1);
+                return None;
+            }
+        };
+        inner.hit_count = inner.hit_count.saturating_add(1);
+        Some(SegmentCacheLease { bytes })
+    }
+
+    /// Looks up bytes by their immutable physical identity after a prior
+    /// insertion established and verified the content digest.
+    pub(crate) fn get_by_identity(
+        &self,
+        identity: &SegmentCacheIdentity,
+    ) -> Option<SegmentCacheLease> {
+        let mut inner = self.lock();
+        let bytes = match inner.entries.get_mut(identity) {
             Some(entry) => {
                 entry.referenced = true;
                 Arc::clone(&entry.bytes)
@@ -198,10 +256,31 @@ impl SegmentCache {
                 actual: actual_digest,
             });
         }
-        if let Some(entry) = inner.entries.get_mut(&key) {
-            if entry.bytes.as_ref() != bytes.as_ref() {
+        let identity = key.identity();
+        if let Some(resident_digest) = inner
+            .entries
+            .get(&identity)
+            .map(|entry| entry.key.content_digest)
+        {
+            if resident_digest != key.content_digest {
+                inner.digest_mismatch_count = inner.digest_mismatch_count.saturating_add(1);
+                return Err(SegmentCacheError::IdentityCollision {
+                    requested_key: key,
+                    resident_digest,
+                });
+            }
+            if inner
+                .entries
+                .get(&identity)
+                .is_some_and(|entry| entry.bytes.as_ref() != bytes.as_ref())
+            {
+                inner.digest_mismatch_count = inner.digest_mismatch_count.saturating_add(1);
                 return Err(SegmentCacheError::DigestCollision { key });
             }
+            let entry = inner
+                .entries
+                .get_mut(&identity)
+                .expect("cache identity remains resident");
             entry.referenced = true;
             let bytes = Arc::clone(&entry.bytes);
             inner.hit_count = inner.hit_count.saturating_add(1);
@@ -228,10 +307,11 @@ impl SegmentCache {
 
         inner.resident_bytes = inner.resident_bytes.saturating_add(entry_bytes);
         inner.insertion_count = inner.insertion_count.saturating_add(1);
-        inner.clock.push_back(key);
+        inner.clock.push_back(identity);
         inner.entries.insert(
-            key,
+            identity,
             SegmentCacheEntry {
+                key,
                 bytes: Arc::clone(&bytes),
                 referenced: true,
             },
@@ -391,5 +471,36 @@ mod tests {
         drop(third);
 
         assert_eq!(cache.snapshot().entry_count, 3);
+    }
+
+    #[test]
+    fn immutable_identity_lookup_reuses_the_verified_digest() {
+        let cache = SegmentCache::new(16);
+        let key = key(1, b"page");
+        drop(cache.insert(key, &b"page"[..]).unwrap());
+
+        let lease = cache
+            .get_by_identity(&key.identity())
+            .expect("verified immutable identity remains cached");
+
+        assert_eq!(&*lease, b"page");
+        assert_eq!(cache.snapshot().hit_count, 1);
+    }
+
+    #[test]
+    fn immutable_identity_rejects_different_content_in_one_generation() {
+        let cache = SegmentCache::new(16);
+        let first = key(1, b"page-a");
+        drop(cache.insert(first, &b"page-a"[..]).unwrap());
+        let second = SegmentCacheKey {
+            content_digest: content_digest(b"page-b"),
+            ..first
+        };
+
+        let error = cache.insert(second, &b"page-b"[..]).unwrap_err();
+
+        assert!(matches!(error, SegmentCacheError::IdentityCollision { .. }));
+        assert_eq!(cache.snapshot().entry_count, 1);
+        assert_eq!(cache.snapshot().digest_mismatch_count, 1);
     }
 }

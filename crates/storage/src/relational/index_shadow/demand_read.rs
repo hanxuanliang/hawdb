@@ -37,6 +37,11 @@ impl Default for RelationalIndexReadLimits {
 pub struct RelationalIndexReadReport {
     pub pages_read: usize,
     pub bytes_read: usize,
+    pub file_pages_read: usize,
+    pub file_bytes_read: usize,
+    pub cache_hits: usize,
+    pub cache_misses: usize,
+    pub cache_admission_rejections: usize,
     pub leaf_entries_visited: usize,
     pub matched_index_keys: usize,
     pub rows_visited: usize,
@@ -167,6 +172,11 @@ impl<'a> ReadContext<'a> {
             report: RelationalIndexReadReport {
                 pages_read: 0,
                 bytes_read: 0,
+                file_pages_read: 0,
+                file_bytes_read: 0,
+                cache_hits: 0,
+                cache_misses: 0,
+                cache_admission_rejections: 0,
                 leaf_entries_visited: 0,
                 matched_index_keys: 0,
                 rows_visited: 0,
@@ -429,10 +439,21 @@ impl<'a> ReadContext<'a> {
                 self.limits.max_bytes
             )));
         }
-        let page = self.reader.read_page(page_id)?;
+        let read = self.reader.read_page_accounted(page_id)?;
         self.report.pages_read += 1;
         self.report.bytes_read = next_bytes;
-        Ok(page)
+        self.report.cache_hits += usize::from(read.cache_hit);
+        self.report.cache_misses += usize::from(read.cache_miss);
+        self.report.cache_admission_rejections += usize::from(read.cache_admission_rejected);
+        if !read.cache_hit {
+            self.report.file_pages_read += 1;
+            self.report.file_bytes_read = self
+                .report
+                .file_bytes_read
+                .checked_add(page_bytes)
+                .ok_or_else(|| self.admission("index file byte counter overflow"))?;
+        }
+        Ok(read.page)
     }
 
     fn corrupt(&self, message: impl Into<String>) -> RelationalIndexShadowError {

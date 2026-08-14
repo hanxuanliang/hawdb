@@ -435,6 +435,17 @@ and fail-closed schema invalidation. `CrashCandidate` discards only unpublished
 candidate state; the previously published manifest and canonical WAL remain
 unchanged. Production SQL selection is still false in every modeled state.
 
+`SkeinPageCacheAdmission.tla` models the clean immutable page-cache boundary
+used by relational base and recovery-delta readers. The cache capacity is a
+caller-carved domain below the root memory budget, so its maximum residency
+preserves a separate foreground reserve. It checks resident/pinned/reference
+accounting, pin-safe eviction, generation/digest/representation identity,
+cache-cold open, corruption rejection, foreground bypass when all resident
+pages are pinned, and cancellation release. Background population is
+weak-fair and always terminates through a hit, admission, unpinned eviction, or
+non-blocking bypass; it never waits for or evicts a pin. Dirty pages are outside
+this model and remain a later COW page-publication obligation.
+
 ## Derived Source Segment Publication
 
 `SkeinSourceSegmentPublication.tla` models Source scan sidecars, including the

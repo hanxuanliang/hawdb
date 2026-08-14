@@ -181,6 +181,10 @@ name = "relational_index_access"
 harness = false
 
 [[bench]]
+name = "relational_index_page_cache"
+harness = false
+
+[[bench]]
 name = "relational_oltp_mix"
 harness = false
 

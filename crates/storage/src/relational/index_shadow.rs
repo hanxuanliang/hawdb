@@ -3,19 +3,23 @@ use super::{
     RelationalReferentialAction, RelationalScalarType, RelationalState, RelationalTableSchema,
     RelationalValue,
 };
+use crate::cache::SegmentCacheIdentity;
 use crate::{
-    durable_replace_file, ImmutableIndexPage, ImmutableIndexPageBody, ImmutableIndexPageError,
-    ImmutableIndexPageLimits, IndexIdentity, IndexInteriorEntry, IndexInteriorPage, IndexLeafEntry,
-    IndexLeafPage, IndexLeafPosting, IndexPageId, IndexPostingPage, IndexRootPage, IndexRowId,
+    content_digest, durable_replace_file, ImmutableIndexPage, ImmutableIndexPageBody,
+    ImmutableIndexPageError, ImmutableIndexPageLimits, IndexIdentity, IndexInteriorEntry,
+    IndexInteriorPage, IndexLeafEntry, IndexLeafPage, IndexLeafPosting, IndexPageId,
+    IndexPostingPage, IndexRootPage, IndexRowId, ManifestGeneration, RepresentationKind,
+    SegmentCache, SegmentCacheError, SegmentCacheKey, StoreId,
 };
 use fs2::FileExt;
 use skein_integrity::{integrity_digest, IntegrityHasher, Sha256Digest, SHA256_BYTES};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 mod demand_read;
 mod recovery;
@@ -548,13 +552,41 @@ pub struct RelationalIndexShadowReader {
     directory: PathBuf,
     manifest: RelationalIndexShadowManifest,
     config: RelationalIndexShadowConfig,
+    page_cache: Option<Arc<SegmentCache>>,
+    store_id: StoreId,
+    artifact: OnceLock<File>,
     poisoned: AtomicBool,
+}
+
+pub(super) struct RelationalIndexPageRead {
+    pub page: ImmutableIndexPage,
+    pub cache_hit: bool,
+    pub cache_miss: bool,
+    pub cache_admission_rejected: bool,
 }
 
 impl RelationalIndexShadowReader {
     pub fn open_latest(
         directory: &Path,
         config: RelationalIndexShadowConfig,
+    ) -> Result<Self, RelationalIndexShadowError> {
+        Self::open_latest_inner(directory, config, None, StoreId::default())
+    }
+
+    pub fn open_latest_with_cache(
+        directory: &Path,
+        config: RelationalIndexShadowConfig,
+        page_cache: Arc<SegmentCache>,
+        store_id: StoreId,
+    ) -> Result<Self, RelationalIndexShadowError> {
+        Self::open_latest_inner(directory, config, Some(page_cache), store_id)
+    }
+
+    fn open_latest_inner(
+        directory: &Path,
+        config: RelationalIndexShadowConfig,
+        page_cache: Option<Arc<SegmentCache>>,
+        store_id: StoreId,
     ) -> Result<Self, RelationalIndexShadowError> {
         let manifest_path = directory.join(RELATIONAL_INDEX_SHADOW_MANIFEST_FILE);
         let encoded = read_bounded_file(
@@ -563,7 +595,7 @@ impl RelationalIndexShadowReader {
             "relational index shadow manifest",
         )?;
         let manifest = RelationalIndexShadowManifest::decode(&encoded, config)?;
-        Self::from_manifest(directory, manifest, config)
+        Self::from_manifest(directory, manifest, config, page_cache, store_id)
     }
 
     pub fn open(
@@ -588,6 +620,8 @@ impl RelationalIndexShadowReader {
         directory: &Path,
         manifest: RelationalIndexShadowManifest,
         config: RelationalIndexShadowConfig,
+        page_cache: Option<Arc<SegmentCache>>,
+        store_id: StoreId,
     ) -> Result<Self, RelationalIndexShadowError> {
         let artifact_path =
             directory.join(relational_index_shadow_artifact_file(manifest.generation));
@@ -611,6 +645,9 @@ impl RelationalIndexShadowReader {
             directory: directory.to_path_buf(),
             manifest,
             config,
+            page_cache,
+            store_id,
+            artifact: OnceLock::new(),
             poisoned: AtomicBool::new(false),
         })
     }
@@ -631,6 +668,13 @@ impl RelationalIndexShadowReader {
         &self,
         page_id: IndexPageId,
     ) -> Result<ImmutableIndexPage, RelationalIndexShadowError> {
+        self.read_page_accounted(page_id).map(|read| read.page)
+    }
+
+    pub(super) fn read_page_accounted(
+        &self,
+        page_id: IndexPageId,
+    ) -> Result<RelationalIndexPageRead, RelationalIndexShadowError> {
         if page_id.get() > self.manifest.page_count {
             return Err(RelationalIndexShadowError::Corrupt(format!(
                 "page {} exceeds published page count {}",
@@ -653,8 +697,25 @@ impl RelationalIndexShadowReader {
     fn read_page_inner(
         &self,
         page_id: IndexPageId,
-    ) -> Result<ImmutableIndexPage, RelationalIndexShadowError> {
+    ) -> Result<RelationalIndexPageRead, RelationalIndexShadowError> {
         let page_bytes = self.config.page_limits.max_page_bytes.get();
+        let cache_identity = SegmentCacheIdentity {
+            store_id: self.store_id,
+            manifest_generation: ManifestGeneration(self.manifest.generation),
+            segment_id: page_id.get(),
+            representation: RepresentationKind::RelationalIndexPageSlot,
+        };
+        if let Some(cache) = &self.page_cache
+            && let Some(slot) = cache.get_by_identity(&cache_identity)
+        {
+            let page = self.decode_selected_page(&slot, page_id)?;
+            return Ok(RelationalIndexPageRead {
+                page,
+                cache_hit: true,
+                cache_miss: false,
+                cache_admission_rejected: false,
+            });
+        }
         let offset = page_id
             .get()
             .checked_sub(1)
@@ -662,16 +723,47 @@ impl RelationalIndexShadowReader {
             .ok_or_else(|| {
                 RelationalIndexShadowError::Corrupt("index page offset overflow".to_string())
             })?;
-        let path = self.directory.join(relational_index_shadow_artifact_file(
-            self.manifest.generation,
-        ));
-        let mut file = File::open(path).map_err(durability("open shadow artifact"))?;
-        file.seek(SeekFrom::Start(offset))
-            .map_err(durability("seek shadow page"))?;
         let mut slot = vec![0; page_bytes];
-        file.read_exact(&mut slot)
+        read_exact_at(self.artifact()?, &mut slot, offset)
             .map_err(durability("read shadow page"))?;
-        let page = ImmutableIndexPage::decode_slot(&slot, self.config.page_limits)?;
+        let slot: Arc<[u8]> = slot.into();
+        let page = self.decode_selected_page(&slot, page_id)?;
+        let mut cache_admission_rejected = false;
+        if let Some(cache) = &self.page_cache {
+            let key = SegmentCacheKey {
+                store_id: cache_identity.store_id,
+                manifest_generation: cache_identity.manifest_generation,
+                segment_id: cache_identity.segment_id,
+                content_digest: content_digest(&slot),
+                representation: cache_identity.representation,
+            };
+            match cache.insert(key, Arc::clone(&slot)) {
+                Ok(_) => {}
+                Err(SegmentCacheError::EntryTooLarge { .. })
+                | Err(SegmentCacheError::PinnedCapacity { .. }) => {
+                    cache_admission_rejected = true;
+                }
+                Err(error) => {
+                    return Err(RelationalIndexShadowError::Corrupt(format!(
+                        "relational index page cache rejected immutable page identity: {error}"
+                    )));
+                }
+            }
+        }
+        Ok(RelationalIndexPageRead {
+            page,
+            cache_hit: false,
+            cache_miss: self.page_cache.is_some(),
+            cache_admission_rejected,
+        })
+    }
+
+    fn decode_selected_page(
+        &self,
+        slot: &[u8],
+        page_id: IndexPageId,
+    ) -> Result<ImmutableIndexPage, RelationalIndexShadowError> {
+        let page = ImmutableIndexPage::decode_slot(slot, self.config.page_limits)?;
         if page.generation != self.manifest.generation
             || page.source_commit_epoch != self.manifest.source_commit_epoch
             || page.page_id != page_id
@@ -682,6 +774,21 @@ impl RelationalIndexShadowReader {
             )));
         }
         Ok(page)
+    }
+
+    fn artifact(&self) -> Result<&File, RelationalIndexShadowError> {
+        if let Some(file) = self.artifact.get() {
+            return Ok(file);
+        }
+        let path = self.directory.join(relational_index_shadow_artifact_file(
+            self.manifest.generation,
+        ));
+        let opened = File::open(path).map_err(durability("open shadow artifact"))?;
+        let _ = self.artifact.set(opened);
+        Ok(self
+            .artifact
+            .get()
+            .expect("the current or a concurrent reader opened the shadow artifact"))
     }
 
     pub fn read_root(
@@ -717,6 +824,38 @@ impl RelationalIndexShadowReader {
         }
         Ok(root)
     }
+}
+
+#[cfg(unix)]
+fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    file.read_exact_at(buffer, offset)
+}
+
+#[cfg(windows)]
+fn read_exact_at(file: &File, mut buffer: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !buffer.is_empty() {
+        let read = file.seek_read(buffer, offset)?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "relational index page ended before the fixed slot was filled",
+            ));
+        }
+        buffer = &mut buffer[read..];
+        offset = offset.saturating_add(read as u64);
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
+    use std::io::Read;
+
+    let mut file = file.try_clone()?;
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(buffer)
 }
 
 struct SlotWriter {

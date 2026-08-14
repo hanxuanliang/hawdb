@@ -12,7 +12,10 @@ use super::{
     read_u64, take, RelationalIndexReadLimits, RelationalIndexReadReport,
     RelationalIndexShadowConfig, RelationalIndexShadowError, RelationalIndexShadowReader,
 };
-use crate::durable_replace_file;
+use crate::{
+    durable_replace_file, ContentDigest, ManifestGeneration, RepresentationKind, SegmentCache,
+    SegmentCacheError, SegmentCacheKey, StoreId,
+};
 use skein_integrity::{IntegrityDigest, IntegrityHasher, Sha256Digest, SHA256_BYTES};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -20,6 +23,7 @@ use std::io::Write;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 const DELTA_MANIFEST_MAGIC: &[u8; 8] = b"SKRIDXR1";
 const DELTA_PAGE_MAGIC: &[u8; 8] = b"SKRIDXD1";
@@ -536,6 +540,11 @@ pub struct RelationalIndexRecoveryReadReport {
     pub base: RelationalIndexReadReport,
     pub delta_pages_read: usize,
     pub delta_bytes_read: usize,
+    pub delta_file_pages_read: usize,
+    pub delta_file_bytes_read: usize,
+    pub delta_cache_hits: usize,
+    pub delta_cache_misses: usize,
+    pub delta_cache_admission_rejections: usize,
     pub delta_entries_visited: usize,
     pub rows_visited: usize,
     pub stopped_early: bool,
@@ -545,7 +554,16 @@ pub struct RelationalIndexRecoveryReader {
     base: RelationalIndexShadowReader,
     manifest: RelationalIndexRecoveryManifest,
     config: RelationalIndexRecoveryConfig,
+    page_cache: Option<Arc<SegmentCache>>,
+    store_id: StoreId,
     poisoned: AtomicBool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RecoveryDeltaPageRead {
+    cache_hit: bool,
+    cache_miss: bool,
+    cache_admission_rejected: bool,
 }
 
 impl RelationalIndexRecoveryReader {
@@ -555,7 +573,52 @@ impl RelationalIndexRecoveryReader {
         shadow_config: RelationalIndexShadowConfig,
         recovery_config: RelationalIndexRecoveryConfig,
     ) -> Result<Self, RelationalIndexShadowError> {
-        let base = RelationalIndexShadowReader::open_latest(directory, shadow_config)?;
+        Self::open_latest_inner(
+            directory,
+            expected_recovered_commit_epoch,
+            shadow_config,
+            recovery_config,
+            None,
+            StoreId::default(),
+        )
+    }
+
+    pub fn open_latest_with_cache(
+        directory: &Path,
+        expected_recovered_commit_epoch: u64,
+        shadow_config: RelationalIndexShadowConfig,
+        recovery_config: RelationalIndexRecoveryConfig,
+        page_cache: Arc<SegmentCache>,
+        store_id: StoreId,
+    ) -> Result<Self, RelationalIndexShadowError> {
+        Self::open_latest_inner(
+            directory,
+            expected_recovered_commit_epoch,
+            shadow_config,
+            recovery_config,
+            Some(page_cache),
+            store_id,
+        )
+    }
+
+    fn open_latest_inner(
+        directory: &Path,
+        expected_recovered_commit_epoch: u64,
+        shadow_config: RelationalIndexShadowConfig,
+        recovery_config: RelationalIndexRecoveryConfig,
+        page_cache: Option<Arc<SegmentCache>>,
+        store_id: StoreId,
+    ) -> Result<Self, RelationalIndexShadowError> {
+        let base = if let Some(cache) = &page_cache {
+            RelationalIndexShadowReader::open_latest_with_cache(
+                directory,
+                shadow_config,
+                Arc::clone(cache),
+                store_id,
+            )?
+        } else {
+            RelationalIndexShadowReader::open_latest(directory, shadow_config)?
+        };
         let manifest_path = directory.join(RELATIONAL_INDEX_RECOVERY_MANIFEST_FILE);
         let encoded = read_bounded_file(
             &manifest_path,
@@ -580,6 +643,8 @@ impl RelationalIndexRecoveryReader {
             base,
             manifest,
             config: recovery_config,
+            page_cache,
+            store_id,
             poisoned: AtomicBool::new(false),
         })
     }
@@ -657,6 +722,11 @@ impl RelationalIndexRecoveryReader {
             base,
             delta_pages_read: 0,
             delta_bytes_read: 0,
+            delta_file_pages_read: 0,
+            delta_file_bytes_read: 0,
+            delta_cache_hits: 0,
+            delta_cache_misses: 0,
+            delta_cache_admission_rejections: 0,
             delta_entries_visited: 0,
             rows_visited: 0,
             stopped_early: false,
@@ -687,7 +757,7 @@ impl RelationalIndexRecoveryReader {
                     limits.max_bytes
                 )));
             }
-            self.visit_page(descriptor, |entry| {
+            let page_read = self.visit_page(descriptor, |entry| {
                 report.delta_entries_visited = report
                     .delta_entries_visited
                     .checked_add(1)
@@ -718,6 +788,14 @@ impl RelationalIndexRecoveryReader {
             })?;
             report.delta_pages_read += 1;
             report.delta_bytes_read += encoded_len;
+            report.delta_cache_hits += usize::from(page_read.cache_hit);
+            report.delta_cache_misses += usize::from(page_read.cache_miss);
+            report.delta_cache_admission_rejections +=
+                usize::from(page_read.cache_admission_rejected);
+            if !page_read.cache_hit {
+                report.delta_file_pages_read += 1;
+                report.delta_file_bytes_read += encoded_len;
+            }
         }
         for row in rows {
             report.rows_visited += 1;
@@ -733,7 +811,35 @@ impl RelationalIndexRecoveryReader {
         &self,
         descriptor: &DeltaPageDescriptor,
         visit: impl FnMut(DeltaEntry) -> Result<(), RelationalIndexShadowError>,
-    ) -> Result<(), RelationalIndexShadowError> {
+    ) -> Result<RecoveryDeltaPageRead, RelationalIndexShadowError> {
+        let cache_key = SegmentCacheKey {
+            store_id: self.store_id,
+            manifest_generation: ManifestGeneration(self.manifest.delta_generation),
+            segment_id: descriptor.ordinal as u64,
+            content_digest: ContentDigest(descriptor.digest.crc32c.as_u64()),
+            representation: RepresentationKind::RelationalIndexRecoveryDelta,
+        };
+        if let Some(cache) = &self.page_cache
+            && let Some(encoded) = cache.get(&cache_key)
+        {
+            let result = decode_delta_page(
+                &encoded,
+                self.manifest.base_generation,
+                self.manifest.delta_generation,
+                self.manifest.base_commit_epoch,
+                descriptor,
+                self.config,
+                visit,
+            );
+            if result.as_ref().is_err_and(should_poison) {
+                self.poison();
+            }
+            return result.map(|()| RecoveryDeltaPageRead {
+                cache_hit: true,
+                cache_miss: false,
+                cache_admission_rejected: false,
+            });
+        }
         let path = self
             .base
             .directory
@@ -767,7 +873,28 @@ impl RelationalIndexRecoveryReader {
                 descriptor,
                 self.config,
                 visit,
-            )
+            )?;
+            let mut cache_admission_rejected = false;
+            if let Some(cache) = &self.page_cache {
+                let encoded: Arc<[u8]> = encoded.into();
+                match cache.insert(cache_key, encoded) {
+                    Ok(_) => {}
+                    Err(SegmentCacheError::EntryTooLarge { .. })
+                    | Err(SegmentCacheError::PinnedCapacity { .. }) => {
+                        cache_admission_rejected = true;
+                    }
+                    Err(error) => {
+                        return Err(corrupt(format!(
+                            "relational index recovery cache rejected immutable delta identity: {error}"
+                        )));
+                    }
+                }
+            }
+            Ok(RecoveryDeltaPageRead {
+                cache_hit: false,
+                cache_miss: self.page_cache.is_some(),
+                cache_admission_rejected,
+            })
         });
         if result.as_ref().is_err_and(should_poison) {
             self.poison();

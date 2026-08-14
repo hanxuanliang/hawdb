@@ -310,6 +310,27 @@ doctor/deep-scrub mode visits every reachable page and projection artifact.
 8. Oversized pages are rejected before insertion. The cache MUST NOT exceed its
    capacity in order to admit one exceptional entry.
 
+The current relational shadow reader uses the existing shared `SegmentCache`
+for immutable base-page slots and WAL recovery-delta pages. Cache entries retain
+the complete physical identity: store, manifest or delta generation, page
+identity, verified content digest, and representation kind. Base slots whose
+digest is intentionally absent from the compact manifest are first opened by
+generation/page identity, strongly decoded and verified, and only then inserted
+with their computed digest. The cache rejects any later attempt to associate
+different bytes with that immutable identity. Recovery descriptors already
+carry the complete delta-page digest and therefore use exact-key lookup.
+
+Opening either reader validates bounded manifests and artifact lengths but does
+not open the page artifact or populate the cache. The first lookup uses
+cross-platform positioned reads and reports logical pages/bytes separately from
+file pages/bytes, cache hits/misses, and cache admission rejections. An
+oversized entry or temporarily pinned cache does not make an otherwise admitted
+query incorrect: the reader keeps the strongly verified page only for the
+current bounded operation and bypasses cache residency. Corruption, digest
+collision, or immutable-identity collision poisons the reader. Raw-page cache
+leases end before decoded traversal continues, so cancellation, early stop,
+error, and panic cannot retain a cache pin through the cursor lifetime.
+
 ## Transaction and lock contract
 
 Ordinary snapshot reads do not acquire row locks. Locking reads and mutations
@@ -433,8 +454,11 @@ boundaries and MUST land before their corresponding production activation:
 - `SkeinIndexRecovery.tla`: base root plus ordered WAL delta equivalence,
   bounded dirty overlays, immutable candidate generations, crash recovery,
   schema invalidation, and no partial replay visibility.
-- planned `SkeinPageCacheAdmission.tla`: resident/pinned/dirty accounting, eviction,
-  cancellation, foreground reserve, and background progress.
+- `SkeinPageCacheAdmission.tla`: clean immutable page residency, pin-safe
+  eviction, cancellation release, caller-carved foreground reserve, corrupt
+  admission rejection, cold open, and background hit/admit/bypass progress.
+  Dirty row-page publication remains owned by the planned
+  `SkeinCowPagePublication.tla`; it is not inferred from this clean-cache model.
 
 Existing `SkeinCompactionVisibility.tla`, `SkeinColumnGroupManifest.tla`, and
 `SkeinColumnarShadowIntegration.tla` continue to prove derived column-group
