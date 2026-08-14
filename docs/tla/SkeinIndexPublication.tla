@@ -43,7 +43,8 @@ VARIABLES
     constraintTarget,
     constraintPage,
     durableWalEpochs,
-    constraintRejected
+    constraintRejected,
+    materializedPostingsResident
 
 vars == <<
     canonicalEpoch,
@@ -69,7 +70,8 @@ vars == <<
     constraintTarget,
     constraintPage,
     durableWalEpochs,
-    constraintRejected
+    constraintRejected,
+    materializedPostingsResident
 >>
 
 authorityMutationVars == <<
@@ -78,7 +80,8 @@ authorityMutationVars == <<
     constraintTarget,
     constraintPage,
     durableWalEpochs,
-    constraintRejected
+    constraintRejected,
+    materializedPostingsResident
 >>
 
 Init ==
@@ -106,6 +109,7 @@ Init ==
     /\ constraintPage = 0
     /\ durableWalEpochs = {}
     /\ constraintRejected = FALSE
+    /\ materializedPostingsResident = TRUE
 
 Commit ==
     /\ canonicalEpoch < MaxEpoch
@@ -277,6 +281,7 @@ OpenHandle ==
     /\ requiredPage' = 0
     /\ poisoned' = FALSE
     /\ authoritativeHandle' = FALSE
+    /\ materializedPostingsResident' = TRUE
     /\ UNCHANGED <<
         canonicalEpoch,
         rowRootEpoch,
@@ -311,6 +316,7 @@ OpenAuthoritativeHandle ==
     /\ queryState' = "idle"
     /\ requiredPage' = 0
     /\ poisoned' = FALSE
+    /\ materializedPostingsResident' = FALSE
     /\ UNCHANGED <<
         canonicalEpoch,
         rowRootEpoch,
@@ -492,6 +498,7 @@ BeginAuthoritativeConstraint ==
         visibleRowEpoch,
         visibleIndexEpoch,
         authoritativeHandle,
+        materializedPostingsResident,
         durableWalEpochs
         >>
 
@@ -520,6 +527,7 @@ AcceptAuthoritativeConstraint ==
         visibleRowEpoch,
         visibleIndexEpoch,
         authoritativeHandle,
+        materializedPostingsResident,
         constraintTarget,
         constraintPage,
         durableWalEpochs,
@@ -551,6 +559,7 @@ RejectAuthoritativeConstraint ==
         visibleRowEpoch,
         visibleIndexEpoch,
         authoritativeHandle,
+        materializedPostingsResident,
         constraintTarget,
         constraintPage,
         durableWalEpochs
@@ -581,6 +590,7 @@ FailAuthoritativeConstraint ==
         visibleRowEpoch,
         visibleIndexEpoch,
         authoritativeHandle,
+        materializedPostingsResident,
         constraintTarget,
         constraintPage,
         durableWalEpochs
@@ -612,6 +622,7 @@ PersistAuthoritativeWal ==
         visibleRowEpoch,
         visibleIndexEpoch,
         authoritativeHandle,
+        materializedPostingsResident,
         constraintTarget,
         constraintPage,
         constraintRejected
@@ -645,6 +656,7 @@ PublishAuthoritativeMutation ==
         poisoned,
         stalePublishRejected,
         authoritativeHandle,
+        materializedPostingsResident,
         durableWalEpochs
         >>
 
@@ -675,6 +687,7 @@ ResetRejectedConstraint ==
         visibleRowEpoch,
         visibleIndexEpoch,
         authoritativeHandle,
+        materializedPostingsResident,
         durableWalEpochs
         >>
 
@@ -693,6 +706,7 @@ CrashAndRecover ==
     /\ visibleRowEpoch' = IF constraintState = "durable" THEN constraintTarget ELSE visibleRowEpoch
     /\ visibleIndexEpoch' = IF constraintState = "durable" THEN constraintTarget ELSE visibleIndexEpoch
     /\ authoritativeHandle' = FALSE
+    /\ materializedPostingsResident' = FALSE
     /\ constraintState' = "idle"
     /\ constraintTarget' = 0
     /\ constraintPage' = 0
@@ -755,6 +769,7 @@ TypeOK ==
     /\ constraintPage \in 0..MaxPage
     /\ durableWalEpochs \subseteq Epochs
     /\ constraintRejected \in BOOLEAN
+    /\ materializedPostingsResident \in BOOLEAN
 
 RowAndIndexRootsAgree == rowRootEpoch = indexRootEpoch
 
@@ -788,6 +803,9 @@ AuthoritativeIndexIsRecoverable ==
         /\ indexRootEpoch \in durableIndexEpochs
         /\ \/ visibleIndexEpoch = indexRootEpoch
            \/ visibleIndexEpoch \in durableWalEpochs
+
+AuthoritativeOmitsMaterializedPostings ==
+    authoritativeHandle => ~materializedPostingsResident
 
 ConstraintCheckUsesCurrentView ==
     constraintState # "idle" =>

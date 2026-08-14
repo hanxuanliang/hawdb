@@ -20,15 +20,16 @@ use super::{GraphStore, SkeinError};
 use skein_integrity::{integrity_digest, IntegrityHasher, Sha256Digest};
 use skein_storage::{
     relational_index_shadow_artifact_file, relational_index_shadow_manifest_generation_file,
-    RelationalIndexChange, RelationalIndexChangeCapture, RelationalIndexChangeCaptureLimits,
-    RelationalIndexChangeKind, RelationalIndexGenerationArtifacts,
-    RelationalIndexGenerationIdentity, RelationalIndexMode, RelationalIndexReadLimits,
-    RelationalIndexReadReport, RelationalIndexRecoveryBuilder, RelationalIndexRecoveryConfig,
-    RelationalIndexRecoveryReadReport, RelationalIndexRecoveryReader,
-    RelationalIndexRecoveryReport, RelationalIndexRole, RelationalIndexShadowBuildReport,
-    RelationalIndexShadowConfig, RelationalIndexShadowError, RelationalIndexShadowManifest,
-    RelationalIndexShadowReader, RelationalIndexShadowWriter, RelationalKey, RelationalScalarType,
-    RelationalTableSchema, RelationalTransaction, RelationalValue, RELATIONAL_PRIMARY_INDEX_NAME,
+    RelationalCheckpointIndexLoad, RelationalIndexChange, RelationalIndexChangeCapture,
+    RelationalIndexChangeCaptureLimits, RelationalIndexChangeKind,
+    RelationalIndexGenerationArtifacts, RelationalIndexGenerationIdentity, RelationalIndexMode,
+    RelationalIndexReadLimits, RelationalIndexReadReport, RelationalIndexRecoveryBuilder,
+    RelationalIndexRecoveryConfig, RelationalIndexRecoveryReadReport,
+    RelationalIndexRecoveryReader, RelationalIndexRecoveryReport, RelationalIndexRole,
+    RelationalIndexShadowBuildReport, RelationalIndexShadowConfig, RelationalIndexShadowError,
+    RelationalIndexShadowManifest, RelationalIndexShadowReader, RelationalIndexShadowWriter,
+    RelationalKey, RelationalScalarType, RelationalTableSchema, RelationalTransaction,
+    RelationalValue, RELATIONAL_PRIMARY_INDEX_NAME,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -955,6 +956,18 @@ pub(super) struct RelationalIndexLiveUnavailable {
 }
 
 impl GraphStore {
+    pub(super) fn relational_checkpoint_index_load(&self) -> RelationalCheckpointIndexLoad {
+        if self
+            .relational_index_shadow
+            .mode
+            .requires_authoritative_indexes()
+        {
+            RelationalCheckpointIndexLoad::OmitMaterializedPostings
+        } else {
+            RelationalCheckpointIndexLoad::MaterializedPostings
+        }
+    }
+
     pub(super) fn prepare_relational_index_candidate(
         &self,
         generation: u64,
@@ -1561,7 +1574,17 @@ impl GraphStore {
         transaction: RelationalTransaction,
         expected_epoch: u64,
     ) -> Result<(), skein_storage::RelationalError> {
+        let authoritative = self
+            .relational_index_shadow
+            .mode
+            .requires_authoritative_indexes();
         let Some(builder) = self.relational_index_shadow.recovery_builder.as_ref() else {
+            if authoritative {
+                return Err(skein_storage::RelationalError::Corruption(
+                    "authoritative relational index recovery requires a bound base generation and writable recovery-delta builder"
+                        .to_string(),
+                ));
+            }
             self.relational_state = self.relational_state.stage_transaction(
                 transaction,
                 self.relational_mutation_limits,
@@ -1570,12 +1593,22 @@ impl GraphStore {
             return Ok(());
         };
         let capture_limits = builder.capture_limits();
-        let (next, capture) = self.relational_state.stage_transaction_with_index_changes(
-            transaction,
-            self.relational_mutation_limits,
-            self.relational_overflow_config,
-            capture_limits,
-        )?;
+        let (next, capture) = if authoritative {
+            self.relational_state
+                .stage_transaction_for_authoritative_recovery(
+                    transaction,
+                    self.relational_mutation_limits,
+                    self.relational_overflow_config,
+                    capture_limits,
+                )?
+        } else {
+            self.relational_state.stage_transaction_with_index_changes(
+                transaction,
+                self.relational_mutation_limits,
+                self.relational_overflow_config,
+                capture_limits,
+            )?
+        };
         self.relational_state = next;
         if let Some(mut builder) = self.relational_index_shadow.recovery_builder.take() {
             if let Err(error) = builder.record(expected_epoch, capture) {
@@ -2973,6 +3006,9 @@ mod tests {
             store
                 .checkpoint(&catalog)
                 .expect("publish authoritative bootstrap generation");
+            assert!(store
+                .relational_state()
+                .materialized_index_postings_resident());
         }
 
         let replay = WalReplayConfig {
@@ -2991,6 +3027,17 @@ mod tests {
             store
                 .validate_authoritative_relational_index_open()
                 .expect("authoritative view is current");
+            assert!(!store
+                .relational_state()
+                .materialized_index_postings_resident());
+            assert!(store
+                .relational_state()
+                .index_lookup(
+                    "accounts",
+                    "accounts_handle_idx",
+                    &RelationalKey(vec![RelationalValue::Text("bob".to_string())]),
+                )
+                .is_none());
             let pinned_snapshot = store.snapshot();
             pinned_snapshot
                 .ensure_usable()
@@ -3129,10 +3176,13 @@ mod tests {
                 account_b.values()[2],
                 RelationalValue::Text("updated@example.test".to_string())
             );
+            assert!(!store
+                .relational_state()
+                .materialized_index_postings_resident());
         }
         {
             let mut catalog = Catalog::default();
-            let store = GraphStore::open_with_durability_and_replay_config(
+            let mut store = GraphStore::open_with_durability_and_replay_config(
                 &path,
                 &mut catalog,
                 DurabilityPolicy::default(),
@@ -3142,10 +3192,19 @@ mod tests {
             store
                 .validate_authoritative_relational_index_open()
                 .expect("recovered authoritative view is current");
+            assert!(!store
+                .relational_state()
+                .materialized_index_postings_resident());
             assert!(matches!(
                 store.relational_index_shadow_recovery_status(),
                 RelationalIndexShadowRecoveryStatus::WalRecovered { .. }
             ));
+            store
+                .checkpoint(&catalog)
+                .expect("checkpoint recovered authoritative state");
+            assert!(!store
+                .relational_state()
+                .materialized_index_postings_resident());
         }
         std::fs::remove_dir_all(path).expect("remove authoritative fixture");
     }

@@ -219,11 +219,13 @@ impl GraphStore {
             )?;
             let checkpoint_relational_state = relational_checkpoint_artifact
                 .map(|_| {
-                    decode_relational_checkpoint_file(
+                    let index_load = self.relational_checkpoint_index_load();
+                    decode_relational_checkpoint_file_with_index_load(
                         &durable
                             .root_path()
                             .join(relational_checkpoint_generation_file(generation)),
                         RelationalDecodeLimits::checkpoint(),
+                        index_load,
                     )
                     .map(|checkpoint| checkpoint.state)
                     .map_err(|error| SkeinError::Storage(error.to_string()))

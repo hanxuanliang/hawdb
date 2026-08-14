@@ -765,9 +765,20 @@ impl GraphStore {
                 metadata.encoded_sha256,
                 "relational checkpoint",
             )?;
-            let checkpoint =
-                decode_relational_checkpoint_file(&path, RelationalDecodeLimits::checkpoint())
-                    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            let index_load = if config
+                .relational_index_mode
+                .requires_authoritative_indexes()
+            {
+                RelationalCheckpointIndexLoad::OmitMaterializedPostings
+            } else {
+                RelationalCheckpointIndexLoad::MaterializedPostings
+            };
+            let checkpoint = decode_relational_checkpoint_file_with_index_load(
+                &path,
+                RelationalDecodeLimits::checkpoint(),
+                index_load,
+            )
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
             if checkpoint.epoch != self.commit_epoch {
                 return Err(SkeinError::Storage(format!(
                     "relational checkpoint epoch {} does not match graph commit epoch {}",

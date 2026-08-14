@@ -1483,6 +1483,162 @@ fn checkpoint_file_keeps_overflow_out_of_resident_state_and_checks_size_before_r
 }
 
 #[test]
+fn checkpoint_decode_can_omit_materialized_postings_and_recovery_keeps_them_omitted() {
+    let seeded = RelationalState::default()
+        .stage_transaction(
+            create_upsert_table(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .and_then(|state| {
+            state.stage_transaction(
+                RelationalTransaction {
+                    writes: vec![RelationalWrite::Insert {
+                        table: "documents".to_string(),
+                        rows: vec![upsert_row("id-1", "owner-1", "payload-1")],
+                        mode: RelationalInsertMode::Error,
+                    }],
+                },
+                RelationalMutationLimits::default(),
+                RelationalOverflowConfig::default(),
+            )
+        })
+        .expect("seed indexed checkpoint state");
+    let checkpoint = encode_relational_checkpoint(2, &seeded).expect("encode indexed checkpoint");
+    let materialized =
+        decode_relational_checkpoint(&checkpoint, RelationalDecodeLimits::checkpoint())
+            .expect("decode materialized checkpoint");
+    let owner = RelationalKey(vec![RelationalValue::Text("owner-1".to_string())]);
+    assert!(materialized.state.materialized_index_postings_resident());
+    assert!(materialized
+        .state
+        .index_lookup("documents", &relational_unique_index_name(0), &owner)
+        .is_some());
+
+    let omitted = decode_relational_checkpoint_with_index_load(
+        &checkpoint,
+        RelationalDecodeLimits::checkpoint(),
+        RelationalCheckpointIndexLoad::OmitMaterializedPostings,
+    )
+    .expect("decode checkpoint without materialized postings");
+    assert!(!omitted.state.materialized_index_postings_resident());
+    assert!(omitted
+        .state
+        .index_lookup("documents", &relational_unique_index_name(0), &owner)
+        .is_none());
+    assert!(matches!(
+        omitted.state.stage_transaction(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::Insert {
+                    table: "documents".to_string(),
+                    rows: vec![upsert_row("id-2", "owner-2", "payload-2")],
+                    mode: RelationalInsertMode::Error,
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        ),
+        Err(RelationalError::Corruption(message))
+            if message.contains("postings were omitted")
+    ));
+
+    let (recovered, capture) = omitted
+        .state
+        .stage_transaction_for_authoritative_recovery(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::Insert {
+                    table: "documents".to_string(),
+                    rows: vec![upsert_row("id-2", "owner-2", "payload-2")],
+                    mode: RelationalInsertMode::Error,
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            RelationalIndexChangeCaptureLimits::default(),
+        )
+        .expect("replay authoritative transaction without rebuilding postings");
+    assert!(!recovered.materialized_index_postings_resident());
+    assert!(matches!(
+        capture,
+        RelationalIndexChangeCapture::Captured { .. }
+    ));
+}
+
+#[test]
+fn authoritative_recovery_does_not_revalidate_durable_non_primary_foreign_keys() {
+    let schema = RelationalTransaction {
+        writes: vec![
+            RelationalWrite::CreateTable(RelationalTableSchema {
+                name: "accounts".to_string(),
+                columns: vec![text_column("id", false), text_column("owner", false)],
+                primary_key: vec!["id".to_string()],
+                unique_constraints: vec![vec!["owner".to_string()]],
+                foreign_keys: Vec::new(),
+                indexes: Vec::new(),
+            }),
+            RelationalWrite::CreateTable(RelationalTableSchema {
+                name: "sessions".to_string(),
+                columns: vec![text_column("id", false), text_column("owner", false)],
+                primary_key: vec!["id".to_string()],
+                unique_constraints: Vec::new(),
+                foreign_keys: vec![RelationalForeignKeySchema {
+                    columns: vec!["owner".to_string()],
+                    referenced_table: "accounts".to_string(),
+                    referenced_columns: vec!["owner".to_string()],
+                    on_delete: RelationalReferentialAction::Restrict,
+                    on_update: RelationalReferentialAction::Restrict,
+                }],
+                indexes: Vec::new(),
+            }),
+            RelationalWrite::Insert {
+                table: "accounts".to_string(),
+                rows: vec![RelationalRow::new(vec![
+                    RelationalValue::Text("account-1".to_string()),
+                    RelationalValue::Text("owner-1".to_string()),
+                ])],
+                mode: RelationalInsertMode::Error,
+            },
+        ],
+    };
+    let seeded = RelationalState::default()
+        .stage_transaction(
+            schema,
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("seed non-primary foreign-key target");
+    let checkpoint = encode_relational_checkpoint(1, &seeded).expect("encode recovery fixture");
+    let omitted = decode_relational_checkpoint_with_index_load(
+        &checkpoint,
+        RelationalDecodeLimits::checkpoint(),
+        RelationalCheckpointIndexLoad::OmitMaterializedPostings,
+    )
+    .expect("decode authoritative recovery fixture");
+
+    let (recovered, _) = omitted
+        .state
+        .stage_transaction_for_authoritative_recovery(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::Insert {
+                    table: "sessions".to_string(),
+                    rows: vec![RelationalRow::new(vec![
+                        RelationalValue::Text("session-1".to_string()),
+                        RelationalValue::Text("owner-1".to_string()),
+                    ])],
+                    mode: RelationalInsertMode::Error,
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            RelationalIndexChangeCaptureLimits::default(),
+        )
+        .expect("replay already-validated foreign-key WAL without materialized postings");
+
+    assert_eq!(recovered.row_count("sessions"), 1);
+    assert!(!recovered.materialized_index_postings_resident());
+}
+
+#[test]
 fn checkpoint_corruption_is_rejected_without_partial_state() {
     let store = RelationalStore::default();
     store

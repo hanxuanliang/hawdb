@@ -103,11 +103,13 @@ pub use relational_index_shadow::{
     RELATIONAL_CONSTRAINT_QUALIFICATION_PROTOCOL, RELATIONAL_INDEX_VIEW_QUALIFICATION_PROTOCOL,
 };
 use skein_storage::{
-    available_storage_space, decode_relational_checkpoint, decode_relational_checkpoint_file,
-    decode_relational_wal_batch, encode_relational_checkpoint, encode_relational_wal_batch,
-    sync_parent_directory, AdjacencyPostingList, CanonicalEndpointDirection, CanonicalNodeIterator,
-    CanonicalRelationshipIterator, CanonicalSegmentError, RelationalDecodeLimits,
-    RelationalMutationLimits, RelationalOverflowConfig, RelationalState, RelationalTransaction,
+    available_storage_space, decode_relational_checkpoint_file_with_index_load,
+    decode_relational_checkpoint_with_index_load, decode_relational_wal_batch,
+    encode_relational_checkpoint, encode_relational_wal_batch, sync_parent_directory,
+    AdjacencyPostingList, CanonicalEndpointDirection, CanonicalNodeIterator,
+    CanonicalRelationshipIterator, CanonicalSegmentError, RelationalCheckpointIndexLoad,
+    RelationalDecodeLimits, RelationalMutationLimits, RelationalOverflowConfig, RelationalState,
+    RelationalTransaction,
 };
 pub use skein_storage::{
     AdjacencyDirection, AdjacencyGroupConsistencyMismatch, AdjacencyGroupKey, AdjacencyGroupStats,
@@ -1789,6 +1791,12 @@ impl GraphStore {
             runtime_governor: None,
             durable: Some(durable),
         };
+        if replay_config
+            .relational_index_mode
+            .requires_authoritative_indexes()
+        {
+            store.relational_state.omit_materialized_index_postings();
+        }
         store.load_checkpoint(catalog, replay_config)?;
         if replay_config.graph_columnar_shadow_checkpoint {
             // Mounted between checkpoint load and WAL replay so replayed

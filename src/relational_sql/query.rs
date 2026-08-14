@@ -841,13 +841,22 @@ fn index_access_candidate(
     }
     let prefix_len = prefix.len();
     let key = RelationalKey(prefix);
-    let estimated_rows = state
-        .index_prefix_cardinality_at_most(table, &name, &key, cardinality_limit)
-        .ok_or_else(|| {
-            SkeinError::Execution(format!(
-                "relational index {name} on table {table} is not materialized"
-            ))
-        })?;
+    let estimated_rows =
+        match state.index_prefix_cardinality_at_most(table, &name, &key, cardinality_limit) {
+            Some(rows) => rows,
+            None if !state.materialized_index_postings_resident() => {
+                if unique && prefix_len == columns.len() {
+                    usize::from(state.row_count(table) != 0)
+                } else {
+                    state.row_count(table).min(cardinality_limit)
+                }
+            }
+            None => {
+                return Err(SkeinError::Execution(format!(
+                    "relational index {name} on table {table} is not materialized"
+                )));
+            }
+        };
     Ok(Some(RelationalAccessCandidate {
         descriptor: RelationalAccessPathDescriptor {
             kind: RelationalAccessPathKind::Index,

@@ -96,18 +96,6 @@ remaining work below makes those derived foundations canonical without allowing
 a stale index or a database-sized resident set to become a correctness
 dependency.
 
-- [ ] Remove materialized relational indexes from authoritative open.
-  - `Authoritative` mode now requires the bound current view for open, SQL, and
-    primary-key, unique, UPSERT, and foreign-key decisions before WAL. The
-    default remains `Materialized`; `Shadow` and `DemandPaged` keep their prior
-    isolation and fallback semantics.
-  - Generation publication already streams bounded index builds directly from
-    canonical rows. Stop normal-open `rebuild_indexes()` in `Authoritative`
-    mode and derive live change capture only from before/after rows.
-  - Prove index-open I/O and mandatory residency remain independent of leaf and
-    posting counts while preserving the materialized oracle in non-authoritative
-    modes for differential rollback evidence.
-
 - [ ] Implement the canonical relational row-page runtime.
   - Add the v1 row-page codec, bounded slot directory, ordered primary-key
     bounds, requested-field decoding, and overflow descriptors with strict

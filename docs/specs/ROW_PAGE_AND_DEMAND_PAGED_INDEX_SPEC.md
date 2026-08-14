@@ -436,9 +436,22 @@ Index startup has a stronger bound:
 - mandatory index residency MUST be bounded by catalog, root-descriptor, and
   dirty-recovery state, not index entry or leaf-page count.
 
-The current unconditional `rebuild_indexes()` behavior is a migration oracle,
-not the target open path. Generation publication no longer consumes that
-oracle; only non-authoritative runtime and differential paths retain it.
+`Materialized`, `Shadow`, and `DemandPaged` checkpoint decode retain
+`rebuild_indexes()` as the transitional differential oracle. `Authoritative`
+checkpoint decode omits those posting maps, requires the bound persistent view
+before serving, and derives WAL-recovery plus live changes directly from
+before/after rows. Constraints are checked against that view before WAL; replay
+of an already-durable authoritative transaction does not revalidate it through
+the absent posting oracle. Because v1 WAL retains logical `UPSERT`, recovery
+resolves a non-primary conflict target by scanning canonical rows without
+building resident postings; the scan MUST reject multiple matches as
+corruption. An ordinary materialized mutation against an omitted state fails
+closed instead of silently bypassing constraints. Generation publication also
+derives entries from canonical rows and never consumes the oracle. When
+postings are omitted, SQL planning uses a conservative row-count estimate (or
+one row for a complete unique key) and leaves the actual bounded cardinality
+discovery to the demand reader; planning MUST NOT rebuild or scan the persistent
+index merely to obtain an estimate.
 
 ### WAL index recovery
 
@@ -632,8 +645,9 @@ boundaries and MUST land before their corresponding production activation:
   generation-fenced publication, stale-builder rejection, cold open, on-demand
   leaf loading, corrupt-page fail-closed behavior, authoritative constraint
   acceptance/rejection before WAL, durable-before-visible mutation
-  publication, row/index visible-epoch agreement, and recovery after a crash
-  between WAL durability and in-process publication.
+  publication, row/index visible-epoch agreement, absence of materialized
+  postings on authoritative handles, and recovery after a crash between WAL
+  durability and in-process publication.
 - `SkeinRelationalIndexShadowPublication.tla`: optional checkpoint-bound
   relational-index identity, complete root-set publication, candidate-failure
   isolation, cold open, and mode-specific corruption handling. Its optional

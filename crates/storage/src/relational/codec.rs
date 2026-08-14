@@ -80,6 +80,13 @@ pub struct RelationalCheckpoint {
     pub state: RelationalState,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RelationalCheckpointIndexLoad {
+    #[default]
+    MaterializedPostings,
+    OmitMaterializedPostings,
+}
+
 pub fn encode_relational_wal_batch(
     epoch: u64,
     transaction: &RelationalTransaction,
@@ -218,12 +225,41 @@ pub fn decode_relational_checkpoint(
     bytes: &[u8],
     limits: RelationalDecodeLimits,
 ) -> Result<RelationalCheckpoint, RelationalError> {
-    decode_relational_checkpoint_with_storage(bytes, limits, OverflowDecodeStorage::Inline)
+    decode_relational_checkpoint_with_index_load(
+        bytes,
+        limits,
+        RelationalCheckpointIndexLoad::MaterializedPostings,
+    )
+}
+
+pub fn decode_relational_checkpoint_with_index_load(
+    bytes: &[u8],
+    limits: RelationalDecodeLimits,
+    index_load: RelationalCheckpointIndexLoad,
+) -> Result<RelationalCheckpoint, RelationalError> {
+    decode_relational_checkpoint_with_storage(
+        bytes,
+        limits,
+        OverflowDecodeStorage::Inline,
+        index_load,
+    )
 }
 
 pub fn decode_relational_checkpoint_file(
     path: &Path,
     limits: RelationalDecodeLimits,
+) -> Result<RelationalCheckpoint, RelationalError> {
+    decode_relational_checkpoint_file_with_index_load(
+        path,
+        limits,
+        RelationalCheckpointIndexLoad::MaterializedPostings,
+    )
+}
+
+pub fn decode_relational_checkpoint_file_with_index_load(
+    path: &Path,
+    limits: RelationalDecodeLimits,
+    index_load: RelationalCheckpointIndexLoad,
 ) -> Result<RelationalCheckpoint, RelationalError> {
     let encoded_len = std::fs::metadata(path)
         .map_err(|error| {
@@ -248,6 +284,7 @@ pub fn decode_relational_checkpoint_file(
         Decoder::new(input, limits, false),
         limits,
         OverflowDecodeStorage::File(Arc::new(reader)),
+        index_load,
     )
 }
 
@@ -260,6 +297,7 @@ fn decode_relational_checkpoint_with_storage(
     bytes: &[u8],
     limits: RelationalDecodeLimits,
     storage: OverflowDecodeStorage,
+    index_load: RelationalCheckpointIndexLoad,
 ) -> Result<RelationalCheckpoint, RelationalError> {
     let (epoch, payload) = decode_envelope(bytes, CHECKPOINT_MAGIC, limits.max_record_bytes)?;
     decode_relational_checkpoint_from_decoder(
@@ -267,6 +305,7 @@ fn decode_relational_checkpoint_with_storage(
         Decoder::from_slice(payload, limits, true),
         limits,
         storage,
+        index_load,
     )
 }
 
@@ -275,6 +314,7 @@ fn decode_relational_checkpoint_from_decoder<I: DecodeInput>(
     mut decoder: Decoder<I>,
     limits: RelationalDecodeLimits,
     storage: OverflowDecodeStorage,
+    index_load: RelationalCheckpointIndexLoad,
 ) -> Result<RelationalCheckpoint, RelationalError> {
     let table_count = decoder.count(limits.max_tables, "checkpoint tables")?;
     let mut state = RelationalState::default();
@@ -370,9 +410,13 @@ fn decode_relational_checkpoint_from_decoder<I: DecodeInput>(
     }
     decoder.finish()?;
     validate_checkpoint_overflow_reachability(&state)?;
-    let table_names = state.schemas.keys().cloned().collect::<Vec<_>>();
-    for table in table_names {
-        rebuild_indexes(&mut state, &table)?;
+    if index_load == RelationalCheckpointIndexLoad::MaterializedPostings {
+        let table_names = state.schemas.keys().cloned().collect::<Vec<_>>();
+        for table in table_names {
+            rebuild_indexes(&mut state, &table)?;
+        }
+    } else {
+        state.materialized_index_postings_resident = false;
     }
     validate_foreign_keys(&state)?;
     Ok(RelationalCheckpoint { epoch, state })

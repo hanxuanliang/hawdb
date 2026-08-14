@@ -682,9 +682,13 @@ impl GraphStore {
                     .map_err(|error| SkeinError::Storage(error.to_string()))?;
             }
             WalOp::RelationalSnapshot { record } => {
-                let checkpoint =
-                    decode_relational_checkpoint(&record, RelationalDecodeLimits::checkpoint())
-                        .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                let index_load = self.relational_checkpoint_index_load();
+                let checkpoint = decode_relational_checkpoint_with_index_load(
+                    &record,
+                    RelationalDecodeLimits::checkpoint(),
+                    index_load,
+                )
+                .map_err(|error| SkeinError::Storage(error.to_string()))?;
                 let expected_epoch = self.commit_epoch.saturating_add(1);
                 if checkpoint.epoch != expected_epoch {
                     return Err(SkeinError::Storage(format!(

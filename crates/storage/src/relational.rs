@@ -15,9 +15,12 @@ mod index_shadow;
 mod overflow;
 
 pub use codec::{
-    decode_relational_checkpoint, decode_relational_checkpoint_file, decode_relational_wal_batch,
+    decode_relational_checkpoint, decode_relational_checkpoint_file,
+    decode_relational_checkpoint_file_with_index_load,
+    decode_relational_checkpoint_with_index_load, decode_relational_wal_batch,
     encode_relational_checkpoint, encode_relational_checkpoint_to_writer,
-    encode_relational_wal_batch, RelationalCheckpoint, RelationalDecodeLimits, RelationalWalBatch,
+    encode_relational_wal_batch, RelationalCheckpoint, RelationalCheckpointIndexLoad,
+    RelationalDecodeLimits, RelationalWalBatch,
 };
 pub use constraints::RelationalConstraintIndex;
 pub use index_shadow::{
@@ -825,11 +828,23 @@ impl<'a> RelationalIndexPosting<'a> {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RelationalState {
     schemas: BTreeMap<String, Arc<RelationalTableSchema>>,
     segments: BTreeMap<String, Arc<RelationalTableSegment>>,
     overflow_segments: BTreeMap<String, RelationalOverflowSegment>,
+    materialized_index_postings_resident: bool,
+}
+
+impl Default for RelationalState {
+    fn default() -> Self {
+        Self {
+            schemas: BTreeMap::new(),
+            segments: BTreeMap::new(),
+            overflow_segments: BTreeMap::new(),
+            materialized_index_postings_resident: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -863,6 +878,23 @@ impl RelationalState {
         self.schemas.is_empty()
     }
 
+    pub fn materialized_index_postings_resident(&self) -> bool {
+        self.materialized_index_postings_resident
+    }
+
+    /// Drops the transitional in-memory posting maps while preserving rows,
+    /// schema, and overflow values. Ordinary materialized mutations fail
+    /// closed afterward; callers must provide the authoritative index path.
+    pub fn omit_materialized_index_postings(&mut self) {
+        if !self.materialized_index_postings_resident {
+            return;
+        }
+        for segment in self.segments.values_mut() {
+            Arc::make_mut(segment).indexes.clear();
+        }
+        self.materialized_index_postings_resident = false;
+    }
+
     pub fn stage_transaction(
         &self,
         transaction: RelationalTransaction,
@@ -888,6 +920,37 @@ impl RelationalState {
             overflow_config,
             capture_limits,
             None,
+            TransactionIndexMode::Materialized,
+        )
+    }
+
+    /// Replays an already-durable authoritative transaction while deriving
+    /// its recovery-index delta directly from before/after rows.
+    ///
+    /// Constraint checks happened before the WAL became durable. Recovery
+    /// must not recreate the transitional materialized-posting oracle.
+    pub fn stage_transaction_for_authoritative_recovery(
+        &self,
+        transaction: RelationalTransaction,
+        limits: RelationalMutationLimits,
+        overflow_config: RelationalOverflowConfig,
+        capture_limits: RelationalIndexChangeCaptureLimits,
+    ) -> Result<(Self, RelationalIndexChangeCapture), RelationalError> {
+        admit_transaction(&transaction, limits)?;
+        if transaction.changes_index_schema() {
+            return Err(RelationalError::Admission(
+                "authoritative relational index recovery rejects schema-changing WAL until a new canonical index generation is published"
+                    .to_string(),
+            ));
+        }
+        apply_transaction_with_index_changes(
+            self,
+            transaction,
+            limits,
+            overflow_config,
+            capture_limits,
+            None,
+            TransactionIndexMode::AuthoritativeRecovery,
         )
     }
 
@@ -916,6 +979,7 @@ impl RelationalState {
             overflow_config,
             capture_limits,
             Some(constraint_index),
+            TransactionIndexMode::Authoritative,
         )
     }
 
@@ -1438,8 +1502,23 @@ fn apply_transaction(
     limits: RelationalMutationLimits,
     overflow_config: RelationalOverflowConfig,
 ) -> Result<RelationalState, RelationalError> {
-    apply_transaction_inner(state, transaction, limits, overflow_config, None, None)
-        .map(|(state, _)| state)
+    apply_transaction_inner(
+        state,
+        transaction,
+        limits,
+        overflow_config,
+        None,
+        None,
+        TransactionIndexMode::Materialized,
+    )
+    .map(|(state, _)| state)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TransactionIndexMode {
+    Materialized,
+    Authoritative,
+    AuthoritativeRecovery,
 }
 
 fn apply_transaction_with_index_changes(
@@ -1449,6 +1528,7 @@ fn apply_transaction_with_index_changes(
     overflow_config: RelationalOverflowConfig,
     capture_limits: RelationalIndexChangeCaptureLimits,
     constraint_index: Option<&dyn RelationalConstraintIndex>,
+    index_mode: TransactionIndexMode,
 ) -> Result<(RelationalState, RelationalIndexChangeCapture), RelationalError> {
     let (state, capture) = apply_transaction_inner(
         state,
@@ -1457,6 +1537,7 @@ fn apply_transaction_with_index_changes(
         overflow_config,
         Some(capture_limits),
         constraint_index,
+        index_mode,
     )?;
     Ok((
         state,
@@ -1471,8 +1552,22 @@ fn apply_transaction_inner(
     overflow_config: RelationalOverflowConfig,
     capture_limits: Option<RelationalIndexChangeCaptureLimits>,
     constraint_index: Option<&dyn RelationalConstraintIndex>,
+    index_mode: TransactionIndexMode,
 ) -> Result<(RelationalState, Option<RelationalIndexChangeCapture>), RelationalError> {
     let mut next = state.clone();
+    match index_mode {
+        TransactionIndexMode::Materialized => {
+            if !state.materialized_index_postings_resident {
+                return Err(RelationalError::Corruption(
+                    "materialized relational index maintenance was requested for a state whose postings were omitted"
+                        .to_string(),
+                ));
+            }
+        }
+        TransactionIndexMode::Authoritative | TransactionIndexMode::AuthoritativeRecovery => {
+            next.omit_materialized_index_postings();
+        }
+    }
     let mut touched = BTreeSet::new();
     let mut changed_keys = BTreeMap::<String, BTreeSet<RelationalKey>>::new();
     let mut full_index_rebuild = BTreeSet::new();
@@ -1696,11 +1791,13 @@ fn apply_transaction_inner(
         }
     }
     overflow::prune_unreachable_segments(&mut next);
-    for table in &touched {
-        if full_index_rebuild.contains(table) {
-            rebuild_indexes(&mut next, table)?;
-        } else if let Some(keys) = changed_keys.get(table) {
-            refresh_indexes_for_keys(state, &mut next, table, keys, constraint_index.is_none())?;
+    if index_mode == TransactionIndexMode::Materialized {
+        for table in &touched {
+            if full_index_rebuild.contains(table) {
+                rebuild_indexes(&mut next, table)?;
+            } else if let Some(keys) = changed_keys.get(table) {
+                refresh_indexes_for_keys(state, &mut next, table, keys, true)?;
+            }
         }
     }
     let capture = capture_limits.map(|capture_limits| {
@@ -1712,19 +1809,29 @@ fn apply_transaction_inner(
             capture_limits,
         )
     });
-    if let Some(constraint_index) = constraint_index {
-        let changes = capture
-            .as_ref()
-            .expect("authoritative constraints require index change capture")
-            .changes()?;
-        constraints::validate_authoritative_constraints(
-            &next,
-            &changed_keys,
-            changes,
-            constraint_index,
-        )?;
-    } else {
-        validate_foreign_keys_incremental(state, &next, &changed_keys, &full_index_rebuild)?;
+    match (index_mode, constraint_index) {
+        (TransactionIndexMode::Materialized, None) => {
+            validate_foreign_keys_incremental(state, &next, &changed_keys, &full_index_rebuild)?;
+        }
+        (TransactionIndexMode::Authoritative, Some(constraint_index)) => {
+            let changes = capture
+                .as_ref()
+                .expect("authoritative constraints require index change capture")
+                .changes()?;
+            constraints::validate_authoritative_constraints(
+                &next,
+                &changed_keys,
+                changes,
+                constraint_index,
+            )?;
+        }
+        (TransactionIndexMode::AuthoritativeRecovery, None) => {}
+        _ => {
+            return Err(RelationalError::Corruption(
+                "relational transaction index mode does not match its constraint source"
+                    .to_string(),
+            ));
+        }
     }
     Ok((next, capture))
 }
@@ -1912,6 +2019,21 @@ fn conflict_primary_key(
     }
     if definition.role == RelationalIndexRole::Primary {
         return Ok(state.row(table, conflict_key).map(|_| conflict_key.clone()));
+    }
+    if !state.materialized_index_postings_resident {
+        let positions = column_positions(schema, conflict_columns)?;
+        let mut matches = state
+            .rows(table)
+            .filter(|(_, row)| row_key(row, &positions) == *conflict_key)
+            .map(|(primary_key, _)| primary_key.clone());
+        let primary_key = matches.next();
+        if matches.next().is_some() {
+            return Err(RelationalError::Corruption(format!(
+                "unique conflict target {} on table {table} has multiple visible rows during authoritative recovery",
+                definition.name
+            )));
+        }
+        return Ok(primary_key);
     }
     let Some(postings) = state.index_lookup(table, &definition.name, conflict_key) else {
         return Ok(None);
