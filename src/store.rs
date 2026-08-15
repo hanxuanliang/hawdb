@@ -123,9 +123,9 @@ use skein_storage::{
     CanonicalSegmentError, PersistentPropertyProjectionDefinitionAdmission,
     PersistentPropertyProjectionRecord, RelationalCheckpointIndexLoad, RelationalDecodeLimits,
     RelationalMutationLimits, RelationalOverflowConfig, RelationalOverflowPublicationConfig,
-    RelationalOverflowPublisher, RelationalRowPageGenerationRequest,
-    RelationalRowPagePublicationConfig, RelationalRowPagePublisher, RelationalState,
-    RelationalTransaction,
+    RelationalOverflowPublisher, RelationalRecoverySourceBuilder,
+    RelationalRowPageGenerationRequest, RelationalRowPagePublicationConfig,
+    RelationalRowPagePublisher, RelationalState, RelationalTransaction,
 };
 pub use skein_storage::{
     AdjacencyDirection, AdjacencyGroupConsistencyMismatch, AdjacencyGroupKey, AdjacencyGroupStats,

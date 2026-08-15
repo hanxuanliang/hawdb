@@ -15,6 +15,7 @@ use super::{
 use crate::error::{Result, SkeinError};
 use crate::schema::{PropertyType, SchemaObjectState, TableKind};
 use crate::value::Value;
+use skein_integrity::Sha256Digest;
 use skein_storage::{NodeId, RelId};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -64,6 +65,8 @@ pub(super) enum WalCursorEvent {
         entry: WalEntry,
         start_offset: u64,
         encoded_len: u64,
+        payload_len: u64,
+        payload_sha256: Sha256Digest,
     },
     /// Damage inside the durable prefix; recovery fails closed.
     Corrupt {
@@ -151,17 +154,25 @@ impl WalRecordCursor {
                 payload,
                 start_offset,
                 end_offset,
-            } => match binary::decode_binary_wal_record(&payload)? {
-                binary::BinaryWalRecordDecode::Entry { entry, .. } => Ok(WalCursorEvent::Entry {
-                    entry,
-                    start_offset,
-                    encoded_len: end_offset - start_offset,
-                }),
-                binary::BinaryWalRecordDecode::Corrupt(reason) => Ok(WalCursorEvent::Corrupt {
-                    offset: start_offset,
-                    reason,
-                }),
-            },
+            } => {
+                let payload_len = payload.len() as u64;
+                let payload_sha256 = skein_integrity::sha256(&payload);
+                match binary::decode_binary_wal_record(&payload)? {
+                    binary::BinaryWalRecordDecode::Entry { entry, .. } => {
+                        Ok(WalCursorEvent::Entry {
+                            entry,
+                            start_offset,
+                            encoded_len: end_offset - start_offset,
+                            payload_len,
+                            payload_sha256,
+                        })
+                    }
+                    binary::BinaryWalRecordDecode::Corrupt(reason) => Ok(WalCursorEvent::Corrupt {
+                        offset: start_offset,
+                        reason,
+                    }),
+                }
+            }
             frame::BinaryWalReadEvent::TornTail {
                 valid_prefix_len,
                 reason,

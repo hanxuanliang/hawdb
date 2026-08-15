@@ -144,9 +144,11 @@ crash; read-only recovery remains fail closed.
     retaining schemas and exact logical counts. When no WAL record follows the
     checkpoint, it now builds that sparse state directly from canonical root
     metadata and avoids the full row decode. Published row deltas now carry the
-    exact final per-table counts required to reconstruct that state after WAL;
-    WAL-bearing recovery still needs a sparse mutation workspace before its
-    startup peak can be removed.
+    exact final per-table counts required to reconstruct that state after WAL.
+    Row and index recovery manifests also bind the exact WAL generation, LSN
+    interval, and ordered-record digest, so an epoch-only derived artifact
+    cannot be reused. WAL-bearing recovery still needs a sparse mutation
+    workspace before its startup peak can be removed.
   - The typed runner now qualifies `content_documents`, `thread_messages`,
     `content_chunks`, and `content_anchors` using the frozen PostgreSQL statement
     corpus and graph-plus-relational commits that publish one shared epoch.

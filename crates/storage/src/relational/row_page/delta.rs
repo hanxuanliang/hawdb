@@ -1,7 +1,10 @@
 //! Immutable, manifest-last relational row delta runs.
 
 use super::{RelationalRowPageLimits, RelationalRowPageRootReader};
-use crate::relational::{RelationalOverflowRootBinding, RelationalRowChangeCaptureLimits};
+use crate::relational::{
+    RelationalOverflowRootBinding, RelationalRecoverySourceIdentity,
+    RelationalRowChangeCaptureLimits,
+};
 use skein_integrity::{IntegrityDigest, Sha256Digest};
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
@@ -114,6 +117,7 @@ pub struct RelationalRowDeltaManifest {
     pub base: RelationalRowDeltaBaseBinding,
     pub delta_generation: u64,
     pub visible_commit_epoch: u64,
+    pub recovery_source: RelationalRecoverySourceIdentity,
     pub schema_set_digest: Sha256Digest,
     pub run_set_digest: Sha256Digest,
     pub overflow_root: Option<RelationalOverflowRootBinding>,

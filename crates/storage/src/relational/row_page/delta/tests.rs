@@ -2,9 +2,9 @@ use super::*;
 use crate::relational::{
     ImmutableRelationalRowPage, RelationalKey, RelationalOverflowConfig,
     RelationalOverflowExtentInput, RelationalOverflowPublicationConfig,
-    RelationalOverflowPublisher, RelationalOverflowRootReader, RelationalRow, RelationalRowChange,
-    RelationalRowChangeCapture, RelationalRowPageEntry, RelationalRowPageId,
-    RelationalRowPagePublicationConfig, RelationalRowPagePublisher,
+    RelationalOverflowPublisher, RelationalOverflowRootReader, RelationalRecoveryFence,
+    RelationalRow, RelationalRowChange, RelationalRowChangeCapture, RelationalRowPageEntry,
+    RelationalRowPageId, RelationalRowPagePublicationConfig, RelationalRowPagePublisher,
     RelationalRowPageRecoveredValue, RelationalRowPageTableDelta, RelationalScalarType,
     RelationalValue,
 };
@@ -59,6 +59,19 @@ fn immutable_runs_round_trip_across_bounded_flushes() {
         RelationalRowPageRecoveredValue::Deleted
     ));
     assert_eq!(rows[1].3, 3);
+    let wrong_source = RelationalRecoverySourceIdentity {
+        record_sequence_sha256: skein_integrity::Sha256Digest::from_bytes([0x5a; 32]),
+        ..RelationalRecoverySourceIdentity::for_test(1, 3)
+    };
+    assert!(matches!(
+        RelationalRowDeltaReader::open_latest_with_recovery_fence(
+            &directory,
+            &base,
+            RelationalRecoveryFence::new(3, wrong_source),
+            config,
+        ),
+        Err(RelationalRowDeltaError::Corrupt(_))
+    ));
 
     fs::remove_dir_all(directory).unwrap();
 }
@@ -340,7 +353,12 @@ fn every_pre_latest_stop_keeps_the_previous_delta_selected() {
         candidate.record(2, capture(3, Some("three"))).unwrap();
         candidate.record(3, capture(2, Some("two-v3"))).unwrap();
         assert!(matches!(
-            candidate.finish_inner(3, None, Some(phase)),
+            candidate.finish_inner(
+                3,
+                RelationalRecoverySourceIdentity::for_test(1, 3),
+                None,
+                Some(phase),
+            ),
             Err(RelationalRowDeltaError::Durability(_))
         ));
         let selected = RelationalRowDeltaReader::open_latest(&directory, &base, 2, config)

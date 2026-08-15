@@ -977,29 +977,40 @@ impl GraphStore {
             )));
         }
         let mut expected_lsn = wal_replay_start_lsn;
+        let mut relational_recovery_source =
+            RelationalRecoverySourceBuilder::new(wal_generation, wal_replay_start_lsn);
         loop {
-            let (entry, record_start, record_encoded_len) = match cursor.next()? {
-                WalCursorEvent::Eof => break,
-                WalCursorEvent::TornTail { reason, .. } => {
-                    return Err(SkeinError::Storage(format!(
+            let (entry, record_start, record_encoded_len, payload_len, payload_sha256) =
+                match cursor.next()? {
+                    WalCursorEvent::Eof => break,
+                    WalCursorEvent::TornTail { reason, .. } => {
+                        return Err(SkeinError::Storage(format!(
                         "strict WAL recovery rejected torn tail: {reason}; use DatabaseDoctor to inspect and explicitly repair the incomplete final record"
                     )));
-                }
-                WalCursorEvent::Corrupt { offset, reason } => {
-                    return reject_corrupt_wal_record(
-                        &wal_path,
-                        wal_generation,
-                        read_only,
-                        offset,
-                        reason,
-                    );
-                }
-                WalCursorEvent::Entry {
-                    entry,
-                    start_offset,
-                    encoded_len,
-                } => (entry, start_offset, encoded_len),
-            };
+                    }
+                    WalCursorEvent::Corrupt { offset, reason } => {
+                        return reject_corrupt_wal_record(
+                            &wal_path,
+                            wal_generation,
+                            read_only,
+                            offset,
+                            reason,
+                        );
+                    }
+                    WalCursorEvent::Entry {
+                        entry,
+                        start_offset,
+                        encoded_len,
+                        payload_len,
+                        payload_sha256,
+                    } => (
+                        entry,
+                        start_offset,
+                        encoded_len,
+                        payload_len,
+                        payload_sha256,
+                    ),
+                };
             if entry.lsn != expected_lsn {
                 quarantine_corrupt_wal(&wal_path, wal_generation, read_only)?;
                 return Err(SkeinError::Storage(format!(
@@ -1026,6 +1037,9 @@ impl GraphStore {
             }
             replayed_entries += 1;
             replayed_bytes = replayed_bytes.saturating_add(record_encoded_len);
+            relational_recovery_source
+                .record(entry.lsn, payload_len, payload_sha256)
+                .map_err(|reason| SkeinError::Storage(reason.to_string()))?;
             expected_lsn = expected_lsn
                 .checked_add(1)
                 .ok_or_else(|| SkeinError::Storage("WAL LSN overflow during replay".to_string()))?;
@@ -1058,8 +1072,17 @@ impl GraphStore {
                 }
             }
         }
-        self.finish_relational_row_page_recovery();
-        self.finish_relational_index_recovery();
+        let relational_recovery_source = if replayed_entries == 0 {
+            None
+        } else {
+            Some(
+                relational_recovery_source
+                    .finish()
+                    .map_err(|reason| SkeinError::Storage(reason.to_string()))?,
+            )
+        };
+        self.finish_relational_row_page_recovery(relational_recovery_source);
+        self.finish_relational_index_recovery(relational_recovery_source);
         if let Some(durable) = &mut self.durable {
             durable.next_lsn = expected_lsn;
             durable.wal_commit_epoch = self.commit_epoch;

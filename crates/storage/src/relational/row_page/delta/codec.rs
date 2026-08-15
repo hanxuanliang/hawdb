@@ -4,6 +4,7 @@ use super::{
     RowDeltaRunDescriptor, RowDeltaValue,
 };
 use crate::relational::row_page::{RelationalRowPageRootReader, RelationalRowPageTableRoot};
+use crate::relational::{RelationalRecoverySourceIdentity, RELATIONAL_RECOVERY_SOURCE_BYTES};
 use skein_integrity::{IntegrityDigest, IntegrityHasher, Sha256Digest, SHA256_BYTES};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -13,8 +14,8 @@ use std::path::Path;
 const MANIFEST_MAGIC: &[u8; 8] = b"SKRDMF01";
 const RUN_MAGIC: &[u8; 8] = b"SKRDLT01";
 const FORMAT_VERSION: u16 = 1;
-pub(super) const MANIFEST_HEADER_BYTES: usize = 248;
-const MANIFEST_INTEGRITY_OFFSET: usize = 212;
+pub(super) const MANIFEST_HEADER_BYTES: usize = 304;
+const MANIFEST_INTEGRITY_OFFSET: usize = 268;
 pub(super) const RUN_HEADER_BYTES: usize = 176;
 const RUN_INTEGRITY_OFFSET: usize = 140;
 pub(super) const ENTRY_DESCRIPTOR_BYTES: usize = 80;
@@ -203,6 +204,10 @@ pub(super) fn encode_manifest(
     encoded.extend_from_slice(&manifest.delta_generation.to_le_bytes());
     encoded.extend_from_slice(&manifest.base.source_commit_epoch.to_le_bytes());
     encoded.extend_from_slice(&manifest.visible_commit_epoch.to_le_bytes());
+    manifest
+        .recovery_source
+        .encode_into(&mut encoded)
+        .map_err(|reason| RelationalRowDeltaError::Admission(reason.to_string()))?;
     encoded.extend_from_slice(manifest.base.root_set_digest.as_bytes());
     encoded.extend_from_slice(manifest.schema_set_digest.as_bytes());
     encoded.extend_from_slice(manifest.run_set_digest.as_bytes());
@@ -283,15 +288,15 @@ fn decode_manifest(
             "unsupported row delta manifest version {version} or flags {flags}"
         )));
     }
-    let table_count = read_u32(&encoded[188..192]) as usize;
-    let run_count = read_u32(&encoded[192..196]) as usize;
+    let table_count = read_u32(&encoded[244..248]) as usize;
+    let run_count = read_u32(&encoded[248..252]) as usize;
     if table_count > config.max_tables.get() || run_count > config.max_runs.get() {
         return Err(RelationalRowDeltaError::Admission(format!(
             "row delta manifest declares {table_count} tables/{run_count} runs beyond limits {}/{}",
             config.max_tables, config.max_runs
         )));
     }
-    let payload_len = usize::try_from(read_u64(&encoded[204..212])).map_err(|_| {
+    let payload_len = usize::try_from(read_u64(&encoded[260..268])).map_err(|_| {
         RelationalRowDeltaError::Corrupt(
             "row delta manifest payload length overflows usize".to_string(),
         )
@@ -311,8 +316,8 @@ fn decode_manifest(
     hasher.update(&encoded[..MANIFEST_INTEGRITY_OFFSET]);
     hasher.update(payload);
     let digest = hasher.finish();
-    if digest.crc32c.get() != read_u32(&encoded[212..216])
-        || digest.sha256.as_bytes() != &encoded[216..248]
+    if digest.crc32c.get() != read_u32(&encoded[268..272])
+        || digest.sha256.as_bytes() != &encoded[272..304]
     {
         return Err(RelationalRowDeltaError::Corrupt(
             "row delta manifest checksum mismatch".to_string(),
@@ -333,10 +338,10 @@ fn decode_manifest(
             "row delta manifest contains trailing bytes".to_string(),
         ));
     }
-    let overflow_generation = read_u64(&encoded[140..148]);
-    let overflow_epoch = read_u64(&encoded[148..156]);
+    let overflow_generation = read_u64(&encoded[196..204]);
+    let overflow_epoch = read_u64(&encoded[204..212]);
     let overflow_digest = Sha256Digest::from_bytes(
-        encoded[156..188]
+        encoded[212..244]
             .try_into()
             .expect("overflow digest has a fixed length"),
     );
@@ -359,27 +364,31 @@ fn decode_manifest(
             generation: read_u64(&encoded[12..20]),
             source_commit_epoch: read_u64(&encoded[28..36]),
             root_set_digest: Sha256Digest::from_bytes(
-                encoded[44..76]
+                encoded[100..132]
                     .try_into()
                     .expect("base root digest has a fixed length"),
             ),
         },
         delta_generation: read_u64(&encoded[20..28]),
         visible_commit_epoch: read_u64(&encoded[36..44]),
+        recovery_source: RelationalRecoverySourceIdentity::decode(
+            &encoded[44..44 + RELATIONAL_RECOVERY_SOURCE_BYTES],
+        )
+        .map_err(|reason| RelationalRowDeltaError::Corrupt(reason.to_string()))?,
         schema_set_digest: Sha256Digest::from_bytes(
-            encoded[76..108]
+            encoded[132..164]
                 .try_into()
                 .expect("schema digest has a fixed length"),
         ),
         run_set_digest: Sha256Digest::from_bytes(
-            encoded[108..140]
+            encoded[164..196]
                 .try_into()
                 .expect("run digest has a fixed length"),
         ),
         overflow_root,
         tables,
         runs,
-        total_entries: read_u64(&encoded[196..204]),
+        total_entries: read_u64(&encoded[252..260]),
     };
     validate_manifest(&manifest, config, ErrorClass::Corrupt)?;
     Ok(manifest)
@@ -564,6 +573,17 @@ fn validate_manifest(
         || manifest.visible_commit_epoch < manifest.base.source_commit_epoch
     {
         return Err(fail("invalid row delta generation fence".to_string()));
+    }
+    manifest
+        .recovery_source
+        .validate()
+        .map_err(|reason| fail(reason.to_string()))?;
+    if manifest.recovery_source.end_lsn - manifest.recovery_source.start_lsn
+        != manifest.visible_commit_epoch - manifest.base.source_commit_epoch
+    {
+        return Err(fail(
+            "row delta recovery source length does not match its commit epoch range".to_string(),
+        ));
     }
     if manifest.tables.len() > config.max_tables.get()
         || manifest.runs.len() > config.max_runs.get()

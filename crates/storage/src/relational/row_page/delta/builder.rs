@@ -8,9 +8,9 @@ use super::{
 };
 use crate::relational::row_page::RelationalRowPageRootReader;
 use crate::relational::{
-    ordered_key::encode_ordered_relational_key, RelationalOverflowRootReader, RelationalRowChange,
-    RelationalRowChangeCapture, RelationalRowChangeCaptureLimits,
-    RelationalRowPagePublicationConfig, RelationalState,
+    ordered_key::encode_ordered_relational_key, RelationalOverflowRootReader,
+    RelationalRecoverySourceIdentity, RelationalRowChange, RelationalRowChangeCapture,
+    RelationalRowChangeCaptureLimits, RelationalRowPagePublicationConfig, RelationalState,
 };
 use crate::{durable_replace_file, sync_directory};
 use fs2::FileExt;
@@ -248,7 +248,16 @@ impl RelationalRowDeltaBuilder {
         expected_visible_commit_epoch: u64,
         overflow_root: Option<&RelationalOverflowRootReader>,
     ) -> Result<RelationalRowDeltaReport, RelationalRowDeltaError> {
-        self.finish_inner(expected_visible_commit_epoch, overflow_root, None)
+        let recovery_source = RelationalRecoverySourceIdentity::for_test(
+            self.base.source_commit_epoch,
+            expected_visible_commit_epoch,
+        );
+        self.finish_inner(
+            expected_visible_commit_epoch,
+            recovery_source,
+            overflow_root,
+            None,
+        )
     }
 
     /// Publishes a recovery delta with exact final row counts bound to the
@@ -256,6 +265,7 @@ impl RelationalRowDeltaBuilder {
     pub fn finish_with_state(
         mut self,
         expected_visible_commit_epoch: u64,
+        recovery_source: RelationalRecoverySourceIdentity,
         overflow_root: Option<&RelationalOverflowRootReader>,
         final_state: &RelationalState,
     ) -> Result<RelationalRowDeltaReport, RelationalRowDeltaError> {
@@ -278,12 +288,18 @@ impl RelationalRowDeltaBuilder {
             });
         }
         self.tables = final_tables;
-        self.finish_inner(expected_visible_commit_epoch, overflow_root, None)
+        self.finish_inner(
+            expected_visible_commit_epoch,
+            recovery_source,
+            overflow_root,
+            None,
+        )
     }
 
     pub(super) fn finish_inner(
         mut self,
         expected_visible_commit_epoch: u64,
+        recovery_source: RelationalRecoverySourceIdentity,
         overflow_root: Option<&RelationalOverflowRootReader>,
         stop_after: Option<RelationalRowDeltaPublicationPhase>,
     ) -> Result<RelationalRowDeltaReport, RelationalRowDeltaError> {
@@ -318,6 +334,7 @@ impl RelationalRowDeltaBuilder {
             base: self.base,
             delta_generation: self.delta_generation,
             visible_commit_epoch: expected_visible_commit_epoch,
+            recovery_source,
             schema_set_digest: self.schema_set_digest,
             run_set_digest: codec::run_set_digest(&self.runs)?,
             overflow_root: overflow_binding,

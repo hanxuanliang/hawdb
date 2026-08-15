@@ -31,8 +31,8 @@ use skein_storage::{
     RelationalIndexRecoveryReader, RelationalIndexRecoveryReport, RelationalIndexRole,
     RelationalIndexShadowBuildReport, RelationalIndexShadowConfig, RelationalIndexShadowError,
     RelationalIndexShadowManifest, RelationalIndexShadowReader, RelationalIndexShadowWriter,
-    RelationalKey, RelationalScalarType, RelationalTableSchema, RelationalTransaction,
-    RelationalValue, RELATIONAL_PRIMARY_INDEX_NAME,
+    RelationalKey, RelationalRecoveryFence, RelationalRecoverySourceIdentity, RelationalScalarType,
+    RelationalTableSchema, RelationalTransaction, RelationalValue, RELATIONAL_PRIMARY_INDEX_NAME,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -1156,6 +1156,7 @@ impl GraphStore {
     fn open_recovered_relational_index_read_view(
         &self,
         recovered_commit_epoch: u64,
+        expected_recovery_source: RelationalRecoverySourceIdentity,
     ) -> Result<Arc<RelationalIndexReadView>, skein_storage::RelationalIndexShadowError> {
         let durable = self.durable.as_ref().ok_or_else(|| {
             skein_storage::RelationalIndexShadowError::Admission(
@@ -1173,7 +1174,7 @@ impl GraphStore {
         let reader = RelationalIndexRecoveryReader::open_generation_with_cache(
             durable.root_path(),
             relational_index_generation_identity(generation_artifacts),
-            recovered_commit_epoch,
+            RelationalRecoveryFence::new(recovered_commit_epoch, expected_recovery_source),
             RelationalIndexShadowConfig::default(),
             RelationalIndexRecoveryConfig::default(),
             Arc::clone(&durable.segment_cache),
@@ -1724,7 +1725,10 @@ impl GraphStore {
         }
     }
 
-    pub(super) fn finish_relational_index_recovery(&mut self) {
+    pub(super) fn finish_relational_index_recovery(
+        &mut self,
+        recovery_source: Option<RelationalRecoverySourceIdentity>,
+    ) {
         let Some(builder) = self.relational_index_shadow.recovery_builder.take() else {
             if let RelationalIndexShadowRecoveryStatus::CheckpointReady {
                 generation,
@@ -1748,10 +1752,19 @@ impl GraphStore {
         if self.commit_epoch == builder.base_commit_epoch() {
             return;
         }
-        match builder.finish(self.commit_epoch) {
+        let Some(recovery_source) = recovery_source else {
+            self.mark_relational_index_recovery_unavailable(
+                self.commit_epoch,
+                "WAL recovery did not produce a relational recovery source identity".to_string(),
+            );
+            return;
+        };
+        match builder.finish_with_recovery_source(self.commit_epoch, recovery_source) {
             Ok(report) => {
-                match self.open_recovered_relational_index_read_view(report.recovered_commit_epoch)
-                {
+                match self.open_recovered_relational_index_read_view(
+                    report.recovered_commit_epoch,
+                    recovery_source,
+                ) {
                     Ok(view) => {
                         self.relational_index_shadow.read_view = Some(view);
                         self.relational_index_shadow.recovery_status =

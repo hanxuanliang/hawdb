@@ -5,7 +5,8 @@
 
 use super::super::{
     RelationalIndexChange, RelationalIndexChangeCapture, RelationalIndexChangeCaptureLimits,
-    RelationalIndexChangeKind, RelationalKey, RelationalState,
+    RelationalIndexChangeKind, RelationalKey, RelationalRecoveryFence,
+    RelationalRecoverySourceIdentity, RelationalState, RELATIONAL_RECOVERY_SOURCE_BYTES,
 };
 use super::{
     decode_bytes, decode_utf8, encode_relational_key, read_bounded_file, read_u16, read_u32,
@@ -29,7 +30,8 @@ use std::sync::Arc;
 const DELTA_MANIFEST_MAGIC: &[u8; 8] = b"SKRIDXR1";
 const DELTA_PAGE_MAGIC: &[u8; 8] = b"SKRIDXD1";
 const DELTA_FORMAT_VERSION: u16 = 1;
-const DELTA_MANIFEST_HEADER_BYTES: usize = 92;
+const DELTA_MANIFEST_HEADER_BYTES: usize = 148;
+const DELTA_MANIFEST_INTEGRITY_OFFSET: usize = 112;
 const DELTA_PAGE_HEADER_BYTES: usize = 104;
 const DELTA_DESCRIPTOR_BYTES: usize = 68;
 const DELTA_ENTRY_FIXED_BYTES: usize = 17;
@@ -98,6 +100,7 @@ pub struct RelationalIndexRecoveryManifest {
     pub delta_generation: u64,
     pub base_commit_epoch: u64,
     pub recovered_commit_epoch: u64,
+    pub recovery_source: RelationalRecoverySourceIdentity,
     pages: Vec<DeltaPageDescriptor>,
 }
 
@@ -152,6 +155,9 @@ impl RelationalIndexRecoveryManifest {
         encoded.extend_from_slice(&self.delta_generation.to_le_bytes());
         encoded.extend_from_slice(&self.base_commit_epoch.to_le_bytes());
         encoded.extend_from_slice(&self.recovered_commit_epoch.to_le_bytes());
+        self.recovery_source
+            .encode_into(&mut encoded)
+            .map_err(|reason| RelationalIndexShadowError::Admission(reason.to_string()))?;
         encoded.extend_from_slice(&page_count.to_le_bytes());
         encoded.extend_from_slice(&payload_len.to_le_bytes());
         let mut hasher = IntegrityHasher::new();
@@ -199,14 +205,18 @@ impl RelationalIndexRecoveryManifest {
         let delta_generation = read_u64(&encoded[20..28]);
         let base_commit_epoch = read_u64(&encoded[28..36]);
         let recovered_commit_epoch = read_u64(&encoded[36..44]);
-        let page_count = read_u32(&encoded[44..48]) as usize;
+        let recovery_source = RelationalRecoverySourceIdentity::decode(
+            &encoded[44..44 + RELATIONAL_RECOVERY_SOURCE_BYTES],
+        )
+        .map_err(|reason| RelationalIndexShadowError::Corrupt(reason.to_string()))?;
+        let page_count = read_u32(&encoded[100..104]) as usize;
         if page_count > config.max_delta_pages.get() {
             return Err(RelationalIndexShadowError::Admission(format!(
                 "recovery manifest declares {page_count} pages, exceeding limit {}",
                 config.max_delta_pages
             )));
         }
-        let payload_len = usize::try_from(read_u64(&encoded[48..56])).map_err(|_| {
+        let payload_len = usize::try_from(read_u64(&encoded[104..112])).map_err(|_| {
             RelationalIndexShadowError::Corrupt(
                 "recovery manifest payload length overflows usize".to_string(),
             )
@@ -225,11 +235,11 @@ impl RelationalIndexRecoveryManifest {
         }
         let payload = &encoded[DELTA_MANIFEST_HEADER_BYTES..];
         let mut hasher = IntegrityHasher::new();
-        hasher.update(&encoded[..56]);
+        hasher.update(&encoded[..DELTA_MANIFEST_INTEGRITY_OFFSET]);
         hasher.update(payload);
         let digest = hasher.finish();
-        if digest.crc32c.get() != read_u32(&encoded[56..60])
-            || digest.sha256.as_bytes() != &encoded[60..92]
+        if digest.crc32c.get() != read_u32(&encoded[112..116])
+            || digest.sha256.as_bytes() != &encoded[116..148]
         {
             return Err(RelationalIndexShadowError::Corrupt(
                 "relational index recovery manifest checksum mismatch".to_string(),
@@ -266,6 +276,7 @@ impl RelationalIndexRecoveryManifest {
             delta_generation,
             base_commit_epoch,
             recovered_commit_epoch,
+            recovery_source,
             pages,
         };
         validate_manifest(&manifest, config, true)?;
@@ -431,9 +442,22 @@ impl RelationalIndexRecoveryBuilder {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn finish(
+        self,
+        recovered_commit_epoch: u64,
+    ) -> Result<RelationalIndexRecoveryReport, RelationalIndexShadowError> {
+        let recovery_source = RelationalRecoverySourceIdentity::for_test(
+            self.base_commit_epoch,
+            recovered_commit_epoch,
+        );
+        self.finish_with_recovery_source(recovered_commit_epoch, recovery_source)
+    }
+
+    pub fn finish_with_recovery_source(
         mut self,
         recovered_commit_epoch: u64,
+        recovery_source: RelationalRecoverySourceIdentity,
     ) -> Result<RelationalIndexRecoveryReport, RelationalIndexShadowError> {
         if recovered_commit_epoch < self.base_commit_epoch {
             return Err(RelationalIndexShadowError::Corrupt(format!(
@@ -447,6 +471,7 @@ impl RelationalIndexRecoveryBuilder {
             delta_generation: self.delta_generation,
             base_commit_epoch: self.base_commit_epoch,
             recovered_commit_epoch,
+            recovery_source,
             pages: self.pages,
         };
         let encoded_manifest = manifest.encode(self.config)?;
@@ -576,13 +601,13 @@ struct RecoveryDeltaPageRead {
 impl RelationalIndexRecoveryReader {
     pub fn open_latest(
         directory: &Path,
-        expected_recovered_commit_epoch: u64,
+        expected_recovery: RelationalRecoveryFence,
         shadow_config: RelationalIndexShadowConfig,
         recovery_config: RelationalIndexRecoveryConfig,
     ) -> Result<Self, RelationalIndexShadowError> {
         Self::open_latest_inner(
             directory,
-            expected_recovered_commit_epoch,
+            expected_recovery,
             shadow_config,
             recovery_config,
             None,
@@ -592,7 +617,7 @@ impl RelationalIndexRecoveryReader {
 
     pub fn open_latest_with_cache(
         directory: &Path,
-        expected_recovered_commit_epoch: u64,
+        expected_recovery: RelationalRecoveryFence,
         shadow_config: RelationalIndexShadowConfig,
         recovery_config: RelationalIndexRecoveryConfig,
         page_cache: Arc<SegmentCache>,
@@ -600,7 +625,7 @@ impl RelationalIndexRecoveryReader {
     ) -> Result<Self, RelationalIndexShadowError> {
         Self::open_latest_inner(
             directory,
-            expected_recovered_commit_epoch,
+            expected_recovery,
             shadow_config,
             recovery_config,
             Some(page_cache),
@@ -611,7 +636,7 @@ impl RelationalIndexRecoveryReader {
     pub fn open_generation_with_cache(
         directory: &Path,
         expected_base: RelationalIndexGenerationIdentity,
-        expected_recovered_commit_epoch: u64,
+        expected_recovery: RelationalRecoveryFence,
         shadow_config: RelationalIndexShadowConfig,
         recovery_config: RelationalIndexRecoveryConfig,
         page_cache: Arc<SegmentCache>,
@@ -627,7 +652,7 @@ impl RelationalIndexRecoveryReader {
         Self::open_with_base(
             directory,
             base,
-            expected_recovered_commit_epoch,
+            expected_recovery,
             recovery_config,
             Some(page_cache),
             store_id,
@@ -636,7 +661,7 @@ impl RelationalIndexRecoveryReader {
 
     fn open_latest_inner(
         directory: &Path,
-        expected_recovered_commit_epoch: u64,
+        expected_recovery: RelationalRecoveryFence,
         shadow_config: RelationalIndexShadowConfig,
         recovery_config: RelationalIndexRecoveryConfig,
         page_cache: Option<Arc<SegmentCache>>,
@@ -655,7 +680,7 @@ impl RelationalIndexRecoveryReader {
         Self::open_with_base(
             directory,
             base,
-            expected_recovered_commit_epoch,
+            expected_recovery,
             recovery_config,
             page_cache,
             store_id,
@@ -665,7 +690,7 @@ impl RelationalIndexRecoveryReader {
     fn open_with_base(
         directory: &Path,
         base: RelationalIndexShadowReader,
-        expected_recovered_commit_epoch: u64,
+        expected_recovery: RelationalRecoveryFence,
         recovery_config: RelationalIndexRecoveryConfig,
         page_cache: Option<Arc<SegmentCache>>,
         store_id: StoreId,
@@ -679,13 +704,15 @@ impl RelationalIndexRecoveryReader {
         let manifest = RelationalIndexRecoveryManifest::decode(&encoded, recovery_config)?;
         if manifest.base_generation != base.manifest().generation
             || manifest.base_commit_epoch != base.manifest().source_commit_epoch
-            || manifest.recovered_commit_epoch != expected_recovered_commit_epoch
+            || manifest.recovered_commit_epoch != expected_recovery.commit_epoch
+            || manifest.recovery_source != expected_recovery.source
         {
             return Err(RelationalIndexShadowError::Corrupt(format!(
-                "recovery manifest fence {}/{}/{} does not match base {}/{} and recovered epoch {expected_recovered_commit_epoch}",
+                "recovery manifest fence {}/{}/{}/{:?} does not match base {}/{} and expected recovery {expected_recovery:?}",
                 manifest.base_generation,
                 manifest.base_commit_epoch,
                 manifest.recovered_commit_epoch,
+                manifest.recovery_source,
                 base.manifest().generation,
                 base.manifest().source_commit_epoch
             )));
@@ -1301,6 +1328,18 @@ fn validate_manifest(
     {
         return Err(fail(
             "invalid relational index recovery manifest fence".to_string(),
+        ));
+    }
+    manifest
+        .recovery_source
+        .validate()
+        .map_err(|reason| fail(reason.to_string()))?;
+    if manifest.recovery_source.end_lsn - manifest.recovery_source.start_lsn
+        != manifest.recovered_commit_epoch - manifest.base_commit_epoch
+    {
+        return Err(fail(
+            "relational index recovery source length does not match its commit epoch range"
+                .to_string(),
         ));
     }
     let mut previous_end = manifest.base_commit_epoch;

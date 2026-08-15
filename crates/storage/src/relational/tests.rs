@@ -2383,9 +2383,13 @@ fn required_relational_index_roots_cover_constraints_and_foreign_keys() {
         .record(2, capture)
         .expect("record foreign-key recovery delta");
     builder.finish(2).expect("publish recovery delta");
-    let recovered =
-        RelationalIndexRecoveryReader::open_latest(&directory, 2, shadow_config, recovery_config)
-            .expect("open recovered foreign-key root");
+    let recovered = RelationalIndexRecoveryReader::open_latest(
+        &directory,
+        RelationalRecoveryFence::new(2, RelationalRecoverySourceIdentity::for_test(1, 2)),
+        shadow_config,
+        recovery_config,
+    )
+    .expect("open recovered foreign-key root");
     recovered
         .validate_required_roots(&next)
         .expect("recovered root identity remains schema-complete");
@@ -2978,9 +2982,14 @@ fn relational_index_wal_deltas_merge_with_cold_base_and_stay_bounded() {
     assert!(report.peak_dirty_entries <= recovery_config.max_dirty_entries.get());
     assert!(report.peak_dirty_bytes <= recovery_config.max_dirty_bytes.get());
 
-    let reader =
-        RelationalIndexRecoveryReader::open_latest(&directory, 4, shadow_config, recovery_config)
-            .expect("open fenced recovery reader");
+    let recovery_source = RelationalRecoverySourceIdentity::for_test(1, 4);
+    let reader = RelationalIndexRecoveryReader::open_latest(
+        &directory,
+        RelationalRecoveryFence::new(4, recovery_source),
+        shadow_config,
+        recovery_config,
+    )
+    .expect("open fenced recovery reader");
     for (index, key) in [
         (
             "documents_owner_idx",
@@ -3043,7 +3052,7 @@ fn relational_index_wal_deltas_merge_with_cold_base_and_stay_bounded() {
     let page_cache = std::sync::Arc::new(crate::SegmentCache::new(64 * 1024));
     let cached_reader = RelationalIndexRecoveryReader::open_latest_with_cache(
         &directory,
-        4,
+        RelationalRecoveryFence::new(4, recovery_source),
         shadow_config,
         recovery_config,
         std::sync::Arc::clone(&page_cache),
@@ -3098,7 +3107,18 @@ fn relational_index_wal_deltas_merge_with_cold_base_and_stay_bounded() {
 
     assert!(RelationalIndexRecoveryReader::open_latest(
         &directory,
-        5,
+        RelationalRecoveryFence::new(5, RelationalRecoverySourceIdentity::for_test(1, 5)),
+        shadow_config,
+        recovery_config,
+    )
+    .is_err());
+    let wrong_source = RelationalRecoverySourceIdentity {
+        record_sequence_sha256: skein_integrity::Sha256Digest::from_bytes([0x5a; 32]),
+        ..recovery_source
+    };
+    assert!(RelationalIndexRecoveryReader::open_latest(
+        &directory,
+        RelationalRecoveryFence::new(4, wrong_source),
         shadow_config,
         recovery_config,
     )
@@ -3143,9 +3163,13 @@ fn relational_index_wal_deltas_merge_with_cold_base_and_stay_bounded() {
         )
         .expect("flush one immutable but unpublished delta generation");
     drop(abandoned);
-    let old_reader =
-        RelationalIndexRecoveryReader::open_latest(&directory, 4, shadow_config, recovery_config)
-            .expect("abandoned delta generation must not replace the old manifest");
+    let old_reader = RelationalIndexRecoveryReader::open_latest(
+        &directory,
+        RelationalRecoveryFence::new(4, recovery_source),
+        shadow_config,
+        recovery_config,
+    )
+    .expect("abandoned delta generation must not replace the old manifest");
     let mut old_rows = Vec::new();
     old_reader
         .visit_exact_postings(
@@ -3178,9 +3202,13 @@ fn relational_index_wal_deltas_merge_with_cold_base_and_stay_bounded() {
     let last = encoded.last_mut().expect("recovery delta is not empty");
     *last ^= 1;
     std::fs::write(&first_delta, encoded).expect("corrupt recovery delta");
-    let corrupt_reader =
-        RelationalIndexRecoveryReader::open_latest(&directory, 4, shadow_config, recovery_config)
-            .expect("cold recovery open does not read delta pages");
+    let corrupt_reader = RelationalIndexRecoveryReader::open_latest(
+        &directory,
+        RelationalRecoveryFence::new(4, recovery_source),
+        shadow_config,
+        recovery_config,
+    )
+    .expect("cold recovery open does not read delta pages");
     assert!(matches!(
         corrupt_reader.visit_exact_postings(
             "documents",

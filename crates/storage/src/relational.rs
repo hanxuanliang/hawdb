@@ -15,6 +15,7 @@ mod constraints;
 mod index_shadow;
 mod ordered_key;
 mod overflow;
+mod recovery;
 mod row_page;
 
 pub use codec::{
@@ -58,6 +59,10 @@ pub use overflow::{
     DEFAULT_MAX_RELATIONAL_HYDRATION_BYTES, DEFAULT_RELATIONAL_OVERFLOW_EXTENTS,
     DEFAULT_RELATIONAL_OVERFLOW_MANIFEST_BYTES, DEFAULT_RELATIONAL_OVERFLOW_NEW_EXTENT_BYTES,
     DEFAULT_RELATIONAL_OVERFLOW_THRESHOLD_BYTES, RELATIONAL_OVERFLOW_MANIFEST_FILE,
+};
+pub(crate) use recovery::RELATIONAL_RECOVERY_SOURCE_BYTES;
+pub use recovery::{
+    RelationalRecoveryFence, RelationalRecoverySourceBuilder, RelationalRecoverySourceIdentity,
 };
 pub use row_page::{
     relational_row_delta_manifest_generation_file, relational_row_delta_run_file,

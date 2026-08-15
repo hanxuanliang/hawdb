@@ -2,11 +2,12 @@
 
 use super::{GraphStore, RelationalRowStorageResidencyReport};
 use skein_storage::{
-    RelationalOverflowRootReader, RelationalRowChangeCapture, RelationalRowChangeCaptureLimits,
-    RelationalRowDeltaBuilder, RelationalRowDeltaConfig, RelationalRowDeltaError,
-    RelationalRowDeltaReader, RelationalRowDeltaReport, RelationalRowPageLiveError,
-    RelationalRowPageMutationPlanner, RelationalRowPagePublicationConfig,
-    RelationalRowPageReadView, RelationalRowPageReadViewIdentity, RelationalRowPageRootReader,
+    RelationalOverflowRootReader, RelationalRecoveryFence, RelationalRecoverySourceIdentity,
+    RelationalRowChangeCapture, RelationalRowChangeCaptureLimits, RelationalRowDeltaBuilder,
+    RelationalRowDeltaConfig, RelationalRowDeltaError, RelationalRowDeltaReader,
+    RelationalRowDeltaReport, RelationalRowPageLiveError, RelationalRowPageMutationPlanner,
+    RelationalRowPagePublicationConfig, RelationalRowPageReadView,
+    RelationalRowPageReadViewIdentity, RelationalRowPageRootReader,
     RelationalRowPageSnapshotReader, RelationalRowPageTableDelta, RelationalState, SegmentCache,
     StorageResidencyMode, StoreId,
 };
@@ -670,7 +671,10 @@ impl GraphStore {
         }
     }
 
-    pub(super) fn finish_relational_row_page_recovery(&mut self) {
+    pub(super) fn finish_relational_row_page_recovery(
+        &mut self,
+        recovery_source: Option<RelationalRecoverySourceIdentity>,
+    ) {
         let Some(builder) = self.relational_row_pages.recovery_builder.take() else {
             if let RelationalRowPageRecoveryStatus::CheckpointReady {
                 generation,
@@ -679,7 +683,15 @@ impl GraphStore {
             } = self.relational_row_pages.recovery_status
                 && self.commit_epoch > source_commit_epoch
             {
-                match self.open_relational_row_delta_view(self.commit_epoch) {
+                let Some(recovery_source) = recovery_source else {
+                    self.mark_relational_row_page_recovery_unavailable(
+                        self.commit_epoch,
+                        "WAL recovery did not produce a relational recovery source identity"
+                            .to_string(),
+                    );
+                    return;
+                };
+                match self.open_relational_row_delta_view(self.commit_epoch, recovery_source) {
                     Ok((view, delta)) => {
                         let manifest = delta.manifest();
                         self.relational_row_pages.read_view = Some(view);
@@ -714,27 +726,41 @@ impl GraphStore {
         if self.commit_epoch == builder.base_commit_epoch() {
             return;
         }
-        match builder.finish_with_state(self.commit_epoch, None, &self.relational_state) {
-            Ok(report) => match self.open_relational_row_delta_view(self.commit_epoch) {
-                Ok((view, _delta)) => {
-                    self.relational_row_pages.read_view = Some(view);
-                    self.relational_row_pages.recovery_status =
-                        RelationalRowPageRecoveryStatus::WalRecovered {
-                            base_generation: report.generation.base_generation,
-                            delta_generation: report.generation.delta_generation,
-                            base_commit_epoch: report.base_commit_epoch,
-                            recovered_commit_epoch: report.visible_commit_epoch,
-                            delta_runs: report.runs,
-                            delta_entries: report.entries,
-                            peak_dirty_bytes: Some(report.peak_dirty_bytes),
-                        };
-                    self.relational_row_pages.recovery_report = Some(report);
+        let Some(recovery_source) = recovery_source else {
+            self.mark_relational_row_page_recovery_unavailable(
+                self.commit_epoch,
+                "WAL recovery did not produce a relational recovery source identity".to_string(),
+            );
+            return;
+        };
+        match builder.finish_with_state(
+            self.commit_epoch,
+            recovery_source,
+            None,
+            &self.relational_state,
+        ) {
+            Ok(report) => {
+                match self.open_relational_row_delta_view(self.commit_epoch, recovery_source) {
+                    Ok((view, _delta)) => {
+                        self.relational_row_pages.read_view = Some(view);
+                        self.relational_row_pages.recovery_status =
+                            RelationalRowPageRecoveryStatus::WalRecovered {
+                                base_generation: report.generation.base_generation,
+                                delta_generation: report.generation.delta_generation,
+                                base_commit_epoch: report.base_commit_epoch,
+                                recovered_commit_epoch: report.visible_commit_epoch,
+                                delta_runs: report.runs,
+                                delta_entries: report.entries,
+                                peak_dirty_bytes: Some(report.peak_dirty_bytes),
+                            };
+                        self.relational_row_pages.recovery_report = Some(report);
+                    }
+                    Err(error) => self.mark_relational_row_page_recovery_unavailable(
+                        self.commit_epoch,
+                        format!("published relational row delta could not be pinned: {error}"),
+                    ),
                 }
-                Err(error) => self.mark_relational_row_page_recovery_unavailable(
-                    self.commit_epoch,
-                    format!("published relational row delta could not be pinned: {error}"),
-                ),
-            },
+            }
             Err(error) => self.mark_relational_row_page_recovery_unavailable(
                 self.commit_epoch,
                 format!("relational row recovery could not finish: {error}"),
@@ -745,6 +771,7 @@ impl GraphStore {
     fn open_relational_row_delta_view(
         &self,
         expected_visible_commit_epoch: u64,
+        expected_recovery_source: RelationalRecoverySourceIdentity,
     ) -> Result<
         (
             Arc<RelationalRowPageReadView>,
@@ -767,10 +794,10 @@ impl GraphStore {
                     "relational row delta recovery requires a pinned row root".to_string(),
                 )
             })?;
-        let delta = RelationalRowDeltaReader::open_latest(
+        let delta = RelationalRowDeltaReader::open_latest_with_recovery_fence(
             durable.root_path(),
             &base,
-            expected_visible_commit_epoch,
+            RelationalRecoveryFence::new(expected_visible_commit_epoch, expected_recovery_source),
             self.relational_row_pages.delta_config,
         )?
         .ok_or_else(|| {

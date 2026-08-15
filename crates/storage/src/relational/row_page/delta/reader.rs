@@ -5,10 +5,12 @@ use super::{
     RowDeltaRunDescriptor, RELATIONAL_ROW_DELTA_MANIFEST_FILE,
 };
 use crate::relational::row_page::RelationalRowPageRecoveredValue;
+#[cfg(test)]
+use crate::relational::RelationalRecoverySourceIdentity;
 use crate::relational::{
     ordered_key::{decode_ordered_relational_key, encode_ordered_relational_key},
-    RelationalKey, RelationalOverflowRootReader, RelationalRow, RelationalRowPageRootReader,
-    RelationalValue,
+    RelationalKey, RelationalOverflowRootReader, RelationalRecoveryFence, RelationalRow,
+    RelationalRowPageRootReader, RelationalValue,
 };
 use skein_integrity::IntegrityHasher;
 use std::fs::File;
@@ -35,10 +37,31 @@ impl RelationalRowDeltaReader {
         Ok(codec::read_manifest_if_exists(&path, config)?.map(|manifest| manifest.generation()))
     }
 
+    #[cfg(test)]
     pub fn open_latest(
         directory: &Path,
         expected_base: &RelationalRowPageRootReader,
         expected_visible_commit_epoch: u64,
+        config: RelationalRowDeltaConfig,
+    ) -> Result<Option<Self>, RelationalRowDeltaError> {
+        Self::open_latest_with_recovery_fence(
+            directory,
+            expected_base,
+            RelationalRecoveryFence::new(
+                expected_visible_commit_epoch,
+                RelationalRecoverySourceIdentity::for_test(
+                    expected_base.manifest().source_commit_epoch,
+                    expected_visible_commit_epoch,
+                ),
+            ),
+            config,
+        )
+    }
+
+    pub fn open_latest_with_recovery_fence(
+        directory: &Path,
+        expected_base: &RelationalRowPageRootReader,
+        expected_recovery: RelationalRecoveryFence,
         config: RelationalRowDeltaConfig,
     ) -> Result<Option<Self>, RelationalRowDeltaError> {
         let path = directory.join(RELATIONAL_ROW_DELTA_MANIFEST_FILE);
@@ -48,18 +71,41 @@ impl RelationalRowDeltaReader {
                     directory,
                     manifest,
                     expected_base,
-                    expected_visible_commit_epoch,
+                    expected_recovery,
                     config,
                 )
             })
             .transpose()
     }
 
+    #[cfg(test)]
     pub fn open_generation(
         directory: &Path,
         generation: RelationalRowDeltaGeneration,
         expected_base: &RelationalRowPageRootReader,
         expected_visible_commit_epoch: u64,
+        config: RelationalRowDeltaConfig,
+    ) -> Result<Self, RelationalRowDeltaError> {
+        Self::open_generation_with_recovery_fence(
+            directory,
+            generation,
+            expected_base,
+            RelationalRecoveryFence::new(
+                expected_visible_commit_epoch,
+                RelationalRecoverySourceIdentity::for_test(
+                    expected_base.manifest().source_commit_epoch,
+                    expected_visible_commit_epoch,
+                ),
+            ),
+            config,
+        )
+    }
+
+    pub fn open_generation_with_recovery_fence(
+        directory: &Path,
+        generation: RelationalRowDeltaGeneration,
+        expected_base: &RelationalRowPageRootReader,
+        expected_recovery: RelationalRecoveryFence,
         config: RelationalRowDeltaConfig,
     ) -> Result<Self, RelationalRowDeltaError> {
         let path = directory.join(relational_row_delta_manifest_generation_file(
@@ -77,7 +123,7 @@ impl RelationalRowDeltaReader {
             directory,
             manifest,
             expected_base,
-            expected_visible_commit_epoch,
+            expected_recovery,
             config,
         )
     }
@@ -86,20 +132,22 @@ impl RelationalRowDeltaReader {
         directory: &Path,
         manifest: RelationalRowDeltaManifest,
         expected_base: &RelationalRowPageRootReader,
-        expected_visible_commit_epoch: u64,
+        expected_recovery: RelationalRecoveryFence,
         config: RelationalRowDeltaConfig,
     ) -> Result<Self, RelationalRowDeltaError> {
         let base = expected_base.manifest();
         if manifest.base.generation != base.generation
             || manifest.base.source_commit_epoch != base.source_commit_epoch
             || manifest.base.root_set_digest != base.root_set_digest
-            || manifest.visible_commit_epoch != expected_visible_commit_epoch
+            || manifest.visible_commit_epoch != expected_recovery.commit_epoch
+            || manifest.recovery_source != expected_recovery.source
         {
             return Err(RelationalRowDeltaError::Corrupt(format!(
-                "row delta fence {}/{}/{} does not match base {}/{} and visible epoch {expected_visible_commit_epoch}",
+                "row delta fence {}/{}/{}/{:?} does not match base {}/{} and expected recovery {expected_recovery:?}",
                 manifest.base.generation,
                 manifest.base.source_commit_epoch,
                 manifest.visible_commit_epoch,
+                manifest.recovery_source,
                 base.generation,
                 base.source_commit_epoch
             )));

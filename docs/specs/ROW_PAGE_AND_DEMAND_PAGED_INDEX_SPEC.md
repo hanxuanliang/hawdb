@@ -293,7 +293,15 @@ delta generation, so candidate pages never overwrite files referenced by the
 previous recovery manifest. The base generation, base commit epoch, delta
 generation, ordered page epoch ranges, recovered commit epoch, lengths,
 CRC32C, and SHA-256 digests are published in one manifest only after strict
-WAL replay completes. Crashes before that replacement leave the prior
+WAL replay completes. The `SKRIDXR1` version 1 manifest uses a fixed 148-byte
+header. It also binds a 56-byte recovery-source identity containing the WAL
+generation, inclusive start LSN, exclusive end LSN, and a
+domain-separated SHA-256 over the ordered record sequence. Each record
+contributes its LSN, exact logical payload length, and payload SHA-256. The LSN
+range length MUST equal the recovered-epoch distance from the immutable base.
+Opening a recovery reader requires the exact source identity recomputed while
+validating that WAL prefix; matching only the recovered epoch is insufficient.
+Crashes before that replacement leave the prior
 manifest intact and new pages orphaned.
 
 Point and leading-prefix differential reads merge the cold base with delta
@@ -846,8 +854,9 @@ selected row root and previous delta selector, and atomically replaces the
 latest delta manifest last. It then reopens that exact generation and exposes
 one immutable `Arc` view containing the pinned base root, disk delta reader,
 and recovered visible epoch. A read-only open never writes recovery artifacts;
-it may reuse only an already-published delta whose base identity and visible
-epoch exactly match the replayed database. `GraphStore::snapshot()` retains
+it may reuse only an already-published delta whose base identity, visible
+epoch, WAL generation, LSN interval, and ordered-record digest exactly match
+the replayed database. `GraphStore::snapshot()` retains
 that exact view only for the matching commit epoch.
 
 Every later relational commit stages the next row view before appending WAL.
@@ -938,9 +947,11 @@ new candidate file is created.
 One generation has both an immutable manifest
 `relational-row-delta-{base_generation}-{delta_generation}.manifest.skein`
 and the publish-last selector `relational-row-delta.manifest.skein`.
-`SKRDMF01` version 1 has a fixed 248-byte header followed by 48-byte table
+`SKRDMF01` version 1 has a fixed 304-byte header followed by 48-byte table
 descriptors plus names and 100-byte run descriptors plus lower/upper keys. It
-binds each table's schema identity and exact final row count from the same
+contains the same 56-byte recovery-source identity used by index recovery and
+rejects an empty or epoch-length-mismatched LSN range. It binds each table's
+schema identity and exact final row count from the same
 `RelationalState` that produced the recovery changes, plus exact table and
 run-set digests, optional overflow-root identity, run artifact length and
 digest, total entries, and the complete epoch fence. A schema or table-set
