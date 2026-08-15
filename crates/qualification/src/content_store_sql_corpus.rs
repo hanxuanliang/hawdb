@@ -504,7 +504,8 @@ mod tests {
         assert!(identity.required_statement_count > identity.rewritten_statement_count);
         assert_eq!(identity.caller_count, 25);
         assert!(identity.covered_caller_count > 0);
-        assert!(identity.partial_caller_count > 0);
+        assert_eq!(identity.partial_caller_count, 0);
+        assert_eq!(identity.covered_caller_count, identity.caller_count);
         assert_eq!(identity.retained_on_sqlite_caller_count, 0);
         assert_eq!(
             identity.caller_count,
@@ -631,6 +632,27 @@ mod tests {
             .iter()
             .any(|name| name == "thread_tail_delete_candidates"));
         assert!(caller.note.contains("negative-start clamping"));
+        assert!(caller.note.contains("one mixed durable transaction"));
+        assert!(caller.note.contains("live tombstones"));
+        assert!(caller.note.contains("checkpoint/reopen identity"));
+    }
+
+    #[test]
+    fn thread_delete_is_bound_to_mixed_transaction_evidence() {
+        let corpus = nowledge_content_store_sql_corpus().unwrap();
+        let caller = corpus
+            .source_inventory
+            .iter()
+            .find(|caller| caller.symbol == "delete_thread_messages")
+            .expect("whole-thread delete caller must be inventoried");
+        assert_eq!(caller.coverage, ContentStoreSqlCallerCoverage::Covered);
+        assert!(caller
+            .statements
+            .iter()
+            .any(|name| name == "thread_owned_document_ids"));
+        assert!(caller.note.contains("bounded document discovery"));
+        assert!(caller.note.contains("empty owned document"));
+        assert!(caller.note.contains("epoch-preserving preflight"));
         assert!(caller.note.contains("one mixed durable transaction"));
         assert!(caller.note.contains("live tombstones"));
         assert!(caller.note.contains("checkpoint/reopen identity"));

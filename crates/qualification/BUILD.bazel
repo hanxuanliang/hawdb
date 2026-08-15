@@ -22,6 +22,7 @@ rust_library(
         "src/content_store_row_pages/source_replacement.rs",
         "src/content_store_row_pages/tests.rs",
         "src/content_store_row_pages/thread_fixture.rs",
+        "src/content_store_row_pages/thread_delete.rs",
         "src/content_store_row_pages/thread_ownership.rs",
         "src/content_store_row_pages/thread_reconcile.rs",
         "src/content_store_row_pages/thread_tail_delete.rs",

@@ -400,12 +400,33 @@ state. `SkeinContentThreadTailDelete.tla` models exact tail selection, empty
 no-op behavior, arbitrary partial staging, retained payload identity, and
 durable-before-visible publication.
 
+`delete_thread_messages` first performs bounded reads of both documents owned
+by the Thread storage identity and documents referenced by its message
+occurrences. The exact sorted union determines anchor and empty-document
+cleanup; an owned document with no messages and a legacy message-only document
+MUST both be discovered. The graph Thread uses its public identity while
+relational messages and documents use the distinct storage identity.
+
+A missing or already-deleted Thread MUST terminate after a bounded read-only
+preflight. It MUST NOT execute zero-match mutation statements, write WAL, or
+advance the commit epoch. For a present Thread, graph Message nodes,
+ThreadIdentity nodes, the Thread node, relational anchors, message occurrences,
+and now-empty documents MUST stage in one transaction. Transaction workspace
+reads MUST observe the complete deletion before commit; rollback and a
+pre-durability crash expose the complete old state. Publication exposes the
+complete deletion at one epoch, preserves unrelated graph and relational
+payloads byte-for-byte, and leaves a live row tombstone until checkpoint.
+Checkpoint/reopen MUST preserve the same absence and unrelated payload digest.
+`SkeinContentThreadDelete.tla` models exact document discovery, arbitrary
+cross-model staging, epoch-preserving preflight no-ops, rollback, atomic
+durable publication, and recovery.
+
 This gate deliberately covers the selected storage lifecycle, transaction,
 locking, cancellation, injected corruption, and synthetic resource evidence;
-it does not claim complete Content Store cutover. Callers still marked
-`partial`, isolated resource enforcement, production-copy measurements, and
-cross-platform fault injection remain fail-closed. The runner never embeds its
-database path or payload contents in the serialized report.
+it does not claim complete Content Store cutover. The frozen corpus has no
+remaining `partial` callers, but isolated resource enforcement, production-copy
+measurements, and cross-platform fault injection remain fail-closed. The runner
+never embeds its database path or payload contents in the serialized report.
 
 The focused Rust tests cover:
 

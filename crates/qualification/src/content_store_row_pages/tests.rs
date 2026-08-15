@@ -22,7 +22,7 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
 
     assert!(report.ready);
     assert_eq!(report.qualified_tables, QUALIFIED_TABLES);
-    assert_eq!(report.corpus.partial_caller_count, 1);
+    assert_eq!(report.corpus.partial_caller_count, 0);
     assert_eq!(report.final_message_count, 7);
     assert_eq!(report.base_chunk_count, 5);
     assert_eq!(report.final_chunk_count, 2);
@@ -540,6 +540,71 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
     assert!(
         report.thread_tail_delete.checkpoint_generation
             > report.thread_tail_delete.seed_checkpoint_generation
+    );
+    assert_eq!(report.thread_delete.thread_id, "qualified-delete-thread");
+    assert_eq!(
+        report.thread_delete.thread_storage_id,
+        "qualified-delete-storage"
+    );
+    assert_eq!(
+        report.thread_delete.requested_thread_id,
+        "qualified-delete-alias"
+    );
+    assert_eq!(
+        report.thread_delete.discovered_document_ids,
+        [
+            "qualified-delete-doc-legacy".to_string(),
+            "qualified-delete-doc-owned".to_string(),
+        ]
+    );
+    assert_eq!(report.thread_delete.discovered_document_sha256.len(), 64);
+    assert!(report.thread_delete.empty_owned_document_discovered);
+    assert_eq!(report.thread_delete.graph_deleted_message_count, 2);
+    assert_eq!(report.thread_delete.relational_deleted_message_count, 3);
+    assert_eq!(report.thread_delete.deleted_anchor_count, 2);
+    assert_eq!(report.thread_delete.deleted_identity_count, 2);
+    assert!(report.thread_delete.missing_thread_noop);
+    assert!(report.thread_delete.rollback_preserved_state);
+    assert!(report.thread_delete.workspace_read_your_own_writes);
+    assert!(report.thread_delete.graph_relational_absent);
+    assert!(report.thread_delete.unrelated_payload_identity);
+    assert!(report.thread_delete.second_delete_noop);
+    assert_eq!(
+        report.thread_delete.committed_epoch,
+        report.thread_delete.seed_commit_epoch + 1
+    );
+    assert_eq!(
+        report.thread_delete.unrelated_state_sha256_before,
+        report.thread_delete.unrelated_state_sha256_after_live
+    );
+    assert_eq!(
+        report.thread_delete.unrelated_state_sha256_before,
+        report.thread_delete.unrelated_state_sha256_after_reopen
+    );
+    assert_eq!(
+        report
+            .thread_delete
+            .deleted_tombstone_read
+            .execution
+            .visible_commit_epoch,
+        report.thread_delete.committed_epoch
+    );
+    assert_eq!(report.thread_delete.deleted_tombstone_read.output_rows, 0);
+    assert!(
+        report
+            .thread_delete
+            .deleted_tombstone_read
+            .execution
+            .overlay_entries
+            > 0
+    );
+    assert_eq!(
+        report.thread_delete.live_count_sha256,
+        report.thread_delete.reopened_count_sha256
+    );
+    assert!(
+        report.thread_delete.checkpoint_generation
+            > report.thread_delete.seed_checkpoint_generation
     );
     assert_eq!(
         report.multi_statement_transaction.index_runtime_path,

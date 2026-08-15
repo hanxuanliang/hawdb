@@ -9,6 +9,7 @@ mod source_replacement;
 mod space_merge_ownership;
 #[cfg(test)]
 mod tests;
+mod thread_delete;
 mod thread_fixture;
 mod thread_ownership;
 mod thread_reconcile;
@@ -38,6 +39,7 @@ use source_ownership::qualify_source_ownership_move;
 use source_replacement::qualify_source_chunk_replacement;
 use space_merge_ownership::qualify_space_merge_ownership;
 use std::path::PathBuf;
+use thread_delete::qualify_thread_delete;
 use thread_ownership::qualify_thread_ownership_moves;
 use thread_reconcile::qualify_thread_message_reconcile;
 use thread_tail_delete::qualify_thread_tail_delete;
@@ -279,6 +281,7 @@ pub struct ContentStoreInitialRowPageQualificationReport {
     pub thread_message_upsert: ContentStoreThreadUpsertQualificationReport,
     pub thread_message_reconcile: ContentStoreThreadReconcileQualificationReport,
     pub thread_tail_delete: ContentStoreThreadTailDeleteQualificationReport,
+    pub thread_delete: ContentStoreThreadDeleteQualificationReport,
     pub multi_statement_transaction: ContentStoreTransactionQualificationReport,
     pub resources: ContentStoreResourceEvidence,
     pub corruption: ContentStoreCorruptionQualificationReport,
@@ -480,6 +483,36 @@ pub struct ContentStoreThreadTailDeleteQualificationReport {
     pub checkpoint_generation: u64,
     pub reopened_read: ContentStoreRowPageReadReport,
     pub reopened_anchor_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContentStoreThreadDeleteQualificationReport {
+    pub thread_id: String,
+    pub thread_storage_id: String,
+    pub requested_thread_id: String,
+    pub discovered_document_ids: Vec<String>,
+    pub discovered_document_sha256: String,
+    pub empty_owned_document_discovered: bool,
+    pub graph_deleted_message_count: i64,
+    pub relational_deleted_message_count: i64,
+    pub deleted_anchor_count: i64,
+    pub deleted_identity_count: i64,
+    pub missing_thread_noop: bool,
+    pub rollback_preserved_state: bool,
+    pub workspace_read_your_own_writes: bool,
+    pub graph_relational_absent: bool,
+    pub unrelated_payload_identity: bool,
+    pub second_delete_noop: bool,
+    pub seed_commit_epoch: u64,
+    pub seed_checkpoint_generation: u64,
+    pub committed_epoch: u64,
+    pub unrelated_state_sha256_before: String,
+    pub unrelated_state_sha256_after_live: String,
+    pub unrelated_state_sha256_after_reopen: String,
+    pub deleted_tombstone_read: ContentStoreRowPageReadReport,
+    pub live_count_sha256: String,
+    pub checkpoint_generation: u64,
+    pub reopened_count_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -828,6 +861,13 @@ pub fn run_content_store_initial_row_page_qualification(
         &corpus,
     )?;
     database = thread_tail_delete_database;
+    let (thread_delete_database, thread_delete) = qualify_thread_delete(
+        database,
+        &config.database_path,
+        &authoritative_config,
+        &corpus,
+    )?;
+    database = thread_delete_database;
     let isolation = qualify_content_store_isolation(
         database,
         &corpus,
@@ -872,6 +912,7 @@ pub fn run_content_store_initial_row_page_qualification(
         thread_message_upsert,
         thread_message_reconcile,
         thread_tail_delete,
+        thread_delete,
         multi_statement_transaction,
         resources,
         corruption,

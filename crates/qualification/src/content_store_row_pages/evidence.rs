@@ -3,7 +3,10 @@ use super::{
     ContentStoreRowPageReadPhase, ContentStoreRowPageReadReport,
 };
 use crate::evidence_digest::rows_sha256;
-use crate::ContentStoreSqlStatementSpec;
+use crate::{
+    ContentStoreSqlStatementClassification, ContentStoreSqlStatementKind,
+    ContentStoreSqlStatementSpec,
+};
 use skein::{Database, QueryStreamOptions, Result, SkeinError, Value};
 
 const EXPLAIN_MAX_ROWS: usize = 128;
@@ -15,6 +18,24 @@ pub(super) const MESSAGE_POINT_MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 
 pub(super) fn message_point_parameters(content_message_id: &str) -> [Value; 1] {
     [Value::String(content_message_id.to_string())]
+}
+
+pub(super) fn message_point_statement(
+    name: &str,
+    transaction_group: &str,
+) -> ContentStoreSqlStatementSpec {
+    ContentStoreSqlStatementSpec {
+        name: name.to_string(),
+        kind: ContentStoreSqlStatementKind::Read,
+        classification: ContentStoreSqlStatementClassification::Required,
+        transaction_group: Some(transaction_group.to_string()),
+        sql: MESSAGE_POINT_SQL.to_string(),
+        parameters: vec!["TEXT".to_string()],
+        result_columns: vec!["content_message_id".to_string(), "content".to_string()],
+        ordering: Vec::new(),
+        max_rows: MESSAGE_POINT_MAX_ROWS,
+        max_payload_bytes: MESSAGE_POINT_MAX_PAYLOAD_BYTES,
+    }
 }
 
 pub(super) const fn message_point_options() -> QueryStreamOptions {

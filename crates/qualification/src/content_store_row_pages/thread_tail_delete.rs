@@ -1,7 +1,4 @@
-use super::evidence::{
-    execute_qualified_read, message_point_parameters, MESSAGE_POINT_MAX_PAYLOAD_BYTES,
-    MESSAGE_POINT_MAX_ROWS, MESSAGE_POINT_SQL,
-};
+use super::evidence::{execute_qualified_read, message_point_parameters, message_point_statement};
 use super::fixture::corpus_statement;
 use super::thread_fixture::{
     thread_document_parameters, thread_message_anchor_parameters, thread_message_parameters,
@@ -10,10 +7,7 @@ use super::thread_fixture::{
 };
 use super::{ContentStoreRowPageReadPhase, ContentStoreThreadTailDeleteQualificationReport};
 use crate::evidence_digest::rows_sha256;
-use crate::{
-    ContentStoreSqlCorpus, ContentStoreSqlStatementClassification, ContentStoreSqlStatementKind,
-    ContentStoreSqlStatementSpec,
-};
+use crate::ContentStoreSqlCorpus;
 use skein::{
     Database, DatabaseConfig, DurabilityPolicy, QueryOutput, QueryStreamOptions, Result,
     SkeinError, Value,
@@ -134,7 +128,8 @@ pub(super) fn qualify_thread_tail_delete(
     let summary = corpus_statement(corpus, "thread_document_payload_summary")?;
     let update_summary = corpus_statement(corpus, "update_content_document_summary")?;
     let page = corpus_statement(corpus, "thread_messages_page")?;
-    let tombstone_point = deleted_message_point_statement();
+    let tombstone_point =
+        message_point_statement("thread_tail_deleted_message_point", "thread_tail_delete");
     let page_parameters = thread_page_parameters(THREAD_STORAGE_ID, RETAINED_MESSAGE_COUNT);
 
     let mut transaction = database.begin_transaction();
@@ -771,21 +766,6 @@ fn required_i64(output: &QueryOutput, field: &str) -> Result<i64> {
 
 fn tail_delete_phase_error(phase: &str, error: SkeinError) -> SkeinError {
     SkeinError::Execution(format!("content-store tail delete {phase} failed: {error}"))
-}
-
-fn deleted_message_point_statement() -> ContentStoreSqlStatementSpec {
-    ContentStoreSqlStatementSpec {
-        name: "thread_tail_deleted_message_point".to_string(),
-        kind: ContentStoreSqlStatementKind::Read,
-        classification: ContentStoreSqlStatementClassification::Required,
-        transaction_group: Some("thread_tail_delete".to_string()),
-        sql: MESSAGE_POINT_SQL.to_string(),
-        parameters: vec!["TEXT".to_string()],
-        result_columns: vec!["content_message_id".to_string(), "content".to_string()],
-        ordering: Vec::new(),
-        max_rows: MESSAGE_POINT_MAX_ROWS,
-        max_payload_bytes: MESSAGE_POINT_MAX_PAYLOAD_BYTES,
-    }
 }
 
 fn retained_payload_bytes() -> Result<i64> {

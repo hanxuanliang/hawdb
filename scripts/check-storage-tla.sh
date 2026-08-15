@@ -18,6 +18,7 @@ readonly specifications=(
   SkeinContentSpaceMergeOwnership
   SkeinContentSourceOwnershipMove
   SkeinContentSourceReplacement
+  SkeinContentThreadDelete
   SkeinContentThreadOwnershipMove
   SkeinContentThreadReconcile
   SkeinContentThreadTailDelete

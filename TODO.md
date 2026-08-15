@@ -121,17 +121,15 @@ crash; read-only recovery remains fail closed.
     The `upsert_source_chunks` caller now has complete mixed-transaction
     evidence for shorter and empty whole-document replacement, duplicate-order
     statement rollback, graph/document count agreement, live visibility, and
-    checkpoint/reopen identity. Remaining `partial` callers stay blocked.
+    checkpoint/reopen identity.
     The `patch_source_chunks_space` caller now has complete mixed-transaction
     evidence for graph/document workspace agreement, read-your-own-writes,
     exact chunk-count and payload preservation, missing-owner no-op behavior,
-    live visibility, and checkpoint/reopen identity. The other `partial`
-    callers remain blocked on their own qualification evidence.
+    live visibility, and checkpoint/reopen identity.
     The `patch_thread_space_ownership` caller now has a guarded mixed-source
     batch qualification: graph Thread, relational document, and messages agree
     in one epoch, matching previews move, a stale preview remains unchanged,
-    and non-ownership payloads survive live reads and checkpoint/reopen. Other
-    `partial` callers remain blocked on independent evidence.
+    and non-ownership payloads survive live reads and checkpoint/reopen.
     The `patch_moved_space_ownership` caller now composes selected Threads and
     Sources in one guarded mixed transaction, reports exact document/message
     changes, proves stale selection remains unchanged, and retains payload and
@@ -139,8 +137,13 @@ crash; read-only recovery remains fail closed.
     caller now proves bounded ordered candidate identity, negative-start
     clamping, empty-tail no-op behavior, rollback atomicity, exact graph and
     relational summary agreement, retained payload identity, live tombstones,
-    and checkpoint/reopen identity. Whole-thread deletion remains blocked on
-    its independent mixed-transaction gate.
+    and checkpoint/reopen identity. The `delete_thread_messages` caller now
+    proves bounded empty-owned/message-only document discovery, missing/repeated
+    preflight no-ops without an epoch advance, rollback and workspace
+    read-your-own-writes, graph Thread/identity/Message deletion and relational
+    anchor/message/empty-document deletion in one durable epoch, unrelated
+    payload identity, live tombstones, and checkpoint/reopen identity. The
+    frozen corpus now has no `partial` callers.
   - Require checkpoint/reopen, WAL replay, corruption, cancellation, and
     locking evidence before enabling the path by default. Prove that a declared
     bounded workload runs within the supported 512 MiB low-memory profile, but
@@ -187,17 +190,15 @@ Cloud. The initial scope is `content_documents`, `thread_messages`,
 artifact/blob files remain sidecars until a separate workload and recovery
 qualification justifies moving them.
 
-- [ ] Qualify the partial callers in the frozen SQLite-to-Skein statement
+- [x] Qualify the partial callers in the frozen SQLite-to-Skein statement
   corpus.
   - The versioned corpus, real v3 schema, parameter/result contracts, source
     inventory, and revision digest are specified by
     `docs/specs/POSTGRES_RELATIONAL_CONTENT_STORE_SPEC.md`.
-  - Complete the remaining graph-plus-relational write ownership for every
-    caller currently classified as `partial`; do not infer readiness from
-    parser feature counts. `upsert_source_chunks` is now `covered`; ownership
-    moves, Thread message UPSERT, and occurrence-preserving reconciliation are
-    now `covered`; tail deletion is now `covered`; whole-thread deletion remains
-    incomplete.
+  - Every graph-plus-relational write caller is now `covered` by independent
+    runtime evidence rather than parser feature counts. This includes source
+    replacement, ownership moves, Thread message UPSERT and reconciliation,
+    tail deletion, and whole-thread deletion.
   - Acceptance: every active Mem caller is `covered`, and cutover fails closed
     when the corpus protocol, revision, or digest differs from the qualified
     Skein artifact.
