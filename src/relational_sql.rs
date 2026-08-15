@@ -842,6 +842,17 @@ mod tests {
             assert!(demand_infos
                 .iter()
                 .all(|info| info.contains("base_generation=") && info.contains("live_entries=")));
+
+            let scanned_join = database
+                .query_sql(
+                    "SELECT d.id FROM documents AS d INNER JOIN anchors AS a ON a.document_id = d.id ORDER BY d.id ASC",
+                )
+                .expect("run a canonical row scan with nested point hydration");
+            assert_eq!(scanned_join.rows.len(), 1);
+            assert_eq!(
+                scanned_join.rows[0]["id"],
+                Value::String("doc-2".to_string())
+            );
         }
         {
             let mut database = Database::open_with_durability_and_config(

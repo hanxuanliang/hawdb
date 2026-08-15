@@ -307,7 +307,7 @@ impl RelationalRowPageDemandReader {
             value,
             overflow_root,
             &mut resolve,
-            &mut |row| {
+            &mut |row, _| {
                 output = Some(row);
                 true
             },
@@ -326,7 +326,7 @@ impl RelationalRowPageDemandReader {
         limits: RelationalRowPageDemandReadLimits,
         hydration: &mut RelationalHydrationBudget,
         task: &RuntimeTaskContext,
-        visit: impl FnMut(RelationalProjectedRow) -> bool,
+        mut visit: impl FnMut(RelationalProjectedRow) -> bool,
     ) -> Result<RelationalRowPageDemandReadReport, RelationalRowPageDemandReadError> {
         let mut resolve = |_: &mut RelationalProjectedRow,
                            _: &mut RelationalHydrationBudget,
@@ -343,7 +343,7 @@ impl RelationalRowPageDemandReader {
             hydration,
             task,
             &mut resolve,
-            visit,
+            |row, _| visit(row),
         )
     }
 
@@ -353,7 +353,7 @@ impl RelationalRowPageDemandReader {
         hydration: &mut RelationalHydrationBudget,
         task: &RuntimeTaskContext,
         resolve: &mut ProjectedRowResolver<'_>,
-        mut visit: impl FnMut(RelationalProjectedRow) -> bool,
+        mut visit: impl FnMut(RelationalProjectedRow, &mut RelationalHydrationBudget) -> bool,
     ) -> Result<RelationalRowPageDemandReadReport, RelationalRowPageDemandReadError> {
         let RelationalRowPageOverlayRead {
             range,
@@ -488,7 +488,7 @@ impl RelationalRowPageDemandReader {
                     resolve(&mut row, context.hydration, context.task)?;
                     context.report.rows_decoded += 1;
                     context.report.rows_emitted += 1;
-                    if !visit(row) {
+                    if !visit(row, context.hydration) {
                         context.report.stopped_early = true;
                         return Ok(context.finish());
                     }
@@ -537,7 +537,7 @@ impl RelationalRowPageDemandReader {
                 resolve(&mut row, context.hydration, context.task)?;
                 context.report.rows_decoded += 1;
                 context.report.rows_emitted += 1;
-                if !visit(row) {
+                if !visit(row, context.hydration) {
                     context.report.stopped_early = true;
                     return Ok(context.finish());
                 }
@@ -905,7 +905,7 @@ fn emit_overlay_before(
     base_key: &RelationalKey,
     overflow_root: Option<&RelationalOverflowRootReader>,
     resolve: &mut ProjectedRowResolver<'_>,
-    visit: &mut impl FnMut(RelationalProjectedRow) -> bool,
+    visit: &mut impl FnMut(RelationalProjectedRow, &mut RelationalHydrationBudget) -> bool,
 ) -> Result<bool, RelationalRowPageDemandReadError> {
     while overlay
         .peek()
@@ -924,7 +924,7 @@ fn emit_remaining_overlay(
     overlay: &mut OverlayIterator,
     overflow_root: Option<&RelationalOverflowRootReader>,
     resolve: &mut ProjectedRowResolver<'_>,
-    visit: &mut impl FnMut(RelationalProjectedRow) -> bool,
+    visit: &mut impl FnMut(RelationalProjectedRow, &mut RelationalHydrationBudget) -> bool,
 ) -> Result<bool, RelationalRowPageDemandReadError> {
     for (key, value) in overlay.by_ref() {
         if !emit_overlay_row(context, key, value, overflow_root, resolve, visit)? {
@@ -940,7 +940,7 @@ fn emit_overlay_row(
     value: RelationalRowPageProjectedOverlayValue,
     overflow_root: Option<&RelationalOverflowRootReader>,
     resolve: &mut ProjectedRowResolver<'_>,
-    visit: &mut impl FnMut(RelationalProjectedRow) -> bool,
+    visit: &mut impl FnMut(RelationalProjectedRow, &mut RelationalHydrationBudget) -> bool,
 ) -> Result<bool, RelationalRowPageDemandReadError> {
     let RelationalRowPageProjectedOverlayValue::Present(fields) = value else {
         return Ok(true);
@@ -957,7 +957,7 @@ fn emit_overlay_row(
     resolve(&mut row, context.hydration, context.task)?;
     context.report.rows_decoded += 1;
     context.report.rows_emitted += 1;
-    Ok(visit(row))
+    Ok(visit(row, context.hydration))
 }
 
 struct EncodedRange {

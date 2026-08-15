@@ -293,7 +293,7 @@ impl RelationalRowPageSnapshotReader {
         limits: RelationalRowPageSnapshotReadLimits,
         hydration: &mut RelationalHydrationBudget,
         task: &RuntimeTaskContext,
-        visit: impl FnMut(RelationalProjectedRow) -> bool,
+        mut visit: impl FnMut(RelationalProjectedRow) -> bool,
     ) -> Result<RelationalRowPageSnapshotRangeReport, RelationalRowPageSnapshotReadError> {
         self.visit_projected_range_resolving(
             range,
@@ -301,7 +301,7 @@ impl RelationalRowPageSnapshotReader {
             hydration,
             task,
             |_, _, _| Ok(()),
-            visit,
+            |row, _| visit(row),
         )
     }
 
@@ -318,7 +318,7 @@ impl RelationalRowPageSnapshotReader {
             &mut RelationalHydrationBudget,
             &RuntimeTaskContext,
         ) -> Result<(), RelationalRowPageDemandReadError>,
-        visit: impl FnMut(RelationalProjectedRow) -> bool,
+        visit: impl FnMut(RelationalProjectedRow, &mut RelationalHydrationBudget) -> bool,
     ) -> Result<RelationalRowPageSnapshotRangeReport, RelationalRowPageSnapshotReadError> {
         self.checkpoint(task)?;
         let (overlay, overlay_report) = self.collect_overlay(range, limits, task)?;

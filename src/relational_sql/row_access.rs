@@ -210,11 +210,11 @@ impl<'a> RelationalRowRuntime<'a> {
             }
             RelationalRowBackend::Snapshot(reader) => {
                 let remaining = self.remaining_limits()?;
-                let mut hydration = self.hydration.borrow_mut();
+                let mut hydration = *self.hydration.borrow();
                 let state = self.state;
                 let task = self.task;
                 let mut callback_error = None;
-                let report = reader
+                let read_result = reader
                     .visit_projected_range_resolving(
                         skein_storage::RelationalRowPageProjectedRange {
                             table,
@@ -230,16 +230,22 @@ impl<'a> RelationalRowRuntime<'a> {
                                 .hydrate_projected_row_with_context(table, row, budget, Some(task))
                                 .map_err(map_state_to_demand_error)
                         },
-                        |row| match visit(RelationalReadRow { row: Arc::new(row) }) {
-                            Ok(keep_going) => keep_going,
-                            Err(error) => {
-                                callback_error = Some(error);
-                                false
-                            }
+                        |row, range_hydration| {
+                            self.hydration.replace(*range_hydration);
+                            let keep_going = match visit(RelationalReadRow { row: Arc::new(row) }) {
+                                Ok(keep_going) => keep_going,
+                                Err(error) => {
+                                    callback_error = Some(error);
+                                    false
+                                }
+                            };
+                            *range_hydration = *self.hydration.borrow();
+                            keep_going
                         },
                     )
-                    .map_err(map_snapshot_error)?;
-                drop(hydration);
+                    .map_err(map_snapshot_error);
+                self.hydration.replace(hydration);
+                let report = read_result?;
                 self.record_range(&report)?;
                 match callback_error {
                     Some(error) => Err(error),
