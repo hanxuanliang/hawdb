@@ -82,6 +82,10 @@ impl RelationalRowPageRootReader {
         &self.manifest
     }
 
+    pub(crate) const fn publication_config(&self) -> RelationalRowPagePublicationConfig {
+        self.config
+    }
+
     pub fn overflow_root_binding(&self) -> Option<RelationalOverflowRootBinding> {
         self.manifest.overflow_root
     }

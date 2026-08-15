@@ -12,6 +12,7 @@ mod publisher;
 mod reader;
 mod root;
 
+pub(crate) use publisher::acquire_publication_lock;
 pub use publisher::RelationalRowPagePublisher;
 pub use reader::RelationalRowPageRootReader;
 

@@ -8,11 +8,22 @@ use skein_integrity::{IntegrityHasher, Sha256Digest, SHA256_BYTES};
 use std::fmt;
 use std::num::{NonZeroU64, NonZeroUsize};
 
+mod delta;
 mod mutation;
 mod publication;
 mod recovery;
 mod value;
 
+pub use delta::{
+    relational_row_delta_manifest_generation_file, relational_row_delta_run_file,
+    RelationalRowDeltaBaseBinding, RelationalRowDeltaBuilder, RelationalRowDeltaConfig,
+    RelationalRowDeltaError, RelationalRowDeltaGeneration, RelationalRowDeltaManifest,
+    RelationalRowDeltaPublicationPhase, RelationalRowDeltaReadReport, RelationalRowDeltaReader,
+    RelationalRowDeltaReport, RelationalRowDeltaTableSchema,
+    DEFAULT_RELATIONAL_ROW_DELTA_DIRTY_BYTES, DEFAULT_RELATIONAL_ROW_DELTA_DIRTY_ENTRIES,
+    DEFAULT_RELATIONAL_ROW_DELTA_MANIFEST_BYTES, DEFAULT_RELATIONAL_ROW_DELTA_RUNS,
+    DEFAULT_RELATIONAL_ROW_DELTA_RUN_BYTES, RELATIONAL_ROW_DELTA_MANIFEST_FILE,
+};
 pub use mutation::{
     RelationalRowPageBootstrap, RelationalRowPageBootstrapReport, RelationalRowPageIdAllocator,
     RelationalRowPageMutationError, RelationalRowPageMutationPlan,

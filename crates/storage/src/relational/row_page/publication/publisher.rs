@@ -598,7 +598,9 @@ fn validate_table_name(
     Ok(())
 }
 
-fn acquire_publication_lock(directory: &Path) -> Result<File, RelationalRowPagePublicationError> {
+pub(crate) fn acquire_publication_lock(
+    directory: &Path,
+) -> Result<File, RelationalRowPagePublicationError> {
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)

@@ -171,9 +171,9 @@ sequence `CandidateStarted`, `CandidatePagesDurable`, `CandidateRootDurable`,
 streams the complete root directory, rejects stale or reused generations, and
 leaves pre-manifest crash artifacts unreachable. `RelationalRowPageRootReader`
 pins one immutable manifest and resolves cross-generation descriptors after a
-new root is selected. The non-serving recovery and mutation refinements are
-specified separately below. Disk-backed deltas, physical page demand reads,
-reclamation integration, and serving activation remain
+new root is selected. The non-serving recovery, immutable row-delta, and
+mutation refinements are specified separately below. Recovery wiring, physical
+page demand reads, reclamation integration, and serving activation remain
 blocked on their separate implementation and regression evidence.
 
 ## Relational Overflow Publication
@@ -251,8 +251,33 @@ therefore covers repeated-key coalescing, same-epoch fragment ordering,
 graph-only epoch advancement, whole-fragment capacity rejection, schema
 invalidation, missing/stale/corrupt roots, complete-prefix publication, a newer
 shadow root, pinned-reader stability, cold mount, and live invalidation.
-Disk-backed recovery delta runs, exact checkpoint-manifest binding, live row
+The immutable disk-backed row-delta artifact protocol is modeled separately
+below. Recovery integration, exact checkpoint-manifest binding, live row
 publication, demand reads, and serving activation remain later obligations.
+
+## Immutable Relational Row-Delta Runs
+
+`SkeinRowDeltaRuns.tla` models the non-serving disk-backed generation written
+by `RelationalRowDeltaBuilder`. WAL-equivalent primary-key changes coalesce in
+a bounded dirty map and flush into complete immutable run sets. The generation
+manifest becomes durable only after the run set and overflow-reference closure
+are complete; the latest manifest changes only after revalidating both the
+selected row root and expected previous delta generation.
+
+The model includes a competing delta publisher, a concurrent row-root
+publication, missing overflow closure, partial-batch poisoning, process crash,
+and a generation-pinned reader. TLC checks that the dirty overlay remains
+bounded, replay equals the durable logical prefix, manifests select only
+complete run sets, stale or poisoned candidates remain unreachable, published
+state is a complete epoch prefix, and a pinned reader does not drift. SQL
+selection remains false because recovery and serving integration are later
+contracts.
+
+The configured instance uses two keys, a one-entry dirty budget, two
+post-checkpoint epochs, four delta generations, and two row-root generations.
+The Rust refinement provides the byte-level limits, exact CRC32C/SHA-256
+bindings, manifest-last filesystem operations, row-root/delta lock ordering,
+and corruption rejection outside the abstract model.
 
 ## Durable Projection Cursor and Catch-up
 
@@ -457,6 +482,7 @@ They are implementation evidence, not a machine-checked refinement proof.
 | A table-scoped row-page allocator persists monotonically, COW point mutations read only affected leaves and preserve the old left id across splits, deleted ids are never reused, and streaming bootstrap stays within one page plus one candidate | `RelationalRowPageIdAllocator`, `RelationalRowPageMutationPlanner`, `RelationalRowPageBootstrap`, `RelationalRowPageRootReader::find_table_page_descriptor` | `mutation_planner_reads_only_affected_leaves_and_splits_deterministically`, `mutation_planner_updates_deletes_and_never_reuses_page_ids`, `streaming_bootstrap_keeps_one_page_plus_one_candidate_row`, `streaming_bootstrap_fails_closed_after_emit_error`, `allocator_exhaustion_is_atomic`, `SkeinRowPageMutation.tla` |
 | Overflow extents are content-addressed, publish manifest-last behind a stale-generation fence, preserve pinned cross-generation closure, and are required before an overflow-bearing row root can publish | `RelationalOverflowPublisher`, `RelationalOverflowRootReader`, `RelationalRowPagePublisher::publish_with_overflow_root` | `publish_last_overflow_root_round_trips`, `incremental_root_reuses_content_and_keeps_pinned_generation_readable`, `every_pre_latest_crash_keeps_the_previous_overflow_root_selected`, `row_root_binds_and_resolves_the_exact_overflow_generation`, `row_root_rejects_missing_or_mismatched_overflow_generation`, `SkeinOverflowPublication.tla` |
 | A checkpoint-correlated row root remains cold at mount, replays consecutive global epochs and same-epoch relational fragments into one atomically admitted non-serving overlay, publishes only a complete view, retains pinned generations, and invalidates the current view on live writes | `RelationalState::stage_transaction_with_row_changes`, `RelationalRowPageRecoveryBuilder`, `GraphStore::{mount_relational_row_pages_for_recovery,finish_relational_row_page_recovery,invalidate_relational_row_page_live_view}` | `relational_row_change_capture_reports_exact_net_primary_key_changes`, `multiple_relational_fragments_share_one_global_epoch`, `overlay_admission_rejects_a_whole_batch_without_partial_visibility`, `opening_recovery_does_not_read_or_hash_base_page_slots`, `durable_open_replays_wal_into_a_generation_pinned_row_overlay`, `SkeinRowRecovery.tla` |
+| Immutable relational row-delta runs stay within dirty/run/manifest limits, bind the exact base/schema/overflow closure, publish generation metadata before the latest selector, reject stale row-root or delta publishers, poison partial batches, demand-check run integrity, and preserve pinned readers | `RelationalRowDeltaBuilder`, `RelationalRowDeltaReader`, `RelationalRowPageRootReader`, `RelationalOverflowRootReader` | `immutable_runs_round_trip_across_bounded_flushes`, `builder_is_poisoned_after_a_partial_epoch_error`, `every_pre_latest_stop_keeps_the_previous_delta_selected`, `stale_builder_cannot_replace_a_newer_delta_root`, `builder_cannot_publish_after_its_row_root_becomes_stale`, `overflow_references_require_an_exact_visible_epoch_root`, `corruption_poisoning_is_demand_driven`, `pinned_generation_remains_readable_after_new_publication`, `SkeinRowDeltaRuns.tla` |
 | A torn WAL batch has no partial recovered visibility | `replay_wal` record decode and batch apply | `default_recovery_rejects_torn_wal_tail_until_explicit_doctor_repair`, `doctor_discards_torn_batch_wal_without_partial_path_recovery` |
 | Doctor repair binds destructive truncation to an exact acknowledged plan and resumes a durable pending audit | `DatabaseDoctor::{plan_wal_tail_repair,apply_wal_tail_repair}` | `apply_rejects_toctou_change_without_preparing_repair`, `prepared_repair_blocks_open_and_can_continue`, `truncated_pending_repair_is_resumable_and_blocks_open_until_finalized` |
 | Complete-record corruption and LSN gaps fail closed | `replay_wal` framing, checksum, and expected-LSN checks | `rejects_and_quarantines_checksum_corruption_at_wal_tail`, `rejects_and_quarantines_checksum_corruption_before_valid_wal_suffix`, `rejects_and_quarantines_non_contiguous_wal_lsn` |

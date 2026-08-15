@@ -560,9 +560,10 @@ LatestManifestPublished
 These events map in order to `BeginCheckpoint`, `PersistCandidatePages`,
 `PersistCandidateRoot`, `PersistCandidateManifest`, the generation fence, and
 `PublishCheckpoint` in `SkeinCowPagePublication.tla`. The non-serving recovery
-shadow and deterministic mutation planner are specified below. Disk-backed
-recovery deltas, physical page demand reads, overflow hydration, reclamation,
-and production serving activation remain later contracts.
+shadow, immutable row-delta generation, and deterministic mutation planner are
+specified below. Recovery wiring, physical page demand reads, overflow
+hydration, reclamation, and production serving activation remain later
+contracts.
 
 ### Relational row-page mutation planning
 
@@ -631,9 +632,10 @@ unavailable; it cannot publish a partial recovered view.
 The default shadow envelope is 100,000 primary-key entries and 64 MiB of
 charged resident state. These are hard evidence bounds, not a claim that an
 arbitrary retained WAL suffix fits in memory. Exceeding either bound leaves the
-existing canonical recovery path intact. A later stage MUST use schema-aware,
-disk-backed recovery delta runs before row pages can become canonical under the
-larger WAL replay envelope.
+existing canonical recovery path intact. The immutable row-delta generation
+below supplies the disk-backed artifact boundary, but the current recovery
+mount still uses this in-memory shadow until a separate integration stage
+streams WAL captures into those runs.
 
 After the complete WAL prefix is consumed, recovery may expose one immutable
 `Arc` view whose identity contains the base generation, base commit epoch, and
@@ -643,6 +645,78 @@ store's current row shadow because live row-delta publication is not active;
 already pinned snapshots remain valid. This view is diagnostic and differential
 evidence only: SQL, constraints, checkpoint authority, backup, and reclamation
 do not select it.
+
+### Immutable relational row-delta v1 generation
+
+`RelationalRowDeltaBuilder` writes one complete, non-serving delta generation
+over a pinned row root. A generation binds the exact base generation, base
+source commit epoch, base root-set digest, ordered table schema set, fully
+consumed visible commit epoch, and optional overflow root. It consumes only
+exact primary-key before/after change evidence. It does not scan base row pages
+or infer mutations from SQL or WAL text.
+
+The mutable dirty map is ordered by `(table ordinal, encoded primary key)` and
+coalesces repeated keys to their latest row or tombstone. Both entry count and
+charged resident bytes are hard limits. The charge includes the map/value
+allocation envelope, fixed run descriptor, encoded key, and encoded row. When
+the next change would exceed either dirty limit, the complete current map is
+flushed as an immutable run before that change is inserted. A partial
+batch error poisons the builder; already durable candidate runs remain
+unreachable and the builder cannot publish a manifest. Changes at or before
+the immutable base epoch and gaps in the global epoch sequence fail closed.
+
+Each run is named
+`relational-row-delta-{base_generation}-{delta_generation}-{ordinal}.run.skein`.
+`SKRDLT01` version 1 uses one fixed 176-byte header, a contiguous array of
+80-byte entry descriptors, and contiguous key/row payloads. The header binds
+the base identity, delta generation, schema-set digest, run ordinal, epoch
+range, entry count, and exact region lengths. Every entry descriptor stores
+the table ordinal, present/tombstone kind, last-modified epoch, exact payload
+offsets and lengths, CRC32C, and a SHA-256 binding over the base, generation,
+run and entry ordinals, descriptor prefix, key, and row. Reserved bytes are
+zero. Entries are strictly ordered and every region is gap-free. Run bytes are
+written and synchronized without building a second run-sized encoding buffer;
+the configured cumulative run-byte and run-count limits are checked before a
+new candidate file is created.
+
+One generation has both an immutable manifest
+`relational-row-delta-{base_generation}-{delta_generation}.manifest.skein`
+and the publish-last selector `relational-row-delta.manifest.skein`.
+`SKRDMF01` version 1 has a fixed 248-byte header followed by 40-byte table
+descriptors plus names and 100-byte run descriptors plus lower/upper keys. It
+binds exact table and run-set digests, optional overflow-root identity, run
+artifact length and digest, total entries, and the complete epoch fence. Table
+count, run count, manifest bytes, dirty bytes, row/key sizes, and cumulative
+run bytes are independently bounded. Normal open validates this bounded
+manifest and exact run file lengths only; descriptor, payload, and full-run
+integrity are demand-checked while visiting the selected runs. Callback effects
+remain provisional until a complete visit returns success. An explicit early
+stop verifies each emitted entry binding but does not read or hash the
+unselected suffix.
+
+Publication is manifest-last:
+
+1. synchronize every immutable run;
+2. validate every overflow reference against the exact visible-epoch root;
+3. synchronize and publish the immutable generation manifest;
+4. acquire the row-root publication lock and re-read the latest row root;
+5. acquire the delta publication lock and revalidate the expected previous
+   delta generation;
+6. atomically replace `relational-row-delta.manifest.skein` last.
+
+The lock order is row root before row delta. A concurrent row-root publisher or
+delta publisher therefore makes the candidate stale rather than allowing a
+manifest bound to the wrong base or previous generation to become selected.
+Crashes before step 6 retain the prior latest manifest and may leave only
+unreachable immutable candidates. A reader pins the immutable generation
+manifest and remains readable after a newer generation publishes.
+
+This is the only relational row-delta representation. Skein has not published
+a durable database format, so the reader recognizes no legacy magic, version,
+layout, filename, or migration path. This stage does not replace
+`RelationalRowPageRecoveryBuilder`, bind deltas into the canonical checkpoint,
+merge base plus delta for SQL, or reclaim orphan and pinned generations. Those
+are separate activation and lifecycle contracts.
 
 ### Graph layout
 
@@ -954,9 +1028,10 @@ is the first stateful use of these bytes. Its fixed runtime event trace, stale
 generation fence, immutable artifacts, crash boundaries, and pinned
 cross-generation descriptors refine `SkeinCowPagePublication.tla`. WAL recovery
 and serving activation remain separate obligations. The current bounded,
-non-serving base-plus-WAL recovery view refines `SkeinRowRecovery.tla`; it does
-not discharge the later disk-backed recovery, checkpoint binding, demand-read,
-or serving obligations.
+non-serving base-plus-WAL recovery view refines `SkeinRowRecovery.tla`.
+Immutable disk-backed row-delta publication refines `SkeinRowDeltaRuns.tla`;
+it remains outside the recovery mount and therefore does not discharge
+checkpoint binding, demand-read, lifecycle, or serving obligations.
 
 - `SkeinTransactionConcurrency.tla`: logical lock namespaces, compatibility,
   wait-for deadlocks, escalation, savepoint release, and durable publication.
@@ -983,6 +1058,10 @@ or serving obligations.
   admission, fail-closed invalidation, complete-prefix view publication, cold
   page slots, pinned generation stability, live invalidation, and the
   non-serving SQL boundary.
+- `SkeinRowDeltaRuns.tla`: bounded coalescing and immutable run flush,
+  overflow closure, run-before-generation-manifest durability, row-root and
+  previous-delta fencing, manifest-last selection, crash isolation, poisoned
+  candidate rejection, and pinned generation stability.
 - `SkeinPageCacheAdmission.tla`: clean immutable page residency, pin-safe
   eviction, cancellation release, caller-carved foreground reserve, corrupt
   admission rejection, cold open, and background hit/admit/bypass progress.
