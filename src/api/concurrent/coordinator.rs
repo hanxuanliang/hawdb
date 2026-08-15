@@ -215,6 +215,9 @@ impl CommitSequencer {
             let result_index = completed.len() - 1;
             let result = task(&mut database);
             completed[result_index].1 = result;
+            if database.relational_row_schema_checkpoint_required() {
+                break;
+            }
             let progress = database.wal_sync_group_progress();
             if progress.byte_count >= self.group_commit.config.max_bytes().get() {
                 break;
@@ -223,7 +226,19 @@ impl CommitSequencer {
 
         let flush = database.finish_wal_sync_group();
         Ok(match flush {
-            Ok(flush) => flush,
+            Ok(flush) => {
+                if let Err(error) =
+                    database.complete_required_relational_row_checkpoint("group commit durability")
+                {
+                    let message = error.to_string();
+                    for (_, result) in completed.iter_mut() {
+                        if result.is_ok() {
+                            *result = Err(SkeinError::StorageIntegrity(message.clone()));
+                        }
+                    }
+                }
+                flush
+            }
             Err(error) => {
                 let message = format!(
                     "WAL group durability barrier failed after mutation publication; close and reopen the database: {error}"

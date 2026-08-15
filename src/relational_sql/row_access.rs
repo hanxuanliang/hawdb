@@ -1,0 +1,672 @@
+use crate::error::{Result, SkeinError};
+use crate::sql::{
+    SelectProjection, SelectStatement, SqlColumnRef, SqlExpression, SqlFunctionArgument,
+    SqlPredicate,
+};
+use crate::store::GraphStore;
+use skein_core::RuntimeTaskContext;
+use skein_storage::{
+    RelationalError, RelationalHydrationBudget, RelationalKey, RelationalProjectedField,
+    RelationalProjectedRow, RelationalRow, RelationalRowPageDemandReadError,
+    RelationalRowPageReadViewIdentity, RelationalRowPageSnapshotPointReport,
+    RelationalRowPageSnapshotRangeReport, RelationalRowPageSnapshotReadError,
+    RelationalRowPageSnapshotReadLimits, RelationalRowPageSnapshotReader,
+    RelationalRowPageSnapshotRowSource, RelationalState, RelationalTableSchema,
+};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroUsize;
+use std::ops::Bound;
+use std::sync::Arc;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum RelationalRowReadMode<'a> {
+    CanonicalMemory,
+    Store(&'a GraphStore),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RelationalRowExecutionEvidence {
+    pub runtime_path: &'static str,
+    pub base_generation: Option<u64>,
+    pub delta_generation: Option<u64>,
+    pub base_commit_epoch: Option<u64>,
+    pub visible_commit_epoch: Option<u64>,
+    pub root_set_digest: Option<String>,
+    pub descriptor_reads: usize,
+    pub logical_pages: usize,
+    pub logical_bytes: usize,
+    pub file_pages: usize,
+    pub file_bytes: usize,
+    pub cache_hits: usize,
+    pub cache_misses: usize,
+    pub cache_admission_rejections: usize,
+    pub rows_visited: usize,
+    pub overlay_entries: usize,
+    pub overlay_resident_bytes: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct RelationalReadRow {
+    row: Arc<RelationalProjectedRow>,
+}
+
+impl RelationalReadRow {
+    pub(super) fn primary_key(&self) -> &RelationalKey {
+        &self.row.primary_key
+    }
+
+    pub(super) fn value(&self, ordinal: usize) -> Result<&skein_storage::RelationalValue> {
+        let field = self
+            .row
+            .fields
+            .binary_search_by_key(&ordinal, |field| field.ordinal)
+            .ok()
+            .map(|position| &self.row.fields[position])
+            .ok_or_else(|| {
+                SkeinError::StorageIntegrity(format!(
+                    "relational row projection omitted required field {ordinal}"
+                ))
+            })?;
+        Ok(&field.value)
+    }
+}
+
+enum RelationalRowBackend {
+    CanonicalMemory,
+    Snapshot(RelationalRowPageSnapshotReader),
+}
+
+pub(crate) struct RelationalRowRuntime<'a> {
+    state: &'a RelationalState,
+    backend: RelationalRowBackend,
+    scan_fields: BTreeMap<String, Arc<[usize]>>,
+    output_fields: BTreeMap<String, Arc<[usize]>>,
+    limits: RelationalRowPageSnapshotReadLimits,
+    hydration: RefCell<RelationalHydrationBudget>,
+    evidence: RefCell<RelationalRowExecutionEvidence>,
+    task: &'a RuntimeTaskContext,
+}
+
+impl<'a> RelationalRowRuntime<'a> {
+    pub(crate) fn new(
+        state: &'a RelationalState,
+        mode: RelationalRowReadMode<'_>,
+        scan_fields: BTreeMap<String, Arc<[usize]>>,
+        output_fields: BTreeMap<String, Arc<[usize]>>,
+        limits: RelationalRowPageSnapshotReadLimits,
+        hydration: RelationalHydrationBudget,
+        task: &'a RuntimeTaskContext,
+    ) -> Result<Self> {
+        let backend = match mode {
+            RelationalRowReadMode::CanonicalMemory => RelationalRowBackend::CanonicalMemory,
+            RelationalRowReadMode::Store(store) => {
+                store.open_relational_row_snapshot_reader()?.map_or(
+                    RelationalRowBackend::CanonicalMemory,
+                    RelationalRowBackend::Snapshot,
+                )
+            }
+        };
+        let runtime_path = match &backend {
+            RelationalRowBackend::CanonicalMemory => "canonical_memory",
+            RelationalRowBackend::Snapshot(_) => "snapshot_rows",
+        };
+        Ok(Self {
+            state,
+            backend,
+            scan_fields,
+            output_fields,
+            limits,
+            hydration: RefCell::new(hydration),
+            evidence: RefCell::new(RelationalRowExecutionEvidence {
+                runtime_path,
+                ..RelationalRowExecutionEvidence::default()
+            }),
+            task,
+        })
+    }
+
+    pub(crate) fn hydration(&self) -> RelationalHydrationBudget {
+        *self.hydration.borrow()
+    }
+
+    pub(crate) fn evidence(&self) -> RelationalRowExecutionEvidence {
+        self.evidence.borrow().clone()
+    }
+
+    pub(crate) fn read_point(
+        &self,
+        table: &str,
+        key: &RelationalKey,
+    ) -> Result<Option<RelationalReadRow>> {
+        let fields = self.fields(&self.scan_fields, table)?;
+        self.read_point_with_fields(table, key, fields)
+    }
+
+    pub(crate) fn read_output_point(
+        &self,
+        table: &str,
+        key: &RelationalKey,
+    ) -> Result<Option<RelationalReadRow>> {
+        let fields = self.fields(&self.output_fields, table)?;
+        self.read_point_with_fields(table, key, fields)
+    }
+
+    fn read_point_with_fields(
+        &self,
+        table: &str,
+        key: &RelationalKey,
+        fields: &[usize],
+    ) -> Result<Option<RelationalReadRow>> {
+        match &self.backend {
+            RelationalRowBackend::CanonicalMemory => {
+                let Some((key, row)) = self.state.row_entry(table, key) else {
+                    return Ok(None);
+                };
+                self.admit_memory_row()?;
+                self.project_memory_row(table, key, row, fields).map(Some)
+            }
+            RelationalRowBackend::Snapshot(reader) => {
+                let remaining = self.remaining_limits()?;
+                let mut hydration = self.hydration.borrow_mut();
+                let (mut row, report) = reader
+                    .point_projected(table, key, fields, remaining, &mut hydration, self.task)
+                    .map_err(map_snapshot_error)?;
+                if let Some(row) = &mut row {
+                    self.state
+                        .hydrate_projected_row_with_context(
+                            table,
+                            row,
+                            &mut hydration,
+                            Some(self.task),
+                        )
+                        .map_err(map_state_error)?;
+                }
+                drop(hydration);
+                self.record_point(&report)?;
+                Ok(row.map(|row| RelationalReadRow { row: Arc::new(row) }))
+            }
+        }
+    }
+
+    pub(crate) fn visit_all(
+        &self,
+        table: &str,
+        mut visit: impl FnMut(RelationalReadRow) -> Result<bool>,
+    ) -> Result<bool> {
+        let fields = self.fields(&self.scan_fields, table)?;
+        match &self.backend {
+            RelationalRowBackend::CanonicalMemory => {
+                for (key, row) in self.state.rows(table) {
+                    self.task.checkpoint().map_err(|reason| {
+                        SkeinError::Execution(format!("runtime task stopped: {reason}"))
+                    })?;
+                    self.admit_memory_row()?;
+                    if !visit(self.project_memory_row(table, key, row, fields)?)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            RelationalRowBackend::Snapshot(reader) => {
+                let remaining = self.remaining_limits()?;
+                let mut hydration = self.hydration.borrow_mut();
+                let state = self.state;
+                let task = self.task;
+                let mut callback_error = None;
+                let report = reader
+                    .visit_projected_range_resolving(
+                        skein_storage::RelationalRowPageProjectedRange {
+                            table,
+                            lower: Bound::Unbounded,
+                            upper: Bound::Unbounded,
+                            requested_fields: fields,
+                        },
+                        remaining,
+                        &mut hydration,
+                        task,
+                        |row, budget, task| {
+                            state
+                                .hydrate_projected_row_with_context(table, row, budget, Some(task))
+                                .map_err(map_state_to_demand_error)
+                        },
+                        |row| match visit(RelationalReadRow { row: Arc::new(row) }) {
+                            Ok(keep_going) => keep_going,
+                            Err(error) => {
+                                callback_error = Some(error);
+                                false
+                            }
+                        },
+                    )
+                    .map_err(map_snapshot_error)?;
+                drop(hydration);
+                self.record_range(&report)?;
+                match callback_error {
+                    Some(error) => Err(error),
+                    None => Ok(!report.demand.stopped_early),
+                }
+            }
+        }
+    }
+
+    fn fields<'fields>(
+        &self,
+        plan: &'fields BTreeMap<String, Arc<[usize]>>,
+        table: &str,
+    ) -> Result<&'fields [usize]> {
+        plan.get(table).map(AsRef::as_ref).ok_or_else(|| {
+            SkeinError::StorageIntegrity(format!(
+                "relational query has no field plan for table {table}"
+            ))
+        })
+    }
+
+    fn project_memory_row(
+        &self,
+        table: &str,
+        key: &RelationalKey,
+        row: &RelationalRow,
+        fields: &[usize],
+    ) -> Result<RelationalReadRow> {
+        let mut projected = RelationalProjectedRow {
+            primary_key: key.clone(),
+            fields: fields
+                .iter()
+                .map(|ordinal| {
+                    row.values()
+                        .get(*ordinal)
+                        .cloned()
+                        .map(|value| RelationalProjectedField {
+                            ordinal: *ordinal,
+                            value,
+                        })
+                        .ok_or_else(|| {
+                            SkeinError::StorageIntegrity(format!(
+                                "relational field {ordinal} is outside row shape for table {table}"
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>>>()?,
+        };
+        self.state
+            .hydrate_projected_row_with_context(
+                table,
+                &mut projected,
+                &mut self.hydration.borrow_mut(),
+                Some(self.task),
+            )
+            .map_err(map_state_error)?;
+        Ok(RelationalReadRow {
+            row: Arc::new(projected),
+        })
+    }
+
+    fn admit_memory_row(&self) -> Result<()> {
+        let mut evidence = self.evidence.borrow_mut();
+        let next = evidence
+            .rows_visited
+            .checked_add(1)
+            .ok_or_else(|| SkeinError::Execution("relational row count overflow".to_string()))?;
+        if next > self.limits.demand.max_rows.get() {
+            return Err(SkeinError::Execution(format!(
+                "relational row scan exceeds row limit {}",
+                self.limits.demand.max_rows
+            )));
+        }
+        evidence.rows_visited = next;
+        Ok(())
+    }
+
+    fn remaining_limits(&self) -> Result<RelationalRowPageSnapshotReadLimits> {
+        let evidence = self.evidence.borrow();
+        let remaining = |limit: NonZeroUsize, used: usize, name: &str| {
+            limit
+                .get()
+                .checked_sub(used)
+                .and_then(NonZeroUsize::new)
+                .ok_or_else(|| {
+                    SkeinError::Execution(format!(
+                        "relational row {name} budget is exhausted at {}",
+                        limit.get()
+                    ))
+                })
+        };
+        Ok(RelationalRowPageSnapshotReadLimits {
+            demand: skein_storage::RelationalRowPageDemandReadLimits {
+                max_pages: remaining(self.limits.demand.max_pages, evidence.logical_pages, "page")?,
+                max_rows: remaining(self.limits.demand.max_rows, evidence.rows_visited, "row")?,
+                max_bytes: remaining(self.limits.demand.max_bytes, evidence.logical_bytes, "byte")?,
+                max_pins: self.limits.demand.max_pins,
+                max_tree_height: self.limits.demand.max_tree_height,
+            },
+            max_overlay_entries: remaining(
+                self.limits.max_overlay_entries,
+                evidence.overlay_entries,
+                "overlay-entry",
+            )?,
+            max_overlay_bytes: remaining(
+                self.limits.max_overlay_bytes,
+                evidence.overlay_resident_bytes,
+                "overlay-byte",
+            )?,
+        })
+    }
+
+    fn record_point(&self, report: &RelationalRowPageSnapshotPointReport) -> Result<()> {
+        let overlay_entries = usize::from(matches!(
+            report.source,
+            RelationalRowPageSnapshotRowSource::Recovery
+                | RelationalRowPageSnapshotRowSource::Live
+                | RelationalRowPageSnapshotRowSource::Deleted
+        ));
+        self.record(
+            report.identity,
+            &report.demand,
+            overlay_entries,
+            report.overlay_resident_bytes,
+        )
+    }
+
+    fn record_range(&self, report: &RelationalRowPageSnapshotRangeReport) -> Result<()> {
+        self.record(
+            report.identity,
+            &report.demand,
+            report.overlay_entries,
+            report.overlay_resident_bytes,
+        )
+    }
+
+    fn record(
+        &self,
+        identity: RelationalRowPageReadViewIdentity,
+        demand: &skein_storage::RelationalRowPageDemandReadReport,
+        overlay_entries: usize,
+        overlay_resident_bytes: usize,
+    ) -> Result<()> {
+        let mut evidence = self.evidence.borrow_mut();
+        let observed = (
+            Some(identity.base_generation),
+            identity.delta_generation,
+            Some(identity.base_commit_epoch),
+            Some(identity.visible_commit_epoch),
+            Some(identity.root_set_digest.to_string()),
+        );
+        let expected = (
+            evidence.base_generation,
+            evidence.delta_generation,
+            evidence.base_commit_epoch,
+            evidence.visible_commit_epoch,
+            evidence.root_set_digest.clone(),
+        );
+        if evidence.base_generation.is_some() && expected != observed {
+            return Err(SkeinError::StorageIntegrity(
+                "relational row view identity changed within one SQL statement".to_string(),
+            ));
+        }
+        evidence.base_generation = observed.0;
+        evidence.delta_generation = observed.1;
+        evidence.base_commit_epoch = observed.2;
+        evidence.visible_commit_epoch = observed.3;
+        evidence.root_set_digest = observed.4;
+        add_counter(
+            &mut evidence.descriptor_reads,
+            demand.descriptor_reads,
+            "descriptor",
+        )?;
+        add_counter(
+            &mut evidence.logical_pages,
+            demand.pages_read,
+            "logical page",
+        )?;
+        add_counter(
+            &mut evidence.logical_bytes,
+            demand.bytes_read,
+            "logical byte",
+        )?;
+        add_counter(
+            &mut evidence.file_pages,
+            demand.file_pages_read,
+            "file page",
+        )?;
+        add_counter(
+            &mut evidence.file_bytes,
+            demand.file_bytes_read,
+            "file byte",
+        )?;
+        add_counter(&mut evidence.cache_hits, demand.cache_hits, "cache hit")?;
+        add_counter(
+            &mut evidence.cache_misses,
+            demand.cache_misses,
+            "cache miss",
+        )?;
+        add_counter(
+            &mut evidence.cache_admission_rejections,
+            demand.cache_admission_rejections,
+            "cache rejection",
+        )?;
+        add_counter(&mut evidence.rows_visited, demand.rows_emitted, "row")?;
+        add_counter(
+            &mut evidence.overlay_entries,
+            overlay_entries,
+            "overlay entry",
+        )?;
+        add_counter(
+            &mut evidence.overlay_resident_bytes,
+            overlay_resident_bytes,
+            "overlay byte",
+        )?;
+        Ok(())
+    }
+}
+
+pub(super) fn expression_contains_aggregate(expression: &SqlExpression) -> bool {
+    match expression {
+        SqlExpression::Function {
+            name, arguments, ..
+        } => {
+            matches!(name.as_str(), "count" | "sum" | "max")
+                || arguments.iter().any(|argument| match argument {
+                    SqlFunctionArgument::Expression(expression) => {
+                        expression_contains_aggregate(expression)
+                    }
+                    SqlFunctionArgument::Wildcard => false,
+                })
+        }
+        SqlExpression::Column(_) | SqlExpression::Value(_) => false,
+    }
+}
+
+pub(crate) fn plan_requested_fields(
+    select: &SelectStatement,
+    state: &RelationalState,
+) -> Result<BTreeMap<String, Arc<[usize]>>> {
+    plan_fields(select, state, true)
+}
+
+pub(crate) fn plan_scan_fields(
+    select: &SelectStatement,
+    state: &RelationalState,
+) -> Result<BTreeMap<String, Arc<[usize]>>> {
+    plan_fields(select, state, false)
+}
+
+fn plan_fields(
+    select: &SelectStatement,
+    state: &RelationalState,
+    include_projection: bool,
+) -> Result<BTreeMap<String, Arc<[usize]>>> {
+    let mut bindings = Vec::with_capacity(select.joins.len() + 1);
+    let base_schema = state.table_schema(&select.from.name).ok_or_else(|| {
+        SkeinError::Semantic(format!("unknown relational table {}", select.from.name))
+    })?;
+    bindings.push(FieldBinding {
+        table: &select.from.name,
+        qualifier: select.from_alias.as_deref().unwrap_or(&select.from.name),
+        schema: base_schema,
+    });
+    for join in &select.joins {
+        let schema = state.table_schema(&join.table.name).ok_or_else(|| {
+            SkeinError::Semantic(format!("unknown relational table {}", join.table.name))
+        })?;
+        bindings.push(FieldBinding {
+            table: &join.table.name,
+            qualifier: join.alias.as_deref().unwrap_or(&join.table.name),
+            schema,
+        });
+    }
+    let mut planned = bindings
+        .iter()
+        .map(|binding| (binding.table.to_string(), BTreeSet::new()))
+        .collect::<BTreeMap<_, _>>();
+    let mut columns = Vec::new();
+    if include_projection {
+        for projection in &select.projection {
+            match projection {
+                SelectProjection::Wildcard => {
+                    for binding in &bindings {
+                        planned
+                            .get_mut(binding.table)
+                            .expect("field plan contains every binding")
+                            .extend(0..binding.schema.columns.len());
+                    }
+                }
+                SelectProjection::Column { name, .. } => columns.push(name),
+                SelectProjection::Expression { expression, .. } => {
+                    collect_expression_columns(expression, &mut columns)
+                }
+            }
+        }
+    } else {
+        // A grouped aggregate can defer output-only columns until after the
+        // blocking operator, but every aggregate input is still part of the
+        // scan contract. Omitting it would make the row-page reader produce a
+        // projection that the aggregate executor cannot evaluate.
+        for projection in &select.projection {
+            if let SelectProjection::Expression { expression, .. } = projection
+                && expression_contains_aggregate(expression)
+            {
+                collect_expression_columns(expression, &mut columns);
+            }
+        }
+    }
+    if let Some(selection) = &select.selection {
+        collect_predicate_columns(selection, &mut columns);
+    }
+    for join in &select.joins {
+        collect_predicate_columns(&join.on, &mut columns);
+    }
+    columns.extend(select.group_by.iter());
+    columns.extend(select.order_by.iter().map(|item| &item.column));
+    for column in columns {
+        let mut matches = bindings.iter().filter_map(|binding| {
+            let qualifier_matches = column.qualifier.as_deref().is_none_or(|qualifier| {
+                qualifier == binding.qualifier || qualifier == binding.table
+            });
+            qualifier_matches
+                .then(|| binding.schema.column_position(&column.name))
+                .flatten()
+                .map(|ordinal| (binding.table, ordinal))
+        });
+        let first = matches.next().ok_or_else(|| {
+            SkeinError::Semantic(format!("unknown relational column {}", column.name))
+        })?;
+        if matches.next().is_some() {
+            return Err(SkeinError::Semantic(format!(
+                "ambiguous relational column {}",
+                column.name
+            )));
+        }
+        planned
+            .get_mut(first.0)
+            .expect("resolved table has a field plan")
+            .insert(first.1);
+    }
+    Ok(planned
+        .into_iter()
+        .map(|(table, fields)| (table, Arc::from(fields.into_iter().collect::<Vec<_>>())))
+        .collect())
+}
+
+struct FieldBinding<'a> {
+    table: &'a str,
+    qualifier: &'a str,
+    schema: &'a RelationalTableSchema,
+}
+
+fn collect_expression_columns<'a>(
+    expression: &'a SqlExpression,
+    output: &mut Vec<&'a SqlColumnRef>,
+) {
+    match expression {
+        SqlExpression::Column(column) => output.push(column),
+        SqlExpression::Function { arguments, .. } => {
+            for argument in arguments {
+                if let SqlFunctionArgument::Expression(expression) = argument {
+                    collect_expression_columns(expression, output);
+                }
+            }
+        }
+        SqlExpression::Value(_) => {}
+    }
+}
+
+fn collect_predicate_columns<'a>(predicate: &'a SqlPredicate, output: &mut Vec<&'a SqlColumnRef>) {
+    match predicate {
+        SqlPredicate::And(left, right) | SqlPredicate::Or(left, right) => {
+            collect_predicate_columns(left, output);
+            collect_predicate_columns(right, output);
+        }
+        SqlPredicate::Not(predicate) => collect_predicate_columns(predicate, output),
+        SqlPredicate::Compare { left, .. } | SqlPredicate::InList { left, .. } => output.push(left),
+        SqlPredicate::CompareColumns { left, right, .. } => {
+            output.push(left);
+            output.push(right);
+        }
+        SqlPredicate::IsNull { column, .. } => output.push(column),
+    }
+}
+
+fn map_state_to_demand_error(error: RelationalError) -> RelationalRowPageDemandReadError {
+    match error {
+        RelationalError::Admission(message) => RelationalRowPageDemandReadError::Admission(message),
+        RelationalError::Durability(message) => {
+            RelationalRowPageDemandReadError::Durability(message)
+        }
+        RelationalError::Schema(message)
+        | RelationalError::Constraint(message)
+        | RelationalError::Corruption(message) => {
+            RelationalRowPageDemandReadError::Corrupt(message)
+        }
+    }
+}
+
+fn map_state_error(error: RelationalError) -> SkeinError {
+    match error {
+        RelationalError::Admission(message) => SkeinError::Execution(message),
+        RelationalError::Durability(message)
+        | RelationalError::Schema(message)
+        | RelationalError::Constraint(message)
+        | RelationalError::Corruption(message) => SkeinError::StorageIntegrity(message),
+    }
+}
+
+fn map_snapshot_error(error: RelationalRowPageSnapshotReadError) -> SkeinError {
+    match error {
+        RelationalRowPageSnapshotReadError::Admission(message) => SkeinError::Execution(message),
+        RelationalRowPageSnapshotReadError::Stopped(reason) => {
+            SkeinError::Execution(format!("runtime task stopped: {reason}"))
+        }
+        RelationalRowPageSnapshotReadError::Corrupt(message)
+        | RelationalRowPageSnapshotReadError::Durability(message)
+        | RelationalRowPageSnapshotReadError::MissingTable(message) => {
+            SkeinError::StorageIntegrity(message)
+        }
+    }
+}
+
+fn add_counter(counter: &mut usize, value: usize, name: &str) -> Result<()> {
+    *counter = counter.checked_add(value).ok_or_else(|| {
+        SkeinError::StorageIntegrity(format!("relational row {name} counter overflow"))
+    })?;
+    Ok(())
+}

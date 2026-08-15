@@ -97,15 +97,19 @@ a stale index or a database-sized resident set to become a correctness
 dependency. The storage-owned relational snapshot reader now binds one exact
 checkpoint, recovery delta, and immutable live view; it performs bounded
 live-over-recovery-over-checkpoint point and ordered range reads without a
-database-sized base-row collection.
+database-sized base-row collection. Ordinary live admission failures reject
+before WAL append, while schema-changing WAL is followed by a mandatory
+manifest-last canonical row checkpoint that writable recovery retries after a
+crash; read-only recovery remains fail closed.
 
 - [ ] Add Windows rename, reopen, backup, and reclaim fault-injection coverage
   for the exact canonical row/overflow-root path.
 
-- [ ] Activate canonical row pages for the first Mem relational tables.
-  - Select the exact checkpoint/recovery/live snapshot reader through SQL only
-    after differential qualification; a base-only reader must never serve a
-    later visible epoch.
+- [ ] Qualify canonical row pages for the first Mem relational tables.
+  - The SQL runtime now selects one exact checkpoint/recovery/live snapshot
+    reader, rejects an unavailable reader, and uses canonical memory only before
+    the first checkpoint or inside a transaction-private workspace. Keep this
+    engine contract while qualifying the product cutover.
   - Qualify `content_documents` and `thread_messages` first, then
     `content_chunks` and `content_anchors`, using the frozen PostgreSQL statement
     corpus and one pinned graph-plus-relational epoch.

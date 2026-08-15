@@ -83,7 +83,9 @@ VARIABLES
     resolvedOverflow,
     poisoned,
     stoppedEarly,
-    currentViewEpoch
+    currentViewEpoch,
+    servingState,
+    schemaWalDurable
 
 vars == <<
     readState,
@@ -100,8 +102,12 @@ vars == <<
     resolvedOverflow,
     poisoned,
     stoppedEarly,
-    currentViewEpoch
+    currentViewEpoch,
+    servingState,
+    schemaWalDurable
 >>
+
+ServingReady == servingState \in {"ready", "readyAfterSchema"}
 
 Init ==
     /\ readState = "idle"
@@ -119,9 +125,12 @@ Init ==
     /\ poisoned = FALSE
     /\ stoppedEarly = FALSE
     /\ currentViewEpoch = VisibleEpoch
+    /\ servingState = "ready"
+    /\ schemaWalDurable = FALSE
 
 BeginRead(lower, upper, entries, bytes) ==
     /\ readState = "idle"
+    /\ ServingReady
     /\ lower \in 0..2
     /\ upper \in 2..4
     /\ lower < upper
@@ -140,7 +149,7 @@ BeginRead(lower, upper, entries, bytes) ==
     /\ emittedRows' = <<>>
     /\ resolvedOverflow' = FALSE
     /\ stoppedEarly' = FALSE
-    /\ UNCHANGED <<poisoned, currentViewEpoch>>
+    /\ UNCHANGED <<poisoned, currentViewEpoch, servingState, schemaWalDurable>>
 
 CandidateValue ==
     IF readState = "recovery" THEN Recovery[cursor] ELSE Live[cursor]
@@ -163,7 +172,7 @@ SkipCandidate ==
     /\ UNCHANGED <<
         readState, outcome, lowerBound, upperBound, entryBudget, byteBudget,
         overlay, overlayEntries, overlayBytes, emittedRows, resolvedOverflow, poisoned,
-        stoppedEarly, currentViewEpoch
+        stoppedEarly, currentViewEpoch, servingState, schemaWalDurable
         >>
 
 AdmitCandidate ==
@@ -179,7 +188,8 @@ AdmitCandidate ==
     /\ cursor' = cursor + 1
     /\ UNCHANGED <<
         readState, outcome, lowerBound, upperBound, entryBudget, byteBudget,
-        emittedRows, resolvedOverflow, poisoned, stoppedEarly, currentViewEpoch
+        emittedRows, resolvedOverflow, poisoned, stoppedEarly, currentViewEpoch, servingState,
+        schemaWalDurable
         >>
 
 RejectCandidate ==
@@ -193,7 +203,7 @@ RejectCandidate ==
     /\ UNCHANGED <<
         lowerBound, upperBound, entryBudget, byteBudget, overlay,
         overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
-        stoppedEarly, currentViewEpoch
+        stoppedEarly, currentViewEpoch, servingState, schemaWalDurable
         >>
 
 BeginLiveCollection ==
@@ -204,7 +214,7 @@ BeginLiveCollection ==
     /\ UNCHANGED <<
         outcome, lowerBound, upperBound, entryBudget, byteBudget, overlay,
         overlayEntries, overlayBytes, emittedRows, resolvedOverflow, poisoned, stoppedEarly,
-        currentViewEpoch
+        currentViewEpoch, servingState, schemaWalDurable
         >>
 
 BeginStreaming ==
@@ -215,7 +225,7 @@ BeginStreaming ==
     /\ UNCHANGED <<
         outcome, lowerBound, upperBound, entryBudget, byteBudget, overlay,
         overlayEntries, overlayBytes, emittedRows, resolvedOverflow, poisoned, stoppedEarly,
-        currentViewEpoch
+        currentViewEpoch, servingState, schemaWalDurable
         >>
 
 ResolveOverflowFromPinnedState ==
@@ -226,7 +236,7 @@ ResolveOverflowFromPinnedState ==
     /\ UNCHANGED <<
         outcome, lowerBound, upperBound, entryBudget, byteBudget, overlay,
         overlayEntries, overlayBytes, cursor, emittedRows, poisoned, stoppedEarly,
-        currentViewEpoch
+        currentViewEpoch, servingState, schemaWalDurable
         >>
 
 RejectOverflowAdmission ==
@@ -237,7 +247,7 @@ RejectOverflowAdmission ==
     /\ UNCHANGED <<
         lowerBound, upperBound, entryBudget, byteBudget, overlay,
         overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
-        stoppedEarly, currentViewEpoch
+        stoppedEarly, currentViewEpoch, servingState, schemaWalDurable
         >>
 
 ReadNextKey ==
@@ -252,7 +262,7 @@ ReadNextKey ==
     /\ UNCHANGED <<
         readState, outcome, lowerBound, upperBound, entryBudget, byteBudget,
         overlay, overlayEntries, overlayBytes, resolvedOverflow, poisoned, stoppedEarly,
-        currentViewEpoch
+        currentViewEpoch, servingState, schemaWalDurable
         >>
 
 FinishRead ==
@@ -263,7 +273,7 @@ FinishRead ==
     /\ UNCHANGED <<
         lowerBound, upperBound, entryBudget, byteBudget, overlay,
         overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
-        stoppedEarly, currentViewEpoch
+        stoppedEarly, currentViewEpoch, servingState, schemaWalDurable
         >>
 
 StopEarly ==
@@ -275,7 +285,7 @@ StopEarly ==
     /\ UNCHANGED <<
         lowerBound, upperBound, entryBudget, byteBudget, overlay,
         overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
-        currentViewEpoch
+        currentViewEpoch, servingState, schemaWalDurable
         >>
 
 CancelRead ==
@@ -285,7 +295,7 @@ CancelRead ==
     /\ UNCHANGED <<
         lowerBound, upperBound, entryBudget, byteBudget, overlay,
         overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
-        stoppedEarly, currentViewEpoch
+        stoppedEarly, currentViewEpoch, servingState, schemaWalDurable
         >>
 
 CallbackPanics ==
@@ -296,7 +306,7 @@ CallbackPanics ==
     /\ UNCHANGED <<
         lowerBound, upperBound, entryBudget, byteBudget, overlay,
         overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
-        stoppedEarly, currentViewEpoch
+        stoppedEarly, currentViewEpoch, servingState, schemaWalDurable
         >>
 
 DetectCorruption ==
@@ -307,16 +317,129 @@ DetectCorruption ==
     /\ UNCHANGED <<
         lowerBound, upperBound, entryBudget, byteBudget, overlay,
         overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, stoppedEarly,
-        currentViewEpoch
+        currentViewEpoch, servingState, schemaWalDurable
         >>
 
 AdvanceCurrentView ==
+    /\ ServingReady
     /\ currentViewEpoch = VisibleEpoch
     /\ currentViewEpoch' = VisibleEpoch + 1
     /\ UNCHANGED <<
         readState, outcome, lowerBound, upperBound, entryBudget, byteBudget,
         overlay, overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
-        stoppedEarly
+        stoppedEarly, servingState, schemaWalDurable
+        >>
+
+StartBeforeFirstCheckpoint ==
+    /\ readState = "idle"
+    /\ servingState = "ready"
+    /\ ~schemaWalDurable
+    /\ servingState' = "missing"
+    /\ UNCHANGED <<
+        readState, outcome, lowerBound, upperBound, entryBudget, byteBudget,
+        overlay, overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
+        stoppedEarly, currentViewEpoch, schemaWalDurable
+        >>
+
+ReadInMemoryCanonical ==
+    /\ readState = "idle"
+    /\ servingState = "missing"
+    /\ readState' = "succeeded"
+    /\ outcome' = "success"
+    /\ emittedRows' = ExpectedRows(0, 4)
+    /\ UNCHANGED <<
+        lowerBound, upperBound, entryBudget, byteBudget, overlay,
+        overlayEntries, overlayBytes, cursor, resolvedOverflow, poisoned,
+        stoppedEarly, currentViewEpoch, servingState, schemaWalDurable
+        >>
+
+LoseServingResources ==
+    /\ readState = "idle"
+    /\ ServingReady
+    /\ servingState' = "unavailable"
+    /\ UNCHANGED <<
+        readState, outcome, lowerBound, upperBound, entryBudget, byteBudget,
+        overlay, overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
+        stoppedEarly, currentViewEpoch, schemaWalDurable
+        >>
+
+RejectUnavailableReader ==
+    /\ readState = "idle"
+    /\ servingState \in {"unavailable", "schemaRequired"}
+    /\ readState' = "failed"
+    /\ outcome' = "corruption"
+    /\ poisoned' = TRUE
+    /\ UNCHANGED <<
+        lowerBound, upperBound, entryBudget, byteBudget, overlay,
+        overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow,
+        stoppedEarly, currentViewEpoch, servingState, schemaWalDurable
+        >>
+
+RequireSchemaCheckpoint ==
+    /\ readState = "idle"
+    /\ servingState = "ready"
+    /\ currentViewEpoch = VisibleEpoch
+    /\ servingState' = "schemaRequired"
+    /\ schemaWalDurable' = FALSE
+    /\ UNCHANGED <<
+        readState, outcome, lowerBound, upperBound, entryBudget, byteBudget,
+        overlay, overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
+        stoppedEarly, currentViewEpoch
+        >>
+
+DurablySyncSchemaWal ==
+    /\ readState = "idle"
+    /\ servingState = "schemaRequired"
+    /\ ~schemaWalDurable
+    /\ schemaWalDurable' = TRUE
+    /\ UNCHANGED <<
+        readState, outcome, lowerBound, upperBound, entryBudget, byteBudget,
+        overlay, overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
+        stoppedEarly, currentViewEpoch, servingState
+        >>
+
+CrashBeforeSchemaWalSync ==
+    /\ readState = "idle"
+    /\ servingState = "schemaRequired"
+    /\ ~schemaWalDurable
+    /\ servingState' = "ready"
+    /\ UNCHANGED <<
+        readState, outcome, lowerBound, upperBound, entryBudget, byteBudget,
+        overlay, overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
+        stoppedEarly, currentViewEpoch, schemaWalDurable
+        >>
+
+BeginSchemaCheckpoint ==
+    /\ readState = "idle"
+    /\ servingState = "schemaRequired"
+    /\ schemaWalDurable
+    /\ servingState' = "checkpointing"
+    /\ UNCHANGED <<
+        readState, outcome, lowerBound, upperBound, entryBudget, byteBudget,
+        overlay, overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
+        stoppedEarly, currentViewEpoch, schemaWalDurable
+        >>
+
+CrashBeforeSchemaManifest ==
+    /\ readState = "idle"
+    /\ servingState = "checkpointing"
+    /\ servingState' = "schemaRequired"
+    /\ UNCHANGED <<
+        readState, outcome, lowerBound, upperBound, entryBudget, byteBudget,
+        overlay, overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
+        stoppedEarly, currentViewEpoch, schemaWalDurable
+        >>
+
+PublishSchemaCheckpoint ==
+    /\ readState = "idle"
+    /\ servingState = "checkpointing"
+    /\ currentViewEpoch = VisibleEpoch
+    /\ servingState' = "readyAfterSchema"
+    /\ currentViewEpoch' = VisibleEpoch + 1
+    /\ UNCHANGED <<
+        readState, outcome, lowerBound, upperBound, entryBudget, byteBudget,
+        overlay, overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
+        stoppedEarly, schemaWalDurable
         >>
 
 Next ==
@@ -337,6 +460,16 @@ Next ==
     \/ CallbackPanics
     \/ DetectCorruption
     \/ AdvanceCurrentView
+    \/ StartBeforeFirstCheckpoint
+    \/ ReadInMemoryCanonical
+    \/ LoseServingResources
+    \/ RejectUnavailableReader
+    \/ RequireSchemaCheckpoint
+    \/ DurablySyncSchemaWal
+    \/ CrashBeforeSchemaWalSync
+    \/ BeginSchemaCheckpoint
+    \/ CrashBeforeSchemaManifest
+    \/ PublishSchemaCheckpoint
 
 Spec == Init /\ [][Next]_vars
 
@@ -358,6 +491,10 @@ TypeOK ==
     /\ poisoned \in BOOLEAN
     /\ stoppedEarly \in BOOLEAN
     /\ currentViewEpoch \in VisibleEpoch..(VisibleEpoch + 1)
+    /\ servingState \in {
+        "ready", "readyAfterSchema", "missing", "unavailable", "schemaRequired", "checkpointing"
+        }
+    /\ schemaWalDurable \in BOOLEAN
 
 ActiveOverlayStaysWithinAdmission ==
     readState \in {"recovery", "live", "resolving", "reading", "succeeded"} =>
@@ -365,12 +502,27 @@ ActiveOverlayStaysWithinAdmission ==
         /\ overlayBytes <= byteBudget
 
 CollectedOverlayUsesNewestVersion ==
-    readState \in {"resolving", "reading", "succeeded"} =>
+    (ServingReady /\ readState \in {"resolving", "reading", "succeeded"}) =>
         overlay = ExpectedOverlay(lowerBound, upperBound)
 
 OverflowIsResolvedBeforeStreaming ==
     (readState \in {"reading", "succeeded"} /\ OverlayNeedsResolution(overlay)) =>
         resolvedOverflow
+
+ServingAuthorityIsFailClosed ==
+    /\ readState \in {"recovery", "live", "resolving", "reading"} =>
+        ServingReady
+    /\ servingState \in {"unavailable", "schemaRequired", "checkpointing"} =>
+        readState \notin {"recovery", "live", "resolving", "reading", "succeeded"}
+
+SchemaCheckpointPublishesBeforeServing ==
+    /\ servingState \in {"schemaRequired", "checkpointing"} =>
+        currentViewEpoch = VisibleEpoch
+    /\ servingState = "readyAfterSchema" =>
+        currentViewEpoch = VisibleEpoch + 1
+
+SchemaCheckpointWaitsForDurableWal ==
+    servingState \in {"checkpointing", "readyAfterSchema"} => schemaWalDurable
 
 EmittedRowsStayOrderedAndVisible ==
     IsPrefix(emittedRows, ExpectedRows(lowerBound, upperBound))

@@ -463,6 +463,9 @@ pub enum RelationalRowChangeCapture {
         changes: Vec<RelationalRowChange>,
         encoded_bytes: usize,
     },
+    RequiresCheckpoint {
+        tables: Vec<String>,
+    },
     Invalidated {
         reason: String,
     },
@@ -3103,15 +3106,8 @@ fn capture_relational_row_changes(
     limits: RelationalRowChangeCaptureLimits,
 ) -> RelationalRowChangeCapture {
     if !rewritten_tables.is_empty() {
-        return RelationalRowChangeCapture::Invalidated {
-            reason: format!(
-                "schema-changing WAL requires new row roots for tables {}",
-                rewritten_tables
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ),
+        return RelationalRowChangeCapture::RequiresCheckpoint {
+            tables: rewritten_tables.iter().cloned().collect(),
         };
     }
 

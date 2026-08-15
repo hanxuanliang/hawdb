@@ -24,6 +24,7 @@ use std::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelationalRowPageReadViewIdentity {
     pub base_generation: u64,
+    pub delta_generation: Option<u64>,
     pub base_commit_epoch: u64,
     pub visible_commit_epoch: u64,
     pub root_set_digest: Sha256Digest,
@@ -33,6 +34,7 @@ pub struct RelationalRowPageReadViewIdentity {
 pub enum RelationalRowPageLiveError {
     Admission(String),
     Corrupt(String),
+    RequiresCheckpoint { tables: Vec<String> },
     Invalidated(String),
 }
 
@@ -48,6 +50,11 @@ impl fmt::Display for RelationalRowPageLiveError {
             Self::Corrupt(message) => {
                 write!(formatter, "corrupt relational row live view: {message}")
             }
+            Self::RequiresCheckpoint { tables } => write!(
+                formatter,
+                "relational row live view requires a schema checkpoint for tables {}",
+                tables.join(",")
+            ),
             Self::Invalidated(message) => {
                 write!(formatter, "relational row live view invalidated: {message}")
             }
@@ -199,6 +206,9 @@ impl RelationalRowPageLiveOverlay {
                 changes,
                 encoded_bytes,
             } => (changes, encoded_bytes),
+            RelationalRowChangeCapture::RequiresCheckpoint { tables } => {
+                return Err(RelationalRowPageLiveError::RequiresCheckpoint { tables });
+            }
             RelationalRowChangeCapture::Invalidated { reason } => {
                 return Err(RelationalRowPageLiveError::Invalidated(reason));
             }
@@ -309,6 +319,7 @@ impl RelationalRowPageReadView {
         Self {
             identity: RelationalRowPageReadViewIdentity {
                 base_generation: manifest.generation,
+                delta_generation: None,
                 base_commit_epoch: manifest.source_commit_epoch,
                 visible_commit_epoch: manifest.source_commit_epoch,
                 root_set_digest: manifest.root_set_digest,
@@ -336,6 +347,7 @@ impl RelationalRowPageReadView {
         Ok(Self {
             identity: RelationalRowPageReadViewIdentity {
                 base_generation: base_manifest.generation,
+                delta_generation: Some(delta_manifest.delta_generation),
                 base_commit_epoch: base_manifest.source_commit_epoch,
                 visible_commit_epoch: delta_manifest.visible_commit_epoch,
                 root_set_digest: base_manifest.root_set_digest,
@@ -371,6 +383,17 @@ impl RelationalRowPageReadView {
         {
             return Err(RelationalRowDeltaError::Corrupt(
                 "relational row read-view identity differs from its pinned base".to_string(),
+            ));
+        }
+        if self.identity.delta_generation
+            != self
+                .recovery_delta
+                .as_ref()
+                .map(|delta| delta.manifest().delta_generation)
+        {
+            return Err(RelationalRowDeltaError::Corrupt(
+                "relational row read-view delta identity differs from its pinned recovery delta"
+                    .to_string(),
             ));
         }
         let live_floor = self

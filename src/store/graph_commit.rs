@@ -1815,6 +1815,12 @@ impl GraphStore {
             next_commit_epoch,
             &staged_relational_index_publication,
         )?;
+        let row_publication_requirement = self.require_relational_row_live_publication(
+            next_commit_epoch,
+            &staged_relational_row_publication,
+        );
+        self.poison_on_storage_error(&row_publication_requirement);
+        row_publication_requirement?;
         self.validate_constraints_for_ops(&working_catalog, &ops)?;
         if let Some(durable) = &mut self.durable {
             if preserve_single_create_wal

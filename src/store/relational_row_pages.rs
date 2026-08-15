@@ -2,11 +2,12 @@
 
 use super::GraphStore;
 use skein_storage::{
-    RelationalRowChangeCapture, RelationalRowChangeCaptureLimits, RelationalRowDeltaBuilder,
-    RelationalRowDeltaConfig, RelationalRowDeltaError, RelationalRowDeltaReader,
-    RelationalRowDeltaReport, RelationalRowPageMutationPlanner, RelationalRowPagePublicationConfig,
+    RelationalOverflowRootReader, RelationalRowChangeCapture, RelationalRowChangeCaptureLimits,
+    RelationalRowDeltaBuilder, RelationalRowDeltaConfig, RelationalRowDeltaError,
+    RelationalRowDeltaReader, RelationalRowDeltaReport, RelationalRowPageLiveError,
+    RelationalRowPageMutationPlanner, RelationalRowPagePublicationConfig,
     RelationalRowPageReadView, RelationalRowPageReadViewIdentity, RelationalRowPageRootReader,
-    RelationalRowPageTableDelta,
+    RelationalRowPageSnapshotReader, RelationalRowPageTableDelta, SegmentCache, StoreId,
 };
 use std::collections::BTreeMap;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -44,6 +45,7 @@ pub enum RelationalRowPageRecoveryStatus {
         base_commit_epoch: u64,
         last_visible_commit_epoch: u64,
         failed_commit_epoch: u64,
+        checkpoint_required: bool,
         reason: String,
     },
     Stale {
@@ -56,6 +58,7 @@ pub enum RelationalRowPageRecoveryStatus {
         base_generation: Option<u64>,
         base_commit_epoch: Option<u64>,
         recovered_commit_epoch: u64,
+        checkpoint_required: bool,
         reason: String,
     },
 }
@@ -64,10 +67,19 @@ pub enum RelationalRowPageRecoveryStatus {
 pub(super) struct RelationalRowPageState {
     recovery_builder: Option<RelationalRowDeltaBuilder>,
     read_view: Option<Arc<RelationalRowPageReadView>>,
+    serving_resources: Option<Arc<RelationalRowPageServingResources>>,
     live_limits: RelationalRowChangeCaptureLimits,
     delta_config: RelationalRowDeltaConfig,
     recovery_report: Option<RelationalRowDeltaReport>,
     recovery_status: RelationalRowPageRecoveryStatus,
+    schema_checkpoint_required: bool,
+}
+
+#[derive(Debug)]
+struct RelationalRowPageServingResources {
+    base_overflow: Arc<RelationalOverflowRootReader>,
+    cache: Arc<SegmentCache>,
+    store_id: StoreId,
 }
 
 pub(super) struct RelationalRowPageCheckpointPlan {
@@ -90,10 +102,12 @@ impl RelationalRowPageState {
                 .as_ref()
                 .filter(|view| view.identity().visible_commit_epoch == commit_epoch)
                 .cloned(),
+            serving_resources: self.serving_resources.clone(),
             live_limits: self.live_limits,
             delta_config: self.delta_config,
             recovery_report: self.recovery_report.clone(),
             recovery_status: self.recovery_status.clone(),
+            schema_checkpoint_required: self.schema_checkpoint_required,
         }
     }
 
@@ -140,13 +154,22 @@ impl RelationalRowPageState {
         capture: Option<RelationalRowChangeCapture>,
     ) -> Option<Result<Arc<RelationalRowPageReadView>, RelationalRowLiveUnavailable>> {
         let view = self.current_read_view(current_epoch)?;
+        if let Some(RelationalRowChangeCapture::RequiresCheckpoint { tables }) = capture.as_ref() {
+            return Some(Err(RelationalRowLiveUnavailable {
+                identity: view.identity(),
+                failed_commit_epoch: next_epoch,
+                error: RelationalRowPageLiveError::RequiresCheckpoint {
+                    tables: tables.clone(),
+                },
+            }));
+        }
         Some(
             view.advance(next_epoch, capture, self.live_limits)
                 .map(Arc::new)
                 .map_err(|error| RelationalRowLiveUnavailable {
                     identity: view.identity(),
                     failed_commit_epoch: next_epoch,
-                    reason: error.to_string(),
+                    error,
                 }),
         )
     }
@@ -155,7 +178,7 @@ impl RelationalRowPageState {
 pub(super) struct RelationalRowLiveUnavailable {
     identity: RelationalRowPageReadViewIdentity,
     failed_commit_epoch: u64,
-    reason: String,
+    error: RelationalRowPageLiveError,
 }
 
 impl GraphStore {
@@ -323,7 +346,7 @@ impl GraphStore {
         let read_only = durable.read_only;
         let root = durable.root_path().to_path_buf();
         let delta_config = self.relational_row_pages.delta_config;
-        let overflow_root = durable.open_bound_relational_overflow()?;
+        let overflow_root = Arc::new(durable.open_bound_relational_overflow()?);
         let reader = durable.open_bound_relational_row_pages(&overflow_root)?;
         let manifest = reader.manifest();
         if manifest.generation != checkpoint_generation
@@ -362,7 +385,14 @@ impl GraphStore {
         self.relational_row_pages.read_view = Some(Arc::new(RelationalRowPageReadView::from_base(
             Arc::clone(&reader),
         )));
+        self.relational_row_pages.serving_resources =
+            Some(Arc::new(RelationalRowPageServingResources {
+                base_overflow: overflow_root,
+                cache: Arc::clone(&durable.segment_cache),
+                store_id: durable.store_id(),
+            }));
         self.relational_row_pages.recovery_report = None;
+        self.relational_row_pages.schema_checkpoint_required = false;
         self.relational_row_pages.recovery_status =
             RelationalRowPageRecoveryStatus::CheckpointReady {
                 generation,
@@ -394,6 +424,14 @@ impl GraphStore {
             .recovery_builder
             .as_ref()
             .map(RelationalRowDeltaBuilder::capture_limits)
+            .or_else(|| {
+                (self
+                    .durable
+                    .as_ref()
+                    .is_some_and(|durable| durable.read_only)
+                    && self.relational_row_pages.read_view.is_some())
+                .then(|| self.relational_row_pages.delta_config.capture_limits())
+            })
     }
 
     pub(super) fn record_relational_row_recovery_capture(
@@ -404,6 +442,10 @@ impl GraphStore {
         let Some(capture) = capture else {
             return;
         };
+        if let RelationalRowChangeCapture::RequiresCheckpoint { tables } = &capture {
+            self.mark_relational_row_page_schema_checkpoint_required(epoch, tables.clone());
+            return;
+        }
         let Some(mut builder) = self.relational_row_pages.recovery_builder.take() else {
             return;
         };
@@ -459,6 +501,52 @@ impl GraphStore {
             .stage_live_publication(self.commit_epoch, next_epoch, capture)
     }
 
+    pub(super) fn require_relational_row_live_publication(
+        &self,
+        next_epoch: u64,
+        publication: &Option<Result<Arc<RelationalRowPageReadView>, RelationalRowLiveUnavailable>>,
+    ) -> crate::error::Result<()> {
+        match publication {
+            Some(Ok(view)) if view.identity().visible_commit_epoch == next_epoch => Ok(()),
+            Some(Ok(view)) => Err(crate::error::SkeinError::StorageIntegrity(format!(
+                "canonical relational row view staged visible epoch {} for commit {next_epoch}",
+                view.identity().visible_commit_epoch
+            ))),
+            Some(Err(unavailable))
+                if matches!(
+                    &unavailable.error,
+                    RelationalRowPageLiveError::RequiresCheckpoint { .. }
+                ) =>
+            {
+                Ok(())
+            }
+            Some(Err(unavailable)) => match &unavailable.error {
+                RelationalRowPageLiveError::Corrupt(_) => {
+                    Err(crate::error::SkeinError::StorageIntegrity(format!(
+                        "canonical relational row view could not stage commit {next_epoch}: {}",
+                        unavailable.error
+                    )))
+                }
+                RelationalRowPageLiveError::Admission(_)
+                | RelationalRowPageLiveError::Invalidated(_) => {
+                    Err(crate::error::SkeinError::Storage(format!(
+                        "canonical relational row view rejected commit {next_epoch} before WAL append: {}",
+                        unavailable.error
+                    )))
+                }
+                RelationalRowPageLiveError::RequiresCheckpoint { .. } => unreachable!(),
+            },
+            None if matches!(
+                self.relational_row_pages.recovery_status,
+                RelationalRowPageRecoveryStatus::Missing
+            ) => Ok(()),
+            None => Err(crate::error::SkeinError::StorageIntegrity(format!(
+                "canonical relational row view has no current reader for commit {next_epoch}: {:?}",
+                self.relational_row_pages.recovery_status
+            ))),
+        }
+    }
+
     pub(super) fn publish_relational_row_live_view(
         &mut self,
         publication: Option<Result<Arc<RelationalRowPageReadView>, RelationalRowLiveUnavailable>>,
@@ -467,6 +555,7 @@ impl GraphStore {
             None => {}
             Some(Ok(view)) => {
                 let identity = view.identity();
+                self.relational_row_pages.schema_checkpoint_required = false;
                 self.relational_row_pages.recovery_status =
                     RelationalRowPageRecoveryStatus::LiveCurrent {
                         base_generation: identity.base_generation,
@@ -480,14 +569,20 @@ impl GraphStore {
                 self.relational_row_pages.read_view = Some(view);
             }
             Some(Err(unavailable)) => {
+                let checkpoint_required = matches!(
+                    &unavailable.error,
+                    RelationalRowPageLiveError::RequiresCheckpoint { .. }
+                );
                 self.relational_row_pages.read_view = None;
+                self.relational_row_pages.schema_checkpoint_required = checkpoint_required;
                 self.relational_row_pages.recovery_status =
                     RelationalRowPageRecoveryStatus::LiveUnavailable {
                         base_generation: unavailable.identity.base_generation,
                         base_commit_epoch: unavailable.identity.base_commit_epoch,
                         last_visible_commit_epoch: unavailable.identity.visible_commit_epoch,
                         failed_commit_epoch: unavailable.failed_commit_epoch,
-                        reason: unavailable.reason,
+                        checkpoint_required,
+                        reason: unavailable.error.to_string(),
                     };
             }
         }
@@ -524,6 +619,7 @@ impl GraphStore {
                                 base_generation: Some(generation),
                                 base_commit_epoch: Some(source_commit_epoch),
                                 recovered_commit_epoch: self.commit_epoch,
+                                checkpoint_required: false,
                                 reason: format!(
                                     "read-only recovery requires an exact published row delta: {error}"
                                 ),
@@ -613,15 +709,45 @@ impl GraphStore {
         recovered_commit_epoch: u64,
         reason: String,
     ) {
+        self.mark_relational_row_page_unavailable(recovered_commit_epoch, false, reason);
+    }
+
+    fn mark_relational_row_page_schema_checkpoint_required(
+        &mut self,
+        recovered_commit_epoch: u64,
+        tables: Vec<String>,
+    ) {
+        self.mark_relational_row_page_unavailable(
+            recovered_commit_epoch,
+            true,
+            format!(
+                "schema-changing WAL requires a canonical row checkpoint for tables {}",
+                tables.join(",")
+            ),
+        );
+    }
+
+    fn mark_relational_row_page_unavailable(
+        &mut self,
+        recovered_commit_epoch: u64,
+        checkpoint_required: bool,
+        reason: String,
+    ) {
         let (base_generation, base_commit_epoch) = self.relational_row_pages.base_identity();
         self.relational_row_pages.recovery_builder = None;
         self.relational_row_pages.read_view = None;
+        self.relational_row_pages.schema_checkpoint_required = checkpoint_required;
         self.relational_row_pages.recovery_status = RelationalRowPageRecoveryStatus::Unavailable {
             base_generation,
             base_commit_epoch,
             recovered_commit_epoch,
+            checkpoint_required,
             reason,
         };
+    }
+
+    pub(crate) fn relational_row_schema_checkpoint_required(&self) -> bool {
+        self.relational_row_pages.schema_checkpoint_required
     }
 
     pub fn relational_row_page_recovery_status(&self) -> &RelationalRowPageRecoveryStatus {
@@ -631,6 +757,46 @@ impl GraphStore {
     pub fn relational_row_delta_recovery_report(&self) -> Option<&RelationalRowDeltaReport> {
         self.relational_row_pages.recovery_report.as_ref()
     }
+
+    pub(crate) fn open_relational_row_snapshot_reader(
+        &self,
+    ) -> crate::error::Result<Option<RelationalRowPageSnapshotReader>> {
+        let Some(view) = self
+            .relational_row_pages
+            .current_read_view(self.commit_epoch)
+            .cloned()
+        else {
+            return match &self.relational_row_pages.recovery_status {
+                RelationalRowPageRecoveryStatus::Missing => Ok(None),
+                status => Err(crate::error::SkeinError::StorageIntegrity(format!(
+                    "canonical relational row reader is unavailable at commit epoch {}: {status:?}",
+                    self.commit_epoch
+                ))),
+            };
+        };
+        let resources = self
+            .relational_row_pages
+            .serving_resources
+            .as_ref()
+            .ok_or_else(|| {
+                crate::error::SkeinError::StorageIntegrity(
+                    "canonical relational row reader has no pinned serving resources".to_string(),
+                )
+            })?;
+        RelationalRowPageSnapshotReader::new(
+            view,
+            Arc::clone(&resources.base_overflow),
+            None,
+            Arc::clone(&resources.cache),
+            resources.store_id,
+        )
+        .map(Some)
+        .map_err(|error| {
+            crate::error::SkeinError::StorageIntegrity(format!(
+                "canonical relational row reader could not open: {error}"
+            ))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -638,13 +804,15 @@ mod tests {
     use super::*;
     use crate::schema::Catalog;
     use crate::store::GraphStore;
+    use skein_core::RuntimeTaskContext;
     use skein_storage::{
         relational_overflow_extent_file, relational_overflow_manifest_generation_file,
         relational_row_page_manifest_generation_file, DurabilityPolicy, RelationalColumnSchema,
         RelationalHydrationBudget, RelationalInsertMode, RelationalKey, RelationalRow,
         RelationalRowPagePublicationConfig, RelationalRowPagePublisher,
-        RelationalRowPageRootReader, RelationalScalarType, RelationalTableSchema,
-        RelationalTransaction, RelationalValue, RelationalWrite, WalReplayConfig,
+        RelationalRowPageRootReader, RelationalRowPageSnapshotReadLimits, RelationalScalarType,
+        RelationalTableSchema, RelationalTransaction, RelationalValue, RelationalWrite,
+        WalReplayConfig,
     };
     use std::collections::BTreeMap;
 
@@ -694,6 +862,29 @@ mod tests {
             &view,
             snapshot.relational_row_pages.read_view.as_ref().unwrap()
         ));
+        let reader = snapshot
+            .open_relational_row_snapshot_reader()
+            .unwrap()
+            .expect("checkpoint snapshot reader");
+        let mut hydration = RelationalHydrationBudget::default();
+        let (projected, report) = reader
+            .point_projected(
+                "documents",
+                &key(2),
+                &[1],
+                RelationalRowPageSnapshotReadLimits::default(),
+                &mut hydration,
+                &RuntimeTaskContext::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            projected.unwrap().fields[0].value,
+            RelationalValue::Text("two".to_string())
+        );
+        assert_eq!(
+            report.identity.visible_commit_epoch,
+            snapshot.commit_epoch()
+        );
         store
             .commit_relational_transaction(
                 &mut catalog,
@@ -778,10 +969,15 @@ mod tests {
                 base_commit_epoch: 1,
                 last_visible_commit_epoch: 4,
                 failed_commit_epoch: 5,
+                checkpoint_required: true,
                 reason,
-            } if reason.contains("schema-changing WAL")
+            } if reason.contains("requires a schema checkpoint")
         ));
         assert!(store.relational_row_pages.read_view.is_none());
+        assert!(matches!(
+            store.open_relational_row_snapshot_reader(),
+            Err(crate::error::SkeinError::StorageIntegrity(_))
+        ));
         assert!(Arc::ptr_eq(
             &pinned_epoch_four,
             pinned_before_ddl
@@ -789,6 +985,55 @@ mod tests {
                 .read_view
                 .as_ref()
                 .unwrap()
+        ));
+
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn live_row_admission_rejects_before_wal_append() {
+        let replay = WalReplayConfig::default();
+        let path = seed_row_root_with_wal_insert("live-admission", replay);
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::open_with_durability_and_replay_config(
+            &path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            replay,
+        )
+        .unwrap();
+        let commit_epoch = store.commit_epoch;
+        let next_lsn = store.durable.as_ref().unwrap().next_lsn;
+        let previous_limits = store.relational_row_pages.live_limits;
+        store.relational_row_pages.live_limits = RelationalRowChangeCaptureLimits {
+            max_entries: NonZeroUsize::new(1).unwrap(),
+            max_bytes: previous_limits.max_bytes,
+        };
+
+        let error = store
+            .commit_relational_transaction(
+                &mut catalog,
+                RelationalTransaction {
+                    writes: vec![RelationalWrite::Insert {
+                        table: "documents".to_string(),
+                        rows: vec![row(3, "three"), row(4, "four")],
+                        mode: RelationalInsertMode::Error,
+                    }],
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("before WAL append"));
+        assert_eq!(store.commit_epoch, commit_epoch);
+        assert_eq!(store.durable.as_ref().unwrap().next_lsn, next_lsn);
+        assert!(store.relational_state.row("documents", &key(3)).is_none());
+        assert!(store.relational_state.row("documents", &key(4)).is_none());
+        assert!(matches!(
+            store.relational_row_page_recovery_status(),
+            RelationalRowPageRecoveryStatus::WalRecovered {
+                recovered_commit_epoch: 2,
+                ..
+            }
         ));
 
         std::fs::remove_dir_all(path).unwrap();

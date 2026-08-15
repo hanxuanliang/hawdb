@@ -185,6 +185,9 @@ pub enum RelationalRowDeltaError {
     Admission(String),
     Corrupt(String),
     Durability(String),
+    RequiresCheckpoint {
+        tables: Vec<String>,
+    },
     Invalidated(String),
     Publication(super::RelationalRowPagePublicationError),
     Row(super::RelationalRowPageError),
@@ -204,6 +207,11 @@ impl fmt::Display for RelationalRowDeltaError {
             Self::Admission(message) => write!(formatter, "relational row delta admission failed: {message}"),
             Self::Corrupt(message) => write!(formatter, "corrupt relational row delta: {message}"),
             Self::Durability(message) => write!(formatter, "relational row delta durability failed: {message}"),
+            Self::RequiresCheckpoint { tables } => write!(
+                formatter,
+                "relational row delta requires a schema checkpoint for tables {}",
+                tables.join(",")
+            ),
             Self::Invalidated(message) => write!(formatter, "relational row delta invalidated: {message}"),
             Self::Publication(error) => write!(formatter, "{error}"),
             Self::Row(error) => write!(formatter, "{error}"),
@@ -230,6 +238,7 @@ impl std::error::Error for RelationalRowDeltaError {
             Self::Admission(_)
             | Self::Corrupt(_)
             | Self::Durability(_)
+            | Self::RequiresCheckpoint { .. }
             | Self::Invalidated(_)
             | Self::StaleGeneration { .. }
             | Self::StaleBase { .. } => None,

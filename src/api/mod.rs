@@ -308,6 +308,18 @@ fn relational_query_limits_with_payload(
     let max_intermediate_rows = config
         .max_read_result_rows
         .unwrap_or(DEFAULT_MAX_READ_RESULT_ROWS);
+    // A blocking relational query first reads the bounded scan projection and
+    // then re-reads at most `max_output_rows` selected locators with the final
+    // output projection. Budget both phases explicitly so a scan that exactly
+    // reaches its intermediate-row limit can still produce an admitted result.
+    let max_row_read_rows = max_intermediate_rows.saturating_add(max_output_rows).max(1);
+    let max_scan_pages = max_intermediate_rows
+        .div_ceil(skein_storage::DEFAULT_RELATIONAL_ROW_PAGE_ROWS)
+        .max(1);
+    let max_row_read_pages = max_scan_pages.saturating_add(max_output_rows).max(1);
+    let max_row_read_bytes = max_row_read_pages
+        .saturating_mul(skein_storage::DEFAULT_RELATIONAL_ROW_PAGE_BYTES)
+        .max(1);
     crate::relational_sql::RelationalQueryLimits {
         max_output_rows,
         max_output_payload_bytes,
@@ -332,6 +344,18 @@ fn relational_query_limits_with_payload(
             )
             .expect("relational index query byte budget is non-zero"),
             ..skein_storage::RelationalIndexReadLimits::default()
+        },
+        row_read: skein_storage::RelationalRowPageSnapshotReadLimits {
+            demand: skein_storage::RelationalRowPageDemandReadLimits {
+                max_pages: NonZeroUsize::new(max_row_read_pages)
+                    .expect("relational row query page budget is non-zero"),
+                max_rows: NonZeroUsize::new(max_row_read_rows)
+                    .expect("relational row query row budget is non-zero"),
+                max_bytes: NonZeroUsize::new(max_row_read_bytes)
+                    .expect("relational row query byte budget is non-zero"),
+                ..skein_storage::RelationalRowPageDemandReadLimits::default()
+            },
+            ..skein_storage::RelationalRowPageSnapshotReadLimits::default()
         },
     }
 }
@@ -795,6 +819,9 @@ impl Database {
             derived_artifact_jobs: Vec::new(),
             telemetry: None,
         };
+        if !database.config.read_only {
+            database.complete_required_relational_row_checkpoint("writable recovery")?;
+        }
         database.apply_engine_system_schema()?;
         Ok(database)
     }
@@ -1191,6 +1218,31 @@ impl Database {
             });
         }
         result
+    }
+
+    fn complete_required_relational_row_checkpoint(&mut self, context: &str) -> Result<()> {
+        if !self.relational_row_schema_checkpoint_required() {
+            return Ok(());
+        }
+        if self.store.wal_sync_group_active() {
+            return Ok(());
+        }
+        let checkpoint = self.checkpoint_internal(None);
+        let result = match checkpoint {
+            Ok(()) if !self.relational_row_schema_checkpoint_required() => Ok(()),
+            Ok(()) => Err(SkeinError::StorageIntegrity(format!(
+                "canonical relational row schema checkpoint remained required after {context}"
+            ))),
+            Err(error) => Err(SkeinError::StorageIntegrity(format!(
+                "canonical relational row schema checkpoint failed after {context}; the durable WAL remains authoritative and writable reopen will retry: {error}"
+            ))),
+        };
+        self.store.poison_on_storage_error(&result);
+        result
+    }
+
+    fn relational_row_schema_checkpoint_required(&self) -> bool {
+        self.store.relational_row_schema_checkpoint_required()
     }
 
     pub(crate) fn checkpoint_source(&self) -> Result<DatabaseCheckpointSource> {
@@ -18476,15 +18528,18 @@ fn execute_database_transaction_sql(
             sql_text,
             parameters,
             &state.relational_state,
-            if runtime
-                .config
-                .relational_index_mode
-                .serves_demand_paged_reads()
-            {
-                crate::relational_sql::RelationalIndexReadMode::TransactionWorkspace
-            } else {
-                crate::relational_sql::RelationalIndexReadMode::Materialized
-            },
+            crate::relational_sql::RelationalQueryReadModes::new(
+                if runtime
+                    .config
+                    .relational_index_mode
+                    .serves_demand_paged_reads()
+                {
+                    crate::relational_sql::RelationalIndexReadMode::TransactionWorkspace
+                } else {
+                    crate::relational_sql::RelationalIndexReadMode::Materialized
+                },
+                crate::relational_sql::RelationalRowReadMode::CanonicalMemory,
+            ),
             relational_query_limits(&runtime.config, runtime.config.max_read_result_rows),
             &runtime.config.execution_memory,
             None,
@@ -18565,6 +18620,7 @@ fn commit_database_transaction_state(
             db.config.mutation_limits,
         )?
     };
+    db.complete_required_relational_row_checkpoint("transaction commit")?;
     Ok(QueryOutput { rows: summary.rows })
 }
 
@@ -19434,15 +19490,20 @@ impl DatabaseReadTransaction {
             );
         }
 
-        let output = crate::relational_sql::execute_relational_query_sql_with_runtime(
+        let query_result = crate::relational_sql::execute_relational_query_sql_with_runtime(
             sql_text,
             parameters,
             self.store.relational_state(),
-            relational_index_read_mode(&self.config, &self.store),
+            crate::relational_sql::RelationalQueryReadModes::new(
+                relational_index_read_mode(&self.config, &self.store),
+                crate::relational_sql::RelationalRowReadMode::Store(&self.store),
+            ),
             relational_query_limits_with_payload(&self.config, max_rows, max_payload_bytes),
             &self.config.execution_memory,
             None,
-        )?;
+        );
+        self.store.poison_on_storage_error(&query_result);
+        let output = query_result?;
         Ok(QueryOutput { rows: output.rows })
     }
 

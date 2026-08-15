@@ -3,10 +3,7 @@ use crate::store::{
     GraphStore, RelationalIndexReadLimits, RelationalIndexReadViewBackendReport,
     RelationalIndexReadViewReport,
 };
-use skein_storage::{
-    RelationalIndexShadowError, RelationalKey, RelationalRow, RelationalState,
-    RELATIONAL_PRIMARY_INDEX_NAME,
-};
+use skein_storage::{RelationalIndexShadowError, RelationalKey, RelationalState};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
@@ -78,8 +75,7 @@ struct RelationalIndexRuntimeState {
     evidence: BTreeMap<(String, String), RelationalIndexExecutionEvidence>,
 }
 
-struct RelationalIndexProbe<'input, 'state> {
-    state: &'state RelationalState,
+struct RelationalIndexProbe<'input> {
     table: &'input str,
     index: &'input str,
     prefix: &'input RelationalKey,
@@ -101,60 +97,22 @@ impl<'a> RelationalIndexRuntime<'a> {
         self.state.borrow().evidence.values().cloned().collect()
     }
 
-    pub(crate) fn visit_primary<'state>(
+    pub(crate) fn visit_prefix(
         &self,
-        state: &'state RelationalState,
-        table: &str,
-        key: &RelationalKey,
-        mut visit: impl FnMut(&'state RelationalKey, &'state RelationalRow) -> Result<bool>,
-    ) -> Result<bool> {
-        if matches!(self.mode, RelationalIndexReadMode::Materialized) {
-            return match state.row_entry(table, key) {
-                Some((key, row)) => visit(key, row),
-                None => Ok(true),
-            };
-        }
-        let fallback = |visit: &mut dyn FnMut(
-            &'state RelationalKey,
-            &'state RelationalRow,
-        ) -> Result<bool>| {
-            match state.row_entry(table, key) {
-                Some((key, row)) => visit(key, row),
-                None => Ok(true),
-            }
-        };
-        self.visit_demand_or_fallback(
-            RelationalIndexProbe {
-                state,
-                table,
-                index: RELATIONAL_PRIMARY_INDEX_NAME,
-                prefix: key,
-            },
-            &mut visit,
-            fallback,
-        )
-    }
-
-    pub(crate) fn visit_prefix<'state>(
-        &self,
-        state: &'state RelationalState,
+        state: &RelationalState,
         table: &str,
         index: &str,
         prefix: &RelationalKey,
-        mut visit: impl FnMut(&'state RelationalKey, &'state RelationalRow) -> Result<bool>,
+        mut visit: impl FnMut(&RelationalKey) -> Result<bool>,
     ) -> Result<bool> {
         if matches!(self.mode, RelationalIndexReadMode::Materialized) {
             return visit_materialized_prefix(state, table, index, prefix, &mut visit);
         }
-        let fallback = |visit: &mut dyn FnMut(
-            &'state RelationalKey,
-            &'state RelationalRow,
-        ) -> Result<bool>| {
+        let fallback = |visit: &mut dyn FnMut(&RelationalKey) -> Result<bool>| {
             visit_materialized_prefix(state, table, index, prefix, visit)
         };
         self.visit_demand_or_fallback(
             RelationalIndexProbe {
-                state,
                 table,
                 index,
                 prefix,
@@ -164,16 +122,13 @@ impl<'a> RelationalIndexRuntime<'a> {
         )
     }
 
-    fn visit_demand_or_fallback<'input, 'state>(
+    fn visit_demand_or_fallback<'input>(
         &self,
-        probe: RelationalIndexProbe<'input, 'state>,
-        visit: &mut dyn FnMut(&'state RelationalKey, &'state RelationalRow) -> Result<bool>,
-        fallback: impl FnOnce(
-            &mut dyn FnMut(&'state RelationalKey, &'state RelationalRow) -> Result<bool>,
-        ) -> Result<bool>,
+        probe: RelationalIndexProbe<'input>,
+        visit: &mut dyn FnMut(&RelationalKey) -> Result<bool>,
+        fallback: impl FnOnce(&mut dyn FnMut(&RelationalKey) -> Result<bool>) -> Result<bool>,
     ) -> Result<bool> {
         let RelationalIndexProbe {
-            state,
             table,
             index,
             prefix,
@@ -206,13 +161,7 @@ impl<'a> RelationalIndexRuntime<'a> {
             remaining,
             |locator| {
                 produced_provisional_rows = true;
-                let Some((key, row)) = state.row_entry(table, locator) else {
-                    callback_error = Some(SkeinError::StorageIntegrity(format!(
-                        "relational index {index} on table {table} points to a missing row"
-                    )));
-                    return false;
-                };
-                match visit(key, row) {
+                match visit(locator) {
                     Ok(continue_scan) => {
                         keep_going = continue_scan;
                         continue_scan
@@ -431,12 +380,12 @@ fn visit_materialized_prefix<'state>(
     table: &str,
     index: &str,
     prefix: &RelationalKey,
-    visit: &mut dyn FnMut(&'state RelationalKey, &'state RelationalRow) -> Result<bool>,
+    visit: &mut dyn FnMut(&RelationalKey) -> Result<bool>,
 ) -> Result<bool> {
     let mut error = None;
     let mut keep_going = true;
     state
-        .visit_index_prefix_rows(table, index, prefix, |key, row| match visit(key, row) {
+        .visit_index_prefix_rows(table, index, prefix, |key, _| match visit(key) {
             Ok(continue_scan) => {
                 keep_going = continue_scan;
                 continue_scan

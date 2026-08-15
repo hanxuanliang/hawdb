@@ -595,7 +595,8 @@ These events map in order to `BeginCheckpoint`, `PersistCandidatePages`,
 `PublishCheckpoint` in `SkeinCowPagePublication.tla`. The canonical trace does
 not make the candidate visible at its final publisher event; the outer
 checkpoint manifest selects both roots atomically. Physical page demand reads
-and production SQL serving activation remain later contracts.
+and SQL serving are specified by the later demand/snapshot sections rather
+than by this publisher-local trace.
 
 ### Relational row-page mutation planning
 
@@ -660,8 +661,8 @@ pinned-base immutability, and bounded streaming bootstrap.
 
 ### Disk-backed relational row-root recovery
 
-The current recovery integration is a non-serving SQL refinement over a
-mandatory checkpoint-bound row and overflow root pair. Writable checkpoint
+The recovery foundation serves SQL through a mandatory checkpoint-bound row
+and overflow root pair plus its exact recovery/live overlays. Writable checkpoint
 preparation persists both candidates first, verifies their exact generation and
 source commit epoch, and publishes their identities atomically in
 `SKEIN_MANIFEST_V1`. Open never consults either subsystem's independent latest
@@ -686,11 +687,23 @@ database-sized `BTreeMap`.
 
 Recovery never skips a durable WAL record. A corrupt checkpoint-bound base root
 rejects database open. After that base is pinned, an individual capture outside
-its hard entry/byte envelope, an epoch gap, DDL or schema replacement, or
-row-delta run/manifest budget exhaustion makes the
-non-serving WAL overlay unavailable without changing the already recovered
-materialized relational state. A partial batch poisons the builder and its
-already durable candidate runs remain unreachable.
+its hard entry/byte envelope, an epoch gap, or row-delta run/manifest budget
+exhaustion makes the serving WAL overlay unavailable without changing the
+already recovered mutation state. SQL then fails closed; it does not select
+materialized rows. A partial batch poisons the builder and its already durable
+candidate runs remain unreachable.
+
+A schema-changing relational record is distinct from an overlay admission
+failure: it requires a new schema-bound canonical row root. During ordinary
+operation Skein stages that requirement before WAL, permits the canonical DDL
+to become durable, and then synchronously performs a full-row schema checkpoint
+barrier before returning success. The barrier writes row, overflow, and required
+index candidates before publishing the outer checkpoint manifest last. If the
+process stops after WAL durability but before that publication, writable open
+replays the complete WAL first and retries the same barrier. A read-only open
+never writes the repair candidate and leaves the reader explicitly unavailable.
+Failure of the post-WAL barrier poisons the current handle and reports that the
+durable commit will be retried by writable reopen.
 
 After the complete WAL prefix is consumed, a writable open synchronizes all
 runs, publishes the immutable delta-generation manifest, revalidates the
@@ -715,8 +728,10 @@ before its global epoch becomes visible and does not add an empty batch. The
 default cumulative live envelope is 100,000 entries and 64 MiB.
 
 Only a successful durable commit installs the staged view. An epoch gap,
-unordered or undercharged capture, DDL/schema rewrite, or cumulative admission
-failure makes the current acceleration view unavailable. A live or recovery
+unordered or undercharged capture, or cumulative admission failure rejects an
+ordinary live commit before WAL append; it cannot convert the canonical SQL
+reader into a silently unavailable post-commit state. A DDL/schema rewrite
+instead enters the mandatory schema checkpoint barrier described above. A live or recovery
 row may retain a content-addressed overflow reference without copying its large
 payload into the row overlay. Such a reference is unresolved storage evidence,
 not a result value: a serving query MUST resolve it through the exact
@@ -724,16 +739,20 @@ not a result value: a serving query MUST resolve it through the exact
 budget before predicate, aggregate, sort, or projection evaluation. A missing
 row, missing digest, type mismatch, or different value at that key is
 corruption; admission or cancellation is non-poisoning. The status retains both the last
-visible and failed commit epochs. The canonical WAL and materialized relational
-state still commit because this row view is not yet an authority. Already
-pinned snapshots retain their prior immutable view. Writable transaction
+visible and failed commit epochs and whether a schema checkpoint is mandatory.
+Already pinned snapshots retain their prior immutable view while a new root is
+published. Writable transaction
 workspaces continue to read the materialized staged state, so
 read-your-own-writes never consults a lagging read view.
 
-This view remains non-serving for SQL and constraints, but its exact recovery
-and live change identities now drive bounded canonical checkpoint mutation
-planning. The final row values still come from the current canonical
-`RelationalState`; the view cannot become an independent row authority.
+SQL pins this view once per statement. Primary-key probes, secondary-index row
+fetches, full scans, join probes, blocking-operator locator replay, and aggregate
+replay all obtain projected rows from that same view. Only a transaction-private
+workspace and a database before its first checkpoint read canonical memory.
+Selected unresolved overflow references are resolved through the exact pinned
+`RelationalState`; checkpoint values come directly from row pages. The same
+recovery and live identities drive bounded canonical checkpoint mutation
+planning.
 Checkpoint publication, backup, restore, scrub, orphan cleanup, and generation
 reclamation select and preserve the exact bound base roots.
 Reclamation computes the physical row-page and overflow-extent closure of the
@@ -1096,13 +1115,20 @@ return `Ok`.
 
 This is the only v1 snapshot-composition contract. Skein is not released, so
 there is no legacy row-root reader, manifest migration, compatibility fallback,
-or base-only serving mode to preserve. Production SQL selection remains a
-separate differential activation step. Differential execution is development
-evidence only; once activated, the exact snapshot reader is the sole ordinary
-read path and an unavailable reader fails closed instead of selecting a
-materialized compatibility path.
+or base-only serving mode to preserve. Production SQL now selects the exact
+snapshot reader as its sole ordinary read path. Differential execution remains
+qualification evidence only; an unavailable reader fails closed instead of
+selecting a materialized compatibility path.
 
-The current relational shadow reader uses the existing shared `SegmentCache`
+The host snapshot retains the immutable base overflow root, shared segment
+cache, and store identity required to construct that reader after the mutable
+durability handle is removed. `Missing` means no first checkpoint exists and
+therefore selects the canonical in-memory state. `Stale`, `Unavailable`, and
+`LiveUnavailable` are not aliases for `Missing`; they reject the read. This is
+an authority transition inside the single v1 format, not a format-version
+fallback.
+
+The canonical relational snapshot reader uses the existing shared `SegmentCache`
 for immutable base-page slots and WAL recovery-delta pages. Cache entries retain
 the complete physical identity: store, manifest or delta generation, page
 identity, verified content digest, and representation kind. Base slots whose
@@ -1241,8 +1267,11 @@ projected-decode, shared-limit, and corruption testing. Shadow COW publication
 is the first stateful use of these bytes. Its fixed runtime event trace, stale
 generation fence, immutable artifacts, crash boundaries, and pinned
 cross-generation descriptors refine `SkeinCowPagePublication.tla`. WAL recovery
-and serving activation remain separate obligations. The current bounded,
-non-serving base-plus-WAL recovery view refines `SkeinRowRecovery.tla`.
+and serving activation are separate lower-level obligations composed by the
+snapshot runtime. The bounded base-plus-WAL recovery view refines
+`SkeinRowRecovery.tla`; its SQL authority, pre-checkpoint exception,
+schema-checkpoint barrier, and unavailable-reader rejection refine
+`SkeinRelationalRowSnapshotRead.tla`.
 Immutable disk-backed row-delta publication refines `SkeinRowDeltaRuns.tla`;
 it remains outside the recovery mount and therefore does not discharge
 checkpoint binding, demand-read, lifecycle, or serving obligations.
@@ -1270,8 +1299,8 @@ checkpoint binding, demand-read, lifecycle, or serving obligations.
 - `SkeinRowRecovery.tla`: checkpoint-correlated row-root mount, exact ordered
   primary-key WAL overlay, graph-only epoch advancement, whole-fragment
   admission, fail-closed invalidation, complete-prefix view publication, cold
-  page slots, pinned generation stability, live invalidation, and the
-  non-serving SQL boundary.
+  page slots, pinned generation stability, and live invalidation before the
+  separate SQL serving refinement.
 - `SkeinRowDeltaRuns.tla`: bounded coalescing and immutable run flush,
   overflow closure, run-before-generation-manifest durability, row-root and
   previous-delta fencing, manifest-last selection, crash isolation, poisoned

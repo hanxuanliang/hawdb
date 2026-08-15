@@ -16,9 +16,13 @@ use skein_storage::{
 
 mod index_access;
 mod query;
+mod row_access;
 
 pub(crate) use index_access::RelationalIndexReadMode;
-pub(crate) use query::{execute_relational_query_sql_with_runtime, RelationalQueryLimits};
+pub(crate) use query::{
+    execute_relational_query_sql_with_runtime, RelationalQueryLimits, RelationalQueryReadModes,
+};
+pub(crate) use row_access::RelationalRowReadMode;
 
 pub(crate) fn compile_relational_statement_sql(
     sql: &str,
@@ -719,6 +723,12 @@ mod tests {
                 )
                 .expect("insert base document");
             database
+                .query_sql_with_params(
+                    "INSERT INTO documents (id, owner, body) VALUES ('doc-large', 'owner-large', $1)",
+                    &[Value::String("x".repeat(96 * 1024))],
+                )
+                .expect("insert large base document");
+            database
                 .query_sql("INSERT INTO anchors (id, document_id) VALUES ('anchor-1', 'doc-1')")
                 .expect("insert base anchor");
 
@@ -739,10 +749,27 @@ mod tests {
             published_pages = published.pages_written;
             let primary = database
                 .query_sql("EXPLAIN ANALYZE SELECT id FROM documents WHERE id = 'doc-1'")
-                .expect("read the demand-paged primary index");
+                .expect("read the demand-paged primary row");
             let primary_info = relational_explain_operator_info(&primary, "TablePointGetExec");
-            assert!(primary_info.contains("runtime_path=demand_paged"));
-            assert!(primary_info.contains("root_set_digest="));
+            assert!(primary_info.contains("row_runtime_path=snapshot_rows"));
+            assert!(primary_info.contains("row_root_set_digest="));
+            let id_only = database
+                .query_sql("EXPLAIN ANALYZE SELECT id FROM documents WHERE id = 'doc-large'")
+                .expect("project no large value from a row page");
+            assert!(relational_explain_execution_info(&id_only).contains("hydrated_rows=0"));
+            let late_hydration = database
+                .query_sql(
+                    "EXPLAIN ANALYZE SELECT body FROM documents ORDER BY id ASC LIMIT 1 OFFSET 1",
+                )
+                .expect("hydrate only the selected large result after TopN");
+            assert!(relational_explain_execution_info(&late_hydration).contains("hydrated_rows=1"));
+            let grouped = database
+                .query_sql(
+                    "SELECT document_id, COUNT(id) AS anchor_count FROM anchors GROUP BY document_id",
+                )
+                .expect("read aggregate inputs omitted from the final grouping key");
+            assert_eq!(grouped.rows.len(), 1);
+            assert_eq!(grouped.rows[0]["anchor_count"], Value::Int(1));
             {
                 let mut transaction = database.begin_transaction();
                 transaction
@@ -783,6 +810,12 @@ mod tests {
                 .expect("read live-merged relational index");
             assert_eq!(rows.rows.len(), 1);
             assert_eq!(rows.rows[0]["id"], Value::String("doc-2".to_string()));
+            let live = database
+                .query_sql("EXPLAIN ANALYZE SELECT id FROM documents WHERE id = 'doc-2'")
+                .expect("read the live row overlay");
+            let live_info = relational_explain_operator_info(&live, "TablePointGetExec");
+            assert!(live_info.contains("row_runtime_path=snapshot_rows"));
+            assert!(live_info.contains("row_overlay_entries=1"));
 
             let joined = database
                 .query_sql(
@@ -824,6 +857,8 @@ mod tests {
             assert!(recovered_info.contains("runtime_path=demand_paged"));
             assert!(!recovered_info.contains("delta_generation=none"));
             assert!(recovered_info.contains("delta_entries="));
+            assert!(recovered_info.contains("row_runtime_path=snapshot_rows"));
+            assert!(!recovered_info.contains("row_delta_generation=none"));
         }
         {
             let tight_config = DatabaseConfig {
@@ -888,6 +923,82 @@ mod tests {
             assert!(error.to_string().contains("storage integrity"));
         }
         std::fs::remove_dir_all(path).expect("remove demand-index SQL fixture");
+    }
+
+    #[test]
+    fn schema_change_publishes_canonical_row_checkpoint_before_sql_returns() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "skein-relational-schema-row-checkpoint-{}-{nonce}",
+            std::process::id()
+        ));
+        let mut database = Database::open_with_durability(&path, DurabilityPolicy::default())
+            .expect("open row-reader fixture");
+        database
+            .query_sql("CREATE TABLE documents (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
+            .expect("create documents table");
+        database
+            .query_sql("INSERT INTO documents (id, body) VALUES ('doc-1', 'body-1')")
+            .expect("insert document");
+        database.checkpoint().expect("publish canonical row root");
+        database
+            .query_sql("ALTER TABLE documents ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'")
+            .expect("commit schema change");
+
+        let rows = database
+            .query_sql("EXPLAIN ANALYZE SELECT id FROM documents")
+            .expect("read through the schema-bound canonical row checkpoint");
+        let scan_info = relational_explain_operator_info(&rows, "TableFullScanExec");
+        assert!(scan_info.contains("row_runtime_path=snapshot_rows"));
+        assert!(!database.storage_handle_poisoned());
+
+        drop(database);
+        std::fs::remove_dir_all(path).expect("remove schema row-checkpoint fixture");
+    }
+
+    #[test]
+    fn blocking_row_reads_budget_the_scan_and_final_locator_projection() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "skein-relational-blocking-row-budget-{}-{nonce}",
+            std::process::id()
+        ));
+        let mut database = Database::open_with_durability_and_config(
+            &path,
+            DurabilityPolicy::default(),
+            DatabaseConfig {
+                max_read_result_rows: Some(2),
+                ..DatabaseConfig::default()
+            },
+        )
+        .expect("open blocking row-budget fixture");
+        database
+            .query_sql("CREATE TABLE documents (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
+            .expect("create documents table");
+        database
+            .query_sql("INSERT INTO documents (id, body) VALUES ('doc-1', 'body-1')")
+            .expect("insert first document");
+        database
+            .query_sql("INSERT INTO documents (id, body) VALUES ('doc-2', 'body-2')")
+            .expect("insert second document");
+        database
+            .checkpoint()
+            .expect("publish rows before the bounded blocking read");
+
+        let output = database
+            .query_sql("SELECT body FROM documents ORDER BY id DESC LIMIT 1")
+            .expect("budget both the two-row scan and final locator read");
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.rows[0]["body"], Value::String("body-2".to_string()));
+
+        drop(database);
+        std::fs::remove_dir_all(path).expect("remove blocking row-budget fixture");
     }
 
     #[test]
@@ -980,6 +1091,20 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("EXPLAIN output has no {operator} row: {:?}", output.rows))
+    }
+
+    fn relational_explain_execution_info(output: &crate::QueryOutput) -> &str {
+        match output
+            .rows
+            .first()
+            .and_then(|row| row.get("execution info"))
+        {
+            Some(Value::String(info)) => info,
+            _ => panic!(
+                "EXPLAIN ANALYZE output has no execution info: {:?}",
+                output.rows
+            ),
+        }
     }
 
     #[test]
@@ -1333,7 +1458,10 @@ mod tests {
             "SELECT id FROM documents WHERE owner_kind = 'thread' AND owner_id = $1",
             &[text("thread-1")],
             snapshot.value(),
-            RelationalIndexReadMode::Materialized,
+            RelationalQueryReadModes::new(
+                RelationalIndexReadMode::Materialized,
+                RelationalRowReadMode::CanonicalMemory,
+            ),
             query_limits(1, 4 * 1024),
             &skein_executor::ExecutionMemoryConfig::default(),
             None,
@@ -1348,7 +1476,10 @@ mod tests {
             "SELECT id, body FROM messages WHERE stream_id = $1 ORDER BY order_index ASC, id ASC LIMIT $2 OFFSET $3",
             &[text("stream-1"), Value::Int(1), Value::Int(1)],
             snapshot.value(),
-            RelationalIndexReadMode::Materialized,
+            RelationalQueryReadModes::new(
+                RelationalIndexReadMode::Materialized,
+                RelationalRowReadMode::CanonicalMemory,
+            ),
             query_limits(1, 64 * 1024),
             &skein_executor::ExecutionMemoryConfig::default(),
             None,
@@ -1364,7 +1495,10 @@ mod tests {
             "SELECT m.id FROM messages AS m INNER JOIN anchors AS a ON a.document_id = m.document_id AND a.message_id = m.id WHERE m.stream_id = $1",
             &[text("stream-1")],
             snapshot.value(),
-            RelationalIndexReadMode::Materialized,
+            RelationalQueryReadModes::new(
+                RelationalIndexReadMode::Materialized,
+                RelationalRowReadMode::CanonicalMemory,
+            ),
             query_limits(2, 4 * 1024),
             &skein_executor::ExecutionMemoryConfig::default(),
             None,
@@ -1380,7 +1514,10 @@ mod tests {
             summary_sql,
             &[text("stream-1")],
             snapshot.value(),
-            RelationalIndexReadMode::Materialized,
+            RelationalQueryReadModes::new(
+                RelationalIndexReadMode::Materialized,
+                RelationalRowReadMode::CanonicalMemory,
+            ),
             query_limits(1, 4 * 1024),
             &skein_executor::ExecutionMemoryConfig::default(),
             None,
@@ -1397,7 +1534,10 @@ mod tests {
             summary_sql,
             &[text("stream-1")],
             snapshot.value(),
-            RelationalIndexReadMode::Materialized,
+            RelationalQueryReadModes::new(
+                RelationalIndexReadMode::Materialized,
+                RelationalRowReadMode::CanonicalMemory,
+            ),
             constrained,
             &skein_executor::ExecutionMemoryConfig::default(),
             None,
@@ -1432,6 +1572,7 @@ mod tests {
                 .expect("non-zero aggregate memory budget"),
             hydration: skein_storage::RelationalHydrationBudget::default(),
             index_read: skein_storage::RelationalIndexReadLimits::default(),
+            row_read: skein_storage::RelationalRowPageSnapshotReadLimits::default(),
         }
     }
 
@@ -1506,7 +1647,10 @@ mod tests {
             "SELECT id FROM spill_rows ORDER BY value ASC, id ASC",
             &[],
             snapshot.value(),
-            RelationalIndexReadMode::Materialized,
+            RelationalQueryReadModes::new(
+                RelationalIndexReadMode::Materialized,
+                RelationalRowReadMode::CanonicalMemory,
+            ),
             limits,
             &memory,
             None,
@@ -1522,7 +1666,10 @@ mod tests {
             "SELECT DISTINCT id FROM spill_rows ORDER BY id ASC",
             &[],
             snapshot.value(),
-            RelationalIndexReadMode::Materialized,
+            RelationalQueryReadModes::new(
+                RelationalIndexReadMode::Materialized,
+                RelationalRowReadMode::CanonicalMemory,
+            ),
             limits,
             &memory,
             None,
@@ -1538,7 +1685,10 @@ mod tests {
             "SELECT COUNT(DISTINCT id) AS item_count FROM spill_rows",
             &[],
             snapshot.value(),
-            RelationalIndexReadMode::Materialized,
+            RelationalQueryReadModes::new(
+                RelationalIndexReadMode::Materialized,
+                RelationalRowReadMode::CanonicalMemory,
+            ),
             limits,
             &memory,
             None,
@@ -1554,7 +1704,10 @@ mod tests {
             "SELECT value, COUNT(*) AS item_count FROM spill_rows GROUP BY value",
             &[],
             snapshot.value(),
-            RelationalIndexReadMode::Materialized,
+            RelationalQueryReadModes::new(
+                RelationalIndexReadMode::Materialized,
+                RelationalRowReadMode::CanonicalMemory,
+            ),
             limits,
             &memory,
             None,
@@ -1585,7 +1738,10 @@ mod tests {
             "EXPLAIN SELECT id FROM spill_rows WHERE id = $1",
             &[Value::Int(7)],
             snapshot.value(),
-            RelationalIndexReadMode::Materialized,
+            RelationalQueryReadModes::new(
+                RelationalIndexReadMode::Materialized,
+                RelationalRowReadMode::CanonicalMemory,
+            ),
             limits,
             &memory,
             Some(&explain_context),
@@ -1606,7 +1762,10 @@ mod tests {
             "EXPLAIN ANALYZE SELECT id FROM spill_rows ORDER BY value ASC, id ASC",
             &[],
             snapshot.value(),
-            RelationalIndexReadMode::Materialized,
+            RelationalQueryReadModes::new(
+                RelationalIndexReadMode::Materialized,
+                RelationalRowReadMode::CanonicalMemory,
+            ),
             limits,
             &memory,
             None,
@@ -1625,7 +1784,10 @@ mod tests {
             "SELECT id FROM spill_rows",
             &[],
             snapshot.value(),
-            RelationalIndexReadMode::Materialized,
+            RelationalQueryReadModes::new(
+                RelationalIndexReadMode::Materialized,
+                RelationalRowReadMode::CanonicalMemory,
+            ),
             limits,
             &memory,
             Some(&task_context),

@@ -55,6 +55,8 @@ fn application_system_schema_upgrade_crash_recovers_a_consistent_registry_and_sc
         ("before_wal_append", Some(1)),
         ("after_wal_append", None),
         ("after_wal_sync", Some(2)),
+        ("during_checkpoint_publication", Some(2)),
+        ("after_manifest_publication", Some(2)),
     ];
 
     for (stage, required_version) in stages {
@@ -81,6 +83,31 @@ fn application_system_schema_upgrade_crash_recovers_a_consistent_registry_and_sc
             Some(86),
             "child did not terminate at {stage}"
         );
+
+        if stage == "after_wal_sync" {
+            let mut read_only = Database::open_with_config(
+                &path,
+                DatabaseConfig {
+                    read_only: true,
+                    ..DatabaseConfig::default()
+                },
+            )
+            .unwrap();
+            assert!(matches!(
+                read_only.store.relational_row_page_recovery_status(),
+                crate::RelationalRowPageRecoveryStatus::Unavailable {
+                    recovered_commit_epoch: 4,
+                    checkpoint_required: true,
+                    ..
+                }
+            ));
+            let error = read_only
+                .query_sql("SELECT kind FROM content_documents WHERE id = 'doc-1'")
+                .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("canonical relational row reader is unavailable"));
+        }
 
         let mut reopened = Database::open(&path).unwrap();
         let mut versions = reopened
@@ -113,6 +140,13 @@ fn application_system_schema_upgrade_crash_recovers_a_consistent_registry_and_sc
             2 => {
                 assert_eq!(versions, vec![1, 2]);
                 assert_eq!(kind.unwrap(), Value::String("text".to_string()));
+                assert!(matches!(
+                    reopened.store.relational_row_page_recovery_status(),
+                    crate::RelationalRowPageRecoveryStatus::CheckpointReady {
+                        source_commit_epoch: 4,
+                        ..
+                    }
+                ));
                 registry_v2()
             }
             version => panic!("unexpected recovered schema version {version} after {stage}"),
@@ -204,6 +238,44 @@ fn application_system_schema_upgrades_and_reopens_idempotently() {
             Value::String("text".to_string())
         );
     }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn schema_upgrade_publishes_a_canonical_row_checkpoint_before_returning() {
+    let path = unique_test_dir("application_schema_row_checkpoint");
+    let mut db = Database::open(&path).unwrap();
+    db.apply_system_schema_registry(&registry_v1()).unwrap();
+    db.query_sql("INSERT INTO content_documents (id, body) VALUES ('doc-1', 'body')")
+        .unwrap();
+    db.checkpoint().unwrap();
+    let generation_before = db
+        .storage_reclamation_watermark()
+        .checkpoint_epoch
+        .expect("checkpoint generation");
+
+    let report = db.apply_system_schema_registry(&registry_v2()).unwrap();
+
+    assert_eq!(report.applied_versions, vec![2]);
+    assert_eq!(
+        db.storage_reclamation_watermark().checkpoint_epoch,
+        Some(generation_before + 1)
+    );
+    assert!(matches!(
+        db.store.relational_row_page_recovery_status(),
+        crate::RelationalRowPageRecoveryStatus::CheckpointReady {
+            source_commit_epoch,
+            ..
+        } if *source_commit_epoch == db.commit_epoch()
+    ));
+    assert_eq!(
+        db.query_sql("SELECT kind FROM content_documents WHERE id = 'doc-1'")
+            .unwrap()
+            .rows[0]["kind"],
+        Value::String("text".to_string())
+    );
+
+    drop(db);
     std::fs::remove_dir_all(path).unwrap();
 }
 

@@ -924,6 +924,60 @@ fn wal_group_commit_shares_one_sync_without_changing_record_order() {
 }
 
 #[test]
+fn wal_group_commit_publishes_schema_row_checkpoint_after_group_sync() {
+    let path = super::unique_test_dir("wal_group_schema_checkpoint");
+    let mut database = Database::open(&path).unwrap();
+    database
+        .query_sql("CREATE TABLE public.documents (id BIGINT PRIMARY KEY, body TEXT NOT NULL)")
+        .unwrap();
+    database
+        .query_sql("INSERT INTO public.documents (id, body) VALUES (1, 'body')")
+        .unwrap();
+    database.checkpoint().unwrap();
+    let group_commit = WalGroupCommitConfig::benchmark_candidate(
+        NonZeroUsize::new(1).unwrap(),
+        NonZeroU64::new(1024 * 1024).unwrap(),
+        Duration::ZERO,
+    )
+    .unwrap();
+    let db = ConcurrentDatabase::new_with_wal_group_commit(database, group_commit);
+    let mut transaction = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_secs(1),
+        ))
+        .unwrap();
+    transaction
+        .query_sql("ALTER TABLE public.documents ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'")
+        .unwrap();
+
+    transaction.commit().unwrap();
+
+    let published = db.published_read_view().unwrap();
+    assert!(published.physical_base_is_current());
+    assert_eq!(
+        db.query_sql("SELECT kind FROM public.documents WHERE id = 1")
+            .unwrap()
+            .rows[0]["kind"],
+        Value::String("text".to_string())
+    );
+    let group = db.wal_group_commit_snapshot().unwrap();
+    assert_eq!(group.completed_commits, 1);
+    assert_eq!(group.shared_sync_count, 1);
+    drop(db);
+
+    let mut reopened = Database::open(&path).unwrap();
+    assert_eq!(
+        reopened
+            .query_sql("SELECT kind FROM public.documents WHERE id = 1")
+            .unwrap()
+            .rows[0]["kind"],
+        Value::String("text".to_string())
+    );
+    drop(reopened);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn wal_group_sync_failure_rejects_commit_and_poisons_until_reopen() {
     let path = super::unique_test_dir("wal_group_sync_failure");
     let mut database = Database::open(&path).unwrap();

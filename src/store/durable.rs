@@ -543,6 +543,10 @@ impl DurableStore {
             .map_or_else(WalSyncGroupProgress::default, WalSyncGroupState::progress)
     }
 
+    pub(super) const fn wal_sync_group_active(&self) -> bool {
+        self.wal_sync_group.is_some()
+    }
+
     pub(super) fn finish_wal_sync_group(&mut self) -> Result<WalSyncGroupFlush> {
         let Some(group) = self.wal_sync_group.take() else {
             return Ok(WalSyncGroupFlush::default());

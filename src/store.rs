@@ -1901,6 +1901,12 @@ impl GraphStore {
             })
     }
 
+    pub(crate) fn wal_sync_group_active(&self) -> bool {
+        self.durable
+            .as_ref()
+            .is_some_and(DurableStore::wal_sync_group_active)
+    }
+
     pub(crate) fn finish_wal_sync_group(&mut self) -> Result<WalSyncGroupFlush> {
         let Some(durable) = &mut self.durable else {
             return Ok(WalSyncGroupFlush::default());

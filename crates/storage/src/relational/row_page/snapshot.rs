@@ -775,6 +775,7 @@ fn map_delta_error(error: RelationalRowDeltaError) -> RelationalRowPageSnapshotR
         RelationalRowDeltaError::Row(error) => map_row_error(error),
         RelationalRowDeltaError::Publication(error) => map_row_publication_error(error),
         error @ (RelationalRowDeltaError::Corrupt(_)
+        | RelationalRowDeltaError::RequiresCheckpoint { .. }
         | RelationalRowDeltaError::Invalidated(_)
         | RelationalRowDeltaError::StaleGeneration { .. }
         | RelationalRowDeltaError::StaleBase { .. }) => {

@@ -159,15 +159,20 @@ impl Database {
             prepared.statement,
             crate::sql::SqlStatement::Select(_) | crate::sql::SqlStatement::Explain(_)
         ) {
-            let output = crate::relational_sql::execute_relational_query_sql_with_runtime(
+            let query_result = crate::relational_sql::execute_relational_query_sql_with_runtime(
                 sql_text,
                 parameters,
                 self.store.relational_state(),
-                super::relational_index_read_mode(&self.config, &self.store),
+                crate::relational_sql::RelationalQueryReadModes::new(
+                    super::relational_index_read_mode(&self.config, &self.store),
+                    crate::relational_sql::RelationalRowReadMode::Store(&self.store),
+                ),
                 super::relational_query_limits(&self.config, max_rows),
                 &self.config.execution_memory,
                 None,
-            )?;
+            );
+            self.store.poison_on_storage_error(&query_result);
+            let output = query_result?;
             return Ok(QueryOutput { rows: output.rows });
         }
 
@@ -177,6 +182,7 @@ impl Database {
         let summary = self
             .store
             .commit_relational_transaction(&mut self.catalog, transaction)?;
+        self.complete_required_relational_row_checkpoint("SQL commit")?;
         Ok(QueryOutput { rows: summary.rows })
     }
 

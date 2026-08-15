@@ -3346,6 +3346,43 @@ fn relational_row_change_capture_limit_invalidates_without_rejecting_canonical_s
 }
 
 #[test]
+fn relational_schema_change_requires_a_canonical_row_checkpoint() {
+    let base = RelationalState::default()
+        .stage_transaction(
+            create_upsert_table(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("create schema-change table");
+    let (next, capture) = base
+        .stage_transaction_with_row_changes(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::AddColumn {
+                    table: "documents".to_string(),
+                    column: RelationalColumnSchema {
+                        name: "kind".to_string(),
+                        scalar_type: RelationalScalarType::Text,
+                        nullable: false,
+                        default: Some(RelationalValue::Text("text".to_string())),
+                    },
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            RelationalRowChangeCaptureLimits::default(),
+        )
+        .expect("schema change remains a valid canonical mutation");
+
+    assert_eq!(next.table_schema("documents").unwrap().columns.len(), 4);
+    assert_eq!(
+        capture,
+        RelationalRowChangeCapture::RequiresCheckpoint {
+            tables: vec!["documents".to_string()]
+        }
+    );
+}
+
+#[test]
 fn relational_schema_rejects_reserved_and_duplicate_index_names() {
     for name in [
         "",

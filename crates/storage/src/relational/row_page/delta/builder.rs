@@ -380,11 +380,14 @@ impl RelationalRowDeltaBuilder {
         capture: RelationalRowChangeCapture,
     ) -> Result<(), RelationalRowDeltaError> {
         self.require_current_or_next_epoch(epoch)?;
-        let RelationalRowChangeCapture::Captured { changes, .. } = capture else {
-            let RelationalRowChangeCapture::Invalidated { reason } = capture else {
-                unreachable!()
-            };
-            return Err(RelationalRowDeltaError::Invalidated(reason));
+        let changes = match capture {
+            RelationalRowChangeCapture::Captured { changes, .. } => changes,
+            RelationalRowChangeCapture::RequiresCheckpoint { tables } => {
+                return Err(RelationalRowDeltaError::RequiresCheckpoint { tables });
+            }
+            RelationalRowChangeCapture::Invalidated { reason } => {
+                return Err(RelationalRowDeltaError::Invalidated(reason));
+            }
         };
         if epoch == self.base.source_commit_epoch && !changes.is_empty() {
             return Err(RelationalRowDeltaError::Corrupt(
