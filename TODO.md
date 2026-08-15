@@ -122,6 +122,11 @@ crash; read-only recovery remains fail closed.
     evidence for shorter and empty whole-document replacement, duplicate-order
     statement rollback, graph/document count agreement, live visibility, and
     checkpoint/reopen identity. Remaining `partial` callers stay blocked.
+    The `patch_source_chunks_space` caller now has complete mixed-transaction
+    evidence for graph/document workspace agreement, read-your-own-writes,
+    exact chunk-count and payload preservation, missing-owner no-op behavior,
+    live visibility, and checkpoint/reopen identity. The other `partial`
+    callers remain blocked on their own qualification evidence.
   - Require checkpoint/reopen, WAL replay, corruption, cancellation, and
     locking evidence before enabling the path by default. Prove that a declared
     bounded workload runs within the supported 512 MiB low-memory profile, but

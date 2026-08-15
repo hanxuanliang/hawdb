@@ -587,6 +587,19 @@ mod tests {
     }
 
     #[test]
+    fn source_ownership_move_is_bound_to_mixed_transaction_evidence() {
+        let corpus = nowledge_content_store_sql_corpus().unwrap();
+        let caller = corpus
+            .source_inventory
+            .iter()
+            .find(|caller| caller.symbol == "patch_source_chunks_space")
+            .expect("source ownership caller must be inventoried");
+        assert_eq!(caller.coverage, ContentStoreSqlCallerCoverage::Covered);
+        assert!(caller.note.contains("ownership move atomically"));
+        assert!(caller.note.contains("checkpoint/reopen"));
+    }
+
+    #[test]
     fn content_store_mutations_stage_through_the_public_sql_path() {
         let corpus = nowledge_content_store_sql_corpus().expect("valid content-store corpus");
         let mut database = materialized_content_store();

@@ -308,6 +308,18 @@ execute through the same frozen SQL statements used by the caller inventory;
 the evidence also checks chunk identity, order, offsets, token counts,
 non-ASCII heading metadata, and caller-supplied content hashes.
 
+The runner then qualifies `patch_source_chunks_space` without introducing a
+route-specific ownership API. It seeds an exact Source chunk set, executes the
+graph `Source.space_id` update and frozen relational
+`update_source_document_space` statement in one mixed transaction, and reads
+the joined chunks before commit to prove read-your-own-writes. The published
+view MUST expose graph and relational ownership at the same commit epoch while
+preserving chunk count, ordering, text, token count, metadata, and content
+hashes. A missing Source is an explicit no-op that MUST NOT advance the commit
+epoch. The live row overlay and checkpoint/reopen result MUST have identical
+ordered output and payload digests. `SkeinContentSourceOwnershipMove.tla`
+models the durable publication boundary and the missing-owner no-op.
+
 This gate deliberately covers the selected storage lifecycle, transaction,
 locking, cancellation, injected corruption, and synthetic resource evidence;
 it does not claim complete Content Store cutover. Callers still marked

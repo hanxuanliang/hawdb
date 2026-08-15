@@ -1359,6 +1359,13 @@ checkpoint binding, demand-read, lifecycle, or serving obligations.
   duplicate order proves statement rollback; an empty replacement proves zero
   rows and counts. Both phases checkpoint, reopen, and retain identical ordered
   output digests. `SkeinContentSourceReplacement.tla` models this operation.
+  Source ownership qualification reseeds an exact chunk set after the empty
+  replacement and executes the graph Source and relational document workspace
+  updates in one mixed transaction. It proves read-your-own-writes, graph and
+  relational owner agreement, unchanged chunk count and payload digest, live
+  overlay visibility, checkpoint/reopen identity, and a missing-owner no-op
+  that does not advance the commit epoch.
+  `SkeinContentSourceOwnershipMove.tla` models this operation.
 - `SkeinRowRecovery.tla`: checkpoint-correlated row-root mount, exact ordered
   primary-key WAL overlay, graph-only epoch advancement, whole-fragment
   admission, fail-closed invalidation, complete-prefix view publication, cold

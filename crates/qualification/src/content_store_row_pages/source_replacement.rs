@@ -102,6 +102,23 @@ pub(super) fn qualify_source_chunk_replacement(
     ))
 }
 
+pub(super) fn seed_source_chunks_for_followup(
+    database: &mut Database,
+    corpus: &ContentStoreSqlCorpus,
+    chunk_count: usize,
+    chunk_payload_bytes: usize,
+) -> Result<u64> {
+    Ok(replace_source_chunks(
+        database,
+        corpus,
+        chunk_count,
+        chunk_payload_bytes,
+        "ownership-seed",
+        false,
+    )?
+    .committed_epoch)
+}
+
 struct ReplacementOutcome {
     database: Database,
     report: ContentStoreSourceReplacementPhaseReport,

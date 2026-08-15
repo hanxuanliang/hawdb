@@ -351,6 +351,12 @@ pub(super) fn source_id_parameters() -> BTreeMap<String, Value> {
     )])
 }
 
+pub(super) fn source_space_parameters(space_id: &str) -> BTreeMap<String, Value> {
+    let mut parameters = source_id_parameters();
+    parameters.insert("space_id".to_string(), Value::String(space_id.to_string()));
+    parameters
+}
+
 fn graph_identity_parameters(id_name: &str, id: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([
         (id_name.to_string(), Value::String(id.to_string())),

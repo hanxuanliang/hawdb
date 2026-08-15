@@ -17,6 +17,7 @@ rust_library(
         "src/content_store_row_pages/fixture.rs",
         "src/content_store_row_pages/isolation.rs",
         "src/content_store_row_pages/resource.rs",
+        "src/content_store_row_pages/source_ownership.rs",
         "src/content_store_row_pages/source_replacement.rs",
         "src/content_store_row_pages/tests.rs",
         "src/content_store_row_pages/transaction.rs",
