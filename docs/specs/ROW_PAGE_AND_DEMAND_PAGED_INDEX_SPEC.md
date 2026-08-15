@@ -14,6 +14,11 @@ artifacts remain valid derived-projection experiments. They MUST NOT become a
 recovery dependency or a second canonical writer without a new specification
 and workload evidence.
 
+Skein has not shipped a durable storage format. This specification therefore
+defines one destructive v1: readers MUST reject bytes that do not satisfy the
+current v1 contract and MUST NOT add legacy magic, version fallbacks, migration
+branches, or compatibility facades.
+
 Normative `MUST`, `MUST NOT`, `SHOULD`, and `MAY` clauses take precedence over
 descriptive implementation notes, per [`README.md`](README.md).
 
@@ -166,7 +171,7 @@ checked on first access. The sequential slot writer uses constant
 page-accounting metadata; it does not retain a page-id set or offset directory
 proportional to index size.
 
-The relational demand reader implements step 3.
+The relational index demand reader implements step 3.
 Exact-key traversal reads one root-to-leaf path; leading composite-key prefix
 traversal skips subtrees whose upper bound precedes the encoded prefix and
 stops after the contiguous prefix range. Oversized postings are streamed from
@@ -399,8 +404,10 @@ row-page split target. It separately limits columns, key bytes, row bytes,
 inline-value bytes, logical overflow bytes, and projected-field count. The
 encoder applies the same limits as the decoder and rejects a page before
 accumulating payload beyond the page budget. Checkpoint-bound roots now use the
-codec as a recovery dependency. SQL serving, shared-cache admission, projected
-field decoding, and late hydration remain separate activation stages.
+codec as a recovery dependency. Shared-cache admission, projected field
+decoding, and selected-field late hydration are implemented by the typed
+generation-pinned demand reader. SQL selection and recovery/live overlay merge
+remain a separate activation stage.
 
 ### Relational overflow-root v1 publication
 
@@ -969,6 +976,53 @@ doctor/deep-scrub mode visits every reachable page and projection artifact.
 8. Oversized pages are rejected before insertion. The cache MUST NOT exceed its
    capacity in order to admit one exceptional entry.
 
+### Relational row-page demand reads
+
+`RelationalRowPageDemandReader` pins one exact row-root and overflow-root pair;
+it never follows an independent latest selector. Point lookup binary-searches
+the bounded root descriptors, reads one selected physical slot, binary-searches
+its row directory, and decodes only the requested field ordinals. Ordered range
+lookup starts at the first matching descriptor and streams rows through a
+callback. It applies the lower bound only to the first page, stops before a page
+whose lower bound is beyond the upper bound, and does not collect rows or drain
+later pages after callback stop.
+
+Each operation independently admits descriptor-search height, row-page count,
+fixed slot bytes, decoded rows, one-page pin residency, cancellation, and the
+existing compressed/decompressed overflow hydration ledger. A callback result
+is provisional until the range method returns `Ok`. Page, byte, tree-height,
+row, overflow-hydration, and cache-residency admission failures do not poison
+the reader. Descriptor, page, checksum, immutable cache identity, generation,
+and overflow corruption or durability failure poison it; concurrent operations
+observe that poison at their next cancellation checkpoint and emit no later
+row.
+
+The shared cache key uses store id, the descriptor's physical generation and
+slot, CRC32C content identity, and `RelationalRowPageSlot` representation. The
+physical rather than logical root generation is required because a clean COW
+descriptor may retain a page from an older immutable artifact. A hit and a miss
+both validate CRC32C, SHA-256, page id, physical generation, source epoch, row
+count, encoded length, and key bounds before decoding. An entry-too-large or
+temporarily all-pinned cache falls back to the same one-operation slot buffer;
+it never expands cache capacity. At most one slot `Arc` is retained by a cursor
+wave, and cancellation, error, callback stop, or unwind drops it.
+
+Projected decode validates the selected row's complete slot layout but
+materializes only requested values. An overflow descriptor is resolved only if
+its field was selected, so unselected text, JSON, binary, or vector payloads are
+not read, decompressed, or cloned. All selected overflow values in one row stage
+against a private copy of the hydration ledger; a later field failure publishes
+neither partial row values nor partial budget charges. Reports separate
+descriptor reads, logical page and slot bytes, physical file reads, cache
+hits/misses/rejections, decoded and emitted rows, hydration bytes, peak pins,
+and early stop.
+
+This typed reader currently covers one immutable checkpoint base. It MUST NOT be
+selected by SQL until the activation layer binds the same canonical checkpoint
+and merges its exact recovery and live row changes under the statement budget.
+Serving a base-only reader at a later visible epoch would be stale and is
+forbidden.
+
 The current relational shadow reader uses the existing shared `SegmentCache`
 for immutable base-page slots and WAL recovery-delta pages. Cache entries retain
 the complete physical identity: store, manifest or delta generation, page
@@ -1143,6 +1197,10 @@ checkpoint binding, demand-read, lifecycle, or serving obligations.
   overflow closure, run-before-generation-manifest durability, row-root and
   previous-delta fencing, manifest-last selection, crash isolation, poisoned
   candidate rejection, and pinned generation stability.
+- `SkeinRelationalRowDemandRead.tla`: exact root-generation pinning, cold page
+  residency, ordered streaming, page/byte/row/tree-height/hydration bounds,
+  requested-field-only overflow hydration, one-page pins, cancellation and
+  panic cleanup, cache eviction safety, and corruption-only poison.
 - `SkeinPageCacheAdmission.tla`: clean immutable page residency, pin-safe
   eviction, cancellation release, caller-carved foreground reserve, corrupt
   admission rejection, cold open, and background hit/admit/bypass progress.

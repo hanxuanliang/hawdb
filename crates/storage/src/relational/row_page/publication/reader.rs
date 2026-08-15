@@ -9,6 +9,10 @@ use crate::relational::{
     ordered_key::encode_ordered_relational_key, ImmutableRelationalRowPage, RelationalKey,
     RelationalOverflowRootBinding, RelationalOverflowRootReader, RelationalRowPageView,
 };
+use crate::{
+    ContentDigest, ManifestGeneration, RepresentationKind, SegmentCache, SegmentCacheError,
+    SegmentCacheKey, StoreId,
+};
 use skein_integrity::integrity_digest;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
@@ -20,6 +24,13 @@ pub struct RelationalRowPageRootReader {
     directory: PathBuf,
     pub(super) manifest: Arc<RelationalRowPageRootManifest>,
     config: RelationalRowPagePublicationConfig,
+}
+
+pub(crate) struct RelationalRowPageSlotRead {
+    pub bytes: Arc<[u8]>,
+    pub cache_hit: bool,
+    pub cache_miss: bool,
+    pub cache_admission_rejected: bool,
 }
 
 impl RelationalRowPageRootReader {
@@ -130,6 +141,18 @@ impl RelationalRowPageRootReader {
         table: &str,
         primary_key: &RelationalKey,
     ) -> Result<Option<RelationalRowPageRootDescriptor>, RelationalRowPagePublicationError> {
+        self.find_table_page_descriptor_accounted(table, primary_key)
+            .map(|(descriptor, _)| descriptor.map(|(_, descriptor)| descriptor))
+    }
+
+    pub(crate) fn find_table_page_descriptor_accounted(
+        &self,
+        table: &str,
+        primary_key: &RelationalKey,
+    ) -> Result<
+        (Option<(u64, RelationalRowPageRootDescriptor)>, usize),
+        RelationalRowPagePublicationError,
+    > {
         let encoded_key = encode_ordered_relational_key(primary_key).map_err(|error| {
             RelationalRowPagePublicationError::Admission(format!(
                 "row-page lookup key cannot be encoded: {error}"
@@ -144,7 +167,7 @@ impl RelationalRowPageRootReader {
         }
         let table_root = self.table_root(table)?;
         if table_root.page_count == 0 {
-            return Ok(None);
+            return Ok((None, 0));
         }
         let mut descriptors = File::open(self.descriptor_path())
             .map_err(durability("open row-page root descriptor artifact"))?;
@@ -153,6 +176,7 @@ impl RelationalRowPageRootReader {
 
         let mut lower = 0u64;
         let mut upper = table_root.page_count;
+        let mut descriptor_reads = 0usize;
         while lower < upper {
             let middle = lower + (upper - lower) / 2;
             let descriptor = self.read_table_page_descriptor_from(
@@ -162,6 +186,11 @@ impl RelationalRowPageRootReader {
                 table_root,
                 middle,
             )?;
+            descriptor_reads = descriptor_reads.checked_add(1).ok_or_else(|| {
+                RelationalRowPagePublicationError::Admission(
+                    "row-page descriptor read counter overflow".to_string(),
+                )
+            })?;
             if descriptor.upper_bound.as_slice() < encoded_key.as_slice() {
                 lower = middle.checked_add(1).ok_or_else(|| {
                     RelationalRowPagePublicationError::Corrupt(
@@ -173,20 +202,79 @@ impl RelationalRowPageRootReader {
             }
         }
         let ordinal = lower.min(table_root.page_count - 1);
-        self.read_table_page_descriptor_from(
+        let descriptor = self.read_table_page_descriptor_from(
             &mut descriptors,
             &mut keys,
             table,
             table_root,
             ordinal,
-        )
-        .map(Some)
+        )?;
+        descriptor_reads = descriptor_reads.checked_add(1).ok_or_else(|| {
+            RelationalRowPagePublicationError::Admission(
+                "row-page descriptor read counter overflow".to_string(),
+            )
+        })?;
+        Ok((Some((ordinal, descriptor)), descriptor_reads))
     }
 
     pub fn read_page(
         &self,
         descriptor: &RelationalRowPageRootDescriptor,
     ) -> Result<ImmutableRelationalRowPage, RelationalRowPagePublicationError> {
+        let slot = self.read_page_slot_bytes(descriptor)?;
+        let view = self.validate_page_slot(descriptor, &slot)?;
+        ImmutableRelationalRowPage::decode_view(view).map_err(Into::into)
+    }
+
+    pub(crate) fn read_page_slot_accounted(
+        &self,
+        descriptor: &RelationalRowPageRootDescriptor,
+        cache: &SegmentCache,
+        store_id: StoreId,
+    ) -> Result<RelationalRowPageSlotRead, RelationalRowPagePublicationError> {
+        let cache_key = SegmentCacheKey {
+            store_id,
+            manifest_generation: ManifestGeneration(descriptor.physical_generation),
+            segment_id: descriptor.physical_slot,
+            content_digest: ContentDigest(descriptor.slot_integrity.slot_crc32c as u64),
+            representation: RepresentationKind::RelationalRowPageSlot,
+        };
+        if let Some(lease) = cache.get(&cache_key) {
+            let bytes = lease.into_arc();
+            self.validate_page_slot(descriptor, &bytes)?;
+            return Ok(RelationalRowPageSlotRead {
+                bytes,
+                cache_hit: true,
+                cache_miss: false,
+                cache_admission_rejected: false,
+            });
+        }
+        let bytes: Arc<[u8]> = self.read_page_slot_bytes(descriptor)?.into();
+        self.validate_page_slot(descriptor, &bytes)?;
+        match cache.insert(cache_key, Arc::clone(&bytes)) {
+            Ok(lease) => Ok(RelationalRowPageSlotRead {
+                bytes: lease.into_arc(),
+                cache_hit: false,
+                cache_miss: true,
+                cache_admission_rejected: false,
+            }),
+            Err(SegmentCacheError::EntryTooLarge { .. })
+            | Err(SegmentCacheError::PinnedCapacity { .. }) => Ok(RelationalRowPageSlotRead {
+                bytes,
+                cache_hit: false,
+                cache_miss: true,
+                cache_admission_rejected: true,
+            }),
+            Err(error) => Err(RelationalRowPagePublicationError::Corrupt(format!(
+                "row-page cache rejected immutable slot identity: {error}"
+            ))),
+        }
+    }
+
+    fn read_page_slot_bytes(
+        &self,
+        descriptor: &RelationalRowPageRootDescriptor,
+    ) -> Result<Vec<u8>, RelationalRowPagePublicationError> {
         let page_bytes = self.config.page_limits.max_page_bytes.get() as u64;
         let offset = descriptor
             .physical_slot
@@ -207,7 +295,15 @@ impl RelationalRowPageRootReader {
         artifact
             .read_exact(&mut slot)
             .map_err(durability("read row-page generation slot"))?;
-        let digest = integrity_digest(&slot);
+        Ok(slot)
+    }
+
+    fn validate_page_slot<'a>(
+        &self,
+        descriptor: &RelationalRowPageRootDescriptor,
+        slot: &'a [u8],
+    ) -> Result<RelationalRowPageView<'a>, RelationalRowPagePublicationError> {
+        let digest = integrity_digest(slot);
         if digest.crc32c.get() != descriptor.slot_integrity.slot_crc32c
             || digest.sha256 != descriptor.slot_integrity.slot_sha256
         {
@@ -216,7 +312,7 @@ impl RelationalRowPageRootReader {
                 descriptor.logical_page_id.get()
             )));
         }
-        let view = RelationalRowPageView::open_slot(&slot, self.config.page_limits)?;
+        let view = RelationalRowPageView::open_slot(slot, self.config.page_limits)?;
         if view.page_id() != descriptor.logical_page_id
             || view.generation() != descriptor.physical_generation
             || view.source_commit_epoch() != descriptor.source_commit_epoch
@@ -230,7 +326,7 @@ impl RelationalRowPageRootReader {
                 descriptor.logical_page_id.get()
             )));
         }
-        ImmutableRelationalRowPage::decode_view(view).map_err(Into::into)
+        Ok(view)
     }
 
     pub fn visit_table_pages<F>(

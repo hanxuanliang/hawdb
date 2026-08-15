@@ -9,6 +9,7 @@ use std::fmt;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 mod delta;
+mod demand;
 mod live;
 mod mutation;
 mod publication;
@@ -23,6 +24,13 @@ pub use delta::{
     DEFAULT_RELATIONAL_ROW_DELTA_DIRTY_BYTES, DEFAULT_RELATIONAL_ROW_DELTA_DIRTY_ENTRIES,
     DEFAULT_RELATIONAL_ROW_DELTA_MANIFEST_BYTES, DEFAULT_RELATIONAL_ROW_DELTA_RUNS,
     DEFAULT_RELATIONAL_ROW_DELTA_RUN_BYTES, RELATIONAL_ROW_DELTA_MANIFEST_FILE,
+};
+pub use demand::{
+    RelationalRowPageDemandReadError, RelationalRowPageDemandReadLimits,
+    RelationalRowPageDemandReadReport, RelationalRowPageDemandReader,
+    RelationalRowPageProjectedRange, DEFAULT_RELATIONAL_ROW_PAGE_READ_BYTES,
+    DEFAULT_RELATIONAL_ROW_PAGE_READ_PAGES, DEFAULT_RELATIONAL_ROW_PAGE_READ_PINS,
+    DEFAULT_RELATIONAL_ROW_PAGE_READ_ROWS, DEFAULT_RELATIONAL_ROW_PAGE_READ_TREE_HEIGHT,
 };
 pub use live::{
     RelationalRowPageCheckpointError, RelationalRowPageLiveError, RelationalRowPageReadView,
@@ -507,6 +515,34 @@ impl<'a> RelationalRowPageView<'a> {
             }
         }
         Ok(None)
+    }
+
+    fn lower_bound_row(
+        &self,
+        primary_key: &RelationalKey,
+        inclusive: bool,
+    ) -> Result<usize, RelationalRowPageError> {
+        let encoded = encode_ordered_relational_key(primary_key)
+            .map_err(|error| RelationalRowPageError::Admission(error.to_string()))?;
+        if encoded.len() > self.limits.max_key_bytes.get() {
+            return Err(RelationalRowPageError::Admission(format!(
+                "range key contains {} bytes, exceeding limit {}",
+                encoded.len(),
+                self.limits.max_key_bytes
+            )));
+        }
+        let mut lower = 0usize;
+        let mut upper = self.row_count;
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2;
+            let ordering = self.key(middle)?.cmp(encoded.as_slice());
+            if ordering.is_lt() || (!inclusive && ordering.is_eq()) {
+                lower = middle + 1;
+            } else {
+                upper = middle;
+            }
+        }
+        Ok(lower)
     }
 
     pub fn decode_row(&self, ordinal: usize) -> Result<RelationalRow, RelationalRowPageError> {

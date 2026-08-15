@@ -99,16 +99,10 @@ dependency.
 - [ ] Add Windows rename, reopen, backup, and reclaim fault-injection coverage
   for the exact canonical row/overflow-root path.
 
-- [ ] Demand-page relational rows and large values.
-  - Support primary-key point reads, admitted ordered pages, and bounded range
-    cursors through the shared byte-bounded page cache.
-  - Enforce row, page, byte, pin, tree-height, and cancellation limits. Pin
-    lifetime is at most one cursor window or pipeline wave.
-  - Decode only required fields. Reading a projected overflow field hydrates
-    only that value; an unprojected text, JSON, binary, or vector payload must
-    not be read, decoded, or cloned.
-
 - [ ] Activate canonical row pages for the first Mem relational tables.
+  - Bind the checkpoint-pinned row demand reader to the exact recovery/live row
+    view before SQL selection; a base-only reader must never serve a later
+    visible epoch.
   - Qualify `content_documents` and `thread_messages` first, then
     `content_chunks` and `content_anchors`, using the frozen PostgreSQL statement
     corpus and one pinned graph-plus-relational epoch.
