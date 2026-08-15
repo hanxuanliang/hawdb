@@ -74,8 +74,13 @@ through `NowledgeMemEmbeddedStoreHandle`, applies an explicit out-of-core
 and emits `skein-production-graph-storage-qualification-v1`. The report stores
 only query and parameter digests, retains the bound raw storage profile, and
 fails readiness on admission rejection, permit leakage, overcommit, stale
-identity, or any resource-profile blocker. A CLI may transport this report,
-but it MUST NOT replace the typed function in the production host.
+identity, or any resource-profile blocker. When a persistent graph index class
+is under qualification, the typed requirement additionally binds a reference
+result digest and row count plus per-run page and byte budgets. Every run must
+observe that exact class through the store-owned read counters; the bounded
+streaming digest consumer does not retain or serialize result rows. A CLI may
+transport this report, but it MUST NOT replace the typed function in the
+production host.
 
 Default reports MUST redact local paths, query text, parameters, row payloads,
 embeddings, credentials, and raw parser or I/O payload fragments. Debug-only

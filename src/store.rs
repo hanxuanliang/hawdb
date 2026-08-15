@@ -32,6 +32,8 @@ mod graph_checkpoint;
 mod graph_columnar_shadow;
 #[path = "store/graph_commit.rs"]
 mod graph_commit;
+#[path = "store/graph_index_metrics.rs"]
+mod graph_index_metrics;
 #[path = "store/graph_indexes.rs"]
 mod graph_indexes;
 #[path = "store/graph_mutation.rs"]
@@ -96,6 +98,8 @@ pub use graph_columnar_shadow::{
     ColumnarShadowAdmission, ColumnarShadowCheckpointReport, ColumnarShadowCheckpointStatus,
     ColumnarShadowRecoveryStatus, COLUMN_GROUP_SHADOW_DIR,
 };
+use graph_index_metrics::GraphIndexReadMetrics;
+pub use graph_index_metrics::{GraphIndexReadMetricsSnapshot, PersistentGraphIndexClass};
 pub use read_view::PublishedReadView;
 use relational_index_shadow::RelationalIndexShadowState;
 pub(crate) use relational_index_shadow::RelationalTransactionIndexView;
@@ -919,6 +923,7 @@ pub struct GraphStore {
     canonical_base: Option<CanonicalSegmentReader>,
     canonical_adjacency: Option<CanonicalAdjacencyReader>,
     persistent_property_projection: Option<PersistentPropertyProjectionReader>,
+    graph_index_read_metrics: Arc<GraphIndexReadMetrics>,
     canonical_base_out_of_core: bool,
     node_tombstones: CowSegment<BTreeSet<NodeId>>,
     relationship_tombstones: CowSegment<BTreeSet<RelId>>,
@@ -971,6 +976,7 @@ pub struct StorageResidencyReport {
     pub segment_cache_eviction_count: u64,
     pub segment_cache_admission_rejection_count: u64,
     pub segment_cache_digest_mismatch_count: u64,
+    pub graph_index_reads: GraphIndexReadMetricsSnapshot,
 }
 
 pub struct GraphNodeIterator {
@@ -1747,6 +1753,7 @@ impl GraphStore {
             canonical_base: None,
             canonical_adjacency: None,
             persistent_property_projection: None,
+            graph_index_read_metrics: Arc::new(GraphIndexReadMetrics::default()),
             canonical_base_out_of_core: false,
             node_tombstones: CowSegment::default(),
             relationship_tombstones: CowSegment::default(),
@@ -2041,6 +2048,7 @@ impl GraphStore {
             canonical_base: self.canonical_base.clone(),
             canonical_adjacency: self.canonical_adjacency.clone(),
             persistent_property_projection: self.persistent_property_projection.clone(),
+            graph_index_read_metrics: Arc::clone(&self.graph_index_read_metrics),
             canonical_base_out_of_core: self.canonical_base_out_of_core,
             node_tombstones: self.node_tombstones.clone(),
             relationship_tombstones: self.relationship_tombstones.clone(),
@@ -5506,11 +5514,12 @@ mod tests {
         AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, CheckpointPublishStage,
         ConnectedNodesCreate, CowSegmentedMap, DatabaseDoctor, DegreeStatisticsEntry,
         DegreeStatisticsKey, DurableCompression, GraphScanControl, GraphStore, NodeId, NodeRecord,
-        NodeSetAssignment, NodeSetValue, OrderedAdjacencyEntry, ProjectedGraphDefinition,
-        PropertyFilter, RelId, RelRecord, RelTypeId, RelationshipDeleteRequest,
-        ScanPruningStrategy, ScanPruningTargetKind, SearchProjectionGraphChange,
-        SourceScanCandidateRead, WalDoctorOptions, COW_MAP_TARGET_SEGMENT_BYTES,
-        DENSE_ADJACENCY_DEGREE_THRESHOLD, DURABLE_COMPRESSION_HEADER, MANIFEST_FILE,
+        NodeSetAssignment, NodeSetValue, OrderedAdjacencyEntry, PersistentGraphIndexClass,
+        ProjectedGraphDefinition, PropertyFilter, RelId, RelRecord, RelTypeId,
+        RelationshipDeleteRequest, ScanPruningStrategy, ScanPruningTargetKind,
+        SearchProjectionGraphChange, SourceScanCandidateRead, WalDoctorOptions,
+        COW_MAP_TARGET_SEGMENT_BYTES, DENSE_ADJACENCY_DEGREE_THRESHOLD, DURABLE_COMPRESSION_HEADER,
+        MANIFEST_FILE,
     };
     use crate::schema::{Catalog, GraphStatistics, LabelId, PropertyType, TableKind};
     use crate::value::Value;
@@ -6815,6 +6824,8 @@ mod tests {
                 PersistentPropertyProjectionKind::FullText
             ));
             assert!(manifest.supports_composite_equality(label_id, &composite_properties));
+            let graph_index_reads_before = store.storage_residency_report().graph_index_reads;
+            let read_snapshot = store.snapshot();
             corrupt_offset = manifest
                 .blocks
                 .iter()
@@ -6839,7 +6850,7 @@ mod tests {
                 .unwrap();
             assert_eq!(range_ids, vec![second_id]);
             let mut equality_ids = Vec::new();
-            store
+            read_snapshot
                 .visit_nodes_by_property_owned(
                     label_id,
                     "key",
@@ -6874,6 +6885,28 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(composite_ids, vec![second_id]);
+            let graph_index_reads = store
+                .storage_residency_report()
+                .graph_index_reads
+                .delta_since(graph_index_reads_before);
+            assert_eq!(
+                graph_index_reads.operation_count(PersistentGraphIndexClass::NodeEquality),
+                1
+            );
+            assert_eq!(
+                graph_index_reads.operation_count(PersistentGraphIndexClass::NodeRange),
+                1
+            );
+            assert_eq!(
+                graph_index_reads.operation_count(PersistentGraphIndexClass::NodeFullText),
+                1
+            );
+            assert_eq!(
+                graph_index_reads.operation_count(PersistentGraphIndexClass::NodeCompositeEquality),
+                1
+            );
+            assert!(graph_index_reads.property_blocks_read >= 4);
+            assert!(graph_index_reads.property_bytes_read > 0);
 
             let second_filter = PropertyFilter::IdEq {
                 value: Value::Int(second_id.0 as i64),
@@ -7149,6 +7182,7 @@ mod tests {
                 "rank",
                 PersistentPropertyProjectionKind::RelationshipRange,
             ));
+            let graph_index_reads_before = store.storage_residency_report().graph_index_reads;
             corrupt_offset = manifest
                 .blocks
                 .iter()
@@ -7185,6 +7219,32 @@ mod tests {
                             if property == "rank"
                     )
             }));
+            let mut outgoing_ids = Vec::new();
+            store
+                .visit_adjacent_relationships_owned(
+                    source,
+                    Some(rel_type),
+                    AdjacencyDirection::Outgoing,
+                    |relationship| {
+                        outgoing_ids.push(relationship.id);
+                        GraphScanControl::Continue
+                    },
+                )
+                .unwrap();
+            assert_eq!(outgoing_ids.len(), 3);
+            let mut incoming_ids = Vec::new();
+            store
+                .visit_adjacent_relationships_owned(
+                    targets[1],
+                    Some(rel_type),
+                    AdjacencyDirection::Incoming,
+                    |relationship| {
+                        incoming_ids.push(relationship.id);
+                        GraphScanControl::Continue
+                    },
+                )
+                .unwrap();
+            assert_eq!(incoming_ids, vec![second_relationship]);
 
             store
                 .set_relationship_property(
@@ -7250,6 +7310,30 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(ids, vec![second_relationship]);
+            let graph_index_reads = store
+                .storage_residency_report()
+                .graph_index_reads
+                .delta_since(graph_index_reads_before);
+            assert_eq!(
+                graph_index_reads.operation_count(PersistentGraphIndexClass::RelationshipEquality),
+                2
+            );
+            assert_eq!(
+                graph_index_reads.operation_count(PersistentGraphIndexClass::RelationshipRange),
+                1
+            );
+            assert_eq!(
+                graph_index_reads.operation_count(PersistentGraphIndexClass::ForwardAdjacency),
+                1
+            );
+            assert_eq!(
+                graph_index_reads.operation_count(PersistentGraphIndexClass::ReverseAdjacency),
+                1
+            );
+            assert!(graph_index_reads.property_blocks_read >= 2);
+            assert!(graph_index_reads.property_bytes_read > 0);
+            assert!(graph_index_reads.adjacency_blocks_read >= 2);
+            assert!(graph_index_reads.adjacency_bytes_read > 0);
         }
         {
             let mut catalog = Catalog::default();
@@ -7316,6 +7400,335 @@ mod tests {
                 "unexpected relationship property projection corruption error: {error}"
             );
         }
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn persistent_graph_indexes_match_canonical_fallbacks_and_report_each_class() {
+        let path = unique_test_dir("persistent_graph_index_differential");
+        let replay_config = WalReplayConfig {
+            residency_mode: StorageResidencyMode::OutOfCore,
+            ..WalReplayConfig::default()
+        };
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::open_with_durability_and_replay_config(
+            &path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            replay_config,
+        )
+        .unwrap();
+        store
+            .create_property_index(&mut catalog, "Memory", "key")
+            .unwrap();
+        store
+            .create_range_property_index(&mut catalog, "Memory", "rank")
+            .unwrap();
+        store
+            .create_full_text_property_index(&mut catalog, "Memory", "content")
+            .unwrap();
+        store
+            .create_composite_property_index(
+                &mut catalog,
+                "Memory",
+                &["key".to_string(), "rank".to_string()],
+            )
+            .unwrap();
+        let source = store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                properties([
+                    ("key", Value::String("first".to_string())),
+                    ("rank", Value::Int(10)),
+                    ("content", Value::String("alpha beta".to_string())),
+                ]),
+            )
+            .unwrap();
+        let second = store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                properties([
+                    ("key", Value::String("second".to_string())),
+                    ("rank", Value::Int(20)),
+                    ("content", Value::String("beta gamma".to_string())),
+                ]),
+            )
+            .unwrap();
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                properties([
+                    ("key", Value::String("third".to_string())),
+                    ("rank", Value::Int(30)),
+                    ("content", Value::String("delta".to_string())),
+                ]),
+            )
+            .unwrap();
+        let targets = (0..3)
+            .map(|ordinal| {
+                store
+                    .create_node(
+                        &mut catalog,
+                        "Entity",
+                        properties([("ordinal", Value::Int(ordinal))]),
+                    )
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let relationships = [10_i64, 20, 30]
+            .into_iter()
+            .zip(&targets)
+            .map(|(weight, target)| {
+                store
+                    .create_relationship(
+                        &mut catalog,
+                        source,
+                        *target,
+                        "LINKS_TO",
+                        properties([("weight", Value::Int(weight))]),
+                    )
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        store.checkpoint(&catalog).unwrap();
+
+        let mut oracle = store.snapshot();
+        oracle.persistent_property_projection = None;
+        oracle.canonical_adjacency = None;
+        let label_id = catalog.label_id("Memory").unwrap();
+        let rel_type = catalog.rel_type_id("LINKS_TO").unwrap();
+        let lower = (Value::Int(15), true);
+        let upper = (Value::Int(25), true);
+        let before = store.storage_residency_report().graph_index_reads;
+
+        let mut indexed_equality = Vec::new();
+        store
+            .visit_nodes_by_property_owned(
+                label_id,
+                "key",
+                &[Value::String("second".to_string())],
+                |node| {
+                    indexed_equality.push(node.id);
+                    GraphScanControl::Continue
+                },
+            )
+            .unwrap();
+        let mut oracle_equality = Vec::new();
+        oracle
+            .visit_nodes_by_property_owned(
+                label_id,
+                "key",
+                &[Value::String("second".to_string())],
+                |node| {
+                    oracle_equality.push(node.id);
+                    GraphScanControl::Continue
+                },
+            )
+            .unwrap();
+        assert_eq!(indexed_equality, oracle_equality);
+        assert_eq!(indexed_equality, vec![second]);
+
+        let mut indexed_range = Vec::new();
+        store
+            .visit_nodes_by_property_range_owned(
+                label_id,
+                "rank",
+                Some(&lower),
+                Some(&upper),
+                |node| {
+                    indexed_range.push(node.id);
+                    GraphScanControl::Continue
+                },
+            )
+            .unwrap();
+        let mut oracle_range = Vec::new();
+        oracle
+            .visit_nodes_by_property_range_owned(
+                label_id,
+                "rank",
+                Some(&lower),
+                Some(&upper),
+                |node| {
+                    oracle_range.push(node.id);
+                    GraphScanControl::Continue
+                },
+            )
+            .unwrap();
+        assert_eq!(indexed_range, oracle_range);
+
+        let mut indexed_full_text = Vec::new();
+        store
+            .visit_nodes_by_full_text_property_owned(label_id, "content", "beta", |node| {
+                indexed_full_text.push(node.id);
+                GraphScanControl::Continue
+            })
+            .unwrap();
+        let mut oracle_full_text = Vec::new();
+        oracle
+            .visit_nodes_by_full_text_property_owned(label_id, "content", "beta", |node| {
+                oracle_full_text.push(node.id);
+                GraphScanControl::Continue
+            })
+            .unwrap();
+        assert_eq!(indexed_full_text, oracle_full_text);
+
+        let predicates = [
+            ("key".to_string(), Value::String("second".to_string())),
+            ("rank".to_string(), Value::Int(20)),
+        ];
+        let mut indexed_composite = Vec::new();
+        store
+            .visit_nodes_by_composite_property_owned(label_id, &predicates, |node| {
+                indexed_composite.push(node.id);
+                GraphScanControl::Continue
+            })
+            .unwrap();
+        let mut oracle_composite = Vec::new();
+        oracle
+            .visit_nodes_by_composite_property_owned(label_id, &predicates, |node| {
+                oracle_composite.push(node.id);
+                GraphScanControl::Continue
+            })
+            .unwrap();
+        assert_eq!(indexed_composite, oracle_composite);
+
+        let equality_filter = PropertyFilter::Eq {
+            property: "weight".to_string(),
+            value: Value::Int(20),
+        };
+        let range_filter = PropertyFilter::Range {
+            property: "weight".to_string(),
+            lower: Some(lower.clone()),
+            upper: Some(upper.clone()),
+        };
+        let mut indexed_relationship_equality = Vec::new();
+        store
+            .visit_adjacent_relationships_with_filter_owned(
+                source,
+                Some(rel_type),
+                AdjacencyDirection::Outgoing,
+                &equality_filter,
+                |relationship| {
+                    indexed_relationship_equality.push(relationship.id);
+                    GraphScanControl::Continue
+                },
+            )
+            .unwrap();
+        let mut oracle_relationship_equality = Vec::new();
+        oracle
+            .visit_adjacent_relationships_with_filter_owned(
+                source,
+                Some(rel_type),
+                AdjacencyDirection::Outgoing,
+                &equality_filter,
+                |relationship| {
+                    oracle_relationship_equality.push(relationship.id);
+                    GraphScanControl::Continue
+                },
+            )
+            .unwrap();
+        assert_eq!(indexed_relationship_equality, oracle_relationship_equality);
+        assert_eq!(indexed_relationship_equality, vec![relationships[1]]);
+
+        let mut indexed_relationship_range = Vec::new();
+        store
+            .visit_adjacent_relationships_with_filter_owned(
+                source,
+                Some(rel_type),
+                AdjacencyDirection::Outgoing,
+                &range_filter,
+                |relationship| {
+                    indexed_relationship_range.push(relationship.id);
+                    GraphScanControl::Continue
+                },
+            )
+            .unwrap();
+        let mut oracle_relationship_range = Vec::new();
+        oracle
+            .visit_adjacent_relationships_with_filter_owned(
+                source,
+                Some(rel_type),
+                AdjacencyDirection::Outgoing,
+                &range_filter,
+                |relationship| {
+                    oracle_relationship_range.push(relationship.id);
+                    GraphScanControl::Continue
+                },
+            )
+            .unwrap();
+        assert_eq!(indexed_relationship_range, oracle_relationship_range);
+
+        let mut indexed_forward = Vec::new();
+        store
+            .visit_adjacent_relationships_owned(
+                source,
+                Some(rel_type),
+                AdjacencyDirection::Outgoing,
+                |relationship| {
+                    indexed_forward.push(relationship.id);
+                    GraphScanControl::Continue
+                },
+            )
+            .unwrap();
+        let mut oracle_forward = Vec::new();
+        oracle
+            .visit_adjacent_relationships_owned(
+                source,
+                Some(rel_type),
+                AdjacencyDirection::Outgoing,
+                |relationship| {
+                    oracle_forward.push(relationship.id);
+                    GraphScanControl::Continue
+                },
+            )
+            .unwrap();
+        assert_eq!(indexed_forward, oracle_forward);
+
+        let mut indexed_reverse = Vec::new();
+        store
+            .visit_adjacent_relationships_owned(
+                targets[1],
+                Some(rel_type),
+                AdjacencyDirection::Incoming,
+                |relationship| {
+                    indexed_reverse.push(relationship.id);
+                    GraphScanControl::Continue
+                },
+            )
+            .unwrap();
+        let mut oracle_reverse = Vec::new();
+        oracle
+            .visit_adjacent_relationships_owned(
+                targets[1],
+                Some(rel_type),
+                AdjacencyDirection::Incoming,
+                |relationship| {
+                    oracle_reverse.push(relationship.id);
+                    GraphScanControl::Continue
+                },
+            )
+            .unwrap();
+        assert_eq!(indexed_reverse, oracle_reverse);
+
+        let reads = store
+            .storage_residency_report()
+            .graph_index_reads
+            .delta_since(before);
+        for class in PersistentGraphIndexClass::ALL {
+            assert_eq!(reads.operation_count(class), 1, "{}", class.as_str());
+            assert!(reads.blocks_read(class) > 0, "{}", class.as_str());
+            assert!(reads.bytes_read(class) > 0, "{}", class.as_str());
+        }
+        assert!(reads.property_blocks_read >= 6);
+        assert!(reads.property_bytes_read > 0);
+        assert!(reads.adjacency_blocks_read >= 2);
+        assert!(reads.adjacency_bytes_read > 0);
+
+        drop(oracle);
+        drop(store);
         std::fs::remove_dir_all(path).unwrap();
     }
 

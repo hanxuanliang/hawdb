@@ -710,6 +710,7 @@ impl GraphStore {
             segment_cache_eviction_count: cache.eviction_count,
             segment_cache_admission_rejection_count: cache.admission_rejection_count,
             segment_cache_digest_mismatch_count: cache.digest_mismatch_count,
+            graph_index_reads: self.graph_index_read_metrics.snapshot(),
         }
     }
 

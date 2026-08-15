@@ -63,11 +63,11 @@ them; post-checkpoint WAL changes stay in the COW overlay and are merged at
 read time. Relationship equality and range predicates over a bound one-hop
 expansion use the same demand-paged artifact when its estimated global posting
 work does not exceed the endpoint adjacency work. Stable-id graph index state
-remains materialized or rebuilt in memory and remains migration work. Relational
-constraints may opt into the generation-
-bound authoritative reader, but materialized relational postings remain a
-temporary checkpoint builder and differential oracle until the next migration
-stage removes their ordinary-open residency.
+uses a separately published, fixed-page, demand-read sidecar for the ambiguous
+physical-id mapping needed by Skein Lightning. Relational constraints may opt
+into the generation-bound authoritative reader, but materialized relational
+postings remain a temporary checkpoint builder and differential oracle until
+the next migration stage removes their ordinary-open residency.
 
 The migration defined here is incremental:
 
@@ -113,6 +113,53 @@ and then streams matching overlay relationships. Unsupported or incomplete
 definitions fall back to adjacency. Corruption after selection fails closed
 and poisons the database handle. `EXPLAIN ANALYZE` records the selected
 relationship pruning strategy and candidate counts.
+
+### Persistent graph index qualification
+
+Persistent graph index selection is qualified independently for node equality,
+node range, node full-text, ordered node composite equality, relationship
+equality, relationship range, forward adjacency, and reverse adjacency. A
+class MUST NOT be declared production-qualified from logical pruning output or
+generic cache misses alone.
+
+Every selected persistent reader records monotonic process-local counters on
+the owning store. Read transactions share the same counter set as their pinned
+store snapshot. The counters identify the exact index class and accumulate
+property-projection or adjacency blocks considered, blocks pruned, blocks read,
+bytes read, decoded entries or records, returned candidates, and sparse/dense
+adjacency layouts. Canonical fallbacks MUST NOT increment a persistent-class
+counter. These counters are observability evidence only; they MUST NOT affect
+query semantics, admission, or index selection.
+
+`StorageResourceProfileReport` snapshots the counters before and after one
+streamed query and publishes only the saturating delta. A production index case
+uses a dedicated qualification handle with no concurrent query traffic and
+binds one required class to the exact production identity and canonical graph
+epoch, a redacted query and parameter digest, a precomputed reference result
+digest and row count, and explicit per-run block and byte budgets. Every
+measurement run MUST observe the required class, at least one admitted page
+read, and no digest mismatch. The runner computes the result digest through a
+bounded streaming consumer and never retains or serializes row payloads.
+
+The reference digest is created offline by the canonical fallback oracle over
+the same dataset/query identity. Runtime differential tests additionally clone
+one pinned snapshot, disable the rebuildable property and adjacency readers on
+the oracle copy, and require exact result parity for all eight classes. This
+test-only oracle MUST NOT become a production query switch.
+
+Production qualification of one class does not activate another. Each class
+requires evidence bound to the same current generation for:
+
+1. exact differential parity against the canonical fallback;
+2. checkpoint/reopen and complete WAL-overlay recovery;
+3. cold/warm cache, page, byte, pin, cancellation, and corruption behavior;
+4. the production-shaped resource and result-digest run.
+
+Missing evidence, stale generation evidence, or an index/row generation
+mismatch leaves that class unqualified while other classes may remain
+qualified. Once a selected page reports corruption, the read fails closed and
+the handle is poisoned; it MUST NOT retry through the canonical fallback.
+`SkeinGraphIndexQualification.tla` models this independent evidence gate.
 
 The immutable index-page codec is the first format-only slice of step 1. It
 defines generation-tagged root, interior, leaf, and posting pages. Every page

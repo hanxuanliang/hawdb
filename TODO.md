@@ -191,6 +191,16 @@ crash; read-only recovery remains fail closed.
     cache-budget, and production-shaped evidence; derived BM25, vector,
     statistics, analytics, and optional columnar projections remain outside
     canonical recovery.
+  - The core differential oracle now compares all eight selected persistent
+    readers with canonical fallbacks on one pinned snapshot. Store-owned atomic
+    counters survive read-snapshot cloning and expose per-class operations plus
+    property/adjacency block, byte, decode, candidate, and layout totals through
+    storage resource profiles. The typed production runner can bind one required
+    class to an offline reference digest/row count and per-run block/byte
+    budgets without retaining result rows. `SkeinGraphIndexQualification.tla`
+    proves independent same-generation evidence gating and fail-closed selected
+    corruption. Retain this item until production-replica cases for every class
+    and cold/warm, cancellation, and constrained-cache evidence are checked in.
 
 ## P1: PostgreSQL-Dialect Relational Content Store
 

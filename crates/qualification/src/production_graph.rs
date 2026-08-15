@@ -4,9 +4,10 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use skein::{
     IoConcurrencyBudget, NowledgeGraphStatement, NowledgeMemEmbeddedStoreHandle,
-    NowledgeMemGraphMode, NowledgeMemOpenOptions, ProductionEvidenceBinding,
-    ProductionQualificationIdentity, RuntimeGovernor, RuntimeGovernorConfig, StorageDeviceProfile,
-    StorageResourceProfileLimits, StorageResourceProfileReport, Value,
+    NowledgeMemGraphMode, NowledgeMemOpenOptions, NowledgeMemReadOptions,
+    PersistentGraphIndexClass, ProductionEvidenceBinding, ProductionQualificationIdentity,
+    RuntimeGovernor, RuntimeGovernorConfig, StorageDeviceProfile, StorageResourceProfileLimits,
+    StorageResourceProfileReport, Value,
 };
 use skein_query::QueryIdentity;
 use std::error::Error;
@@ -25,6 +26,7 @@ pub struct ProductionGraphStorageQualificationConfig {
     pub evidence_binding: ProductionEvidenceBinding,
     pub expected_identity: ProductionQualificationIdentity,
     pub measurement_runs: usize,
+    pub persistent_index_requirement: Option<PersistentGraphIndexProductionRequirement>,
 }
 
 impl ProductionGraphStorageQualificationConfig {
@@ -54,10 +56,38 @@ impl ProductionGraphStorageQualificationConfig {
                 "production graph qualification measurement_runs must be greater than zero",
             ));
         }
+        if let Some(requirement) = &self.persistent_index_requirement {
+            requirement.validate()?;
+        }
         validate_production_identity_for_current_target(
             &self.evidence_binding,
             &self.expected_identity,
         )?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistentGraphIndexProductionRequirement {
+    pub class: PersistentGraphIndexClass,
+    pub reference_output_digest: String,
+    pub reference_output_rows: usize,
+    pub max_blocks_read_per_run: u64,
+    pub max_bytes_read_per_run: u64,
+}
+
+impl PersistentGraphIndexProductionRequirement {
+    fn validate(&self) -> Result<(), ProductionGraphQualificationError> {
+        if !valid_sha256_digest(&self.reference_output_digest) {
+            return Err(ProductionGraphQualificationError::new(
+                "persistent graph index reference_output_digest must be a sha256 digest",
+            ));
+        }
+        if self.max_blocks_read_per_run == 0 || self.max_bytes_read_per_run == 0 {
+            return Err(ProductionGraphQualificationError::new(
+                "persistent graph index read budgets must be greater than zero",
+            ));
+        }
         Ok(())
     }
 }
@@ -105,6 +135,22 @@ pub struct ProductionGraphExecutionSummary {
     pub latency: LatencyPercentiles,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PersistentGraphIndexProductionEvidence {
+    pub class: String,
+    pub reference_output_digest: String,
+    pub observed_output_digest: String,
+    pub reference_output_rows: usize,
+    pub observed_output_rows: usize,
+    pub exact_result_parity: bool,
+    pub digest_runs: usize,
+    pub measurement_runs: usize,
+    pub runs_using_required_class: usize,
+    pub operation_count: u64,
+    pub max_blocks_read: u64,
+    pub max_bytes_read: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductionGraphStorageQualificationReport {
     pub ready: bool,
@@ -116,6 +162,7 @@ pub struct ProductionGraphStorageQualificationReport {
     pub execution: ProductionGraphExecutionSummary,
     pub runtime: MixedSoakRuntimeReport,
     pub storage_resource_profile: StorageResourceProfileReport,
+    pub persistent_index_evidence: Option<PersistentGraphIndexProductionEvidence>,
 }
 
 impl ProductionGraphStorageQualificationReport {
@@ -135,6 +182,7 @@ impl ProductionGraphStorageQualificationReport {
             "execution": self.execution,
             "runtime": self.runtime,
             "storage_resource_profile": self.storage_resource_profile.json(),
+            "persistent_index_evidence": self.persistent_index_evidence,
         })
     }
 }
@@ -173,6 +221,11 @@ pub fn run_production_graph_storage_qualification(
         durations.push(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
         profiles.push(profile);
     }
+    let observed_index_output = config
+        .persistent_index_requirement
+        .as_ref()
+        .map(|_| stream_graph_result_digest(&store, &config.statement, &config.limits))
+        .transpose()?;
     let runtime_after = store
         .runtime_governor_snapshot()
         .map_err(ProductionGraphQualificationError::from_error)?;
@@ -182,10 +235,17 @@ pub fn run_production_graph_storage_qualification(
         .iter()
         .flat_map(StorageResourceProfileReport::production_blocker_codes)
         .collect::<Vec<_>>();
-    if runtime.admissions_delta < config.measurement_runs as u64 {
+    let expected_runtime_operations = u64::try_from(config.measurement_runs)
+        .unwrap_or(u64::MAX)
+        .saturating_add(if config.persistent_index_requirement.is_some() {
+            1
+        } else {
+            0
+        });
+    if runtime.admissions_delta < expected_runtime_operations {
         blocker_codes.push("runtime_admission_not_observed_for_every_run".to_string());
     }
-    if runtime.completions_delta < config.measurement_runs as u64 {
+    if runtime.completions_delta < expected_runtime_operations {
         blocker_codes.push("runtime_completion_not_observed_for_every_run".to_string());
     }
     if runtime.admission_rejections_delta != 0 {
@@ -201,6 +261,75 @@ pub fn run_production_graph_storage_qualification(
     if runtime.final_overcommitted {
         blocker_codes.push("runtime_overcommitted".to_string());
     }
+    let persistent_index_evidence = if let Some(requirement) = &config.persistent_index_requirement
+    {
+        let (observed_output_digest, observed_output_rows) = observed_index_output
+            .expect("a persistent graph index requirement produces one observed digest");
+        let mut runs_using_required_class = 0usize;
+        let mut operation_count = 0u64;
+        let mut max_blocks_read = 0u64;
+        let mut max_bytes_read = 0u64;
+        for profile in &profiles {
+            let reads = profile
+                .after
+                .graph_index_reads
+                .delta_since(profile.before.graph_index_reads);
+            let class_operations = reads.operation_count(requirement.class);
+            if class_operations > 0 {
+                runs_using_required_class = runs_using_required_class.saturating_add(1);
+            }
+            operation_count = operation_count.saturating_add(class_operations);
+            let blocks_read = reads.blocks_read(requirement.class);
+            let bytes_read = reads.bytes_read(requirement.class);
+            max_blocks_read = max_blocks_read.max(blocks_read);
+            max_bytes_read = max_bytes_read.max(bytes_read);
+            if class_operations == 0 {
+                blocker_codes.push(format!(
+                    "persistent_graph_index_{}_not_observed",
+                    requirement.class.as_str()
+                ));
+            }
+            if blocks_read == 0 || bytes_read == 0 {
+                blocker_codes.push(format!(
+                    "persistent_graph_index_{}_page_read_not_observed",
+                    requirement.class.as_str()
+                ));
+            }
+            if blocks_read > requirement.max_blocks_read_per_run {
+                blocker_codes.push(format!(
+                    "persistent_graph_index_{}_block_budget_exceeded",
+                    requirement.class.as_str()
+                ));
+            }
+            if bytes_read > requirement.max_bytes_read_per_run {
+                blocker_codes.push(format!(
+                    "persistent_graph_index_{}_byte_budget_exceeded",
+                    requirement.class.as_str()
+                ));
+            }
+        }
+        let exact_result_parity = observed_output_digest == requirement.reference_output_digest
+            && observed_output_rows == requirement.reference_output_rows;
+        if !exact_result_parity {
+            blocker_codes.push("persistent_graph_index_result_mismatch".to_string());
+        }
+        Some(PersistentGraphIndexProductionEvidence {
+            class: requirement.class.as_str().to_string(),
+            reference_output_digest: requirement.reference_output_digest.clone(),
+            observed_output_digest,
+            reference_output_rows: requirement.reference_output_rows,
+            observed_output_rows,
+            exact_result_parity,
+            digest_runs: 1,
+            measurement_runs: profiles.len(),
+            runs_using_required_class,
+            operation_count,
+            max_blocks_read,
+            max_bytes_read,
+        })
+    } else {
+        None
+    };
     blocker_codes.sort();
     blocker_codes.dedup();
     let storage_resource_profile = profiles
@@ -217,7 +346,55 @@ pub fn run_production_graph_storage_qualification(
         execution,
         runtime,
         storage_resource_profile,
+        persistent_index_evidence,
     })
+}
+
+fn stream_graph_result_digest(
+    store: &NowledgeMemEmbeddedStoreHandle,
+    statement: &NowledgeGraphStatement,
+    limits: &StorageResourceProfileLimits,
+) -> Result<(String, usize), ProductionGraphQualificationError> {
+    let mut hasher = Sha256::new();
+    hash_bytes(&mut hasher, b"skein-persistent-graph-index-result-v1");
+    let mut row_count = 0usize;
+    let report = store
+        .read_query_with_params_streaming(
+            &statement.cypher,
+            &statement.parameters,
+            &NowledgeMemReadOptions {
+                max_rows: Some(limits.max_output_rows),
+                max_estimated_payload_bytes: Some(limits.max_output_payload_bytes),
+            },
+            |row| {
+                hash_graph_result_row(&mut hasher, &row);
+                row_count = row_count.saturating_add(1);
+                Ok(())
+            },
+        )
+        .map_err(ProductionGraphQualificationError::from_error)?;
+    if !report.fully_streamed {
+        return Err(ProductionGraphQualificationError::new(
+            "persistent graph index result digest requires a fully streamed query",
+        ));
+    }
+    hash_bytes(&mut hasher, &(row_count as u64).to_le_bytes());
+    Ok((format!("sha256:{:x}", hasher.finalize()), row_count))
+}
+
+fn hash_graph_result_row(hasher: &mut Sha256, row: &std::collections::BTreeMap<String, Value>) {
+    hash_bytes(hasher, b"row");
+    hash_bytes(hasher, &(row.len() as u64).to_le_bytes());
+    for (name, value) in row {
+        hash_bytes(hasher, name.as_bytes());
+        hash_value(hasher, value);
+    }
+}
+
+fn valid_sha256_digest(value: &str) -> bool {
+    value
+        .strip_prefix("sha256:")
+        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 fn execution_summary(
@@ -342,6 +519,9 @@ mod tests {
         let graph_commit_epoch = {
             let mut database = Database::open_with_config(&graph_path, database_config.clone())
                 .expect("fixture database should open");
+            database
+                .query("CREATE INDEX ON :Memory(id)")
+                .expect("fixture property index should be created");
             let mut transaction = database.begin_transaction();
             for row in 0..64 {
                 transaction
@@ -374,6 +554,16 @@ mod tests {
             canonical_graph_commit_epoch: graph_commit_epoch,
             policy_version: PRODUCTION_QUALIFICATION_POLICY_VERSION,
         };
+        let expected_output_digest = {
+            let mut hasher = Sha256::new();
+            hash_bytes(&mut hasher, b"skein-persistent-graph-index-result-v1");
+            hash_graph_result_row(
+                &mut hasher,
+                &BTreeMap::from([("memory_id".to_string(), Value::Int(7))]),
+            );
+            hash_bytes(&mut hasher, &1u64.to_le_bytes());
+            format!("sha256:{:x}", hasher.finalize())
+        };
         let report =
             run_production_graph_storage_qualification(ProductionGraphStorageQualificationConfig {
                 open_options: NowledgeMemOpenOptions::graph_only(
@@ -391,8 +581,9 @@ mod tests {
                     ..RuntimeGovernorConfig::desktop_bound()
                 },
                 statement: NowledgeGraphStatement {
-                    cypher: "MATCH (m:Memory) RETURN m.id AS memory_id".to_string(),
-                    parameters: BTreeMap::new(),
+                    cypher: "MATCH (m:Memory) WHERE m.id = $id RETURN m.id AS memory_id"
+                        .to_string(),
+                    parameters: BTreeMap::from([("id".to_string(), Value::Int(7))]),
                 },
                 limits: StorageResourceProfileLimits {
                     min_canonical_artifact_bytes: 4096,
@@ -413,6 +604,13 @@ mod tests {
                 },
                 expected_identity: identity,
                 measurement_runs: 3,
+                persistent_index_requirement: Some(PersistentGraphIndexProductionRequirement {
+                    class: PersistentGraphIndexClass::NodeEquality,
+                    reference_output_digest: expected_output_digest,
+                    reference_output_rows: 1,
+                    max_blocks_read_per_run: 8,
+                    max_bytes_read_per_run: 1024 * 1024,
+                }),
             })
             .expect("qualification should complete");
 
@@ -421,10 +619,18 @@ mod tests {
             "unexpected blockers: {:?}",
             report.blocker_codes
         );
-        assert_eq!(report.runtime.admissions_delta, 3);
-        assert_eq!(report.runtime.completions_delta, 3);
+        assert_eq!(report.runtime.admissions_delta, 4);
+        assert_eq!(report.runtime.completions_delta, 4);
         assert_eq!(report.execution.measurement_runs, 3);
         assert!(report.storage_resource_profile.production_ready());
+        let index_evidence = report
+            .persistent_index_evidence
+            .as_ref()
+            .expect("persistent index evidence should be present");
+        assert!(index_evidence.exact_result_parity);
+        assert_eq!(index_evidence.digest_runs, 1);
+        assert_eq!(index_evidence.runs_using_required_class, 3);
+        assert_eq!(index_evidence.operation_count, 3);
         let json = report.json().to_string();
         assert!(!json.contains(graph_path.to_string_lossy().as_ref()));
         assert!(!json.contains("MATCH (m:Memory)"));

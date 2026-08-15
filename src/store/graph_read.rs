@@ -883,7 +883,7 @@ impl GraphStore {
         for value in values {
             let mut graph_control = GraphScanControl::Continue;
             let canonical_control = if let Some(projection) = equality_projection {
-                let (_, control) = projection
+                let (report, control) = projection
                     .scan_equality_candidates(label_id, property, value, |node_id| {
                         if self.node_tombstones.contains(&node_id)
                             || self.nodes.contains_key(&node_id)
@@ -912,6 +912,8 @@ impl GraphStore {
                         Ok(CanonicalScanControl::Continue)
                     })
                     .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+                self.graph_index_read_metrics
+                    .record_property(PersistentGraphIndexClass::NodeEquality, report);
                 control
             } else {
                 let (_, control) = reader
@@ -988,7 +990,7 @@ impl GraphStore {
                     .map(|(_, value)| value)
                     .collect::<Vec<_>>();
                 let mut graph_control = GraphScanControl::Continue;
-                let (_, projection_control) = projection
+                let (report, projection_control) = projection
                     .scan_composite_equality_candidates(
                         label_id,
                         &properties,
@@ -1023,6 +1025,8 @@ impl GraphStore {
                         },
                     )
                     .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+                self.graph_index_read_metrics
+                    .record_property(PersistentGraphIndexClass::NodeCompositeEquality, report);
                 if projection_control == CanonicalScanControl::Stop {
                     return Ok(graph_control);
                 }
@@ -1128,7 +1132,7 @@ impl GraphStore {
         };
 
         let mut graph_control = GraphScanControl::Continue;
-        let (_, projection_control) = projection
+        let (report, projection_control) = projection
             .scan_range_candidates(label_id, property, lower, upper, |node_id| {
                 if self.node_tombstones.contains(&node_id) || self.nodes.contains_key(&node_id) {
                     return Ok(CanonicalScanControl::Continue);
@@ -1157,6 +1161,8 @@ impl GraphStore {
                 Ok(CanonicalScanControl::Continue)
             })
             .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+        self.graph_index_read_metrics
+            .record_property(PersistentGraphIndexClass::NodeRange, report);
         if projection_control == CanonicalScanControl::Stop {
             return Ok(graph_control);
         }
@@ -1263,7 +1269,7 @@ impl GraphStore {
             })
             .expect("non-empty full-text query has a seed token");
         let mut graph_control = GraphScanControl::Continue;
-        let (_, projection_control) = projection
+        let (report, projection_control) = projection
             .scan_full_text_token_candidates(label_id, property, seed_token, |node_id| {
                 if self.node_tombstones.contains(&node_id) || self.nodes.contains_key(&node_id) {
                     return Ok(CanonicalScanControl::Continue);
@@ -1284,6 +1290,8 @@ impl GraphStore {
                 Ok(CanonicalScanControl::Continue)
             })
             .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+        self.graph_index_read_metrics
+            .record_property(PersistentGraphIndexClass::NodeFullText, report);
         if projection_control == CanonicalScanControl::Stop {
             return Ok(graph_control);
         }
@@ -1363,7 +1371,7 @@ impl GraphStore {
                 }
             };
             if let Some(adjacency) = &self.canonical_adjacency {
-                adjacency
+                let (report, control) = adjacency
                     .scan_endpoint_entries_control(node_id, direction, rel_type, |entry| {
                         let relationship = match entry {
                             CanonicalAdjacencyEntry::Inline(relationship) => relationship,
@@ -1385,8 +1393,14 @@ impl GraphStore {
                         };
                         Ok(consume_canonical(relationship))
                     })
-                    .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?
-                    .1
+                    .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+                let class = match direction {
+                    AdjacencyDirection::Outgoing => PersistentGraphIndexClass::ForwardAdjacency,
+                    AdjacencyDirection::Incoming => PersistentGraphIndexClass::ReverseAdjacency,
+                };
+                self.graph_index_read_metrics
+                    .record_adjacency(class, report);
+                control
             } else {
                 let endpoint_direction = match direction {
                     AdjacencyDirection::Outgoing => CanonicalEndpointDirection::Source,
@@ -1471,7 +1485,7 @@ impl GraphStore {
         let mut graph_control = GraphScanControl::Continue;
         let mut candidate_count = 0usize;
         let mut output_count = 0usize;
-        let projection_control = probe
+        let (projection_read_report, projection_control) = probe
             .scan(projection, |relationship_id| {
                 if self.relationship_tombstones.contains(&relationship_id)
                     || self.relationships.contains_key(&relationship_id)
@@ -1509,6 +1523,8 @@ impl GraphStore {
                 Ok(CanonicalScanControl::Continue)
             })
             .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+        self.graph_index_read_metrics
+            .record_property(probe.index_class(), projection_read_report);
         if projection_control == CanonicalScanControl::Stop {
             return Ok((graph_control, None));
         }
@@ -2446,6 +2462,13 @@ impl RelationshipProjectionProbe<'_> {
         }
     }
 
+    fn index_class(&self) -> PersistentGraphIndexClass {
+        match self {
+            Self::Equality { .. } => PersistentGraphIndexClass::RelationshipEquality,
+            Self::Range { .. } => PersistentGraphIndexClass::RelationshipRange,
+        }
+    }
+
     fn matches(&self, relationship: &RelRecord) -> bool {
         match self {
             Self::Equality {
@@ -2475,7 +2498,13 @@ impl RelationshipProjectionProbe<'_> {
             CanonicalScanControl,
             PersistentPropertyProjectionError,
         >,
-    ) -> std::result::Result<CanonicalScanControl, PersistentPropertyProjectionError> {
+    ) -> std::result::Result<
+        (
+            skein_storage::PersistentPropertyProjectionReadReport,
+            CanonicalScanControl,
+        ),
+        PersistentPropertyProjectionError,
+    > {
         match self {
             Self::Equality {
                 rel_type,
@@ -2483,18 +2512,20 @@ impl RelationshipProjectionProbe<'_> {
                 values,
                 ..
             } => {
+                let mut total = skein_storage::PersistentPropertyProjectionReadReport::default();
                 for value in values {
-                    let (_, control) = projection.scan_relationship_equality_candidates(
+                    let (report, control) = projection.scan_relationship_equality_candidates(
                         *rel_type,
                         property,
                         value,
                         &mut consumer,
                     )?;
+                    accumulate_property_projection_report(&mut total, report);
                     if control == CanonicalScanControl::Stop {
-                        return Ok(control);
+                        return Ok((total, control));
                     }
                 }
-                Ok(CanonicalScanControl::Continue)
+                Ok((total, CanonicalScanControl::Continue))
             }
             Self::Range {
                 rel_type,
@@ -2503,10 +2534,25 @@ impl RelationshipProjectionProbe<'_> {
                 upper,
                 ..
             } => projection
-                .scan_relationship_range_candidates(*rel_type, property, *lower, *upper, consumer)
-                .map(|(_, control)| control),
+                .scan_relationship_range_candidates(*rel_type, property, *lower, *upper, consumer),
         }
     }
+}
+
+fn accumulate_property_projection_report(
+    total: &mut skein_storage::PersistentPropertyProjectionReadReport,
+    report: skein_storage::PersistentPropertyProjectionReadReport,
+) {
+    total.blocks_considered = total
+        .blocks_considered
+        .saturating_add(report.blocks_considered);
+    total.blocks_pruned = total.blocks_pruned.saturating_add(report.blocks_pruned);
+    total.blocks_read = total.blocks_read.saturating_add(report.blocks_read);
+    total.bytes_read = total.bytes_read.saturating_add(report.bytes_read);
+    total.entries_decoded = total.entries_decoded.saturating_add(report.entries_decoded);
+    total.candidates_returned = total
+        .candidates_returned
+        .saturating_add(report.candidates_returned);
 }
 
 fn relationship_projection_probe<'a>(
