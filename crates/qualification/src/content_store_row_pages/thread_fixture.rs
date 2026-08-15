@@ -29,6 +29,19 @@ pub(super) struct ThreadMessageParameters<'a> {
     pub(super) updated_at: &'a str,
 }
 
+pub(super) struct ThreadMessageAnchorParameters<'a> {
+    pub(super) anchor_id: &'a str,
+    pub(super) memory_id: &'a str,
+    pub(super) content_document_id: &'a str,
+    pub(super) thread_storage_id: &'a str,
+    pub(super) content_message_id: Option<&'a str>,
+    pub(super) message_id: &'a str,
+    pub(super) order_index: i64,
+    pub(super) quote_hash: &'a str,
+    pub(super) metadata_json: &'a str,
+    pub(super) created_at: &'a str,
+}
+
 pub(super) fn thread_document_parameters(parameters: ThreadDocumentParameters<'_>) -> Vec<Value> {
     vec![
         Value::String(parameters.content_document_id.to_string()),
@@ -61,6 +74,25 @@ pub(super) fn thread_message_parameters(parameters: ThreadMessageParameters<'_>)
         Value::String(parameters.content_hash.to_string()),
         Value::String(parameters.created_at.to_string()),
         Value::String(parameters.updated_at.to_string()),
+    ]
+}
+
+pub(super) fn thread_message_anchor_parameters(
+    parameters: ThreadMessageAnchorParameters<'_>,
+) -> Vec<Value> {
+    vec![
+        Value::String(parameters.anchor_id.to_string()),
+        Value::String(parameters.memory_id.to_string()),
+        Value::String(parameters.content_document_id.to_string()),
+        Value::String(parameters.thread_storage_id.to_string()),
+        parameters
+            .content_message_id
+            .map_or(Value::Null, |value| Value::String(value.to_string())),
+        Value::String(parameters.message_id.to_string()),
+        Value::Int(parameters.order_index),
+        Value::String(parameters.quote_hash.to_string()),
+        Value::String(parameters.metadata_json.to_string()),
+        Value::String(parameters.created_at.to_string()),
     ]
 }
 

@@ -135,8 +135,12 @@ crash; read-only recovery remains fail closed.
     The `patch_moved_space_ownership` caller now composes selected Threads and
     Sources in one guarded mixed transaction, reports exact document/message
     changes, proves stale selection remains unchanged, and retains payload and
-    ordered-read identity through checkpoint/reopen. The remaining
-    write/reconcile/delete callers stay blocked on their own gates.
+    ordered-read identity through checkpoint/reopen. The `delete_thread_tail`
+    caller now proves bounded ordered candidate identity, negative-start
+    clamping, empty-tail no-op behavior, rollback atomicity, exact graph and
+    relational summary agreement, retained payload identity, live tombstones,
+    and checkpoint/reopen identity. Whole-thread deletion remains blocked on
+    its independent mixed-transaction gate.
   - Require checkpoint/reopen, WAL replay, corruption, cancellation, and
     locking evidence before enabling the path by default. Prove that a declared
     bounded workload runs within the supported 512 MiB low-memory profile, but
@@ -192,7 +196,8 @@ qualification justifies moving them.
     caller currently classified as `partial`; do not infer readiness from
     parser feature counts. `upsert_source_chunks` is now `covered`; ownership
     moves, Thread message UPSERT, and occurrence-preserving reconciliation are
-    now `covered`; tail deletion and whole-thread deletion remain incomplete.
+    now `covered`; tail deletion is now `covered`; whole-thread deletion remains
+    incomplete.
   - Acceptance: every active Mem caller is `covered`, and cutover fails closed
     when the corpus protocol, revision, or digest differs from the qualified
     Skein artifact.

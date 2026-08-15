@@ -22,7 +22,7 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
 
     assert!(report.ready);
     assert_eq!(report.qualified_tables, QUALIFIED_TABLES);
-    assert_eq!(report.corpus.partial_caller_count, 2);
+    assert_eq!(report.corpus.partial_caller_count, 1);
     assert_eq!(report.final_message_count, 7);
     assert_eq!(report.base_chunk_count, 5);
     assert_eq!(report.final_chunk_count, 2);
@@ -440,6 +440,106 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
     assert!(
         report.thread_message_reconcile.checkpoint_generation
             > report.thread_message_reconcile.seed_checkpoint_generation
+    );
+    assert_eq!(report.thread_tail_delete.thread_id, "qualified-tail-thread");
+    assert_eq!(
+        report.thread_tail_delete.thread_storage_id,
+        "qualified-tail-storage"
+    );
+    assert_eq!(report.thread_tail_delete.start_index, 2);
+    assert_eq!(report.thread_tail_delete.initial_message_count, 4);
+    assert_eq!(report.thread_tail_delete.retained_message_count, 2);
+    assert_eq!(report.thread_tail_delete.deleted_candidate_sha256.len(), 64);
+    assert_eq!(
+        report.thread_tail_delete.deleted_message_ids,
+        [
+            "qualified-tail-message-c".to_string(),
+            "qualified-tail-message-d".to_string(),
+        ]
+    );
+    assert_eq!(
+        report.thread_tail_delete.deleted_occurrence_ids,
+        [
+            "qualified-tail-content-message-c".to_string(),
+            "qualified-tail-content-message-d".to_string(),
+        ]
+    );
+    assert!(report.thread_tail_delete.negative_start_clamped);
+    assert!(report.thread_tail_delete.empty_tail_noop);
+    assert!(report.thread_tail_delete.empty_tail_epoch_unchanged);
+    assert!(report.thread_tail_delete.rollback_preserved_state);
+    assert!(report.thread_tail_delete.graph_relational_agreement);
+    assert!(report.thread_tail_delete.exact_summary);
+    assert!(report.thread_tail_delete.retained_payload_identity);
+    assert_eq!(report.thread_tail_delete.summary_item_count, 2);
+    assert!(report.thread_tail_delete.summary_size_bytes > 0);
+    assert_eq!(
+        report.thread_tail_delete.committed_epoch,
+        report.thread_tail_delete.seed_commit_epoch + 1
+    );
+    assert_eq!(
+        report
+            .thread_tail_delete
+            .retained_message_payload_sha256_before,
+        report
+            .thread_tail_delete
+            .retained_message_payload_sha256_after_live
+    );
+    assert_eq!(
+        report
+            .thread_tail_delete
+            .retained_message_payload_sha256_before,
+        report
+            .thread_tail_delete
+            .retained_message_payload_sha256_after_reopen
+    );
+    assert_eq!(
+        report
+            .thread_tail_delete
+            .retained_anchor_payload_sha256_before,
+        report
+            .thread_tail_delete
+            .retained_anchor_payload_sha256_after_live
+    );
+    assert_eq!(
+        report
+            .thread_tail_delete
+            .retained_anchor_payload_sha256_before,
+        report
+            .thread_tail_delete
+            .retained_anchor_payload_sha256_after_reopen
+    );
+    assert_eq!(
+        report
+            .thread_tail_delete
+            .deleted_tombstone_read
+            .execution
+            .visible_commit_epoch,
+        report.thread_tail_delete.committed_epoch
+    );
+    assert!(
+        report
+            .thread_tail_delete
+            .deleted_tombstone_read
+            .execution
+            .overlay_entries
+            > 0
+    );
+    assert_eq!(
+        report.thread_tail_delete.deleted_tombstone_read.output_rows,
+        0
+    );
+    assert_eq!(
+        report.thread_tail_delete.live_read.output_sha256,
+        report.thread_tail_delete.reopened_read.output_sha256
+    );
+    assert_eq!(
+        report.thread_tail_delete.live_anchor_sha256,
+        report.thread_tail_delete.reopened_anchor_sha256
+    );
+    assert!(
+        report.thread_tail_delete.checkpoint_generation
+            > report.thread_tail_delete.seed_checkpoint_generation
     );
     assert_eq!(
         report.multi_statement_transaction.index_runtime_path,

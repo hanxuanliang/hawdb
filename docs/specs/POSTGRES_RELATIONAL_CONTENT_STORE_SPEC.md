@@ -381,6 +381,25 @@ checkpoint/reopen output, occurrence identity, and anchor state MUST match.
 anchor-following, immutable preserved payloads, and complete durable
 publication.
 
+`delete_thread_tail` clamps a negative start position to zero before issuing
+the frozen bounded candidate query. Candidate rows MUST remain ordered by
+`(order_index, content_message_id)` and MUST return both public `message_id` and
+stable `content_message_id` so the host can report the exact removed
+occurrences. A start beyond the current tail is an explicit no-op and MUST NOT
+advance the commit epoch.
+
+For a non-empty tail, the graph Thread count update, deletion of only
+`anchor_kind = 'message'` anchors at or beyond the start, message occurrence
+deletion, and exact document count/size summary MUST stage in one mixed
+transaction. Rollback or a pre-durability crash MUST expose none of those
+changes. Retained messages and anchors MUST preserve their full payload and
+creation identity. The live view MUST expose row tombstones for deleted
+occurrences at the same commit epoch as graph and summary state, and
+checkpoint/reopen MUST preserve the same ordered retained rows and anchor
+state. `SkeinContentThreadTailDelete.tla` models exact tail selection, empty
+no-op behavior, arbitrary partial staging, retained payload identity, and
+durable-before-visible publication.
+
 This gate deliberately covers the selected storage lifecycle, transaction,
 locking, cancellation, injected corruption, and synthetic resource evidence;
 it does not claim complete Content Store cutover. Callers still marked

@@ -1,8 +1,9 @@
 use super::evidence::execute_qualified_read;
 use super::fixture::corpus_statement;
 use super::thread_fixture::{
-    thread_document_parameters, thread_message_parameters, thread_page_parameters,
-    ThreadDocumentParameters, ThreadMessageParameters,
+    thread_document_parameters, thread_message_anchor_parameters, thread_message_parameters,
+    thread_page_parameters, ThreadDocumentParameters, ThreadMessageAnchorParameters,
+    ThreadMessageParameters,
 };
 use super::{ContentStoreRowPageReadPhase, ContentStoreThreadReconcileQualificationReport};
 use crate::evidence_digest::rows_sha256;
@@ -328,14 +329,14 @@ fn seed_reconcile_thread(
     )?;
     transaction.query_sql_with_params(
         &anchor.sql,
-        &anchor_parameters(ANCHOR_A_ID, MEMORY_A_ID, Value::Null, MESSAGE_A_ID, 0),
+        &anchor_parameters(ANCHOR_A_ID, MEMORY_A_ID, None, MESSAGE_A_ID, 0),
     )?;
     transaction.query_sql_with_params(
         &anchor.sql,
         &anchor_parameters(
             ANCHOR_B_ID,
             MEMORY_B_ID,
-            Value::String(CONTENT_MESSAGE_B_ID.to_string()),
+            Some(CONTENT_MESSAGE_B_ID),
             MESSAGE_B_ID,
             1,
         ),
@@ -681,22 +682,24 @@ fn message_parameters(
 fn anchor_parameters(
     anchor_id: &str,
     memory_id: &str,
-    content_message_id: Value,
+    content_message_id: Option<&str>,
     message_id: &str,
     order_index: i64,
 ) -> Vec<Value> {
-    vec![
-        Value::String(anchor_id.to_string()),
-        Value::String(memory_id.to_string()),
-        Value::String(CONTENT_DOCUMENT_ID.to_string()),
-        Value::String(THREAD_STORAGE_ID.to_string()),
+    let quote_hash = format!("quote-{anchor_id}");
+    let metadata_json = format!("{{\"anchor\":\"{anchor_id}\"}}");
+    thread_message_anchor_parameters(ThreadMessageAnchorParameters {
+        anchor_id,
+        memory_id,
+        content_document_id: CONTENT_DOCUMENT_ID,
+        thread_storage_id: THREAD_STORAGE_ID,
         content_message_id,
-        Value::String(message_id.to_string()),
-        Value::Int(order_index),
-        Value::String(format!("quote-{anchor_id}")),
-        Value::String(format!("{{\"anchor\":\"{anchor_id}\"}}")),
-        Value::String(CREATED_AT.to_string()),
-    ]
+        message_id,
+        order_index,
+        quote_hash: &quote_hash,
+        metadata_json: &metadata_json,
+        created_at: CREATED_AT,
+    })
 }
 
 fn anchor_order_parameters(

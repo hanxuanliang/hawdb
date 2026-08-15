@@ -618,6 +618,25 @@ mod tests {
     }
 
     #[test]
+    fn thread_tail_delete_is_bound_to_mixed_transaction_evidence() {
+        let corpus = nowledge_content_store_sql_corpus().unwrap();
+        let caller = corpus
+            .source_inventory
+            .iter()
+            .find(|caller| caller.symbol == "delete_thread_tail")
+            .expect("thread tail delete caller must be inventoried");
+        assert_eq!(caller.coverage, ContentStoreSqlCallerCoverage::Covered);
+        assert!(caller
+            .statements
+            .iter()
+            .any(|name| name == "thread_tail_delete_candidates"));
+        assert!(caller.note.contains("negative-start clamping"));
+        assert!(caller.note.contains("one mixed durable transaction"));
+        assert!(caller.note.contains("live tombstones"));
+        assert!(caller.note.contains("checkpoint/reopen identity"));
+    }
+
+    #[test]
     fn source_ownership_move_is_bound_to_mixed_transaction_evidence() {
         let corpus = nowledge_content_store_sql_corpus().unwrap();
         let caller = corpus

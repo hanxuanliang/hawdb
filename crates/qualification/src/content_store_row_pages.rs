@@ -12,6 +12,7 @@ mod tests;
 mod thread_fixture;
 mod thread_ownership;
 mod thread_reconcile;
+mod thread_tail_delete;
 mod thread_upsert;
 mod transaction;
 
@@ -39,6 +40,7 @@ use space_merge_ownership::qualify_space_merge_ownership;
 use std::path::PathBuf;
 use thread_ownership::qualify_thread_ownership_moves;
 use thread_reconcile::qualify_thread_message_reconcile;
+use thread_tail_delete::qualify_thread_tail_delete;
 use thread_upsert::qualify_thread_message_upsert;
 use transaction::qualify_multi_statement_transaction;
 
@@ -276,6 +278,7 @@ pub struct ContentStoreInitialRowPageQualificationReport {
     pub space_merge_ownership: ContentStoreSpaceMergeOwnershipQualificationReport,
     pub thread_message_upsert: ContentStoreThreadUpsertQualificationReport,
     pub thread_message_reconcile: ContentStoreThreadReconcileQualificationReport,
+    pub thread_tail_delete: ContentStoreThreadTailDeleteQualificationReport,
     pub multi_statement_transaction: ContentStoreTransactionQualificationReport,
     pub resources: ContentStoreResourceEvidence,
     pub corruption: ContentStoreCorruptionQualificationReport,
@@ -436,6 +439,42 @@ pub struct ContentStoreThreadReconcileQualificationReport {
     pub preserved_anchor_payload_sha256_before: String,
     pub preserved_anchor_payload_sha256_after_live: String,
     pub preserved_anchor_payload_sha256_after_reopen: String,
+    pub live_read: ContentStoreRowPageReadReport,
+    pub live_anchor_sha256: String,
+    pub checkpoint_generation: u64,
+    pub reopened_read: ContentStoreRowPageReadReport,
+    pub reopened_anchor_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContentStoreThreadTailDeleteQualificationReport {
+    pub thread_id: String,
+    pub thread_storage_id: String,
+    pub start_index: i64,
+    pub initial_message_count: usize,
+    pub retained_message_count: usize,
+    pub deleted_message_ids: Vec<String>,
+    pub deleted_occurrence_ids: Vec<String>,
+    pub deleted_candidate_sha256: String,
+    pub negative_start_clamped: bool,
+    pub empty_tail_noop: bool,
+    pub empty_tail_epoch_unchanged: bool,
+    pub rollback_preserved_state: bool,
+    pub graph_relational_agreement: bool,
+    pub exact_summary: bool,
+    pub retained_payload_identity: bool,
+    pub summary_item_count: i64,
+    pub summary_size_bytes: i64,
+    pub seed_commit_epoch: u64,
+    pub seed_checkpoint_generation: u64,
+    pub committed_epoch: u64,
+    pub retained_message_payload_sha256_before: String,
+    pub retained_message_payload_sha256_after_live: String,
+    pub retained_message_payload_sha256_after_reopen: String,
+    pub retained_anchor_payload_sha256_before: String,
+    pub retained_anchor_payload_sha256_after_live: String,
+    pub retained_anchor_payload_sha256_after_reopen: String,
+    pub deleted_tombstone_read: ContentStoreRowPageReadReport,
     pub live_read: ContentStoreRowPageReadReport,
     pub live_anchor_sha256: String,
     pub checkpoint_generation: u64,
@@ -782,6 +821,13 @@ pub fn run_content_store_initial_row_page_qualification(
         &corpus,
     )?;
     database = thread_reconcile_database;
+    let (thread_tail_delete_database, thread_tail_delete) = qualify_thread_tail_delete(
+        database,
+        &config.database_path,
+        &authoritative_config,
+        &corpus,
+    )?;
+    database = thread_tail_delete_database;
     let isolation = qualify_content_store_isolation(
         database,
         &corpus,
@@ -825,6 +871,7 @@ pub fn run_content_store_initial_row_page_qualification(
         space_merge_ownership,
         thread_message_upsert,
         thread_message_reconcile,
+        thread_tail_delete,
         multi_statement_transaction,
         resources,
         corruption,

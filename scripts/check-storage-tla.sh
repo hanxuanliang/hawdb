@@ -20,6 +20,7 @@ readonly specifications=(
   SkeinContentSourceReplacement
   SkeinContentThreadOwnershipMove
   SkeinContentThreadReconcile
+  SkeinContentThreadTailDelete
   SkeinContentThreadUpsert
   SkeinSourceSegmentPublication
   SkeinCrdtReplication
