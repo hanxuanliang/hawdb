@@ -7,6 +7,8 @@ use std::collections::BTreeSet;
 
 #[path = "release_bundle/durability.rs"]
 mod durability;
+#[path = "release_bundle/graph_index.rs"]
+mod graph_index;
 #[path = "release_bundle/graph_resource.rs"]
 mod graph_resource;
 #[path = "release_bundle/graph_search.rs"]
@@ -104,6 +106,7 @@ impl ProductionReleaseControlEvidence {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProductionReleaseQualificationArtifacts {
     pub graph_storage: Option<Value>,
+    pub graph_index_matrix: Option<Value>,
     pub search: Option<Value>,
     pub vector_targets: Vec<Value>,
     pub morsel_profiles: Vec<Value>,
@@ -183,6 +186,7 @@ pub struct ProductionReleaseQualificationBundleReport {
     pub expected_identity: ProductionQualificationIdentity,
     pub policy: ProductionReleaseQualificationPolicy,
     pub graph_storage: ProductionArtifactAssessment,
+    pub graph_index_matrix: ProductionArtifactAssessment,
     pub search: ProductionArtifactAssessment,
     pub vector_matrix: ProductionVectorMatrixArtifactAssessment,
     pub morsel_matrix: ProductionMorselMatrixArtifactAssessment,
@@ -201,6 +205,7 @@ impl ProductionReleaseQualificationBundleReport {
             "expected_identity": self.expected_identity.json(),
             "policy": self.policy,
             "graph_storage": self.graph_storage,
+            "graph_index_matrix": self.graph_index_matrix,
             "search": self.search,
             "vector_matrix": self.vector_matrix,
             "morsel_matrix": self.morsel_matrix,
@@ -220,6 +225,11 @@ pub fn evaluate_production_release_qualification_bundle(
         "representative_production_replica",
         artifacts.graph_storage.as_ref(),
         |artifact| graph_search::validate_graph(artifact, &expected_identity),
+    );
+    let graph_index_matrix = evaluate_optional(
+        "representative_production_graph_index_matrix",
+        artifacts.graph_index_matrix.as_ref(),
+        |artifact| graph_index::validate_matrix(artifact, &expected_identity),
     );
     let search = evaluate_optional(
         "representative_production_search_replica",
@@ -257,6 +267,7 @@ pub fn evaluate_production_release_qualification_bundle(
         .unwrap_or_default();
     for (prefix, ready) in [
         ("graph_storage", graph_storage.ready),
+        ("graph_index_matrix", graph_index_matrix.ready),
         ("search", search.ready),
         ("vector_matrix", vector_matrix.ready),
         ("morsel_matrix", morsel_matrix.ready),
@@ -277,6 +288,7 @@ pub fn evaluate_production_release_qualification_bundle(
         expected_identity,
         policy,
         graph_storage,
+        graph_index_matrix,
         search,
         vector_matrix,
         morsel_matrix,

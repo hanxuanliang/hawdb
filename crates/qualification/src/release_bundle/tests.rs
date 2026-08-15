@@ -6,6 +6,7 @@ fn complete_raw_artifact_bundle_is_ready() {
     let expected = identity("linux", "x86_64");
     let artifacts = ProductionReleaseQualificationArtifacts {
         graph_storage: Some(graph(&expected)),
+        graph_index_matrix: Some(graph_index_matrix(&expected)),
         search: Some(search(&expected)),
         vector_targets: [
             ("linux", "x86_64"),
@@ -34,6 +35,7 @@ fn complete_raw_artifact_bundle_is_ready() {
 
     assert!(report.ready, "{:?}", report.blocker_codes);
     assert!(report.graph_storage.ready);
+    assert!(report.graph_index_matrix.ready);
     assert!(report.search.ready);
     assert!(report.vector_matrix.ready);
     assert!(report.morsel_matrix.ready);
@@ -132,6 +134,66 @@ fn windows_graph_resource_evidence_uses_total_page_faults_without_unix_split() {
         "{:?}",
         report.graph_storage.blocker_codes
     );
+}
+
+#[test]
+fn graph_index_matrix_rejects_duplicate_classes_despite_top_level_ready() {
+    let expected = identity("linux", "x86_64");
+    let mut matrix = graph_index_matrix(&expected);
+    matrix["cases"][1]["persistent_index_evidence"]["class"] =
+        matrix["cases"][0]["persistent_index_evidence"]["class"].clone();
+    let report = evaluate_production_release_qualification_bundle(
+        ProductionReleaseQualificationArtifacts {
+            graph_index_matrix: Some(matrix),
+            ..ProductionReleaseQualificationArtifacts::default()
+        },
+        expected,
+        ProductionReleaseQualificationPolicy::default(),
+    );
+
+    assert!(!report.graph_index_matrix.ready);
+    assert!(report
+        .graph_index_matrix
+        .blocker_codes
+        .iter()
+        .any(|blocker| blocker.contains("duplicate_class")));
+}
+
+#[test]
+fn graph_index_matrix_revalidates_raw_case_runs() {
+    let expected = identity("linux", "x86_64");
+    let mut matrix = graph_index_matrix(&expected);
+    matrix["cases"][0]["persistent_index_evidence"]["runs"][0]["operation_count"] =
+        serde_json::json!(0);
+    matrix["cases"][0]["persistent_index_evidence"]["runs"][0]["blocks_read"] =
+        serde_json::json!(3);
+    matrix["cases"][0]["persistent_index_evidence"]["runs"][0]["bytes_read"] =
+        serde_json::json!(257);
+    let report = evaluate_production_release_qualification_bundle(
+        ProductionReleaseQualificationArtifacts {
+            graph_index_matrix: Some(matrix),
+            ..ProductionReleaseQualificationArtifacts::default()
+        },
+        expected,
+        ProductionReleaseQualificationPolicy::default(),
+    );
+
+    assert!(!report.graph_index_matrix.ready);
+    assert!(report
+        .graph_index_matrix
+        .blocker_codes
+        .iter()
+        .any(|blocker| blocker.contains("run_operation_missing")));
+    assert!(report
+        .graph_index_matrix
+        .blocker_codes
+        .iter()
+        .any(|blocker| blocker.contains("run_block_budget_exceeded")));
+    assert!(report
+        .graph_index_matrix
+        .blocker_codes
+        .iter()
+        .any(|blocker| blocker.contains("run_byte_budget_exceeded")));
 }
 
 #[test]
@@ -506,6 +568,81 @@ fn graph(identity: &ProductionQualificationIdentity) -> Value {
             },
         },
     })
+}
+
+fn graph_index_matrix(identity: &ProductionQualificationIdentity) -> Value {
+    let cases = skein::PersistentGraphIndexClass::ALL
+        .into_iter()
+        .map(|class| graph_index_case(identity, class.as_str()))
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "protocol": "skein-production-graph-index-qualification-matrix-v1",
+        "evidence_kind": "representative_production_replica",
+        "production_eligible": true,
+        "ready": true,
+        "blocker_codes": [],
+        "qualified_class_count": cases.len(),
+        "required_class_count": skein::PersistentGraphIndexClass::ALL.len(),
+        "cases": cases,
+    })
+}
+
+fn graph_index_case(identity: &ProductionQualificationIdentity, class: &str) -> Value {
+    let mut case = graph(identity);
+    let digest = format!("sha256:{}", "0".repeat(64));
+    case["persistent_index_evidence"] = serde_json::json!({
+        "class": class,
+        "reference_output_digest": digest.clone(),
+        "observed_output_digest": digest,
+        "reference_output_rows": 10,
+        "observed_output_rows": 10,
+        "exact_result_parity": true,
+        "digest_runs": 1,
+        "measurement_runs": 2,
+        "runs_using_required_class": 2,
+        "operation_count": 2,
+        "max_blocks_read": 1,
+        "max_bytes_read": 128,
+        "max_blocks_read_per_run": 2,
+        "max_bytes_read_per_run": 256,
+        "required_artifact_bytes": 2_048,
+        "segment_cache_capacity_bytes": 1_024,
+        "artifact_exceeds_cache": true,
+        "cold_read_observed": true,
+        "warm_read_observed": true,
+        "runs": [
+            {
+                "run": 0,
+                "phase": "cold",
+                "operation_count": 1,
+                "blocks_read": 1,
+                "bytes_read": 128,
+                "index_cache_hits": 0,
+                "index_cache_misses": 1,
+                "segment_cache_evictions": 0,
+            },
+            {
+                "run": 1,
+                "phase": "warm",
+                "operation_count": 1,
+                "blocks_read": 1,
+                "bytes_read": 128,
+                "index_cache_hits": 1,
+                "index_cache_misses": 0,
+                "segment_cache_evictions": 0,
+            }
+        ],
+        "cancellation": {
+            "cancellation_observed": true,
+            "latency_micros": 10,
+            "max_latency_micros": 100,
+            "pinned_bytes_before": 0,
+            "pinned_bytes_after": 0,
+            "handle_poisoned_after": false,
+            "subsequent_read_succeeded": true,
+        },
+    });
+    case
 }
 
 fn search(identity: &ProductionQualificationIdentity) -> Value {

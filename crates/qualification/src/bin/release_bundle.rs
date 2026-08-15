@@ -55,6 +55,7 @@ fn run(
         read_json::<ProductionQualificationIdentity>(&config.expected_identity)?;
     let artifacts = ProductionReleaseQualificationArtifacts {
         graph_storage: Some(read_value(&config.graph)?),
+        graph_index_matrix: Some(read_value(&config.graph_index_matrix)?),
         search: Some(read_value(&config.search)?),
         vector_targets: config
             .vectors
@@ -81,6 +82,7 @@ fn run(
 struct Config {
     expected_identity: PathBuf,
     graph: PathBuf,
+    graph_index_matrix: PathBuf,
     search: PathBuf,
     vectors: Vec<PathBuf>,
     morsels: Vec<PathBuf>,
@@ -93,6 +95,7 @@ struct Config {
 fn parse_config(args: impl IntoIterator<Item = String>) -> Result<Option<Config>, String> {
     let mut expected_identity = None;
     let mut graph = None;
+    let mut graph_index_matrix = None;
     let mut search = None;
     let mut vectors = Vec::new();
     let mut morsels = Vec::new();
@@ -111,6 +114,7 @@ fn parse_config(args: impl IntoIterator<Item = String>) -> Result<Option<Config>
         match argument.as_str() {
             "--expected-identity-json" => expected_identity = Some(PathBuf::from(value)),
             "--graph-json" => graph = Some(PathBuf::from(value)),
+            "--graph-index-matrix-json" => graph_index_matrix = Some(PathBuf::from(value)),
             "--search-json" => search = Some(PathBuf::from(value)),
             "--vector-json" => vectors.push(PathBuf::from(value)),
             "--morsel-json" => morsels.push(PathBuf::from(value)),
@@ -138,6 +142,7 @@ fn parse_config(args: impl IntoIterator<Item = String>) -> Result<Option<Config>
     Ok(Some(Config {
         expected_identity: required(expected_identity, "--expected-identity-json")?,
         graph: required(graph, "--graph-json")?,
+        graph_index_matrix: required(graph_index_matrix, "--graph-index-matrix-json")?,
         search: required(search, "--search-json")?,
         vectors,
         morsels,
@@ -193,7 +198,8 @@ fn parse_bool(name: &str, value: &str) -> Result<bool, String> {
 
 fn usage() -> &'static str {
     "usage: skein-qualification-bundle \
-     --expected-identity-json <path> --graph-json <path> --search-json <path> \
+     --expected-identity-json <path> --graph-json <path> \
+     --graph-index-matrix-json <path> --search-json <path> \
      --vector-json <path>... --morsel-json <path>... --blocking-json <path> \
      --storage-crash-recovery-json <path> --release-controls-json <path> \
      [--min-throughput-gain-per-million <u32>] \
@@ -214,6 +220,8 @@ mod tests {
             "identity.json".to_string(),
             "--graph-json".to_string(),
             "graph.json".to_string(),
+            "--graph-index-matrix-json".to_string(),
+            "graph-index-matrix.json".to_string(),
             "--search-json".to_string(),
             "search.json".to_string(),
             "--vector-json".to_string(),
@@ -234,6 +242,10 @@ mod tests {
 
         assert_eq!(config.vectors.len(), 2);
         assert_eq!(config.morsels.len(), 1);
+        assert_eq!(
+            config.graph_index_matrix,
+            PathBuf::from("graph-index-matrix.json")
+        );
         assert_eq!(config.storage_crash_recovery, PathBuf::from("crash.json"));
         assert_eq!(config.release_controls, PathBuf::from("controls.json"));
         assert!(config.policy.require_turbovec_oracle);

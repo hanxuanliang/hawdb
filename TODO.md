@@ -222,9 +222,11 @@ crash; read-only recovery remains fail closed.
     and fail-closed selected corruption. The typed production matrix rejects
     missing, duplicate, mixed-replica, mixed-runtime, or mixed-generation cases
     before measurement and reports readiness only when all eight independent
-    class cases pass. Retain this item until representative production-replica
-    cases for every class are checked in; synthetic fixtures prove the contract,
-    not production readiness.
+    class cases pass. The final release bundle now requires this matrix and
+    revalidates every raw case, including its declared per-run I/O budgets,
+    rather than trusting top-level readiness. Retain this item until
+    representative production-replica cases for every class are checked in;
+    synthetic fixtures prove the contract, not production readiness.
 
 ## P1: PostgreSQL-Dialect Relational Content Store
 

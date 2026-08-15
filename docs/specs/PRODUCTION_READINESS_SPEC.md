@@ -104,6 +104,9 @@ generation. Duplicate, missing, or requirement-free cases fail before any
 measurement starts. Cases execute independently and retain class-scoped
 blockers; the matrix is ready only when every case is ready. This aggregate
 contract does not make one class's evidence authoritative for another class.
+Each case serializes both its observed maximum block/byte reads and the
+declared per-run block/byte limits so that a later release process can
+re-evaluate every run without trusting the case's reported readiness.
 
 Default reports MUST redact local paths, query text, parameters, row payloads,
 embeddings, credentials, and raw parser or I/O payload fragments. Debug-only
@@ -111,9 +114,10 @@ diagnostics MAY expose local detail through an explicit host decision, but
 debug reports MUST NOT be accepted as production cutover evidence.
 
 `evaluate_production_release_qualification_bundle` is the final typed
-cross-process evidence gate. It consumes the raw graph-storage, out-of-core
-search, per-target vector, per-worker morsel, active-route blocking, storage
-crash-recovery, and exact-revision release-control artifacts. The evaluator
+cross-process evidence gate. It consumes the raw graph-storage, all-class graph
+index matrix, out-of-core search, per-target vector, per-worker morsel,
+active-route blocking, storage crash-recovery, and exact-revision
+release-control artifacts. The evaluator
 does not trust their top-level `ready` fields: it revalidates protocols,
 release bindings, every graph cold/warm resource run, the recomputed graph
 resource summary, lifecycle process-memory capabilities, raw resource limits,
@@ -124,6 +128,14 @@ truncated, reordered, incorrectly phased, over-budget, or summary-inconsistent
 graph run fails closed. Its output retains only source-artifact SHA-256 digests
 and assessments, so it can be retained as release evidence without copying queries,
 paths, embeddings, or row payloads.
+
+The graph-index matrix is a required release artifact distinct from the
+general graph-storage run. The evaluator requires all eight classes in stable
+order, validates every embedded graph resource report against the exact release
+identity, recomputes parity, cold/warm cache lifecycle, operation and I/O
+aggregates, per-run block/byte budgets, larger-than-cache residency, and
+cancellation cleanup, and rejects missing or duplicate classes. A top-level
+matrix `ready` value or `qualified_class_count` cannot hide an invalid case.
 
 `skein-qualification-bundle` is a thin CI and release transport over that
 typed evaluator. It accepts bounded JSON inputs from independently generated

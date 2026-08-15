@@ -44,6 +44,7 @@ rust_library(
         "src/production_vector/tests.rs",
         "src/release_bundle.rs",
         "src/release_bundle/durability.rs",
+        "src/release_bundle/graph_index.rs",
         "src/release_bundle/graph_resource.rs",
         "src/release_bundle/graph_search.rs",
         "src/release_bundle/runtime.rs",
@@ -110,5 +111,23 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = all_crate_deps(normal = True, normal_dev = True) + [":skein_qualification"],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "skein_release_bundle_cli_tests",
+    crate_root = "src/bin/release_bundle.rs",
+    srcs = ["src/bin/release_bundle.rs"],
+    edition = "2024",
+    aliases = aliases(
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = all_crate_deps(normal = True, normal_dev = True) + [
+        ":skein_qualification",
+        "//:skein",
+    ],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
 )

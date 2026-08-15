@@ -168,6 +168,12 @@ class for deterministic evidence, prefixes every blocker with its class, and
 publishes readiness only when all eight independent reports are ready. A
 partial matrix, duplicate class, changed open/runtime configuration, or mixed
 canonical generation is invalid rather than a weaker readiness state.
+Every case retains its declared per-run block and byte limits alongside the
+observed maxima and raw cold/warm runs. The final release evaluator treats the
+matrix as a required artifact and independently checks class completeness and
+order, exact release identity, result parity, operation and I/O aggregates,
+per-run limits, larger-than-cache residency, and cancellation cleanup. It does
+not accept the matrix's top-level readiness as proof.
 
 Missing evidence, stale generation evidence, or an index/row generation
 mismatch leaves that class unqualified while other classes may remain

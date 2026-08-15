@@ -850,6 +850,11 @@ only after every modeled class has complete current-generation evidence, and
 it becomes stale when rows advance. The checked configuration explores the
 finite state space over two index classes and two generations: TLC reaches
 1,965,107 distinct states without an invariant violation.
+The Rust refinement serializes each case's declared block/byte budgets and raw
+cold/warm runs. `evaluate_production_release_qualification_bundle` requires the
+all-class matrix and independently reconstructs the complete, ordered,
+current-identity evidence set before release admission; top-level matrix
+readiness is not a refinement witness.
 
 `SkeinRelationalIndexShadowPublication.tla` models the generation-aligned but
 non-authoritative relational index candidate. Candidate fixed-slot pages become
