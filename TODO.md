@@ -307,6 +307,14 @@ qualification justifies moving them.
     replayed or prevent cutover.
 
 - [ ] Close the production evidence and decommissioning gates.
+  - The final release bundle now requires both the representative read-only
+    Content Store artifact and the isolated 1/4/8/10-writer mutation-replica
+    matrix. It independently revalidates frozen statement contracts, raw
+    cold/warm I/O and resource runs, runtime admission, writer sequences,
+    latency percentiles and regression, WAL/group accounting, replay deltas,
+    manifest-only reopen, checkpoint folding, and verification parity instead
+    of trusting child `ready` fields. Representative retained artifacts are
+    still required; synthetic fixtures establish only the evaluator contract.
   - Add a differential oracle that runs the frozen statement corpus against one
     SQLite snapshot and one Skein snapshot, comparing values, nulls, ordering,
     errors, and transaction outcomes rather than only row counts.

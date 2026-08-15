@@ -114,10 +114,11 @@ diagnostics MAY expose local detail through an explicit host decision, but
 debug reports MUST NOT be accepted as production cutover evidence.
 
 `evaluate_production_release_qualification_bundle` is the final typed
-cross-process evidence gate. It consumes the raw graph-storage, all-class graph
-index matrix, out-of-core search, per-target vector, per-worker morsel,
-active-route blocking, storage crash-recovery, and exact-revision
-release-control artifacts. The evaluator
+cross-process evidence gate. It consumes the raw read-only Content Store,
+Content Store mutation-replica matrix, graph-storage, all-class graph index
+matrix, out-of-core search, per-target vector, per-worker morsel, active-route
+blocking, storage crash-recovery, and exact-revision release-control artifacts.
+The evaluator
 does not trust their top-level `ready` fields: it revalidates protocols,
 release bindings, every graph cold/warm resource run, the recomputed graph
 resource summary, lifecycle process-memory capabilities, raw resource limits,
@@ -128,6 +129,18 @@ truncated, reordered, incorrectly phased, over-budget, or summary-inconsistent
 graph run fails closed. Its output retains only source-artifact SHA-256 digests
 and assessments, so it can be retained as release evidence without copying queries,
 paths, embeddings, or row payloads.
+
+The Content Store artifacts are independently re-evaluated from retained raw
+contracts and measurements. The read-only artifact binds every frozen SQL
+statement to its corpus-derived digest and row/payload limits, requires one
+open plus exact cold/warm runs per case, recomputes row/index generation and
+larger-than-cache invariants, and checks physical I/O, hydration, process,
+page-fault, cache-pin, and runtime-governor accounting. The mutation artifact
+requires exactly the 1, 4, 8, and 10 writer cases, validates every frozen
+`INSERT` and `UPDATE` run, recomputes latency percentiles and regression,
+checks commit-epoch and WAL group accounting, and proves the distinct
+WAL-replay and manifest-only reopen boundaries plus result-digest parity. A
+child report's empty blocker list cannot override contradictory raw fields.
 
 The graph-index matrix is a required release artifact distinct from the
 general graph-storage run. The evaluator requires all eight classes in stable
@@ -141,7 +154,9 @@ matrix `ready` value or `qualified_class_count` cannot hide an invalid case.
 typed evaluator. It accepts bounded JSON inputs from independently generated
 process and platform artifacts and exits unsuccessfully when the recomputed
 bundle is not ready. It is not a production serving control plane and cannot
-generate representative evidence by itself.
+generate representative evidence by itself. The Content Store inputs are
+mandatory through `--content-store-read-json` and
+`--content-store-mutation-matrix-json`; omitting either fails before evaluation.
 
 ## Cross-Platform Qualification
 

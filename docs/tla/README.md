@@ -189,6 +189,32 @@ generations atomically. Recovery opens those exact generations rather than an
 independent latest selector. Physical page demand reads and serving activation
 remain blocked on their separate implementation and regression evidence.
 
+## Production Content Store Evidence Refinement
+
+The read-only and mutation production runners and the final release-bundle
+evaluator are observers over existing storage transitions; they do not add a
+new publication, locking, or recovery action. Their formal boundary is the
+composition of `SkeinCowPagePublication.tla`, `SkeinTransactionConcurrency.tla`,
+`SkeinTransactionIndexOverlay.tla`, `SkeinStorageDurability.tla`, and
+`SkeinWalGroupCommit.tla`.
+
+The concrete read-only report refines a pinned current row/index generation:
+the observed base generation, visible epoch, recovery delta, live overlay, and
+cache pins must remain aligned across opens and cold/warm reads. The mutation
+matrix refines one durable commit transition per retained operation, followed
+by two distinct recovery observations. The first observation requires a
+non-empty WAL suffix to reconstruct both row and index recovery deltas; the
+second follows checkpoint publication and requires manifest selection with no
+WAL replay and no remaining live or recovery delta. Verification digests must
+remain identical across both observations.
+
+`release_bundle::content_store` rechecks these refinement obligations from raw
+evidence and rejects missing writer cases, inconsistent latency aggregates,
+invalid WAL accounting, stale epochs, and contradictory recovery views even
+when a child artifact reports readiness. Its tests are implementation-level
+refinement checks; the Bazel `storage_models` suite remains the authoritative
+bounded state-machine gate.
+
 ## Content Source Replacement
 
 `SkeinContentSourceReplacement.tla` models the Content Store operation that

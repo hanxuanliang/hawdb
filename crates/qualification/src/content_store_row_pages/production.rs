@@ -41,13 +41,28 @@ pub struct ProductionContentStoreReadCase {
     pub max_physical_bytes_per_run: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ProductionContentStoreResourceLimits {
     pub max_steady_resident_bytes: u64,
     pub max_peak_resident_bytes: u64,
     pub max_total_page_faults_per_run: Option<u64>,
     pub max_minor_page_faults_per_run: Option<u64>,
     pub max_major_page_faults_per_run: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProductionContentStoreReadContractEvidence {
+    pub case_name: String,
+    pub statement_name: String,
+    pub statement_sha256: String,
+    pub parameter_sha256: String,
+    pub expected_output_rows: usize,
+    pub expected_output_sha256: String,
+    pub max_output_rows: usize,
+    pub max_output_payload_bytes: usize,
+    pub max_intermediate_rows: u64,
+    pub max_physical_pages_per_run: u64,
+    pub max_physical_bytes_per_run: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -165,6 +180,10 @@ pub struct ProductionContentStoreStorageQualificationReport {
     pub schema: ContentStoreSchemaIdentity,
     pub resource_profile_kind: ContentStoreResourceProfileKind,
     pub configured_available_memory_bytes: u64,
+    pub max_relational_hydration_bytes: u64,
+    pub measurement_runs: usize,
+    pub resource_limits: ProductionContentStoreResourceLimits,
+    pub read_contracts: Vec<ProductionContentStoreReadContractEvidence>,
     pub runtime_memory: ContentStoreRuntimeMemoryEvidence,
     pub runtime_governor: ProductionContentStoreRuntimeGovernorEvidence,
     pub lifecycle_process: ContentStoreProcessResourceEvidence,
@@ -187,6 +206,10 @@ impl ProductionContentStoreStorageQualificationReport {
             "schema": self.schema,
             "resource_profile_kind": self.resource_profile_kind,
             "configured_available_memory_bytes": self.configured_available_memory_bytes,
+            "max_relational_hydration_bytes": self.max_relational_hydration_bytes,
+            "measurement_runs": self.measurement_runs,
+            "resource_limits": self.resource_limits,
+            "read_contracts": self.read_contracts,
             "runtime_memory": self.runtime_memory,
             "runtime_governor": self.runtime_governor,
             "lifecycle_process": self.lifecycle_process,
@@ -211,6 +234,28 @@ pub fn run_production_content_store_storage_qualification(
     ));
     let governor = RuntimeGovernor::detect(config.runtime_governor_config, storage_io);
     let governor_before = governor.snapshot();
+    let read_contracts = config
+        .read_cases
+        .iter()
+        .map(|read_case| {
+            let statement = corpus
+                .statement(&read_case.statement_name)
+                .expect("validated production read statement");
+            ProductionContentStoreReadContractEvidence {
+                case_name: read_case.case_name.clone(),
+                statement_name: read_case.statement_name.clone(),
+                statement_sha256: statement_digest(&statement.sql),
+                parameter_sha256: ordered_parameter_digest(&read_case.parameters),
+                expected_output_rows: read_case.expected_output_rows,
+                expected_output_sha256: read_case.expected_output_sha256.clone(),
+                max_output_rows: statement.max_rows,
+                max_output_payload_bytes: statement.max_payload_bytes,
+                max_intermediate_rows: read_case.max_intermediate_rows,
+                max_physical_pages_per_run: read_case.max_physical_pages_per_run,
+                max_physical_bytes_per_run: read_case.max_physical_bytes_per_run,
+            }
+        })
+        .collect();
     let mut blocker_codes = Vec::new();
     let mut opens = Vec::with_capacity(config.read_cases.len());
     let mut runs = Vec::with_capacity(
@@ -393,6 +438,13 @@ pub fn run_production_content_store_storage_qualification(
         schema: nowledge_content_store_schema_identity(),
         resource_profile_kind: config.resource_profile_kind,
         configured_available_memory_bytes: config.configured_available_memory_bytes,
+        max_relational_hydration_bytes: u64::try_from(
+            config.database_config.max_relational_hydration_bytes.get(),
+        )
+        .unwrap_or(u64::MAX),
+        measurement_runs: config.measurement_runs,
+        resource_limits: config.resource_limits,
+        read_contracts,
         runtime_memory,
         runtime_governor,
         lifecycle_process,
@@ -988,7 +1040,7 @@ mod tests {
                     identity: identity.clone(),
                     generated_at_unix_seconds: 1,
                 },
-                expected_identity: identity,
+                expected_identity: identity.clone(),
                 measurement_runs: 2,
                 resource_limits: ProductionContentStoreResourceLimits {
                     max_steady_resident_bytes: CONTENT_STORE_512_MIB_CAPABILITY_BYTES,
@@ -1015,6 +1067,19 @@ mod tests {
             report.ready,
             "unexpected blockers: {:?}",
             report.blocker_codes
+        );
+        let release = crate::evaluate_production_release_qualification_bundle(
+            crate::ProductionReleaseQualificationArtifacts {
+                content_store_read: Some(report.json()),
+                ..crate::ProductionReleaseQualificationArtifacts::default()
+            },
+            identity,
+            crate::ProductionReleaseQualificationPolicy::default(),
+        );
+        assert!(
+            release.content_store_read.ready,
+            "unexpected release blockers: {:?}",
+            release.content_store_read.blocker_codes
         );
         assert_eq!(report.opens.len(), 1);
         assert_eq!(report.runs.len(), 2);

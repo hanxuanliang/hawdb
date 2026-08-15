@@ -54,6 +54,8 @@ fn run(
     let expected_identity =
         read_json::<ProductionQualificationIdentity>(&config.expected_identity)?;
     let artifacts = ProductionReleaseQualificationArtifacts {
+        content_store_read: Some(read_value(&config.content_store_read)?),
+        content_store_mutation_matrix: Some(read_value(&config.content_store_mutation_matrix)?),
         graph_storage: Some(read_value(&config.graph)?),
         graph_index_matrix: Some(read_value(&config.graph_index_matrix)?),
         search: Some(read_value(&config.search)?),
@@ -81,6 +83,8 @@ fn run(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Config {
     expected_identity: PathBuf,
+    content_store_read: PathBuf,
+    content_store_mutation_matrix: PathBuf,
     graph: PathBuf,
     graph_index_matrix: PathBuf,
     search: PathBuf,
@@ -94,6 +98,8 @@ struct Config {
 
 fn parse_config(args: impl IntoIterator<Item = String>) -> Result<Option<Config>, String> {
     let mut expected_identity = None;
+    let mut content_store_read = None;
+    let mut content_store_mutation_matrix = None;
     let mut graph = None;
     let mut graph_index_matrix = None;
     let mut search = None;
@@ -113,6 +119,10 @@ fn parse_config(args: impl IntoIterator<Item = String>) -> Result<Option<Config>
             .ok_or_else(|| format!("missing value for {argument}"))?;
         match argument.as_str() {
             "--expected-identity-json" => expected_identity = Some(PathBuf::from(value)),
+            "--content-store-read-json" => content_store_read = Some(PathBuf::from(value)),
+            "--content-store-mutation-matrix-json" => {
+                content_store_mutation_matrix = Some(PathBuf::from(value));
+            }
             "--graph-json" => graph = Some(PathBuf::from(value)),
             "--graph-index-matrix-json" => graph_index_matrix = Some(PathBuf::from(value)),
             "--search-json" => search = Some(PathBuf::from(value)),
@@ -141,6 +151,11 @@ fn parse_config(args: impl IntoIterator<Item = String>) -> Result<Option<Config>
     }
     Ok(Some(Config {
         expected_identity: required(expected_identity, "--expected-identity-json")?,
+        content_store_read: required(content_store_read, "--content-store-read-json")?,
+        content_store_mutation_matrix: required(
+            content_store_mutation_matrix,
+            "--content-store-mutation-matrix-json",
+        )?,
         graph: required(graph, "--graph-json")?,
         graph_index_matrix: required(graph_index_matrix, "--graph-index-matrix-json")?,
         search: required(search, "--search-json")?,
@@ -198,7 +213,8 @@ fn parse_bool(name: &str, value: &str) -> Result<bool, String> {
 
 fn usage() -> &'static str {
     "usage: skein-qualification-bundle \
-     --expected-identity-json <path> --graph-json <path> \
+     --expected-identity-json <path> --content-store-read-json <path> \
+     --content-store-mutation-matrix-json <path> --graph-json <path> \
      --graph-index-matrix-json <path> --search-json <path> \
      --vector-json <path>... --morsel-json <path>... --blocking-json <path> \
      --storage-crash-recovery-json <path> --release-controls-json <path> \
@@ -218,6 +234,10 @@ mod tests {
         let config = parse_config([
             "--expected-identity-json".to_string(),
             "identity.json".to_string(),
+            "--content-store-read-json".to_string(),
+            "content-store-read.json".to_string(),
+            "--content-store-mutation-matrix-json".to_string(),
+            "content-store-mutation.json".to_string(),
             "--graph-json".to_string(),
             "graph.json".to_string(),
             "--graph-index-matrix-json".to_string(),
@@ -242,6 +262,14 @@ mod tests {
 
         assert_eq!(config.vectors.len(), 2);
         assert_eq!(config.morsels.len(), 1);
+        assert_eq!(
+            config.content_store_read,
+            PathBuf::from("content-store-read.json")
+        );
+        assert_eq!(
+            config.content_store_mutation_matrix,
+            PathBuf::from("content-store-mutation.json")
+        );
         assert_eq!(
             config.graph_index_matrix,
             PathBuf::from("graph-index-matrix.json")

@@ -45,6 +45,7 @@ rust_library(
         "src/production_vector/query.rs",
         "src/production_vector/tests.rs",
         "src/release_bundle.rs",
+        "src/release_bundle/content_store.rs",
         "src/release_bundle/durability.rs",
         "src/release_bundle/graph_index.rs",
         "src/release_bundle/graph_resource.rs",

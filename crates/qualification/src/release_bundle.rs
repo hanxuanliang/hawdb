@@ -5,6 +5,8 @@ use sha2::{Digest, Sha256};
 use skein::{ProductionEvidenceBinding, ProductionQualificationIdentity};
 use std::collections::BTreeSet;
 
+#[path = "release_bundle/content_store.rs"]
+mod content_store;
 #[path = "release_bundle/durability.rs"]
 mod durability;
 #[path = "release_bundle/graph_index.rs"]
@@ -105,6 +107,8 @@ impl ProductionReleaseControlEvidence {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProductionReleaseQualificationArtifacts {
+    pub content_store_read: Option<Value>,
+    pub content_store_mutation_matrix: Option<Value>,
     pub graph_storage: Option<Value>,
     pub graph_index_matrix: Option<Value>,
     pub search: Option<Value>,
@@ -185,6 +189,8 @@ pub struct ProductionReleaseQualificationBundleReport {
     pub blocker_codes: Vec<String>,
     pub expected_identity: ProductionQualificationIdentity,
     pub policy: ProductionReleaseQualificationPolicy,
+    pub content_store_read: ProductionArtifactAssessment,
+    pub content_store_mutation_matrix: ProductionArtifactAssessment,
     pub graph_storage: ProductionArtifactAssessment,
     pub graph_index_matrix: ProductionArtifactAssessment,
     pub search: ProductionArtifactAssessment,
@@ -204,6 +210,8 @@ impl ProductionReleaseQualificationBundleReport {
             "blocker_codes": self.blocker_codes,
             "expected_identity": self.expected_identity.json(),
             "policy": self.policy,
+            "content_store_read": self.content_store_read,
+            "content_store_mutation_matrix": self.content_store_mutation_matrix,
             "graph_storage": self.graph_storage,
             "graph_index_matrix": self.graph_index_matrix,
             "search": self.search,
@@ -221,6 +229,16 @@ pub fn evaluate_production_release_qualification_bundle(
     expected_identity: ProductionQualificationIdentity,
     policy: ProductionReleaseQualificationPolicy,
 ) -> ProductionReleaseQualificationBundleReport {
+    let content_store_read = evaluate_optional(
+        "representative_production_relational_replica",
+        artifacts.content_store_read.as_ref(),
+        |artifact| content_store::validate_read_storage(artifact, &expected_identity),
+    );
+    let content_store_mutation_matrix = evaluate_optional(
+        "representative_production_relational_mutation_replicas",
+        artifacts.content_store_mutation_matrix.as_ref(),
+        |artifact| content_store::validate_mutation_matrix(artifact, &expected_identity),
+    );
     let graph_storage = evaluate_optional(
         "representative_production_replica",
         artifacts.graph_storage.as_ref(),
@@ -266,6 +284,11 @@ pub fn evaluate_production_release_qualification_bundle(
         .map(|_| vec!["expected_identity_invalid".to_string()])
         .unwrap_or_default();
     for (prefix, ready) in [
+        ("content_store_read", content_store_read.ready),
+        (
+            "content_store_mutation_matrix",
+            content_store_mutation_matrix.ready,
+        ),
         ("graph_storage", graph_storage.ready),
         ("graph_index_matrix", graph_index_matrix.ready),
         ("search", search.ready),
@@ -287,6 +310,8 @@ pub fn evaluate_production_release_qualification_bundle(
         blocker_codes,
         expected_identity,
         policy,
+        content_store_read,
+        content_store_mutation_matrix,
         graph_storage,
         graph_index_matrix,
         search,

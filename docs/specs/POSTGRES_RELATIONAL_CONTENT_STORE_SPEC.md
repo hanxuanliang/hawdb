@@ -545,6 +545,16 @@ the isolation, replay, checkpoint, digest, and evidence contracts only; release
 readiness still requires retained reports from disposable copies of the
 representative production import.
 
+The final `evaluate_production_release_qualification_bundle` gate requires
+both the read-only production-copy report and the four-case mutation-replica
+report. The reports retain their declared resource and statement contracts so
+the gate can independently recompute every cold/warm I/O bound, runtime permit,
+writer sequence, percentile, epoch, WAL, recovery-delta, checkpoint-fold, and
+verification-digest obligation. It resolves statement digests and row/payload
+limits against the frozen corpus instead of trusting report-provided SQL
+metadata. `ready=true` and an empty child blocker list are descriptive only;
+contradictory raw evidence fails the final bundle.
+
 The focused Rust tests cover:
 
 - parser preparation and every statement in the qualification corpus;

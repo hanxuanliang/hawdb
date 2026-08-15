@@ -97,13 +97,23 @@ pub struct ProductionContentStoreMutationLatencyReference {
     pub generated_at_unix_seconds: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ProductionContentStoreMutationResourceLimits {
     pub max_steady_resident_bytes: u64,
     pub max_peak_resident_bytes: u64,
     pub max_total_page_faults_per_case: Option<u64>,
     pub max_minor_page_faults_per_case: Option<u64>,
     pub max_major_page_faults_per_case: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProductionContentStoreMutationVerificationContractEvidence {
+    pub case_name: String,
+    pub statement_name: String,
+    pub statement_sha256: String,
+    pub parameter_sha256: String,
+    pub expected_output_rows: usize,
+    pub expected_output_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -204,6 +214,7 @@ pub struct ProductionContentStoreMutationCaseReport {
     pub wal_replay_open: ProductionContentStoreMutationRecoveryEvidence,
     pub manifest_only_open: ProductionContentStoreMutationRecoveryEvidence,
     pub runs: Vec<ProductionContentStoreMutationRunEvidence>,
+    pub verification_contracts: Vec<ProductionContentStoreMutationVerificationContractEvidence>,
     pub replay_verification: Vec<ProductionContentStoreMutationVerificationEvidence>,
     pub checkpoint_verification: Vec<ProductionContentStoreMutationVerificationEvidence>,
     pub blocker_codes: Vec<String>,
@@ -218,6 +229,8 @@ pub struct ProductionContentStoreMutationQualificationReport {
     pub schema: ContentStoreSchemaIdentity,
     pub resource_profile_kind: ContentStoreResourceProfileKind,
     pub configured_available_memory_bytes: u64,
+    pub resource_limits: ProductionContentStoreMutationResourceLimits,
+    pub max_commit_p95_regression_per_million: u32,
     pub latency_reference: ProductionContentStoreMutationLatencyReference,
     pub cases: Vec<ProductionContentStoreMutationCaseReport>,
 }
@@ -235,6 +248,8 @@ impl ProductionContentStoreMutationQualificationReport {
             "schema": self.schema,
             "resource_profile_kind": self.resource_profile_kind,
             "configured_available_memory_bytes": self.configured_available_memory_bytes,
+            "resource_limits": self.resource_limits,
+            "max_commit_p95_regression_per_million": self.max_commit_p95_regression_per_million,
             "latency_reference": self.latency_reference,
             "cases": self.cases,
         })
@@ -265,6 +280,8 @@ pub fn run_production_content_store_mutation_qualification(
         schema: nowledge_content_store_schema_identity(),
         resource_profile_kind: config.resource_profile_kind,
         configured_available_memory_bytes: config.configured_available_memory_bytes,
+        resource_limits: config.resource_limits,
+        max_commit_p95_regression_per_million: config.max_commit_p95_regression_per_million,
         latency_reference: config.latency_reference,
         cases: reports,
     })
@@ -389,6 +406,23 @@ fn run_case(
     );
     let commit_p95_regression_per_million =
         regression_per_million(overall_commit.p95_micros, case.reference_commit_p95_micros);
+    let verification_contracts = case
+        .verification_cases
+        .iter()
+        .map(|verification| {
+            let statement = corpus
+                .statement(&verification.statement_name)
+                .expect("validated production verification statement");
+            ProductionContentStoreMutationVerificationContractEvidence {
+                case_name: verification.case_name.clone(),
+                statement_name: verification.statement_name.clone(),
+                statement_sha256: statement_digest(&statement.sql),
+                parameter_sha256: parameter_digest(&verification.parameters),
+                expected_output_rows: verification.expected_output_rows,
+                expected_output_sha256: verification.expected_output_sha256.clone(),
+            }
+        })
+        .collect();
     let mut blocker_codes = Vec::new();
     collect_case_blockers(
         CaseBlockerInputs {
@@ -438,6 +472,7 @@ fn run_case(
         wal_replay_open,
         manifest_only_open,
         runs,
+        verification_contracts,
         replay_verification,
         checkpoint_verification,
         blocker_codes,
@@ -1254,7 +1289,7 @@ mod tests {
                     identity: identity.clone(),
                     generated_at_unix_seconds: 1,
                 },
-                expected_identity: identity,
+                expected_identity: identity.clone(),
                 cases,
             },
         )
@@ -1264,6 +1299,19 @@ mod tests {
             report.ready,
             "unexpected blockers: {:?}",
             report.blocker_codes
+        );
+        let release = crate::evaluate_production_release_qualification_bundle(
+            crate::ProductionReleaseQualificationArtifacts {
+                content_store_mutation_matrix: Some(report.json()),
+                ..crate::ProductionReleaseQualificationArtifacts::default()
+            },
+            identity,
+            crate::ProductionReleaseQualificationPolicy::default(),
+        );
+        assert!(
+            release.content_store_mutation_matrix.ready,
+            "unexpected release blockers: {:?}",
+            release.content_store_mutation_matrix.blocker_codes
         );
         assert_eq!(report.cases.len(), 4);
         for case in &report.cases {
