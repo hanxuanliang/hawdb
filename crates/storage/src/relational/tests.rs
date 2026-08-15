@@ -3166,6 +3166,128 @@ fn schema_changing_relational_wal_invalidates_incremental_index_capture() {
 }
 
 #[test]
+fn relational_row_change_capture_reports_exact_net_primary_key_changes() {
+    let base = RelationalState::default()
+        .stage_transaction(
+            create_upsert_table(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("create row-change capture table")
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::Insert {
+                    table: "documents".to_string(),
+                    rows: vec![upsert_row("id-1", "owner-1", "old")],
+                    mode: RelationalInsertMode::Error,
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("seed row-change capture table");
+
+    let (next, capture) = base
+        .stage_transaction_with_row_changes(
+            RelationalTransaction {
+                writes: vec![
+                    RelationalWrite::UpdateWhere {
+                        table: "documents".to_string(),
+                        assignments: vec![RelationalUpdateAssignment {
+                            column: "id".to_string(),
+                            value: RelationalUpdateValue::Value(RelationalValue::Text(
+                                "id-3".to_string(),
+                            )),
+                        }],
+                        predicate: RelationalPredicate::Compare {
+                            column: "id".to_string(),
+                            op: RelationalComparisonOp::Eq,
+                            value: RelationalValue::Text("id-1".to_string()),
+                        },
+                    },
+                    RelationalWrite::Insert {
+                        table: "documents".to_string(),
+                        rows: vec![upsert_row("id-2", "owner-2", "transient")],
+                        mode: RelationalInsertMode::Error,
+                    },
+                    RelationalWrite::DeleteByPrimaryKey {
+                        table: "documents".to_string(),
+                        keys: vec![RelationalKey(vec![RelationalValue::Text(
+                            "id-2".to_string(),
+                        )])],
+                    },
+                ],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            RelationalRowChangeCaptureLimits::default(),
+        )
+        .expect("capture exact net row changes");
+
+    let old_key = RelationalKey(vec![RelationalValue::Text("id-1".to_string())]);
+    let transient_key = RelationalKey(vec![RelationalValue::Text("id-2".to_string())]);
+    let new_key = RelationalKey(vec![RelationalValue::Text("id-3".to_string())]);
+    assert!(next.row("documents", &old_key).is_none());
+    assert!(next.row("documents", &transient_key).is_none());
+    assert_eq!(
+        next.row("documents", &new_key),
+        Some(&upsert_row("id-3", "owner-1", "old"))
+    );
+
+    let RelationalRowChangeCapture::Captured {
+        changes,
+        encoded_bytes,
+    } = capture
+    else {
+        panic!("row-only transaction must remain incrementally capturable");
+    };
+    assert!(encoded_bytes > 0);
+    assert_eq!(changes.len(), 2);
+    assert_eq!(changes[0].primary_key, old_key);
+    assert!(changes[0].row.is_none());
+    assert_eq!(changes[1].primary_key, new_key);
+    assert_eq!(changes[1].row, Some(upsert_row("id-3", "owner-1", "old")));
+}
+
+#[test]
+fn relational_row_change_capture_limit_invalidates_without_rejecting_canonical_state() {
+    let base = RelationalState::default()
+        .stage_transaction(
+            create_upsert_table(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("create row-change limit table");
+    let (next, capture) = base
+        .stage_transaction_with_row_changes(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::Insert {
+                    table: "documents".to_string(),
+                    rows: vec![
+                        upsert_row("id-1", "owner-1", "one"),
+                        upsert_row("id-2", "owner-2", "two"),
+                    ],
+                    mode: RelationalInsertMode::Error,
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            RelationalRowChangeCaptureLimits {
+                max_entries: NonZeroUsize::new(1).unwrap(),
+                max_bytes: NonZeroUsize::new(1024 * 1024).unwrap(),
+            },
+        )
+        .expect("canonical state remains valid when shadow capture is invalidated");
+
+    assert_eq!(next.row_count("documents"), 2);
+    assert!(matches!(
+        capture,
+        RelationalRowChangeCapture::Invalidated { reason }
+            if reason.contains("max_entries=1")
+    ));
+}
+
+#[test]
 fn relational_schema_rejects_reserved_and_duplicate_index_names() {
     for name in [
         "",

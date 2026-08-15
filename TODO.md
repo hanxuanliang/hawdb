@@ -97,8 +97,14 @@ a stale index or a database-sized resident set to become a correctness
 dependency.
 
 - [ ] Implement the canonical relational row-page runtime.
-  - Recover from the published root plus a bounded WAL dirty overlay without
-    skipping durable WAL or scanning all row pages during open.
+  - Add a persistent logical `PageId` allocator plus deterministic leaf lookup,
+    insert, update, delete, split, and streaming bootstrap mechanics.
+  - Replace the non-serving in-memory recovery shadow with schema-aware,
+    disk-backed WAL and live delta runs so complete replay remains resident
+    bounded without skipping durable WAL or scanning all row pages during open.
+  - Automatically publish and bind the exact row root to the canonical
+    checkpoint, then cover backup, restore, scrub, orphan cleanup, reader-pin
+    reclamation, and Windows file lifecycle behavior.
 
 - [ ] Demand-page relational rows and large values.
   - Support primary-key point reads, admitted ordered pages, and bounded range

@@ -491,6 +491,46 @@ These events map in order to `BeginCheckpoint`, `PersistCandidatePages`,
 published root plus WAL, physical page demand reads, overflow hydration,
 reclamation, and production serving activation remain later contracts.
 
+### Relational row-root recovery shadow
+
+The current recovery integration is a non-serving refinement over an optional
+row-root publication. It does not make the independently published latest
+row-root manifest a canonical checkpoint dependency. At open, the store accepts
+a candidate only when its generation and source commit epoch equal the loaded
+checkpoint and every table schema digest matches. Missing, stale, corrupt, or
+schema-drifted candidates are isolated from canonical checkpoint plus WAL
+recovery and never become SQL inputs.
+
+Mounting reads and validates the bounded row-root manifest and exact artifact
+file lengths only. It does not enumerate root descriptors, read row-page slots,
+or hash database-scale artifacts. First descriptor and page integrity checks
+remain demand-read obligations.
+
+Relational transaction apply derives exact primary-key changes from the
+authoritative before and after states. Multiple relational fragments in one
+global commit epoch coalesce into the same overlay, and graph-only commits
+advance that epoch with an empty row change. Each fragment is validated and the
+resulting entry and byte totals are admitted before any overlay entry changes.
+An epoch gap, DDL or schema rewrite, an overflow reference without a published
+overflow manifest, or an entry/byte limit violation makes the shadow
+unavailable; it cannot publish a partial recovered view.
+
+The default shadow envelope is 100,000 primary-key entries and 64 MiB of
+charged resident state. These are hard evidence bounds, not a claim that an
+arbitrary retained WAL suffix fits in memory. Exceeding either bound leaves the
+existing canonical recovery path intact. A later stage MUST use schema-aware,
+disk-backed recovery delta runs before row pages can become canonical under the
+larger WAL replay envelope.
+
+After the complete WAL prefix is consumed, recovery may expose one immutable
+`Arc` view whose identity contains the base generation, base commit epoch, and
+fully recovered visible commit epoch. `GraphStore::snapshot()` retains that
+exact view only for the matching commit epoch. A later live commit removes the
+store's current row shadow because live row-delta publication is not active;
+already pinned snapshots remain valid. This view is diagnostic and differential
+evidence only: SQL, constraints, checkpoint authority, backup, and reclamation
+do not select it.
+
 ### Graph layout
 
 1. Nodes and relationships MUST use stable ids and independently addressable
@@ -799,7 +839,10 @@ projected-decode, shared-limit, and corruption testing. Shadow COW publication
 is the first stateful use of these bytes. Its fixed runtime event trace, stale
 generation fence, immutable artifacts, crash boundaries, and pinned
 cross-generation descriptors refine `SkeinCowPagePublication.tla`. WAL recovery
-and serving activation remain separate obligations.
+and serving activation remain separate obligations. The current bounded,
+non-serving base-plus-WAL recovery view refines `SkeinRowRecovery.tla`; it does
+not discharge the later disk-backed recovery, checkpoint binding, demand-read,
+or serving obligations.
 
 - `SkeinTransactionConcurrency.tla`: logical lock namespaces, compatibility,
   wait-for deadlocks, escalation, savepoint release, and durable publication.
@@ -821,6 +864,11 @@ and serving activation remain separate obligations.
   bounded dirty overlays, immutable candidate generations, crash recovery,
   schema invalidation, no partial replay visibility, and sound exact-key
   constraint qualification only from a current pinned view.
+- `SkeinRowRecovery.tla`: checkpoint-correlated row-root mount, exact ordered
+  primary-key WAL overlay, graph-only epoch advancement, whole-fragment
+  admission, fail-closed invalidation, complete-prefix view publication, cold
+  page slots, pinned generation stability, live invalidation, and the
+  non-serving SQL boundary.
 - `SkeinPageCacheAdmission.tla`: clean immutable page residency, pin-safe
   eviction, cancellation release, caller-carved foreground reserve, corrupt
   admission rejection, cold open, and background hit/admit/bypass progress.

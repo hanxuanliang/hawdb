@@ -57,21 +57,28 @@ pub use row_page::{
     RelationalRowPageId, RelationalRowPageLimits, RelationalRowPagePublicationConfig,
     RelationalRowPagePublicationError, RelationalRowPagePublicationPhase,
     RelationalRowPagePublicationReport, RelationalRowPagePublisher,
-    RelationalRowPageRootDescriptor, RelationalRowPageRootManifest, RelationalRowPageRootReader,
-    RelationalRowPageSlotIntegrity, RelationalRowPageTableDelta, RelationalRowPageTableRoot,
-    RelationalRowPageView, DEFAULT_RELATIONAL_ROW_PAGE_BYTES, DEFAULT_RELATIONAL_ROW_PAGE_COLUMNS,
-    DEFAULT_RELATIONAL_ROW_PAGE_DIRTY_BYTES, DEFAULT_RELATIONAL_ROW_PAGE_DIRTY_PAGES,
-    DEFAULT_RELATIONAL_ROW_PAGE_INLINE_VALUE_BYTES, DEFAULT_RELATIONAL_ROW_PAGE_KEY_BYTES,
-    DEFAULT_RELATIONAL_ROW_PAGE_MANIFEST_BYTES, DEFAULT_RELATIONAL_ROW_PAGE_ROOT_KEY_BYTES,
-    DEFAULT_RELATIONAL_ROW_PAGE_ROOT_PAGES, DEFAULT_RELATIONAL_ROW_PAGE_ROWS,
-    DEFAULT_RELATIONAL_ROW_PAGE_ROW_BYTES, DEFAULT_RELATIONAL_ROW_PAGE_TABLES,
-    DEFAULT_RELATIONAL_ROW_PAGE_VALUE_BYTES, RELATIONAL_ROW_PAGE_MANIFEST_FILE,
+    RelationalRowPageRecoveredValue, RelationalRowPageRecoveryBuilder,
+    RelationalRowPageRecoveryConfig, RelationalRowPageRecoveryError,
+    RelationalRowPageRecoveryIdentity, RelationalRowPageRecoveryReport,
+    RelationalRowPageRecoveryView, RelationalRowPageRootDescriptor, RelationalRowPageRootManifest,
+    RelationalRowPageRootReader, RelationalRowPageSlotIntegrity, RelationalRowPageTableDelta,
+    RelationalRowPageTableRoot, RelationalRowPageView, DEFAULT_RELATIONAL_ROW_PAGE_BYTES,
+    DEFAULT_RELATIONAL_ROW_PAGE_COLUMNS, DEFAULT_RELATIONAL_ROW_PAGE_DIRTY_BYTES,
+    DEFAULT_RELATIONAL_ROW_PAGE_DIRTY_PAGES, DEFAULT_RELATIONAL_ROW_PAGE_INLINE_VALUE_BYTES,
+    DEFAULT_RELATIONAL_ROW_PAGE_KEY_BYTES, DEFAULT_RELATIONAL_ROW_PAGE_MANIFEST_BYTES,
+    DEFAULT_RELATIONAL_ROW_PAGE_RECOVERY_BYTES, DEFAULT_RELATIONAL_ROW_PAGE_RECOVERY_ENTRIES,
+    DEFAULT_RELATIONAL_ROW_PAGE_ROOT_KEY_BYTES, DEFAULT_RELATIONAL_ROW_PAGE_ROOT_PAGES,
+    DEFAULT_RELATIONAL_ROW_PAGE_ROWS, DEFAULT_RELATIONAL_ROW_PAGE_ROW_BYTES,
+    DEFAULT_RELATIONAL_ROW_PAGE_TABLES, DEFAULT_RELATIONAL_ROW_PAGE_VALUE_BYTES,
+    RELATIONAL_ROW_PAGE_MANIFEST_FILE,
 };
 
 pub const DEFAULT_MAX_RELATIONAL_MUTATION_ROWS: usize = 100_000;
 pub const DEFAULT_MAX_RELATIONAL_MUTATION_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_RELATIONAL_INDEX_CHANGES: usize = 100_000;
 pub const DEFAULT_MAX_RELATIONAL_INDEX_CHANGE_BYTES: usize = 8 * 1024 * 1024;
+pub const DEFAULT_MAX_RELATIONAL_ROW_CHANGES: usize = 100_000;
+pub const DEFAULT_MAX_RELATIONAL_ROW_CHANGE_BYTES: usize = 64 * 1024 * 1024;
 pub const RELATIONAL_PRIMARY_INDEX_NAME: &str = "__primary__";
 const RELATIONAL_UNIQUE_INDEX_PREFIX: &str = "__unique_";
 const RELATIONAL_FOREIGN_KEY_INDEX_PREFIX: &str = "__foreign_key_";
@@ -106,6 +113,23 @@ impl Default for RelationalIndexChangeCaptureLimits {
                 .expect("default relational index change limit is non-zero"),
             max_bytes: NonZeroUsize::new(DEFAULT_MAX_RELATIONAL_INDEX_CHANGE_BYTES)
                 .expect("default relational index change byte limit is non-zero"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelationalRowChangeCaptureLimits {
+    pub max_entries: NonZeroUsize,
+    pub max_bytes: NonZeroUsize,
+}
+
+impl Default for RelationalRowChangeCaptureLimits {
+    fn default() -> Self {
+        Self {
+            max_entries: NonZeroUsize::new(DEFAULT_MAX_RELATIONAL_ROW_CHANGES)
+                .expect("default relational row change limit is non-zero"),
+            max_bytes: NonZeroUsize::new(DEFAULT_MAX_RELATIONAL_ROW_CHANGE_BYTES)
+                .expect("default relational row change byte limit is non-zero"),
         }
     }
 }
@@ -392,6 +416,24 @@ pub struct RelationalIndexChange {
 pub enum RelationalIndexChangeCapture {
     Captured {
         changes: Vec<RelationalIndexChange>,
+        encoded_bytes: usize,
+    },
+    Invalidated {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationalRowChange {
+    pub table: String,
+    pub primary_key: RelationalKey,
+    pub row: Option<RelationalRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelationalRowChangeCapture {
+    Captured {
+        changes: Vec<RelationalRowChange>,
         encoded_bytes: usize,
     },
     Invalidated {
@@ -944,6 +986,64 @@ impl RelationalState {
         )
     }
 
+    pub fn stage_transaction_with_index_and_row_changes(
+        &self,
+        transaction: RelationalTransaction,
+        limits: RelationalMutationLimits,
+        overflow_config: RelationalOverflowConfig,
+        index_capture_limits: RelationalIndexChangeCaptureLimits,
+        row_capture_limits: RelationalRowChangeCaptureLimits,
+    ) -> Result<
+        (
+            Self,
+            RelationalIndexChangeCapture,
+            RelationalRowChangeCapture,
+        ),
+        RelationalError,
+    > {
+        admit_transaction(&transaction, limits)?;
+        let (state, index_capture, row_capture) = apply_transaction_inner(
+            self,
+            transaction,
+            limits,
+            overflow_config,
+            TransactionApplyOptions {
+                index_capture_limits: Some(index_capture_limits),
+                row_capture_limits: Some(row_capture_limits),
+                ..TransactionApplyOptions::materialized()
+            },
+        )?;
+        Ok((
+            state,
+            index_capture.expect("index change capture was requested for this transaction"),
+            row_capture.expect("row change capture was requested for this transaction"),
+        ))
+    }
+
+    pub fn stage_transaction_with_row_changes(
+        &self,
+        transaction: RelationalTransaction,
+        limits: RelationalMutationLimits,
+        overflow_config: RelationalOverflowConfig,
+        capture_limits: RelationalRowChangeCaptureLimits,
+    ) -> Result<(Self, RelationalRowChangeCapture), RelationalError> {
+        admit_transaction(&transaction, limits)?;
+        let (state, _, capture) = apply_transaction_inner(
+            self,
+            transaction,
+            limits,
+            overflow_config,
+            TransactionApplyOptions {
+                row_capture_limits: Some(capture_limits),
+                ..TransactionApplyOptions::materialized()
+            },
+        )?;
+        Ok((
+            state,
+            capture.expect("row change capture was requested for this transaction"),
+        ))
+    }
+
     /// Replays an already-durable authoritative transaction while deriving
     /// its recovery-index delta directly from before/after rows.
     ///
@@ -972,6 +1072,47 @@ impl RelationalState {
             None,
             TransactionIndexMode::AuthoritativeRecovery,
         )
+    }
+
+    pub fn stage_transaction_for_authoritative_recovery_with_row_changes(
+        &self,
+        transaction: RelationalTransaction,
+        limits: RelationalMutationLimits,
+        overflow_config: RelationalOverflowConfig,
+        index_capture_limits: RelationalIndexChangeCaptureLimits,
+        row_capture_limits: RelationalRowChangeCaptureLimits,
+    ) -> Result<
+        (
+            Self,
+            RelationalIndexChangeCapture,
+            RelationalRowChangeCapture,
+        ),
+        RelationalError,
+    > {
+        admit_transaction(&transaction, limits)?;
+        if transaction.changes_index_schema() {
+            return Err(RelationalError::Admission(
+                "authoritative relational recovery rejects schema-changing WAL until new canonical row and index generations are published"
+                    .to_string(),
+            ));
+        }
+        let (state, index_capture, row_capture) = apply_transaction_inner(
+            self,
+            transaction,
+            limits,
+            overflow_config,
+            TransactionApplyOptions {
+                index_capture_limits: Some(index_capture_limits),
+                row_capture_limits: Some(row_capture_limits),
+                constraint_index: None,
+                index_mode: TransactionIndexMode::AuthoritativeRecovery,
+            },
+        )?;
+        Ok((
+            state,
+            index_capture.expect("index change capture was requested for recovery"),
+            row_capture.expect("row change capture was requested for recovery"),
+        ))
     }
 
     /// Stages one transaction against a constraint index pinned to this
@@ -1005,6 +1146,16 @@ impl RelationalState {
 
     pub fn table_schema(&self, table: &str) -> Option<&RelationalTableSchema> {
         self.schemas.get(table).map(Arc::as_ref)
+    }
+
+    pub fn table_schema_digest(
+        &self,
+        table: &str,
+    ) -> Result<Option<skein_integrity::Sha256Digest>, RelationalError> {
+        self.table_schema(table)
+            .map(index_shadow::relational_schema_digest)
+            .transpose()
+            .map_err(|error| RelationalError::Corruption(error.to_string()))
     }
 
     pub fn table_schemas(&self) -> impl DoubleEndedIterator<Item = &RelationalTableSchema> {
@@ -1527,11 +1678,9 @@ fn apply_transaction(
         transaction,
         limits,
         overflow_config,
-        None,
-        None,
-        TransactionIndexMode::Materialized,
+        TransactionApplyOptions::materialized(),
     )
-    .map(|(state, _)| state)
+    .map(|(state, _, _)| state)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1539,6 +1688,25 @@ enum TransactionIndexMode {
     Materialized,
     Authoritative,
     AuthoritativeRecovery,
+}
+
+#[derive(Clone, Copy)]
+struct TransactionApplyOptions<'a> {
+    index_capture_limits: Option<RelationalIndexChangeCaptureLimits>,
+    row_capture_limits: Option<RelationalRowChangeCaptureLimits>,
+    constraint_index: Option<&'a dyn RelationalConstraintIndex>,
+    index_mode: TransactionIndexMode,
+}
+
+impl TransactionApplyOptions<'_> {
+    const fn materialized() -> Self {
+        Self {
+            index_capture_limits: None,
+            row_capture_limits: None,
+            constraint_index: None,
+            index_mode: TransactionIndexMode::Materialized,
+        }
+    }
 }
 
 fn apply_transaction_with_index_changes(
@@ -1550,14 +1718,17 @@ fn apply_transaction_with_index_changes(
     constraint_index: Option<&dyn RelationalConstraintIndex>,
     index_mode: TransactionIndexMode,
 ) -> Result<(RelationalState, RelationalIndexChangeCapture), RelationalError> {
-    let (state, capture) = apply_transaction_inner(
+    let (state, capture, _) = apply_transaction_inner(
         state,
         transaction,
         limits,
         overflow_config,
-        Some(capture_limits),
-        constraint_index,
-        index_mode,
+        TransactionApplyOptions {
+            index_capture_limits: Some(capture_limits),
+            row_capture_limits: None,
+            constraint_index,
+            index_mode,
+        },
     )?;
     Ok((
         state,
@@ -1570,10 +1741,21 @@ fn apply_transaction_inner(
     transaction: RelationalTransaction,
     limits: RelationalMutationLimits,
     overflow_config: RelationalOverflowConfig,
-    capture_limits: Option<RelationalIndexChangeCaptureLimits>,
-    constraint_index: Option<&dyn RelationalConstraintIndex>,
-    index_mode: TransactionIndexMode,
-) -> Result<(RelationalState, Option<RelationalIndexChangeCapture>), RelationalError> {
+    options: TransactionApplyOptions<'_>,
+) -> Result<
+    (
+        RelationalState,
+        Option<RelationalIndexChangeCapture>,
+        Option<RelationalRowChangeCapture>,
+    ),
+    RelationalError,
+> {
+    let TransactionApplyOptions {
+        index_capture_limits,
+        row_capture_limits,
+        constraint_index,
+        index_mode,
+    } = options;
     let mut next = state.clone();
     match index_mode {
         TransactionIndexMode::Materialized => {
@@ -1820,8 +2002,17 @@ fn apply_transaction_inner(
             }
         }
     }
-    let capture = capture_limits.map(|capture_limits| {
+    let index_capture = index_capture_limits.map(|capture_limits| {
         capture_relational_index_changes(
+            state,
+            &next,
+            &changed_keys,
+            &full_index_rebuild,
+            capture_limits,
+        )
+    });
+    let row_capture = row_capture_limits.map(|capture_limits| {
+        capture_relational_row_changes(
             state,
             &next,
             &changed_keys,
@@ -1834,7 +2025,7 @@ fn apply_transaction_inner(
             validate_foreign_keys_incremental(state, &next, &changed_keys, &full_index_rebuild)?;
         }
         (TransactionIndexMode::Authoritative, Some(constraint_index)) => {
-            let changes = capture
+            let changes = index_capture
                 .as_ref()
                 .expect("authoritative constraints require index change capture")
                 .changes()?;
@@ -1853,7 +2044,7 @@ fn apply_transaction_inner(
             ));
         }
     }
-    Ok((next, capture))
+    Ok((next, index_capture, row_capture))
 }
 
 struct UpsertIndexContext<'a> {
@@ -2632,6 +2823,89 @@ fn capture_relational_index_changes(
     RelationalIndexChangeCapture::Captured {
         changes,
         encoded_bytes,
+    }
+}
+
+fn capture_relational_row_changes(
+    previous: &RelationalState,
+    next: &RelationalState,
+    changed_keys: &BTreeMap<String, BTreeSet<RelationalKey>>,
+    rewritten_tables: &BTreeSet<String>,
+    limits: RelationalRowChangeCaptureLimits,
+) -> RelationalRowChangeCapture {
+    if !rewritten_tables.is_empty() {
+        return RelationalRowChangeCapture::Invalidated {
+            reason: format!(
+                "schema-changing WAL requires new row roots for tables {}",
+                rewritten_tables
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        };
+    }
+
+    let mut changes = Vec::new();
+    let mut encoded_bytes = 0usize;
+    for (table, keys) in changed_keys {
+        for primary_key in keys {
+            let previous_row = previous.row(table, primary_key);
+            let next_row = next.row(table, primary_key);
+            if previous_row == next_row {
+                continue;
+            }
+            let change = RelationalRowChange {
+                table: table.clone(),
+                primary_key: primary_key.clone(),
+                row: next_row.cloned(),
+            };
+            let Some(change_bytes) = estimated_row_change_encoding_bytes(&change) else {
+                return row_capture_limit_invalidated(limits);
+            };
+            let Some(next_bytes) = encoded_bytes.checked_add(change_bytes) else {
+                return row_capture_limit_invalidated(limits);
+            };
+            if changes.len() >= limits.max_entries.get() || next_bytes > limits.max_bytes.get() {
+                return row_capture_limit_invalidated(limits);
+            }
+            changes.push(change);
+            encoded_bytes = next_bytes;
+        }
+    }
+    RelationalRowChangeCapture::Captured {
+        changes,
+        encoded_bytes,
+    }
+}
+
+fn estimated_row_change_encoding_bytes(change: &RelationalRowChange) -> Option<usize> {
+    const FIXED_BYTES: usize = 1 + 3 * 4;
+    let key_bytes = ordered_key::encode_ordered_relational_key(&change.primary_key)
+        .ok()?
+        .len();
+    let row_bytes = match &change.row {
+        Some(row) => row.estimated_payload_bytes().checked_add(
+            row.values()
+                .len()
+                .checked_mul(std::mem::size_of::<RelationalValue>())?,
+        )?,
+        None => 0,
+    };
+    FIXED_BYTES
+        .checked_add(change.table.len())?
+        .checked_add(key_bytes)?
+        .checked_add(row_bytes)
+}
+
+fn row_capture_limit_invalidated(
+    limits: RelationalRowChangeCaptureLimits,
+) -> RelationalRowChangeCapture {
+    RelationalRowChangeCapture::Invalidated {
+        reason: format!(
+            "relational row WAL delta cannot be encoded within capture limits: max_entries={}, max_bytes={}",
+            limits.max_entries, limits.max_bytes
+        ),
     }
 }
 

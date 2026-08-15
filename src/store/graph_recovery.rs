@@ -1009,6 +1009,7 @@ impl GraphStore {
                         self.apply_wal_op(catalog, op)?;
                     }
                     self.commit_epoch += 1;
+                    self.advance_relational_row_recovery_epoch(self.commit_epoch);
                 }
                 op => {
                     self.ensure_out_of_core_delta_replay_admission(std::slice::from_ref(&op))?;
@@ -1020,9 +1021,11 @@ impl GraphStore {
                     );
                     self.apply_wal_op(catalog, op)?;
                     self.commit_epoch += 1;
+                    self.advance_relational_row_recovery_epoch(self.commit_epoch);
                 }
             }
         }
+        self.finish_relational_row_page_recovery();
         self.finish_relational_index_recovery();
         if let Some(durable) = &mut self.durable {
             durable.next_lsn = expected_lsn;

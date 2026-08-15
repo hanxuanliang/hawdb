@@ -9,6 +9,7 @@ use std::fmt;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 mod publication;
+mod recovery;
 mod value;
 
 pub use publication::{
@@ -23,6 +24,13 @@ pub use publication::{
     DEFAULT_RELATIONAL_ROW_PAGE_MANIFEST_BYTES, DEFAULT_RELATIONAL_ROW_PAGE_ROOT_KEY_BYTES,
     DEFAULT_RELATIONAL_ROW_PAGE_ROOT_PAGES, DEFAULT_RELATIONAL_ROW_PAGE_TABLES,
     RELATIONAL_ROW_PAGE_MANIFEST_FILE,
+};
+pub use recovery::{
+    RelationalRowPageRecoveredValue, RelationalRowPageRecoveryBuilder,
+    RelationalRowPageRecoveryConfig, RelationalRowPageRecoveryError,
+    RelationalRowPageRecoveryIdentity, RelationalRowPageRecoveryReport,
+    RelationalRowPageRecoveryView, DEFAULT_RELATIONAL_ROW_PAGE_RECOVERY_BYTES,
+    DEFAULT_RELATIONAL_ROW_PAGE_RECOVERY_ENTRIES,
 };
 
 use value::{decode_row_fields, encode_row, validate_requested_fields};

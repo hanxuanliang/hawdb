@@ -1205,6 +1205,10 @@ impl GraphStore {
         let publication = self.stage_relational_index_live_publication(next_commit_epoch, None);
         self.commit_epoch = next_commit_epoch;
         self.publish_relational_index_live_view(publication);
+        self.invalidate_relational_row_page_live_view(
+            next_commit_epoch,
+            "live commits require the later canonical row live-overlay activation stage",
+        );
     }
 
     pub(super) fn mount_relational_index_shadow_for_recovery(&mut self) {
@@ -1578,45 +1582,93 @@ impl GraphStore {
             .relational_index_shadow
             .mode
             .requires_authoritative_indexes();
-        let Some(builder) = self.relational_index_shadow.recovery_builder.as_ref() else {
-            if authoritative {
-                return Err(skein_storage::RelationalError::Corruption(
-                    "authoritative relational index recovery requires a bound base generation and writable recovery-delta builder"
-                        .to_string(),
-                ));
+        let index_limits = self
+            .relational_index_shadow
+            .recovery_builder
+            .as_ref()
+            .map(RelationalIndexRecoveryBuilder::capture_limits);
+        if authoritative && index_limits.is_none() {
+            return Err(skein_storage::RelationalError::Corruption(
+                "authoritative relational index recovery requires a bound base generation and writable recovery-delta builder"
+                    .to_string(),
+            ));
+        }
+        let row_limits = self.relational_row_recovery_capture_limits();
+        let (next, index_capture, row_capture) = match (index_limits, row_limits) {
+            (Some(index_limits), Some(row_limits)) if authoritative => {
+                let (next, index_capture, row_capture) = self
+                    .relational_state
+                    .stage_transaction_for_authoritative_recovery_with_row_changes(
+                        transaction,
+                        self.relational_mutation_limits,
+                        self.relational_overflow_config,
+                        index_limits,
+                        row_limits,
+                    )?;
+                (next, Some(index_capture), Some(row_capture))
             }
-            self.relational_state = self.relational_state.stage_transaction(
-                transaction,
-                self.relational_mutation_limits,
-                self.relational_overflow_config,
-            )?;
-            return Ok(());
-        };
-        let capture_limits = builder.capture_limits();
-        let (next, capture) = if authoritative {
-            self.relational_state
-                .stage_transaction_for_authoritative_recovery(
+            (Some(index_limits), Some(row_limits)) => {
+                let (next, index_capture, row_capture) = self
+                    .relational_state
+                    .stage_transaction_with_index_and_row_changes(
+                        transaction,
+                        self.relational_mutation_limits,
+                        self.relational_overflow_config,
+                        index_limits,
+                        row_limits,
+                    )?;
+                (next, Some(index_capture), Some(row_capture))
+            }
+            (Some(index_limits), None) if authoritative => {
+                let (next, capture) = self
+                    .relational_state
+                    .stage_transaction_for_authoritative_recovery(
+                        transaction,
+                        self.relational_mutation_limits,
+                        self.relational_overflow_config,
+                        index_limits,
+                    )?;
+                (next, Some(capture), None)
+            }
+            (Some(index_limits), None) => {
+                let (next, capture) = self.relational_state.stage_transaction_with_index_changes(
                     transaction,
                     self.relational_mutation_limits,
                     self.relational_overflow_config,
-                    capture_limits,
-                )?
-        } else {
-            self.relational_state.stage_transaction_with_index_changes(
-                transaction,
-                self.relational_mutation_limits,
-                self.relational_overflow_config,
-                capture_limits,
-            )?
+                    index_limits,
+                )?;
+                (next, Some(capture), None)
+            }
+            (None, Some(row_limits)) => {
+                let (next, capture) = self.relational_state.stage_transaction_with_row_changes(
+                    transaction,
+                    self.relational_mutation_limits,
+                    self.relational_overflow_config,
+                    row_limits,
+                )?;
+                (next, None, Some(capture))
+            }
+            (None, None) => (
+                self.relational_state.stage_transaction(
+                    transaction,
+                    self.relational_mutation_limits,
+                    self.relational_overflow_config,
+                )?,
+                None,
+                None,
+            ),
         };
         self.relational_state = next;
-        if let Some(mut builder) = self.relational_index_shadow.recovery_builder.take() {
+        if let Some(capture) = index_capture
+            && let Some(mut builder) = self.relational_index_shadow.recovery_builder.take()
+        {
             if let Err(error) = builder.record(expected_epoch, capture) {
                 self.mark_relational_index_recovery_unavailable(expected_epoch, error.to_string());
             } else {
                 self.relational_index_shadow.recovery_builder = Some(builder);
             }
         }
+        self.record_relational_row_recovery_capture(expected_epoch, row_capture);
         Ok(())
     }
 

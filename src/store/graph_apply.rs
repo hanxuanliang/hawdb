@@ -700,6 +700,10 @@ impl GraphStore {
                     expected_epoch,
                     "relational snapshot WAL replaces the complete index schema and rows",
                 );
+                self.invalidate_relational_row_page_recovery(
+                    expected_epoch,
+                    "relational snapshot WAL replaces the complete row schema and data",
+                );
                 self.relational_state = checkpoint.state;
             }
             WalOp::Batch(ops) => {

@@ -44,6 +44,8 @@ mod graph_recovery;
 mod read_view;
 #[path = "store/relational_index_shadow.rs"]
 mod relational_index_shadow;
+#[path = "store/relational_row_pages.rs"]
+mod relational_row_pages;
 #[path = "store/source_scan.rs"]
 mod source_scan;
 #[path = "store/statistics_refresh.rs"]
@@ -102,6 +104,8 @@ pub use relational_index_shadow::{
     RelationalIndexViewQualificationOptions, RelationalIndexViewQualificationReport,
     RELATIONAL_CONSTRAINT_QUALIFICATION_PROTOCOL, RELATIONAL_INDEX_VIEW_QUALIFICATION_PROTOCOL,
 };
+pub use relational_row_pages::RelationalRowPageRecoveryStatus;
+use relational_row_pages::RelationalRowPageState;
 use skein_storage::{
     available_storage_space, decode_relational_checkpoint_file_with_index_load,
     decode_relational_checkpoint_with_index_load, decode_relational_wal_batch,
@@ -959,6 +963,7 @@ pub struct GraphStore {
     relational_overflow_config: RelationalOverflowConfig,
     columnar_shadow: ColumnarShadowState,
     relational_index_shadow: RelationalIndexShadowState,
+    relational_row_pages: RelationalRowPageState,
     /// The engine's runtime governor, threaded down from the embedding
     /// layer (`SkeinEmbedded` / `NowledgeMemGraph`) so background shadow
     /// work can request admission. The store never constructs its own.
@@ -1788,6 +1793,7 @@ impl GraphStore {
             relational_index_shadow: RelationalIndexShadowState::new(
                 replay_config.relational_index_mode,
             ),
+            relational_row_pages: RelationalRowPageState::default(),
             runtime_governor: None,
             durable: Some(durable),
         };
@@ -1803,6 +1809,7 @@ impl GraphStore {
             // mutations mark their derived shadow tables dirty.
             store.mount_columnar_shadow_for_recovery()?;
         }
+        store.mount_relational_row_pages_for_recovery();
         store.mount_relational_index_shadow_for_recovery();
         let checkpoint_catalog = catalog.clone();
         store.storage_recovery_report = store.replay_wal(catalog, replay_config)?;
@@ -2054,6 +2061,9 @@ impl GraphStore {
             columnar_shadow: self.columnar_shadow.clone(),
             relational_index_shadow: self
                 .relational_index_shadow
+                .snapshot_at_epoch(self.commit_epoch),
+            relational_row_pages: self
+                .relational_row_pages
                 .snapshot_at_epoch(self.commit_epoch),
             runtime_governor: self.runtime_governor.clone(),
             durable: None,

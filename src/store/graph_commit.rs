@@ -1786,6 +1786,10 @@ impl GraphStore {
         }
         self.commit_epoch = next_commit_epoch;
         self.publish_relational_index_live_view(staged_relational_index_publication);
+        self.invalidate_relational_row_page_live_view(
+            next_commit_epoch,
+            "live commits require the later canonical row live-overlay activation stage",
+        );
         Ok(MutationSummary { rows })
     }
 

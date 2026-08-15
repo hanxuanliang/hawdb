@@ -1690,7 +1690,7 @@ fn encode_relational_key(key: &RelationalKey) -> Result<Vec<u8>, RelationalIndex
     encode_ordered_relational_key(key).map_err(Into::into)
 }
 
-fn relational_schema_digest(
+pub(super) fn relational_schema_digest(
     schema: &RelationalTableSchema,
 ) -> Result<Sha256Digest, RelationalIndexShadowError> {
     let mut encoded = Vec::new();

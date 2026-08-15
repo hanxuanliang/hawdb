@@ -175,6 +175,36 @@ new root is selected. Runtime recovery, physical page demand reads, overflow
 hydration, reclamation integration, and serving activation remain blocked on
 their separate implementation and regression evidence.
 
+## Relational Row-Root Recovery Shadow
+
+`SkeinRowRecovery.tla` models the bounded, non-serving recovery refinement over
+one generation-pinned relational row root. A valid mount correlates the shadow
+root generation and source epoch with the loaded canonical checkpoint and
+validates every table schema digest without opening a descriptor or row-page
+slot. Missing, stale, corrupt, schema-invalidated, overflow-dependent, and
+over-budget shadows become unavailable without changing canonical checkpoint
+plus WAL recovery.
+
+Every global WAL epoch is consumed in order. One epoch may contain two ordered
+relational fragments, each carrying a set of primary-key changes. A complete
+fragment is pre-admitted before any of its overlay entries change; later
+fragments at the same epoch may replace those entries. Graph-only commits
+advance the visible epoch without adding an entry. The immutable
+`RelationalRowPageRecoveryView` is exposed only after its visible epoch equals
+the fully recovered canonical commit epoch. Snapshots pin that `Arc` view and
+its base generation even if a later shadow root is published. A live commit
+removes the current store view; an already pinned snapshot remains stable.
+Production SQL selection is false throughout this model.
+
+The configured instance uses two keys, two post-checkpoint epochs, one- or
+two-fragment row commits, multi-key fragments, and a one-entry overlay. TLC
+therefore covers repeated-key coalescing, same-epoch fragment ordering,
+graph-only epoch advancement, whole-fragment capacity rejection, schema
+invalidation, missing/stale/corrupt roots, complete-prefix publication, a newer
+shadow root, pinned-reader stability, cold mount, and live invalidation.
+Disk-backed recovery delta runs, exact checkpoint-manifest binding, live row
+publication, demand reads, and serving activation remain later obligations.
+
 ## Durable Projection Cursor and Catch-up
 
 `SkeinProjectionDurability.tla` models the durable projection framework of
@@ -375,6 +405,7 @@ They are implementation evidence, not a machine-checked refinement proof.
 | WAL sync precedes visibility and apply failure closes the handle | `finish_wal_append`, `apply_wal_op`, `ensure_usable` | `post_wal_apply_failure_poisons_handle_until_reopen` |
 | A grouped WAL sync acknowledges every member after one successful barrier or fails the whole group closed | `WalSyncGroupState`, `finish_wal_sync_group`, `CommitSequencer` | `wal_group_commit_shares_one_sync_without_changing_record_order`, `wal_group_sync_failure_rejects_commit_and_poisons_until_reopen`, `panicking_group_commit_task_completes_followers_and_releases_leader` |
 | Fixed and adaptive collection policies remain bounded scheduling refinements, use a bounded fallback without a recent baseline, and never delay a lone request | `effective_group_commit_delay`, `wait_for_group_commit_peers`, `WalGroupCommitConfig::adaptive_enabled_after_evidence` | `wal_group_commit_skips_the_coalescing_window_without_contention`, `adaptive_delay_is_derived_from_the_completed_baseline`, `adaptive_delay_uses_bounded_fallback_before_the_completed_sample_floor`, `adaptive_delay_falls_back_after_the_recent_window_expires`, `wal_group_commit_requires_performance_and_recovery_evidence` |
+| A checkpoint-correlated row root remains cold at mount, replays consecutive global epochs and same-epoch relational fragments into one atomically admitted non-serving overlay, publishes only a complete view, retains pinned generations, and invalidates the current view on live writes | `RelationalState::stage_transaction_with_row_changes`, `RelationalRowPageRecoveryBuilder`, `GraphStore::{mount_relational_row_pages_for_recovery,finish_relational_row_page_recovery,invalidate_relational_row_page_live_view}` | `relational_row_change_capture_reports_exact_net_primary_key_changes`, `multiple_relational_fragments_share_one_global_epoch`, `overlay_admission_rejects_a_whole_batch_without_partial_visibility`, `opening_recovery_does_not_read_or_hash_base_page_slots`, `durable_open_replays_wal_into_a_generation_pinned_row_overlay`, `SkeinRowRecovery.tla` |
 | A torn WAL batch has no partial recovered visibility | `replay_wal` record decode and batch apply | `default_recovery_rejects_torn_wal_tail_until_explicit_doctor_repair`, `doctor_discards_torn_batch_wal_without_partial_path_recovery` |
 | Doctor repair binds destructive truncation to an exact acknowledged plan and resumes a durable pending audit | `DatabaseDoctor::{plan_wal_tail_repair,apply_wal_tail_repair}` | `apply_rejects_toctou_change_without_preparing_repair`, `prepared_repair_blocks_open_and_can_continue`, `truncated_pending_repair_is_resumable_and_blocks_open_until_finalized` |
 | Complete-record corruption and LSN gaps fail closed | `replay_wal` framing, checksum, and expected-LSN checks | `rejects_and_quarantines_checksum_corruption_at_wal_tail`, `rejects_and_quarantines_checksum_corruption_before_valid_wal_suffix`, `rejects_and_quarantines_non_contiguous_wal_lsn` |
