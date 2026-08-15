@@ -20,6 +20,16 @@ Phases == {"idle", "active", "prepared", "durable"}
 ApplyChange(state, key, present) ==
     IF present THEN state \cup {key} ELSE state \ {key}
 
+RangeOf(order) == {order[index] : index \in DOMAIN order}
+
+BaseVisitOrders(base) ==
+    {order \in [1..Cardinality(base) -> Keys] : RangeOf(order) = base}
+
+ExactTombstoneMerge(base, current, order) ==
+    LET retainedIndices ==
+            {index \in DOMAIN order : order[index] \notin (base \ current)}
+    IN {order[index] : index \in retainedIndices} \cup (current \ base)
+
 HistoryState(history, epoch) ==
     IF epoch = 0 THEN BaseState ELSE history[epoch]
 
@@ -256,5 +266,10 @@ ReadYourOwnWritesUsesOverlay ==
         /\ phase = "active"
         /\ readState = workspaceState
         /\ readState = workspaceIndexState
+
+PrefixMergeIsOrderIndependent ==
+    \A base \in SUBSET Keys, current \in SUBSET Keys:
+        \A order \in BaseVisitOrders(base):
+            ExactTombstoneMerge(base, current, order) = current
 
 =============================================================================

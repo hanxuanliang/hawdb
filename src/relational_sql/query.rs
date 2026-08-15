@@ -1217,7 +1217,7 @@ fn visit_join_entries<'a>(
                 match row_runtime.read_point(table, key)? {
                     Some(row) => visit(row),
                     None => Err(SkeinError::StorageIntegrity(format!(
-                        "relational index {name} on table {table} points to a missing row"
+                        "relational index {name} on table {table} points to missing row {key:?}"
                     ))),
                 }
             })
@@ -1244,7 +1244,7 @@ fn visit_base_entries<'a>(
                 match row_runtime.read_point(table, key)? {
                     Some(row) => visit(row),
                     None => Err(SkeinError::StorageIntegrity(format!(
-                        "relational index {name} on table {table} points to a missing row"
+                        "relational index {name} on table {table} points to missing row {key:?}"
                     ))),
                 }
             })

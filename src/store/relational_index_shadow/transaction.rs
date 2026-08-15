@@ -155,17 +155,6 @@ where
     }
 
     fn visit_base(&mut self, primary_key: &RelationalKey) -> bool {
-        while let Some((overlay_key, kind)) = self.overlay.first_key_value() {
-            if overlay_key >= primary_key {
-                break;
-            }
-            let overlay_key = overlay_key.clone();
-            let kind = *kind;
-            self.overlay.pop_first();
-            if kind == RelationalIndexChangeKind::Insert && !self.emit_overlay(&overlay_key) {
-                return false;
-            }
-        }
         match self.overlay.remove(primary_key) {
             Some(RelationalIndexChangeKind::Delete) => true,
             Some(RelationalIndexChangeKind::Insert) | None => {
@@ -512,6 +501,35 @@ mod tests {
         assert_eq!(overlay.entry_count, 2);
         assert_eq!(overlay.encoded_bytes, 10);
         assert_eq!(overlay.batches.len(), 2);
+    }
+
+    #[test]
+    fn transaction_overlay_delete_merge_is_independent_of_prefix_visit_order() {
+        let deleted_early = RelationalKey(vec![RelationalValue::BigInt(1)]);
+        let retained = RelationalKey(vec![RelationalValue::BigInt(2)]);
+        let deleted_late = RelationalKey(vec![RelationalValue::BigInt(3)]);
+        let mut emitted = Vec::new();
+        let mut visit = |key: &RelationalKey| {
+            emitted.push(key.clone());
+            true
+        };
+        let mut merge = TransactionOverlayMerge {
+            overlay: BTreeMap::from([
+                (deleted_early.clone(), RelationalIndexChangeKind::Delete),
+                (deleted_late.clone(), RelationalIndexChangeKind::Delete),
+            ]),
+            visit: &mut visit,
+            overlay_rows_emitted: 0,
+            stopped_early: false,
+        };
+
+        assert!(merge.visit_base(&deleted_late));
+        assert!(merge.visit_base(&retained));
+        assert!(merge.visit_base(&deleted_early));
+        merge.finish();
+        drop(merge);
+
+        assert_eq!(emitted, vec![retained]);
     }
 
     fn capture(
