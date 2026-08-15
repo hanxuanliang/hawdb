@@ -241,19 +241,38 @@ fragments at the same epoch may replace those entries. Graph-only commits
 advance the visible epoch without adding an entry. The immutable
 `RelationalRowPageRecoveryView` is exposed only after its visible epoch equals
 the fully recovered canonical commit epoch. Snapshots pin that `Arc` view and
-its base generation even if a later shadow root is published. A live commit
-removes the current store view; an already pinned snapshot remains stable.
-Production SQL selection is false throughout this model.
+its base generation even if a later shadow root is published. Production SQL
+selection is false throughout this model. Live publication after recovery is
+modeled separately below.
 
 The configured instance uses two keys, two post-checkpoint epochs, one- or
 two-fragment row commits, multi-key fragments, and a one-entry overlay. TLC
 therefore covers repeated-key coalescing, same-epoch fragment ordering,
 graph-only epoch advancement, whole-fragment capacity rejection, schema
 invalidation, missing/stale/corrupt roots, complete-prefix publication, a newer
-shadow root, pinned-reader stability, cold mount, and live invalidation.
+shadow root, pinned-reader stability, and cold mount.
 The immutable disk-backed row-delta artifact protocol is modeled separately
-below. Recovery integration, exact checkpoint-manifest binding, live row
-publication, demand reads, and serving activation remain later obligations.
+below. Recovery integration with that disk artifact, exact checkpoint-manifest
+binding, demand reads, and serving activation remain later obligations.
+
+## Immutable Relational Row Live Views
+
+`SkeinRowLiveView.tla` models publication after a complete recovery view has
+been pinned. DML and DDL stage their canonical state and prospective row view
+before WAL. A graph-only commit makes its WAL durable first and then stages the
+identity-only view advance. WAL durability may lead visible state by one
+commit, but canonical state and the current row view advance only after that
+durable record exists. DML adds one bounded immutable batch, graph-only commits
+advance the global epoch without a batch, and DDL or admission failure makes
+the non-authoritative view unavailable.
+
+The model includes a materialized transaction-workspace read, view poisoning,
+a process crash before or after WAL durability, and one pinned reader. TLC
+checks WAL-before-visibility, exact current-view epoch and contents, cumulative
+live admission, fail-closed invalidation, read-your-own-writes independence,
+pinned-reader stability, and the still-disabled SQL selection boundary. The
+configured instance uses two keys, three post-base epochs, and a two-entry live
+budget.
 
 ## Immutable Relational Row-Delta Runs
 
@@ -481,7 +500,8 @@ They are implementation evidence, not a machine-checked refinement proof.
 | Fixed and adaptive collection policies remain bounded scheduling refinements, use a bounded fallback without a recent baseline, and never delay a lone request | `effective_group_commit_delay`, `wait_for_group_commit_peers`, `WalGroupCommitConfig::adaptive_enabled_after_evidence` | `wal_group_commit_skips_the_coalescing_window_without_contention`, `adaptive_delay_is_derived_from_the_completed_baseline`, `adaptive_delay_uses_bounded_fallback_before_the_completed_sample_floor`, `adaptive_delay_falls_back_after_the_recent_window_expires`, `wal_group_commit_requires_performance_and_recovery_evidence` |
 | A table-scoped row-page allocator persists monotonically, COW point mutations read only affected leaves and preserve the old left id across splits, deleted ids are never reused, and streaming bootstrap stays within one page plus one candidate | `RelationalRowPageIdAllocator`, `RelationalRowPageMutationPlanner`, `RelationalRowPageBootstrap`, `RelationalRowPageRootReader::find_table_page_descriptor` | `mutation_planner_reads_only_affected_leaves_and_splits_deterministically`, `mutation_planner_updates_deletes_and_never_reuses_page_ids`, `streaming_bootstrap_keeps_one_page_plus_one_candidate_row`, `streaming_bootstrap_fails_closed_after_emit_error`, `allocator_exhaustion_is_atomic`, `SkeinRowPageMutation.tla` |
 | Overflow extents are content-addressed, publish manifest-last behind a stale-generation fence, preserve pinned cross-generation closure, and are required before an overflow-bearing row root can publish | `RelationalOverflowPublisher`, `RelationalOverflowRootReader`, `RelationalRowPagePublisher::publish_with_overflow_root` | `publish_last_overflow_root_round_trips`, `incremental_root_reuses_content_and_keeps_pinned_generation_readable`, `every_pre_latest_crash_keeps_the_previous_overflow_root_selected`, `row_root_binds_and_resolves_the_exact_overflow_generation`, `row_root_rejects_missing_or_mismatched_overflow_generation`, `SkeinOverflowPublication.tla` |
-| A checkpoint-correlated row root remains cold at mount, replays consecutive global epochs and same-epoch relational fragments into one atomically admitted non-serving overlay, publishes only a complete view, retains pinned generations, and invalidates the current view on live writes | `RelationalState::stage_transaction_with_row_changes`, `RelationalRowPageRecoveryBuilder`, `GraphStore::{mount_relational_row_pages_for_recovery,finish_relational_row_page_recovery,invalidate_relational_row_page_live_view}` | `relational_row_change_capture_reports_exact_net_primary_key_changes`, `multiple_relational_fragments_share_one_global_epoch`, `overlay_admission_rejects_a_whole_batch_without_partial_visibility`, `opening_recovery_does_not_read_or_hash_base_page_slots`, `durable_open_replays_wal_into_a_generation_pinned_row_overlay`, `SkeinRowRecovery.tla` |
+| A checkpoint-correlated row root remains cold at mount, replays consecutive global epochs and same-epoch relational fragments into one atomically admitted non-serving overlay, and publishes only a complete recovery view | `RelationalState::stage_transaction_with_row_changes`, `RelationalRowPageRecoveryBuilder`, `GraphStore::{mount_relational_row_pages_for_recovery,finish_relational_row_page_recovery}` | `relational_row_change_capture_reports_exact_net_primary_key_changes`, `multiple_relational_fragments_share_one_global_epoch`, `overlay_admission_rejects_a_whole_batch_without_partial_visibility`, `opening_recovery_does_not_read_or_hash_base_page_slots`, `durable_open_replays_wal_into_a_generation_pinned_row_overlay`, `SkeinRowRecovery.tla` |
+| A live row view stages DML before WAL, publishes only after durability, stages already-durable graph-only identity advances without empty batches, retains bounded immutable DML batches, fails closed on DDL or admission errors, preserves materialized read-your-own-writes, and never drifts pinned snapshots | `RelationalRowPageReadView::advance`, `GraphStore::{stage_relational_row_live_publication,publish_relational_row_live_view,finish_non_relational_commit}` | `capture_validation_rejects_undercharged_and_unordered_changes`, `overlay_admission_is_cumulative_and_atomic`, `durable_open_replays_wal_into_a_generation_pinned_row_overlay`, `SkeinRowLiveView.tla` |
 | Immutable relational row-delta runs stay within dirty/run/manifest limits, bind the exact base/schema/overflow closure, publish generation metadata before the latest selector, reject stale row-root or delta publishers, poison partial batches, demand-check run integrity, and preserve pinned readers | `RelationalRowDeltaBuilder`, `RelationalRowDeltaReader`, `RelationalRowPageRootReader`, `RelationalOverflowRootReader` | `immutable_runs_round_trip_across_bounded_flushes`, `builder_is_poisoned_after_a_partial_epoch_error`, `every_pre_latest_stop_keeps_the_previous_delta_selected`, `stale_builder_cannot_replace_a_newer_delta_root`, `builder_cannot_publish_after_its_row_root_becomes_stale`, `overflow_references_require_an_exact_visible_epoch_root`, `corruption_poisoning_is_demand_driven`, `pinned_generation_remains_readable_after_new_publication`, `SkeinRowDeltaRuns.tla` |
 | A torn WAL batch has no partial recovered visibility | `replay_wal` record decode and batch apply | `default_recovery_rejects_torn_wal_tail_until_explicit_doctor_repair`, `doctor_discards_torn_batch_wal_without_partial_path_recovery` |
 | Doctor repair binds destructive truncation to an exact acknowledged plan and resumes a durable pending audit | `DatabaseDoctor::{plan_wal_tail_repair,apply_wal_tail_repair}` | `apply_rejects_toctou_change_without_preparing_repair`, `prepared_repair_blocks_open_and_can_continue`, `truncated_pending_repair_is_resumable_and_blocks_open_until_finalized` |

@@ -1704,44 +1704,96 @@ impl GraphStore {
         }
         let mut staged_relational_state = None;
         let mut staged_relational_index_capture = None;
+        let mut staged_relational_row_capture = None;
         let next_commit_epoch = self
             .commit_epoch
             .checked_add(1)
             .ok_or_else(|| SkeinError::Storage("commit epoch overflow".to_string()))?;
         if let Some(transaction) = relational_transaction.filter(|value| !value.writes.is_empty()) {
             let authoritative_index = self.authoritative_relational_constraint_index()?;
-            if let Some(capture_limits) = self.relational_index_live_capture_limits() {
-                let staged = match authoritative_index.as_ref() {
-                    Some(index) => self
-                        .relational_state
-                        .stage_transaction_with_authoritative_index(
-                            transaction.clone(),
-                            self.relational_mutation_limits,
-                            self.relational_overflow_config,
-                            capture_limits,
-                            index,
-                        ),
-                    None => self.relational_state.stage_transaction_with_index_changes(
-                        transaction.clone(),
-                        self.relational_mutation_limits,
-                        self.relational_overflow_config,
-                        capture_limits,
+            let index_limits = self.relational_index_live_capture_limits();
+            let row_limits = self.relational_row_live_capture_limits();
+            let (next, index_capture, row_capture) =
+                match (authoritative_index.as_ref(), index_limits, row_limits) {
+                    (Some(index), Some(index_limits), Some(row_limits)) => {
+                        let (next, index_capture, row_capture) = self
+                            .relational_state
+                            .stage_transaction_with_authoritative_index_and_row_changes(
+                                transaction.clone(),
+                                self.relational_mutation_limits,
+                                self.relational_overflow_config,
+                                index_limits,
+                                row_limits,
+                                index,
+                            )
+                            .map_err(map_relational_staging_error)?;
+                        (next, Some(index_capture), Some(row_capture))
+                    }
+                    (Some(index), Some(index_limits), None) => {
+                        let (next, capture) = self
+                            .relational_state
+                            .stage_transaction_with_authoritative_index(
+                                transaction.clone(),
+                                self.relational_mutation_limits,
+                                self.relational_overflow_config,
+                                index_limits,
+                                index,
+                            )
+                            .map_err(map_relational_staging_error)?;
+                        (next, Some(capture), None)
+                    }
+                    (None, Some(index_limits), Some(row_limits)) => {
+                        let (next, index_capture, row_capture) = self
+                            .relational_state
+                            .stage_transaction_with_index_and_row_changes(
+                                transaction.clone(),
+                                self.relational_mutation_limits,
+                                self.relational_overflow_config,
+                                index_limits,
+                                row_limits,
+                            )
+                            .map_err(map_relational_staging_error)?;
+                        (next, Some(index_capture), Some(row_capture))
+                    }
+                    (None, Some(index_limits), None) => {
+                        let (next, capture) = self
+                            .relational_state
+                            .stage_transaction_with_index_changes(
+                                transaction.clone(),
+                                self.relational_mutation_limits,
+                                self.relational_overflow_config,
+                                index_limits,
+                            )
+                            .map_err(map_relational_staging_error)?;
+                        (next, Some(capture), None)
+                    }
+                    (_, None, Some(row_limits)) => {
+                        let (next, capture) = self
+                            .relational_state
+                            .stage_transaction_with_row_changes(
+                                transaction.clone(),
+                                self.relational_mutation_limits,
+                                self.relational_overflow_config,
+                                row_limits,
+                            )
+                            .map_err(map_relational_staging_error)?;
+                        (next, None, Some(capture))
+                    }
+                    (_, None, None) => (
+                        self.relational_state
+                            .stage_transaction(
+                                transaction.clone(),
+                                self.relational_mutation_limits,
+                                self.relational_overflow_config,
+                            )
+                            .map_err(map_relational_staging_error)?,
+                        None,
+                        None,
                     ),
                 };
-                let (next, capture) = staged.map_err(map_relational_staging_error)?;
-                staged_relational_state = Some(next);
-                staged_relational_index_capture = Some(capture);
-            } else {
-                staged_relational_state = Some(
-                    self.relational_state
-                        .stage_transaction(
-                            transaction.clone(),
-                            self.relational_mutation_limits,
-                            self.relational_overflow_config,
-                        )
-                        .map_err(map_relational_staging_error)?,
-                );
-            }
+            staged_relational_state = Some(next);
+            staged_relational_index_capture = index_capture;
+            staged_relational_row_capture = row_capture;
             let record = encode_relational_wal_batch(next_commit_epoch, &transaction)
                 .map_err(|error| SkeinError::Storage(error.to_string()))?;
             ops.push(WalOp::Relational {
@@ -1754,6 +1806,10 @@ impl GraphStore {
         let staged_relational_index_publication = self.stage_relational_index_live_publication(
             next_commit_epoch,
             staged_relational_index_capture,
+        );
+        let staged_relational_row_publication = self.stage_relational_row_live_publication(
+            next_commit_epoch,
+            staged_relational_row_capture,
         );
         self.require_authoritative_relational_index_live_publication(
             next_commit_epoch,
@@ -1786,10 +1842,7 @@ impl GraphStore {
         }
         self.commit_epoch = next_commit_epoch;
         self.publish_relational_index_live_view(staged_relational_index_publication);
-        self.invalidate_relational_row_page_live_view(
-            next_commit_epoch,
-            "live commits require the later canonical row live-overlay activation stage",
-        );
+        self.publish_relational_row_live_view(staged_relational_row_publication);
         Ok(MutationSummary { rows })
     }
 

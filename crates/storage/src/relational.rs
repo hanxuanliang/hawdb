@@ -70,10 +70,11 @@ pub use row_page::{
     RelationalRowDeltaReport, RelationalRowDeltaTableSchema, RelationalRowPageArtifactMetadata,
     RelationalRowPageBootstrap, RelationalRowPageBootstrapReport, RelationalRowPageEntry,
     RelationalRowPageError, RelationalRowPageId, RelationalRowPageIdAllocator,
-    RelationalRowPageLimits, RelationalRowPageMutationError, RelationalRowPageMutationPlan,
-    RelationalRowPageMutationPlanner, RelationalRowPagePublicationConfig,
-    RelationalRowPagePublicationError, RelationalRowPagePublicationPhase,
-    RelationalRowPagePublicationReport, RelationalRowPagePublisher,
+    RelationalRowPageLimits, RelationalRowPageLiveError, RelationalRowPageMutationError,
+    RelationalRowPageMutationPlan, RelationalRowPageMutationPlanner,
+    RelationalRowPagePublicationConfig, RelationalRowPagePublicationError,
+    RelationalRowPagePublicationPhase, RelationalRowPagePublicationReport,
+    RelationalRowPagePublisher, RelationalRowPageReadView, RelationalRowPageReadViewIdentity,
     RelationalRowPageRecoveredValue, RelationalRowPageRecoveryBuilder,
     RelationalRowPageRecoveryConfig, RelationalRowPageRecoveryError,
     RelationalRowPageRecoveryIdentity, RelationalRowPageRecoveryReport,
@@ -1162,6 +1163,51 @@ impl RelationalState {
             Some(constraint_index),
             TransactionIndexMode::Authoritative,
         )
+    }
+
+    /// Stages one transaction against a pinned constraint index while deriving
+    /// both immutable index and row live-view batches from the same before/after
+    /// state. The caller owns the WAL and publication boundary.
+    pub fn stage_transaction_with_authoritative_index_and_row_changes(
+        &self,
+        transaction: RelationalTransaction,
+        limits: RelationalMutationLimits,
+        overflow_config: RelationalOverflowConfig,
+        index_capture_limits: RelationalIndexChangeCaptureLimits,
+        row_capture_limits: RelationalRowChangeCaptureLimits,
+        constraint_index: &dyn RelationalConstraintIndex,
+    ) -> Result<
+        (
+            Self,
+            RelationalIndexChangeCapture,
+            RelationalRowChangeCapture,
+        ),
+        RelationalError,
+    > {
+        admit_transaction(&transaction, limits)?;
+        if transaction.changes_index_schema() {
+            return Err(RelationalError::Admission(
+                "authoritative relational indexes reject schema-changing transactions until new canonical row and index generations are published"
+                    .to_string(),
+            ));
+        }
+        let (state, index_capture, row_capture) = apply_transaction_inner(
+            self,
+            transaction,
+            limits,
+            overflow_config,
+            TransactionApplyOptions {
+                index_capture_limits: Some(index_capture_limits),
+                row_capture_limits: Some(row_capture_limits),
+                constraint_index: Some(constraint_index),
+                index_mode: TransactionIndexMode::Authoritative,
+            },
+        )?;
+        Ok((
+            state,
+            index_capture.expect("index change capture was requested for this transaction"),
+            row_capture.expect("row change capture was requested for this transaction"),
+        ))
     }
 
     pub fn table_schema(&self, table: &str) -> Option<&RelationalTableSchema> {

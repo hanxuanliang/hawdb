@@ -3,9 +3,9 @@
 use super::GraphStore;
 use skein_storage::{
     RelationalRowChangeCapture, RelationalRowChangeCaptureLimits,
-    RelationalRowPagePublicationConfig, RelationalRowPageRecoveryBuilder,
+    RelationalRowPagePublicationConfig, RelationalRowPageReadView,
+    RelationalRowPageReadViewIdentity, RelationalRowPageRecoveryBuilder,
     RelationalRowPageRecoveryConfig, RelationalRowPageRecoveryReport,
-    RelationalRowPageRecoveryView,
 };
 use std::sync::Arc;
 
@@ -25,6 +25,22 @@ pub enum RelationalRowPageRecoveryStatus {
         overlay_entries: usize,
         overlay_bytes: usize,
     },
+    LiveCurrent {
+        base_generation: u64,
+        base_commit_epoch: u64,
+        visible_commit_epoch: u64,
+        live_batches: usize,
+        live_entries: usize,
+        live_encoded_bytes: usize,
+        live_resident_bytes: usize,
+    },
+    LiveUnavailable {
+        base_generation: u64,
+        base_commit_epoch: u64,
+        last_visible_commit_epoch: u64,
+        failed_commit_epoch: u64,
+        reason: String,
+    },
     Stale {
         generation: u64,
         source_commit_epoch: u64,
@@ -42,20 +58,28 @@ pub enum RelationalRowPageRecoveryStatus {
 #[derive(Debug, Default)]
 pub(super) struct RelationalRowPageState {
     recovery_builder: Option<RelationalRowPageRecoveryBuilder>,
-    recovery_view: Option<Arc<RelationalRowPageRecoveryView>>,
+    read_view: Option<Arc<RelationalRowPageReadView>>,
+    live_limits: RelationalRowChangeCaptureLimits,
     recovery_report: Option<RelationalRowPageRecoveryReport>,
     recovery_status: RelationalRowPageRecoveryStatus,
 }
 
 impl RelationalRowPageState {
+    fn current_read_view(&self, commit_epoch: u64) -> Option<&Arc<RelationalRowPageReadView>> {
+        self.read_view
+            .as_ref()
+            .filter(|view| view.identity().visible_commit_epoch == commit_epoch)
+    }
+
     pub(super) fn snapshot_at_epoch(&self, commit_epoch: u64) -> Self {
         Self {
             recovery_builder: None,
-            recovery_view: self
-                .recovery_view
+            read_view: self
+                .read_view
                 .as_ref()
                 .filter(|view| view.identity().visible_commit_epoch == commit_epoch)
                 .cloned(),
+            live_limits: self.live_limits,
             recovery_report: self.recovery_report.clone(),
             recovery_status: self.recovery_status.clone(),
         }
@@ -73,6 +97,16 @@ impl RelationalRowPageState {
                 base_commit_epoch,
                 ..
             } => (Some(*base_generation), Some(*base_commit_epoch)),
+            RelationalRowPageRecoveryStatus::LiveCurrent {
+                base_generation,
+                base_commit_epoch,
+                ..
+            } => (Some(*base_generation), Some(*base_commit_epoch)),
+            RelationalRowPageRecoveryStatus::LiveUnavailable {
+                base_generation,
+                base_commit_epoch,
+                ..
+            } => (Some(*base_generation), Some(*base_commit_epoch)),
             RelationalRowPageRecoveryStatus::Stale {
                 generation,
                 source_commit_epoch,
@@ -86,6 +120,30 @@ impl RelationalRowPageState {
             RelationalRowPageRecoveryStatus::Missing => (None, None),
         }
     }
+
+    fn stage_live_publication(
+        &self,
+        current_epoch: u64,
+        next_epoch: u64,
+        capture: Option<RelationalRowChangeCapture>,
+    ) -> Option<Result<Arc<RelationalRowPageReadView>, RelationalRowLiveUnavailable>> {
+        let view = self.current_read_view(current_epoch)?;
+        Some(
+            view.advance(next_epoch, capture, self.live_limits)
+                .map(Arc::new)
+                .map_err(|error| RelationalRowLiveUnavailable {
+                    identity: view.identity(),
+                    failed_commit_epoch: next_epoch,
+                    reason: error.to_string(),
+                }),
+        )
+    }
+}
+
+pub(super) struct RelationalRowLiveUnavailable {
+    identity: RelationalRowPageReadViewIdentity,
+    failed_commit_epoch: u64,
+    reason: String,
 }
 
 impl GraphStore {
@@ -127,7 +185,7 @@ impl GraphStore {
                 checkpoint_commit_epoch,
             };
             self.relational_row_pages.recovery_builder = None;
-            self.relational_row_pages.recovery_view = None;
+            self.relational_row_pages.read_view = None;
             return;
         }
         let root_pages = manifest.root_page_count;
@@ -150,7 +208,9 @@ impl GraphStore {
                 return;
             }
         };
-        self.relational_row_pages.recovery_view = Some(base_view);
+        self.relational_row_pages.read_view = Some(Arc::new(
+            RelationalRowPageReadView::from_recovered(base_view),
+        ));
         self.relational_row_pages.recovery_report = None;
         self.relational_row_pages.recovery_status =
             RelationalRowPageRecoveryStatus::CheckpointReady {
@@ -224,13 +284,54 @@ impl GraphStore {
         }
     }
 
-    pub(super) fn invalidate_relational_row_page_live_view(
+    pub(super) fn relational_row_live_capture_limits(
+        &self,
+    ) -> Option<RelationalRowChangeCaptureLimits> {
+        self.relational_row_pages
+            .current_read_view(self.commit_epoch)
+            .map(|_| self.relational_row_pages.live_limits)
+    }
+
+    pub(super) fn stage_relational_row_live_publication(
+        &self,
+        next_epoch: u64,
+        capture: Option<RelationalRowChangeCapture>,
+    ) -> Option<Result<Arc<RelationalRowPageReadView>, RelationalRowLiveUnavailable>> {
+        self.relational_row_pages
+            .stage_live_publication(self.commit_epoch, next_epoch, capture)
+    }
+
+    pub(super) fn publish_relational_row_live_view(
         &mut self,
-        commit_epoch: u64,
-        reason: &'static str,
+        publication: Option<Result<Arc<RelationalRowPageReadView>, RelationalRowLiveUnavailable>>,
     ) {
-        if self.relational_row_pages.recovery_view.is_some() {
-            self.mark_relational_row_page_recovery_unavailable(commit_epoch, reason.to_string());
+        match publication {
+            None => {}
+            Some(Ok(view)) => {
+                let identity = view.identity();
+                self.relational_row_pages.recovery_status =
+                    RelationalRowPageRecoveryStatus::LiveCurrent {
+                        base_generation: identity.base_generation,
+                        base_commit_epoch: identity.base_commit_epoch,
+                        visible_commit_epoch: identity.visible_commit_epoch,
+                        live_batches: view.live_batch_count(),
+                        live_entries: view.live_entry_count(),
+                        live_encoded_bytes: view.live_encoded_bytes(),
+                        live_resident_bytes: view.live_resident_bytes(),
+                    };
+                self.relational_row_pages.read_view = Some(view);
+            }
+            Some(Err(unavailable)) => {
+                self.relational_row_pages.read_view = None;
+                self.relational_row_pages.recovery_status =
+                    RelationalRowPageRecoveryStatus::LiveUnavailable {
+                        base_generation: unavailable.identity.base_generation,
+                        base_commit_epoch: unavailable.identity.base_commit_epoch,
+                        last_visible_commit_epoch: unavailable.identity.visible_commit_epoch,
+                        failed_commit_epoch: unavailable.failed_commit_epoch,
+                        reason: unavailable.reason,
+                    };
+            }
         }
     }
 
@@ -243,7 +344,7 @@ impl GraphStore {
             } = self.relational_row_pages.recovery_status
                 && self.commit_epoch > source_commit_epoch
             {
-                self.relational_row_pages.recovery_view = None;
+                self.relational_row_pages.read_view = None;
                 self.relational_row_pages.recovery_status =
                     RelationalRowPageRecoveryStatus::Unavailable {
                         base_generation: Some(generation),
@@ -258,7 +359,9 @@ impl GraphStore {
         match builder.finish(self.commit_epoch) {
             Ok(view) => {
                 let report = view.report().clone();
-                self.relational_row_pages.recovery_view = Some(Arc::new(view));
+                self.relational_row_pages.read_view = Some(Arc::new(
+                    RelationalRowPageReadView::from_recovered(Arc::new(view)),
+                ));
                 self.relational_row_pages.recovery_status =
                     RelationalRowPageRecoveryStatus::WalRecovered {
                         base_generation: report.identity.base_generation,
@@ -283,7 +386,7 @@ impl GraphStore {
     ) {
         let (base_generation, base_commit_epoch) = self.relational_row_pages.base_identity();
         self.relational_row_pages.recovery_builder = None;
-        self.relational_row_pages.recovery_view = None;
+        self.relational_row_pages.read_view = None;
         self.relational_row_pages.recovery_status = RelationalRowPageRecoveryStatus::Unavailable {
             base_generation,
             base_commit_epoch,
@@ -313,7 +416,7 @@ mod tests {
         RelationalTableSchema, RelationalTransaction, RelationalValue, RelationalWrite,
         WalReplayConfig, RELATIONAL_ROW_PAGE_MANIFEST_FILE,
     };
-    use std::num::NonZeroU64;
+    use std::{collections::BTreeMap, num::NonZeroU64};
 
     #[test]
     fn durable_open_replays_wal_into_a_generation_pinned_row_overlay() {
@@ -412,20 +515,16 @@ mod tests {
         let report = store.relational_row_page_recovery_report().unwrap();
         assert_eq!(report.replayed_batches, 1);
         assert_eq!(report.overlay_entries, 1);
-        let view = Arc::clone(store.relational_row_pages.recovery_view.as_ref().unwrap());
+        let view = Arc::clone(store.relational_row_pages.read_view.as_ref().unwrap());
         assert!(matches!(
             view.overlay_value("documents", &key(2)),
             Some(skein_storage::RelationalRowPageRecoveredValue::Present(value))
-                if value == &row(2, "two")
+                if value == row(2, "two")
         ));
         let snapshot = store.snapshot();
         assert!(Arc::ptr_eq(
             &view,
-            snapshot
-                .relational_row_pages
-                .recovery_view
-                .as_ref()
-                .unwrap()
+            snapshot.relational_row_pages.read_view.as_ref().unwrap()
         ));
         store
             .commit_relational_transaction(
@@ -441,19 +540,83 @@ mod tests {
             .unwrap();
         assert!(matches!(
             store.relational_row_page_recovery_status(),
-            RelationalRowPageRecoveryStatus::Unavailable {
-                base_generation: Some(1),
-                base_commit_epoch: Some(1),
-                recovered_commit_epoch: 3,
-                reason,
-            } if reason.contains("live commits")
+            RelationalRowPageRecoveryStatus::LiveCurrent {
+                base_generation: 1,
+                base_commit_epoch: 1,
+                visible_commit_epoch: 3,
+                live_batches: 1,
+                live_entries: 1,
+                ..
+            }
         ));
-        assert!(store.relational_row_pages.recovery_view.is_none());
+        let current = store.relational_row_pages.read_view.as_ref().unwrap();
+        assert!(matches!(
+            current.overlay_value("documents", &key(3)),
+            Some(skein_storage::RelationalRowPageRecoveredValue::Present(value))
+                if value == row(3, "three")
+        ));
+        assert!(!Arc::ptr_eq(&view, current));
         assert!(Arc::ptr_eq(
             &view,
-            snapshot
+            snapshot.relational_row_pages.read_view.as_ref().unwrap()
+        ));
+
+        let before_graph_commit = Arc::clone(current);
+        store
+            .create_node(&mut catalog, "Note", BTreeMap::new())
+            .unwrap();
+        assert!(matches!(
+            store.relational_row_page_recovery_status(),
+            RelationalRowPageRecoveryStatus::LiveCurrent {
+                visible_commit_epoch: 4,
+                live_batches: 1,
+                live_entries: 1,
+                ..
+            }
+        ));
+        let after_graph_commit = store.relational_row_pages.read_view.as_ref().unwrap();
+        assert_eq!(after_graph_commit.latest_live_commit_epoch(), Some(3));
+        assert!(!Arc::ptr_eq(&before_graph_commit, after_graph_commit));
+        assert!(matches!(
+            after_graph_commit.overlay_value("documents", &key(3)),
+            Some(skein_storage::RelationalRowPageRecoveredValue::Present(value))
+                if value == row(3, "three")
+        ));
+
+        let pinned_epoch_four = Arc::clone(after_graph_commit);
+        let pinned_before_ddl = store.snapshot();
+        store
+            .commit_relational_transaction(
+                &mut catalog,
+                RelationalTransaction {
+                    writes: vec![RelationalWrite::AddColumn {
+                        table: "documents".to_string(),
+                        column: RelationalColumnSchema {
+                            name: "archived".to_string(),
+                            scalar_type: RelationalScalarType::Boolean,
+                            nullable: false,
+                            default: Some(RelationalValue::Boolean(false)),
+                        },
+                    }],
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            store.relational_row_page_recovery_status(),
+            RelationalRowPageRecoveryStatus::LiveUnavailable {
+                base_generation: 1,
+                base_commit_epoch: 1,
+                last_visible_commit_epoch: 4,
+                failed_commit_epoch: 5,
+                reason,
+            } if reason.contains("schema-changing WAL")
+        ));
+        assert!(store.relational_row_pages.read_view.is_none());
+        assert!(Arc::ptr_eq(
+            &pinned_epoch_four,
+            pinned_before_ddl
                 .relational_row_pages
-                .recovery_view
+                .read_view
                 .as_ref()
                 .unwrap()
         ));
@@ -518,7 +681,7 @@ mod tests {
             }
         ));
         assert_eq!(reopened.relational_state.row_count("documents"), 1);
-        assert!(reopened.relational_row_pages.recovery_view.is_none());
+        assert!(reopened.relational_row_pages.read_view.is_none());
 
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -606,7 +769,7 @@ mod tests {
                 reason,
             } if reason.contains("could not be opened")
         ));
-        assert!(reopened.relational_row_pages.recovery_view.is_none());
+        assert!(reopened.relational_row_pages.read_view.is_none());
 
         std::fs::remove_dir_all(path).unwrap();
     }

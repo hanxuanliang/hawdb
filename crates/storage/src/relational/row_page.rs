@@ -9,6 +9,7 @@ use std::fmt;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 mod delta;
+mod live;
 mod mutation;
 mod publication;
 mod recovery;
@@ -23,6 +24,9 @@ pub use delta::{
     DEFAULT_RELATIONAL_ROW_DELTA_DIRTY_BYTES, DEFAULT_RELATIONAL_ROW_DELTA_DIRTY_ENTRIES,
     DEFAULT_RELATIONAL_ROW_DELTA_MANIFEST_BYTES, DEFAULT_RELATIONAL_ROW_DELTA_RUNS,
     DEFAULT_RELATIONAL_ROW_DELTA_RUN_BYTES, RELATIONAL_ROW_DELTA_MANIFEST_FILE,
+};
+pub use live::{
+    RelationalRowPageLiveError, RelationalRowPageReadView, RelationalRowPageReadViewIdentity,
 };
 pub use mutation::{
     RelationalRowPageBootstrap, RelationalRowPageBootstrapReport, RelationalRowPageIdAllocator,

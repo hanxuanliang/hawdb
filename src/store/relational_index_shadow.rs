@@ -1202,13 +1202,12 @@ impl GraphStore {
     /// snapshot cannot combine graph state with a stale relational identity.
     pub(super) fn finish_non_relational_commit(&mut self) {
         let next_commit_epoch = self.commit_epoch + 1;
-        let publication = self.stage_relational_index_live_publication(next_commit_epoch, None);
+        let index_publication =
+            self.stage_relational_index_live_publication(next_commit_epoch, None);
+        let row_publication = self.stage_relational_row_live_publication(next_commit_epoch, None);
         self.commit_epoch = next_commit_epoch;
-        self.publish_relational_index_live_view(publication);
-        self.invalidate_relational_row_page_live_view(
-            next_commit_epoch,
-            "live commits require the later canonical row live-overlay activation stage",
-        );
+        self.publish_relational_index_live_view(index_publication);
+        self.publish_relational_row_live_view(row_publication);
     }
 
     pub(super) fn mount_relational_index_shadow_for_recovery(&mut self) {

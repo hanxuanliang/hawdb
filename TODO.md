@@ -97,10 +97,10 @@ a stale index or a database-sized resident set to become a correctness
 dependency.
 
 - [ ] Implement the canonical relational row-page runtime.
-  - Wire the implemented immutable row-delta generation into WAL recovery and
-    live publication, then replace the non-serving in-memory recovery shadow so
-    complete replay remains resident bounded without skipping durable WAL or
-    scanning all row pages during open.
+  - Wire the implemented immutable row-delta generation into WAL recovery, then
+    replace the non-serving in-memory recovery shadow so complete replay remains
+    resident bounded without skipping durable WAL or scanning all row pages
+    during open.
   - Automatically publish and bind the exact row root to the canonical
     checkpoint, then cover backup, restore, scrub, orphan cleanup, reader-pin
     reclamation, and Windows file lifecycle behavior.

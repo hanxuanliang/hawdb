@@ -637,14 +637,38 @@ below supplies the disk-backed artifact boundary, but the current recovery
 mount still uses this in-memory shadow until a separate integration stage
 streams WAL captures into those runs.
 
-After the complete WAL prefix is consumed, recovery may expose one immutable
-`Arc` view whose identity contains the base generation, base commit epoch, and
-fully recovered visible commit epoch. `GraphStore::snapshot()` retains that
-exact view only for the matching commit epoch. A later live commit removes the
-store's current row shadow because live row-delta publication is not active;
-already pinned snapshots remain valid. This view is diagnostic and differential
-evidence only: SQL, constraints, checkpoint authority, backup, and reclamation
-do not select it.
+After the complete WAL prefix is consumed, recovery exposes one immutable
+`Arc` read view whose identity contains the base generation, base commit epoch,
+base root-set digest, and fully recovered visible commit epoch.
+`GraphStore::snapshot()` retains that exact view only for the matching commit
+epoch.
+
+Every later relational commit stages the next row view before appending WAL.
+Relational DML derives one strictly ordered immutable primary-key batch from
+the same before/after state used to stage the canonical mutation. The batch
+recomputes and verifies its declared encoded byte charge, conservatively
+charges the retained table/key/value allocation envelope, then moves row
+payloads behind `Arc` ownership. Advancing a view installs one immutable
+persistent-chain head and reuses the prior head; it never copies earlier batch
+handles or clones the complete recovery overlay or canonical row set. An
+already-durable graph-only commit stages only the identity advance immediately
+before its global epoch becomes visible and does not add an empty batch. The
+default cumulative live envelope is 100,000 entries and 64 MiB.
+
+Only a successful durable commit installs the staged view. An epoch gap,
+unordered or undercharged capture, DDL/schema rewrite, an overflow reference
+without live overflow publication, or cumulative admission failure makes the
+current acceleration view unavailable. The status retains both the last
+visible and failed commit epochs. The canonical WAL and materialized relational
+state still commit because this row view is not yet an authority. Already
+pinned snapshots retain their prior immutable view. Writable transaction
+workspaces continue to read the materialized staged state, so
+read-your-own-writes never consults a lagging read view.
+
+This view remains diagnostic and differential evidence only: SQL, constraints,
+checkpoint authority, backup, and reclamation do not select it. The format is
+the sole unreleased v1 design; there is no legacy view representation or
+compatibility path.
 
 ### Immutable relational row-delta v1 generation
 
@@ -715,8 +739,8 @@ This is the only relational row-delta representation. Skein has not published
 a durable database format, so the reader recognizes no legacy magic, version,
 layout, filename, or migration path. This stage does not replace
 `RelationalRowPageRecoveryBuilder`, bind deltas into the canonical checkpoint,
-merge base plus delta for SQL, or reclaim orphan and pinned generations. Those
-are separate activation and lifecycle contracts.
+merge base plus delta plus the live batches for SQL, or reclaim orphan and
+pinned generations. Those are separate activation and lifecycle contracts.
 
 ### Graph layout
 

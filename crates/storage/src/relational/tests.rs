@@ -317,7 +317,7 @@ fn unique_constraint_rejects_complete_batch() {
 }
 
 #[test]
-fn authoritative_constraint_staging_uses_persistent_lookup_for_upsert() {
+fn authoritative_constraint_staging_derives_index_and_row_batches_once() {
     let base = RelationalState::default()
         .stage_transaction(
             create_upsert_table(),
@@ -340,8 +340,8 @@ fn authoritative_constraint_staging_uses_persistent_lookup_for_upsert() {
     let index = TestConstraintIndex::from_state(&base);
     let owner = RelationalKey(vec![RelationalValue::Text("owner-1".to_string())]);
 
-    let (next, capture) = base
-        .stage_transaction_with_authoritative_index(
+    let (next, index_capture, row_capture) = base
+        .stage_transaction_with_authoritative_index_and_row_changes(
             RelationalTransaction {
                 writes: vec![RelationalWrite::Upsert {
                     table: "documents".to_string(),
@@ -356,6 +356,7 @@ fn authoritative_constraint_staging_uses_persistent_lookup_for_upsert() {
             RelationalMutationLimits::default(),
             RelationalOverflowConfig::default(),
             RelationalIndexChangeCaptureLimits::default(),
+            RelationalRowChangeCaptureLimits::default(),
             &index,
         )
         .expect("persistent unique lookup resolves the upsert target");
@@ -372,8 +373,19 @@ fn authoritative_constraint_staging_uses_persistent_lookup_for_upsert() {
     assert!(next.row("documents", &id_2).is_none());
     assert!(index.looked_up("documents", &relational_unique_index_name(0), &owner));
     assert!(matches!(
-        capture,
+        index_capture,
         RelationalIndexChangeCapture::Captured { .. }
+    ));
+    assert!(matches!(
+        row_capture,
+        RelationalRowChangeCapture::Captured {
+            changes,
+            encoded_bytes,
+        } if changes.len() == 1
+            && changes[0].table == "documents"
+            && changes[0].primary_key == id_1
+            && changes[0].row.as_ref() == next.row("documents", &id_1)
+            && encoded_bytes > 0
     ));
 }
 
