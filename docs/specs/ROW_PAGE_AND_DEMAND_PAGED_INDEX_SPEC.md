@@ -1366,6 +1366,12 @@ checkpoint binding, demand-read, lifecycle, or serving obligations.
   overlay visibility, checkpoint/reopen identity, and a missing-owner no-op
   that does not advance the commit epoch.
   `SkeinContentSourceOwnershipMove.tla` models this operation.
+  Thread ownership qualification seeds rows in different source workspaces,
+  moves graph Thread, relational document, and messages through guarded writes
+  in one transaction, and keeps a stale-preview row unchanged. It proves
+  read-your-own-writes, two successful moves out of three requested moves,
+  payload preservation, live overlay visibility, and checkpoint/reopen
+  identity. `SkeinContentThreadOwnershipMove.tla` models the guarded batch.
 - `SkeinRowRecovery.tla`: checkpoint-correlated row-root mount, exact ordered
   primary-key WAL overlay, graph-only epoch advancement, whole-fragment
   admission, fail-closed invalidation, complete-prefix view publication, cold

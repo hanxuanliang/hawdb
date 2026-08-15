@@ -8,6 +8,7 @@ mod source_ownership;
 mod source_replacement;
 #[cfg(test)]
 mod tests;
+mod thread_ownership;
 mod transaction;
 
 use crate::{
@@ -31,6 +32,7 @@ use skein::{Database, DurabilityPolicy, RelationalIndexMode, Result, SkeinError}
 use source_ownership::qualify_source_ownership_move;
 use source_replacement::qualify_source_chunk_replacement;
 use std::path::PathBuf;
+use thread_ownership::qualify_thread_ownership_moves;
 use transaction::qualify_multi_statement_transaction;
 
 pub const CONTENT_STORE_INITIAL_ROW_PAGE_QUALIFICATION_PROTOCOL: &str =
@@ -263,6 +265,7 @@ pub struct ContentStoreInitialRowPageQualificationReport {
     pub live_overlay_anchor_read: ContentStoreRowPageReadReport,
     pub source_chunk_replacement: ContentStoreSourceReplacementQualificationReport,
     pub source_ownership_move: ContentStoreSourceOwnershipMoveQualificationReport,
+    pub thread_ownership_move: ContentStoreThreadOwnershipMoveQualificationReport,
     pub multi_statement_transaction: ContentStoreTransactionQualificationReport,
     pub resources: ContentStoreResourceEvidence,
     pub corruption: ContentStoreCorruptionQualificationReport,
@@ -324,6 +327,31 @@ pub struct ContentStoreSourceOwnershipMoveQualificationReport {
     pub live_read: ContentStoreRowPageReadReport,
     pub checkpoint_generation: u64,
     pub reopened_read: ContentStoreRowPageReadReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContentStoreThreadOwnershipMoveQualificationReport {
+    pub requested_moves: usize,
+    pub documents_updated: usize,
+    pub messages_updated: usize,
+    pub stale_guard_preserved: bool,
+    pub graph_relational_agreement: bool,
+    pub payload_fields_preserved: bool,
+    pub seed_commit_epoch: u64,
+    pub committed_epoch: u64,
+    pub payload_sha256_before: String,
+    pub payload_sha256_after_live: String,
+    pub payload_sha256_after_reopen: String,
+    pub live_reads: Vec<ContentStoreThreadOwnershipReadReport>,
+    pub checkpoint_generation: u64,
+    pub reopened_reads: Vec<ContentStoreThreadOwnershipReadReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContentStoreThreadOwnershipReadReport {
+    pub case_name: String,
+    pub expected_space_id: String,
+    pub read: ContentStoreRowPageReadReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -637,6 +665,13 @@ pub fn run_content_store_initial_row_page_qualification(
         &authoritative_config,
         &multi_statement_transaction.inserted_content_message_id,
     )?;
+    let (ownership_database, thread_ownership_move) = qualify_thread_ownership_moves(
+        database,
+        &config.database_path,
+        &authoritative_config,
+        &corpus,
+    )?;
+    database = ownership_database;
     let isolation = qualify_content_store_isolation(
         database,
         &corpus,
@@ -676,6 +711,7 @@ pub fn run_content_store_initial_row_page_qualification(
         live_overlay_anchor_read,
         source_chunk_replacement,
         source_ownership_move,
+        thread_ownership_move,
         multi_statement_transaction,
         resources,
         corruption,

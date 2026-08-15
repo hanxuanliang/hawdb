@@ -320,6 +320,18 @@ epoch. The live row overlay and checkpoint/reopen result MUST have identical
 ordered output and payload digests. `SkeinContentSourceOwnershipMove.tla`
 models the durable publication boundary and the missing-owner no-op.
 
+`patch_thread_space_ownership` is qualified as one bounded guarded batch. Each
+input binds one thread storage identity, its previewed source workspace, and
+its target workspace. The graph Thread, relational content document, and all
+thread messages MUST move together only when their current workspace still
+matches that guard. A batch may contain different source workspaces. A stale
+preview MUST leave all three representations and their update timestamps
+unchanged while other valid entries in the same batch commit. Apart from the
+intentional workspace and update-time fields, document and message payloads
+MUST retain the same digest through live visibility and checkpoint/reopen.
+`SkeinContentThreadOwnershipMove.tla` models guarded per-owner staging and the
+single durable batch publication.
+
 This gate deliberately covers the selected storage lifecycle, transaction,
 locking, cancellation, injected corruption, and synthetic resource evidence;
 it does not claim complete Content Store cutover. Callers still marked

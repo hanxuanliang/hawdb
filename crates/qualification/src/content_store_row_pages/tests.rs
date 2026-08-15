@@ -22,7 +22,7 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
 
     assert!(report.ready);
     assert_eq!(report.qualified_tables, QUALIFIED_TABLES);
-    assert_eq!(report.corpus.partial_caller_count, 6);
+    assert_eq!(report.corpus.partial_caller_count, 5);
     assert_eq!(report.final_message_count, 7);
     assert_eq!(report.base_chunk_count, 5);
     assert_eq!(report.final_chunk_count, 2);
@@ -217,6 +217,54 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
                 .source_chunk_replacement
                 .empty_replacement
                 .checkpoint_generation
+    );
+    assert_eq!(report.thread_ownership_move.requested_moves, 3);
+    assert_eq!(report.thread_ownership_move.documents_updated, 2);
+    assert_eq!(report.thread_ownership_move.messages_updated, 2);
+    assert!(report.thread_ownership_move.stale_guard_preserved);
+    assert!(report.thread_ownership_move.graph_relational_agreement);
+    assert!(report.thread_ownership_move.payload_fields_preserved);
+    assert_eq!(report.thread_ownership_move.live_reads.len(), 3);
+    assert_eq!(report.thread_ownership_move.reopened_reads.len(), 3);
+    assert!(report
+        .thread_ownership_move
+        .live_reads
+        .iter()
+        .all(|case| case.read.execution.visible_commit_epoch
+            == report.thread_ownership_move.committed_epoch));
+    assert!(report
+        .thread_ownership_move
+        .live_reads
+        .iter()
+        .all(|case| case.read.execution.overlay_entries > 0));
+    assert!(report
+        .thread_ownership_move
+        .live_reads
+        .iter()
+        .zip(&report.thread_ownership_move.reopened_reads)
+        .all(|(live, reopened)| live.case_name == reopened.case_name
+            && live.expected_space_id == reopened.expected_space_id
+            && live.read.output_sha256 == reopened.read.output_sha256));
+    assert_eq!(
+        report
+            .thread_ownership_move
+            .live_reads
+            .iter()
+            .map(|case| (case.case_name.as_str(), case.expected_space_id.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("matched_default", "work"),
+            ("matched_archive", "work"),
+            ("stale_preview", "stale-current"),
+        ]
+    );
+    assert_eq!(
+        report.thread_ownership_move.payload_sha256_before,
+        report.thread_ownership_move.payload_sha256_after_live
+    );
+    assert_eq!(
+        report.thread_ownership_move.payload_sha256_before,
+        report.thread_ownership_move.payload_sha256_after_reopen
     );
     assert_eq!(
         report.multi_statement_transaction.index_runtime_path,

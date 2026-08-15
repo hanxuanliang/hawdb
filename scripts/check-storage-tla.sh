@@ -17,6 +17,7 @@ readonly specifications=(
   SkeinCowPagePublication
   SkeinContentSourceOwnershipMove
   SkeinContentSourceReplacement
+  SkeinContentThreadOwnershipMove
   SkeinSourceSegmentPublication
   SkeinCrdtReplication
   SkeinGossipDelivery

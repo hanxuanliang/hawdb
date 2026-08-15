@@ -8,6 +8,7 @@ _STORAGE_MODELS = [
     "SkeinCompactionVisibility",
     "SkeinContentSourceOwnershipMove",
     "SkeinContentSourceReplacement",
+    "SkeinContentThreadOwnershipMove",
     "SkeinConcurrentSnapshots",
     "SkeinCowPagePublication",
     "SkeinCrdtReplication",

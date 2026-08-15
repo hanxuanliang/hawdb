@@ -600,6 +600,19 @@ mod tests {
     }
 
     #[test]
+    fn thread_ownership_move_is_bound_to_guarded_batch_evidence() {
+        let corpus = nowledge_content_store_sql_corpus().unwrap();
+        let caller = corpus
+            .source_inventory
+            .iter()
+            .find(|caller| caller.symbol == "patch_thread_space_ownership")
+            .expect("thread ownership caller must be inventoried");
+        assert_eq!(caller.coverage, ContentStoreSqlCallerCoverage::Covered);
+        assert!(caller.note.contains("mixed-source guarded moves"));
+        assert!(caller.note.contains("stale-preview preservation"));
+    }
+
+    #[test]
     fn content_store_mutations_stage_through_the_public_sql_path() {
         let corpus = nowledge_content_store_sql_corpus().expect("valid content-store corpus");
         let mut database = materialized_content_store();

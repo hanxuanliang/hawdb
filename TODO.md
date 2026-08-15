@@ -127,6 +127,11 @@ crash; read-only recovery remains fail closed.
     exact chunk-count and payload preservation, missing-owner no-op behavior,
     live visibility, and checkpoint/reopen identity. The other `partial`
     callers remain blocked on their own qualification evidence.
+    The `patch_thread_space_ownership` caller now has a guarded mixed-source
+    batch qualification: graph Thread, relational document, and messages agree
+    in one epoch, matching previews move, a stale preview remains unchanged,
+    and non-ownership payloads survive live reads and checkpoint/reopen. Other
+    `partial` callers remain blocked on independent evidence.
   - Require checkpoint/reopen, WAL replay, corruption, cancellation, and
     locking evidence before enabling the path by default. Prove that a declared
     bounded workload runs within the supported 512 MiB low-memory profile, but
