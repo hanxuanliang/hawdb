@@ -1927,8 +1927,11 @@ impl GraphStore {
         }
     }
 
-    pub fn stable_id_mapping(&self) -> StoreStableIdMapping {
-        (*self.stable_id_mapping).clone()
+    pub fn stable_id_mapping(&self) -> Result<StoreStableIdMapping> {
+        self.durable.as_ref().map_or_else(
+            || Ok((*self.stable_id_mapping).clone()),
+            DurableStore::materialize_stable_id_mapping,
+        )
     }
 
     pub fn initial_import_source_fingerprint(&self) -> Option<&str> {
@@ -1936,20 +1939,14 @@ impl GraphStore {
     }
 
     pub fn replace_stable_id_mapping(&mut self, mapping: StoreStableIdMapping) -> Result<()> {
-        if self
-            .durable
-            .as_ref()
-            .is_some_and(|durable| durable.read_only)
-        {
-            return Err(SkeinError::Storage(
-                "stable id mapping persistence is not allowed in read-only mode".to_string(),
-            ));
-        }
-        self.stable_id_mapping = mapping.into();
-        self.write_stable_id_mapping()
+        self.replace_stable_id_mapping_for_epoch(mapping, self.commit_epoch)
     }
 
-    pub fn ensure_stable_id_mapping(&mut self) -> Result<StoreStableIdMapping> {
+    fn replace_stable_id_mapping_for_epoch(
+        &mut self,
+        mapping: StoreStableIdMapping,
+        covered_commit_epoch: u64,
+    ) -> Result<()> {
         if self
             .durable
             .as_ref()
@@ -1959,40 +1956,62 @@ impl GraphStore {
                 "stable id mapping persistence is not allowed in read-only mode".to_string(),
             ));
         }
-        let mut changed = false;
-        for node in self.nodes.values() {
-            if node.properties.contains_key("id")
-                || self
-                    .stable_id_mapping
-                    .node_stable_ids
-                    .contains_key(&node.id)
-            {
-                continue;
-            }
-            self.stable_id_mapping
-                .node_stable_ids
-                .insert(node.id, generated_stable_id("node", node.id.0));
-            changed = true;
+        if let Some(durable) = &mut self.durable {
+            durable.write_stable_id_mapping(&mapping, covered_commit_epoch)?;
+            self.stable_id_mapping = CowSegment::default();
+        } else {
+            self.stable_id_mapping = mapping.into();
         }
-        for relationship in self.relationships.values() {
-            if relationship.properties.contains_key("id")
-                || self
-                    .stable_id_mapping
-                    .relationship_stable_ids
-                    .contains_key(&relationship.id)
-            {
-                continue;
-            }
-            self.stable_id_mapping.relationship_stable_ids.insert(
-                relationship.id,
-                generated_stable_id("relationship", relationship.id.0),
-            );
-            changed = true;
+        Ok(())
+    }
+
+    pub fn ensure_stable_id_mapping(
+        &mut self,
+        required_node_ids: &BTreeSet<NodeId>,
+        required_relationship_ids: &BTreeSet<RelId>,
+    ) -> Result<StoreStableIdMapping> {
+        if self
+            .durable
+            .as_ref()
+            .is_some_and(|durable| durable.read_only)
+        {
+            return Err(SkeinError::Storage(
+                "stable id mapping persistence is not allowed in read-only mode".to_string(),
+            ));
         }
-        if changed {
-            self.write_stable_id_mapping()?;
+        let existing = self.stable_id_mapping()?;
+        let mapping = StoreStableIdMapping {
+            node_stable_ids: required_node_ids
+                .iter()
+                .map(|id| {
+                    (
+                        *id,
+                        existing
+                            .node_stable_ids
+                            .get(id)
+                            .cloned()
+                            .unwrap_or_else(|| generated_stable_id("node", id.0)),
+                    )
+                })
+                .collect(),
+            relationship_stable_ids: required_relationship_ids
+                .iter()
+                .map(|id| {
+                    (
+                        *id,
+                        existing
+                            .relationship_stable_ids
+                            .get(id)
+                            .cloned()
+                            .unwrap_or_else(|| generated_stable_id("relationship", id.0)),
+                    )
+                })
+                .collect(),
+        };
+        if mapping != existing {
+            self.replace_stable_id_mapping_for_epoch(mapping.clone(), self.commit_epoch)?;
         }
-        Ok(self.stable_id_mapping())
+        Ok(mapping)
     }
 
     pub fn snapshot(&self) -> Self {
@@ -2099,13 +2118,6 @@ impl GraphStore {
                 }
             })
             .collect()
-    }
-
-    fn write_stable_id_mapping(&self) -> Result<()> {
-        let Some(durable) = &self.durable else {
-            return Ok(());
-        };
-        durable.write_stable_id_mapping(&self.stable_id_mapping)
     }
 
     fn next_projection_epoch(&self) -> u64 {
@@ -4735,16 +4747,6 @@ fn split_projected_graph_artifact_checksum(text: &str) -> Result<(&str, u64)> {
     Ok((body, checksum))
 }
 
-fn split_stable_id_mapping_checksum(text: &str) -> Result<(&str, u64)> {
-    let Some((body, footer)) = text.rsplit_once("checksum\t") else {
-        return Err(SkeinError::Storage(
-            "stable id mapping missing checksum footer".to_string(),
-        ));
-    };
-    let checksum = parse_u64(footer.trim(), "stable id mapping checksum")?;
-    Ok((body, checksum))
-}
-
 pub(crate) fn encode_durable_text(text: &str, compression: DurableCompression) -> Result<Vec<u8>> {
     match compression {
         DurableCompression::Zstd => encode_zstd_durable_text(text),
@@ -4945,51 +4947,6 @@ fn decode_string_vec(input: &str) -> Result<Vec<String>> {
         return Ok(Vec::new());
     }
     input.split(':').map(decode_string).collect()
-}
-
-fn encode_stable_id_mapping(mapping: &StoreStableIdMapping) -> String {
-    let mut body = String::new();
-    body.push_str("SKEIN_STABLE_ID_MAPPING_V1\n");
-    body.push_str(&format!("version\t{STORAGE_VERSION}\n"));
-    for (id, stable_id) in &mapping.node_stable_ids {
-        body.push_str(&format!("node\t{}\t{}\n", id.0, encode_value(stable_id)));
-    }
-    for (id, stable_id) in &mapping.relationship_stable_ids {
-        body.push_str(&format!("rel\t{}\t{}\n", id.0, encode_value(stable_id)));
-    }
-    body
-}
-
-fn decode_stable_id_mapping(body: &str) -> Result<StoreStableIdMapping> {
-    let mut mapping = StoreStableIdMapping::default();
-    for line in body.lines() {
-        if line == "SKEIN_STABLE_ID_MAPPING_V1" {
-            continue;
-        }
-        let fields = line.split('\t').collect::<Vec<_>>();
-        match fields.as_slice() {
-            ["version", version] => validate_storage_version(version)?,
-            ["node", raw_id, raw_value] => {
-                mapping.node_stable_ids.insert(
-                    NodeId(parse_u64(raw_id, "stable id node id")?),
-                    decode_value(raw_value)?,
-                );
-            }
-            ["rel", raw_id, raw_value] => {
-                mapping.relationship_stable_ids.insert(
-                    RelId(parse_u64(raw_id, "stable id relationship id")?),
-                    decode_value(raw_value)?,
-                );
-            }
-            [""] => {}
-            _ => {
-                return Err(SkeinError::Storage(format!(
-                    "invalid stable id mapping line: {line}"
-                )));
-            }
-        }
-    }
-    Ok(mapping)
 }
 
 fn encode_value_vec(values: &[Value]) -> String {

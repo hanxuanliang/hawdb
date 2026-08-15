@@ -901,6 +901,22 @@ weak-fair and always terminates through a hit, admission, unpinned eviction, or
 non-blocking bypass; it never waits for or evicts a pin. Dirty pages are outside
 this model and remain a later COW page-publication obligation.
 
+`SkeinStableIdentityPublication.tla` models the independent physical-id to
+stable-identity sidecar used by Skein Lightning. Candidate fixed-size pages
+become durable before the selected checksummed header, and a crash discards
+only an unpublished candidate. Initial-import graph WAL append and visibility
+require one complete mapping generation whose declared covered epoch matches
+the imported graph epoch. A reader pins one immutable generation while a newer
+generation may publish; corruption is scoped to the selected generation/page,
+causes the demand read to fail, and poisons later reads through that handle.
+Deep scrub advances only through validated pages, cannot skip a corrupt page,
+and succeeds only after covering the complete selected page set.
+The model deliberately does not equate this sidecar with the canonical
+generation-bound graph `id` property index. Concrete Rust refinement covers
+header/file-length validation, fixed-slot checksums, ordered key ranges,
+bounded binary-search I/O, shared-cache identity, materialization admission,
+single-page scrub residency, and the durable mapping-before-WAL call order.
+
 `SkeinStatisticsEligibility.tla` models the property-statistics type boundary.
 Compact scalar and `VARCHAR` observations may create candidate facts, while
 declared `TEXT` and other large values exclude the complete property group. The

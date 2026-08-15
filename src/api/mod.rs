@@ -1395,10 +1395,43 @@ impl Database {
         &mut self,
     ) -> Result<CanonicalGraphSnapshotExport> {
         self.ensure_writable()?;
-        let mapping = CanonicalStableIdMapping::from(self.store.ensure_stable_id_mapping()?);
-        Ok(self
-            .try_export_canonical_graph_snapshot()?
-            .with_stable_id_mapping(&mapping))
+        let snapshot = self.try_export_canonical_graph_snapshot()?;
+        let duplicate_node_stable_ids = snapshot
+            .stable_identity
+            .duplicate_node_stable_ids
+            .iter()
+            .collect::<BTreeSet<_>>();
+        let duplicate_relationship_stable_ids = snapshot
+            .stable_identity
+            .duplicate_relationship_stable_ids
+            .iter()
+            .collect::<BTreeSet<_>>();
+        let required_node_ids = snapshot
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.stable_id
+                    .as_ref()
+                    .is_none_or(|stable_id| duplicate_node_stable_ids.contains(stable_id))
+            })
+            .map(|node| NodeId(node.node_id))
+            .collect::<BTreeSet<_>>();
+        let required_relationship_ids = snapshot
+            .relationships
+            .iter()
+            .filter(|relationship| {
+                relationship
+                    .stable_id
+                    .as_ref()
+                    .is_none_or(|stable_id| duplicate_relationship_stable_ids.contains(stable_id))
+            })
+            .map(|relationship| RelId(relationship.relationship_id))
+            .collect::<BTreeSet<_>>();
+        let mapping = CanonicalStableIdMapping::from(
+            self.store
+                .ensure_stable_id_mapping(&required_node_ids, &required_relationship_ids)?,
+        );
+        Ok(snapshot.with_stable_id_mapping(&mapping))
     }
 
     pub fn prepare_skein_lightning_bootstrap_export(

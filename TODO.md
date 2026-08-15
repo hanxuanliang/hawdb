@@ -167,17 +167,27 @@ crash; read-only recovery remains fail closed.
     regular in-process run does not certify an OS-enforced 512 MiB limit: retain
     the isolated constrained-profile run and production-copy measurements as
     separate evidence gates.
+  - Qualify `DesktopBound` separately on an 8 GiB host: automatic Skein
+    capacity must remain at or below 2 GiB, while the effective budget tracks
+    sensed headroom and is expected to move through the 1--2 GiB range rather
+    than becoming a fixed reservation. Keep the explicit 512 MiB run as a
+    supported low-memory capability profile, not as the default or a universal
+    release threshold.
   - Because no storage format has shipped, activation is destructive: remove
     the ordinary materialized row selector instead of retaining a compatibility
     or rollback path. Keep the differential oracle in qualification code only.
 
-- [ ] Persist and activate the remaining stable-id graph index.
-  - Publish the stable-id root with the canonical graph epoch. Equality, range,
-    full-text, ordered composite-equality, relationship equality/range, forward
-    adjacency, and reverse adjacency projections are generation-bound and
-    demand-paged. Relationship probes choose the property projection only when
-    its estimated work does not exceed the bound endpoint adjacency path.
-  - Activate each index class independently after differential, recovery,
+- [ ] Differentially qualify and production-activate persistent graph indexes.
+  - Equality, range, full-text, ordered composite-equality, relationship
+    equality/range, forward adjacency, and reverse adjacency projections are
+    generation-bound and demand-paged. Relationship probes choose the property
+    projection only when its estimated work does not exceed the bound endpoint
+    adjacency path.
+  - The Skein Lightning physical-id to stable-identity sidecar is separately
+    publish-last and demand-paged because it must become durable before an
+    initial-import graph WAL batch. It is not a query index and is not bound to
+    a checkpoint that does not yet contain that import.
+  - Activate each query index class independently after differential, recovery,
     cache-budget, and production-shaped evidence; derived BM25, vector,
     statistics, analytics, and optional columnar projections remain outside
     canonical recovery.

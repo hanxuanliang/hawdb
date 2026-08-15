@@ -894,6 +894,46 @@ reclamation remain separate activation contracts.
 5. Relationship create/delete MUST preserve endpoint and adjacency-index
    agreement in the same commit epoch.
 
+### Stable identity export mapping
+
+The physical-id to logical stable-identity mapping used by Skein Lightning is
+not the graph `id` property index. Declared `id` properties use the ordinary
+generation-bound property projection. `stable_ids.skein` exists only for
+records that need a durable export/import identity because their canonical
+property is missing or non-unique. A persisted overlay replaces the ambiguous
+property value for that physical export; mappings that are no longer required
+are removed by the next explicit export publication.
+
+1. The mapping MUST use its own monotonic generation because initial import
+   publishes it before appending the graph WAL batch. It MUST NOT be falsely
+   bound to a checkpoint generation that does not yet contain the imported
+   graph.
+2. Publication MUST write and synchronize every fixed-size mapping page before
+   atomically replacing the small checksummed header. A crash before header
+   replacement leaves the prior complete generation selected.
+3. The header records generation, covered graph commit epoch, page size, page
+   count, and node/relationship entry counts. Initial-import WAL append is
+   permitted only after a complete selected mapping declares coverage for the
+   target graph epoch.
+4. Normal open reads only the bounded header and validates the exact artifact
+   length. It MUST NOT decode every stable identity or warm mapping pages.
+5. Pages are strictly ordered by `(entity kind, physical id)`, independently
+   checksummed, fixed-size, and demand-read through the shared segment cache.
+   Point lookup uses bounded page and storage-byte admission. A selected corrupt
+   page poisons the mapping reader and fails the identity operation closed. The
+   writer admits the cumulative artifact size before each page write.
+6. Full materialization is allowed only at an explicit export/import boundary
+   with entry, storage-byte, and estimated resident-byte limits. It is not
+   mandatory database residency.
+7. Full storage scrub MUST validate every page checksum, global key order,
+   entry count, and value encoding while retaining at most one page and one
+   decoded value. It MUST NOT warm the shared page cache. A physical failure
+   poisons the storage handle.
+8. Mapping generation is independent from query indexes. Graph property,
+   relationship-property, composite, full-text, and adjacency projections keep
+   their canonical generation fences and cannot use this sidecar as a query
+   fallback.
+
 ### Large values
 
 Strings, JSON, binary values, and vectors above the inline threshold MUST use
@@ -911,7 +951,7 @@ The persistent page contract applies to:
 
 - relational primary-key trees;
 - unique and secondary indexes;
-- graph stable-id and declared property indexes;
+- graph declared property indexes, including an indexed `id` property;
 - forward and reverse adjacency indexes.
 
 BM25, vector ANN, optional columnar scan structures, and algorithm outputs are

@@ -364,6 +364,13 @@ fn persisted_stable_id_mapping_survives_reopen_without_wal_write() {
 
     {
         let mut db = Database::open(&path).unwrap();
+        assert_eq!(
+            db.segment_cache_snapshot()
+                .expect("durable database has a segment cache")
+                .resident_bytes,
+            0,
+            "opening the stable identity header must not load mapping pages"
+        );
         let snapshot = db
             .export_canonical_graph_snapshot_with_persisted_stable_ids()
             .unwrap();
@@ -372,6 +379,231 @@ fn persisted_stable_id_mapping_survives_reopen_without_wal_write() {
         assert!(snapshot.validate().is_import_ready);
     }
 
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn persisted_stable_id_mapping_covers_out_of_core_base_records() {
+    let path = unique_test_dir("persisted_stable_id_mapping_out_of_core");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {title: 'Root'})-[:LINKS {weight: 7}]->(:Entity {name: 'Mid'})")
+            .unwrap();
+        db.checkpoint().unwrap();
+    }
+
+    let first = {
+        let mut db = Database::open_with_config(
+            &path,
+            DatabaseConfig {
+                storage_residency_mode: skein_storage::StorageResidencyMode::OutOfCore,
+                ..DatabaseConfig::default()
+            },
+        )
+        .unwrap();
+        let residency = db.storage_residency_report();
+        assert!(residency.out_of_core);
+        assert_eq!(residency.delta_node_count, 0);
+        assert_eq!(residency.delta_relationship_count, 0);
+        let snapshot = db
+            .export_canonical_graph_snapshot_with_persisted_stable_ids()
+            .unwrap();
+
+        assert!(snapshot.validate().is_import_ready);
+        assert!(snapshot.nodes.iter().all(|node| node.stable_id.is_some()));
+        assert!(snapshot
+            .relationships
+            .iter()
+            .all(|relationship| relationship.stable_id.is_some()));
+        snapshot
+    };
+
+    {
+        let mut db = Database::open_with_config(
+            &path,
+            DatabaseConfig {
+                storage_residency_mode: skein_storage::StorageResidencyMode::OutOfCore,
+                ..DatabaseConfig::default()
+            },
+        )
+        .unwrap();
+        let cache_before_export = db
+            .segment_cache_snapshot()
+            .expect("durable database has a segment cache")
+            .resident_bytes;
+        assert!(
+            cache_before_export < skein_storage::DEFAULT_STABLE_IDENTITY_PAGE_BYTES as u64,
+            "reopen must keep fixed-size stable identity pages cold"
+        );
+        let reopened = db
+            .export_canonical_graph_snapshot_with_persisted_stable_ids()
+            .unwrap();
+        assert!(
+            db.segment_cache_snapshot()
+                .expect("durable database has a segment cache")
+                .resident_bytes
+                >= cache_before_export
+                    .saturating_add(skein_storage::DEFAULT_STABLE_IDENTITY_PAGE_BYTES as u64),
+            "explicit export must demand-load the stable identity page"
+        );
+
+        assert_eq!(reopened.logical_checksum, first.logical_checksum);
+        assert_eq!(
+            reopened
+                .nodes
+                .iter()
+                .map(|node| node.stable_id.clone())
+                .collect::<Vec<_>>(),
+            first
+                .nodes
+                .iter()
+                .map(|node| node.stable_id.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            reopened
+                .relationships
+                .iter()
+                .map(|relationship| relationship.stable_id.clone())
+                .collect::<Vec<_>>(),
+            first
+                .relationships
+                .iter()
+                .map(|relationship| relationship.stable_id.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn persisted_stable_id_mapping_disambiguates_and_prunes_duplicate_property_ids() {
+    let path = unique_test_dir("persisted_stable_id_mapping_duplicates");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {id: 'duplicate'})").unwrap();
+        db.query("CREATE (:Entity {id: 'duplicate'})").unwrap();
+        let raw = db.export_canonical_graph_snapshot();
+        assert_eq!(
+            raw.stable_identity.duplicate_node_stable_ids,
+            vec![Value::String("duplicate".to_string())]
+        );
+
+        let mapped = db
+            .export_canonical_graph_snapshot_with_persisted_stable_ids()
+            .unwrap();
+        assert!(mapped.validate().is_import_ready);
+        assert_ne!(mapped.nodes[0].stable_id, mapped.nodes[1].stable_id);
+        assert_eq!(
+            db.store.stable_id_mapping().unwrap().node_stable_ids.len(),
+            2
+        );
+
+        db.query("MATCH (n:Entity) SET n.id = 'unique'").unwrap();
+        let unique = db
+            .export_canonical_graph_snapshot_with_persisted_stable_ids()
+            .unwrap();
+        assert!(unique.validate().is_import_ready);
+        assert_eq!(
+            unique
+                .nodes
+                .iter()
+                .map(|node| node.stable_id.clone())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                Some(Value::String("duplicate".to_string())),
+                Some(Value::String("unique".to_string())),
+            ])
+        );
+        assert!(db
+            .store
+            .stable_id_mapping()
+            .unwrap()
+            .node_stable_ids
+            .is_empty());
+    }
+
+    {
+        let db = Database::open(&path).unwrap();
+        assert!(db
+            .store
+            .stable_id_mapping()
+            .unwrap()
+            .node_stable_ids
+            .is_empty());
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn stable_id_mapping_backup_restore_preserves_logical_identity() {
+    let path = unique_test_dir("stable_id_mapping_backup_source");
+    let backup = unique_test_dir("stable_id_mapping_backup_image");
+    let restored = unique_test_dir("stable_id_mapping_backup_restored");
+    let expected = {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {title: 'Root'})-[:LINKS]->(:Entity {name: 'Mid'})")
+            .unwrap();
+        let snapshot = db
+            .export_canonical_graph_snapshot_with_persisted_stable_ids()
+            .unwrap();
+        db.backup_to(&backup).unwrap();
+        snapshot
+    };
+
+    Database::restore_backup(&backup, &restored).unwrap();
+    {
+        let mut db = Database::open(&restored).unwrap();
+        let actual = db
+            .export_canonical_graph_snapshot_with_persisted_stable_ids()
+            .unwrap();
+
+        assert_eq!(actual.logical_checksum, expected.logical_checksum);
+        assert_eq!(actual.nodes, expected.nodes);
+        assert_eq!(actual.relationships, expected.relationships);
+    }
+
+    std::fs::remove_dir_all(path).unwrap();
+    std::fs::remove_dir_all(backup).unwrap();
+    std::fs::remove_dir_all(restored).unwrap();
+}
+
+#[test]
+fn storage_scrub_detects_cold_stable_id_mapping_corruption() {
+    let path = unique_test_dir("stable_id_mapping_scrub_corruption");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {title: 'Root'})-[:LINKS]->(:Entity {name: 'Mid'})")
+            .unwrap();
+        db.export_canonical_graph_snapshot_with_persisted_stable_ids()
+            .unwrap();
+        db.checkpoint().unwrap();
+    }
+
+    let mut db = Database::open(&path).unwrap();
+    assert!(
+        db.segment_cache_snapshot()
+            .expect("durable database has a segment cache")
+            .resident_bytes
+            < skein_storage::DEFAULT_STABLE_IDENTITY_PAGE_BYTES as u64,
+        "stable identity pages must remain cold before scrub"
+    );
+    let mapping_path = path.join("stable_ids.skein");
+    let mut bytes = std::fs::read(&mapping_path).unwrap();
+    *bytes.last_mut().expect("mapping contains one page") ^= 0x80;
+    std::fs::write(&mapping_path, bytes).unwrap();
+
+    let error = db
+        .scrub_storage()
+        .expect_err("scrub must inspect every stable identity page");
+    assert!(
+        error.to_string().contains("stable identity"),
+        "unexpected scrub failure: {error}"
+    );
+    assert!(db.storage_handle_poisoned());
+
+    drop(db);
     std::fs::remove_dir_all(path).unwrap();
 }
 

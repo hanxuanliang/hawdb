@@ -34,9 +34,10 @@ Files:
 - `projected_graphs.skein`: checksummed, checkpoint-generated CSR/CSC
   projection artifacts derived from persisted projected graph definitions,
   written through the default zstd compression envelope.
-- `stable_ids.skein`: checksummed persisted stable-ID mapping for records that
-  do not carry an `id` property at the physical export boundary, written
-  through the default zstd compression envelope.
+- `stable_ids.skein`: independently generated stable-ID export/import mapping
+  for records whose `id` property is missing or non-unique. A small checksummed
+  header is opened eagerly; fixed-size, independently checksummed mapping pages
+  remain cold and are demand-read through the shared segment cache.
 
 Recovery:
 
@@ -380,10 +381,15 @@ stable-identity audit and logical checksum, so `validate().is_import_ready`
 remains the gate before first physical import, resumed export, reimport, or
 delta comparison.
 `Database::export_canonical_graph_snapshot_with_persisted_stable_ids` is the
-local physical-export entry point for this path. It generates missing stable IDs
-once, writes them to `stable_ids.skein`, and reuses the same mapping after
-reopen. The default `export_canonical_graph_snapshot` remains read-only and does
-not create persistent export metadata.
+local physical-export entry point for this path. It scans the canonical
+base-plus-delta view, generates missing stable IDs once, publishes an
+independent mapping generation, and reuses the same values after reopen.
+Ordinary open reads only the bounded mapping header; explicit export
+materializes demand-read pages under entry, I/O-byte, and resident-byte limits.
+The mapping is durable before an initial-import graph WAL batch, so recovery
+cannot expose that batch without its selected identity generation. The default
+`export_canonical_graph_snapshot` remains read-only and does not create
+persistent export metadata.
 `Database::prepare_skein_lightning_bootstrap_export` wraps the same persisted
 stable-ID snapshot and the relational state at one database commit epoch in a
 Skein Lightning bootstrap manifest. The authoritative logical payload consists
@@ -408,6 +414,11 @@ The CLI command `skein skein-lightning-bootstrap-manifest [--require-ready]
 `stable_ids.skein`, and prints the bootstrap manifest as JSON. `--require-ready`
 returns a non-zero status if the manifest's embedded validation is not
 import-ready or the relational stream is invalid.
+Normal open validates only the stable-identity header and exact file length;
+mapping pages remain cold and are read through the shared bounded page cache.
+An explicit storage scrub streams every page without cache insertion and
+validates page checksums, global key order, counts, and value encodings while
+retaining at most one page and one decoded value.
 The CLI command `skein skein-lightning-graph-stream [--require-ready]
 <database-path>` uses the same bootstrap export path and prints the deterministic
 GraphStream text. The final `checksum` line covers the stream body and matches

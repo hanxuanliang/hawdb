@@ -38,6 +38,7 @@ _STORAGE_MODELS = [
     "SkeinRowRecovery",
     "SkeinRuntimeAdmission",
     "SkeinSourceSegmentPublication",
+    "SkeinStableIdentityPublication",
     "SkeinStatisticsEligibility",
     "SkeinStorageDurability",
     "SkeinSystemSchemaUpgrade",

@@ -17,6 +17,7 @@ pub mod property_spill;
 pub mod relational;
 pub mod scan;
 pub mod snapshot;
+pub mod stable_identity;
 pub mod wire;
 
 pub use adjacency::{
@@ -220,4 +221,14 @@ pub use scan::{
 };
 pub use snapshot::{
     SnapshotCommitError, SnapshotCoordinator, SnapshotReadGuard, VersionedSnapshot,
+};
+pub use stable_identity::{
+    StableIdentityKey, StableIdentityKind, StableIdentityMappingConfig, StableIdentityMappingError,
+    StableIdentityMappingHeader, StableIdentityMappingReader, StableIdentityMappingWriteOutput,
+    StableIdentityMappingWriter, StableIdentityMaterializeLimits, StableIdentityReadLimits,
+    StableIdentityReadReport, StableIdentityScrubReport, DEFAULT_STABLE_IDENTITY_ARTIFACT_BYTES,
+    DEFAULT_STABLE_IDENTITY_LOOKUP_BYTES, DEFAULT_STABLE_IDENTITY_LOOKUP_PAGES,
+    DEFAULT_STABLE_IDENTITY_MATERIALIZED_BYTES, DEFAULT_STABLE_IDENTITY_MATERIALIZED_ENTRIES,
+    DEFAULT_STABLE_IDENTITY_PAGE_BYTES, DEFAULT_STABLE_IDENTITY_PAGE_ENTRIES,
+    DEFAULT_STABLE_IDENTITY_VALUE_BYTES,
 };

@@ -170,8 +170,12 @@ impl GraphStore {
         for (_, _, _, rel_type, _) in &relationships {
             working_catalog.get_or_create_rel_type(rel_type);
         }
+        let target_commit_epoch = self
+            .commit_epoch
+            .checked_add(1)
+            .ok_or_else(|| SkeinError::Storage("commit epoch overflow".to_string()))?;
         let relational_record =
-            encode_relational_checkpoint(self.commit_epoch.saturating_add(1), &relational_state)
+            encode_relational_checkpoint(target_commit_epoch, &relational_state)
                 .map_err(|error| SkeinError::Storage(error.to_string()))?;
         let mut ops = Vec::with_capacity(nodes.len() + relationships.len() + 2);
         ops.push(WalOp::MarkInitialImportSource { source_fingerprint });
@@ -204,13 +208,13 @@ impl GraphStore {
 
         // The mapping is durable before the WAL batch; recovery never observes imported
         // graph rows without the stable identities required to address them.
-        self.replace_stable_id_mapping(stable_id_mapping)?;
+        self.replace_stable_id_mapping_for_epoch(stable_id_mapping, target_commit_epoch)?;
         if let Some(durable) = &mut self.durable {
             durable.append_batch(ops.clone())?;
         }
         self.record_search_projection_graph_changes_for_ops(
             &working_catalog,
-            self.commit_epoch + 1,
+            target_commit_epoch,
             &ops,
         );
         for op in ops {
@@ -248,10 +252,11 @@ impl GraphStore {
     }
 
     pub(super) fn load_stable_id_mapping(&mut self) -> Result<()> {
-        let Some(durable) = &self.durable else {
+        let Some(durable) = &mut self.durable else {
             return Ok(());
         };
-        self.stable_id_mapping = durable.load_stable_id_mapping()?.into();
+        durable.load_stable_id_mapping()?;
+        self.stable_id_mapping = CowSegment::default();
         Ok(())
     }
 

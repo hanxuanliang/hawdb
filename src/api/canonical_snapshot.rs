@@ -43,16 +43,16 @@ impl CanonicalGraphSnapshotExport {
     pub fn with_stable_id_mapping(&self, mapping: &CanonicalStableIdMapping) -> Self {
         let mut export = self.clone();
         for node in &mut export.nodes {
-            if node.stable_id.is_none() {
-                node.stable_id = mapping.node_stable_ids.get(&node.node_id).cloned();
+            if let Some(stable_id) = mapping.node_stable_ids.get(&node.node_id) {
+                node.stable_id = Some(stable_id.clone());
             }
         }
         for relationship in &mut export.relationships {
-            if relationship.stable_id.is_none() {
-                relationship.stable_id = mapping
-                    .relationship_stable_ids
-                    .get(&relationship.relationship_id)
-                    .cloned();
+            if let Some(stable_id) = mapping
+                .relationship_stable_ids
+                .get(&relationship.relationship_id)
+            {
+                relationship.stable_id = Some(stable_id.clone());
             }
         }
         export.stable_identity =

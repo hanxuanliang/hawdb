@@ -6,27 +6,26 @@ use super::{
     canonical_artifact_generation_file, canonical_manifest_generation_file,
     checkpoint_generation_file, checkpoint_publish_failpoint, checksum_bytes,
     cleanup_abandoned_checkpoint_preparations, copy_backup_file, decode_projected_graph_artifacts,
-    decode_stable_id_mapping, derived_repair, doctor, elapsed_micros, encode_binary_wal_header,
-    encode_binary_wal_record, encode_bool, encode_durable_text, encode_index_kind, encode_nullable,
-    encode_optional_sha256, encode_optional_u64, encode_property_type, encode_schema_object_state,
-    encode_stable_id_mapping, encode_string, encode_string_vec, encode_table_kind, encode_u64_vec,
-    encode_value_vec, file_checksum, frame_binary_wal_record, has_storage_artifacts,
-    parse_optional_sha256, parse_optional_u64, parse_relational_overflow_extent_generation_file,
+    derived_repair, doctor, elapsed_micros, encode_binary_wal_header, encode_binary_wal_record,
+    encode_bool, encode_durable_text, encode_index_kind, encode_nullable, encode_optional_sha256,
+    encode_optional_u64, encode_property_type, encode_schema_object_state, encode_string,
+    encode_string_vec, encode_table_kind, encode_u64_vec, encode_value_vec, file_checksum,
+    frame_binary_wal_record, has_storage_artifacts, parse_optional_sha256, parse_optional_u64,
+    parse_relational_overflow_extent_generation_file,
     parse_relational_row_page_artifact_generation_file, parse_u64, process_crash_failpoint,
     property_projection_artifact_generation_file, property_projection_manifest_generation_file,
     property_spill_artifact_generation_file, property_spill_manifest_generation_file,
     read_durable_text, read_durable_text_bytes_with_limit, relational_checkpoint_generation_file,
     remove_source_scan_artifacts, safe_reclaim_commit_epoch, source_scan, split_manifest_checksum,
-    split_projected_graph_artifact_checksum, split_stable_id_mapping_checksum,
-    storage_generation_for_file, store_id_for_path, sync_parent_dir, validate_backup_files,
-    validate_new_backup_destination, validate_search_projection_checkpoint_changes,
-    validate_storage_version, verify_integrity, wal_generation_file, wal_group_sync_failpoint,
-    CheckpointPublishStage, ProjectedGraphArtifact, WalCursorEvent, WalEntry, WalOp,
-    WalOpenOutcome, WalRecordCursor, BACKUP_MANIFEST_FILE, CANONICAL_ADJACENCY_MANIFEST_MAX_BYTES,
-    CANONICAL_MANIFEST_MAX_BYTES, CHECKPOINT_HEADER_V1, MANIFEST_FILE, MANIFEST_HEADER_V1,
-    PROJECTED_GRAPHS_FILE, PROPERTY_PROJECTION_MANIFEST_MAX_BYTES,
-    PROPERTY_SPILL_MANIFEST_MAX_BYTES, STABLE_ID_MAPPING_FILE, STORAGE_VERSION,
-    WAL_BINARY_FILE_HEADER_BYTES,
+    split_projected_graph_artifact_checksum, storage_generation_for_file, store_id_for_path,
+    sync_parent_dir, validate_backup_files, validate_new_backup_destination,
+    validate_search_projection_checkpoint_changes, validate_storage_version, verify_integrity,
+    wal_generation_file, wal_group_sync_failpoint, CheckpointPublishStage, ProjectedGraphArtifact,
+    WalCursorEvent, WalEntry, WalOp, WalOpenOutcome, WalRecordCursor, BACKUP_MANIFEST_FILE,
+    CANONICAL_ADJACENCY_MANIFEST_MAX_BYTES, CANONICAL_MANIFEST_MAX_BYTES, CHECKPOINT_HEADER_V1,
+    MANIFEST_FILE, MANIFEST_HEADER_V1, PROJECTED_GRAPHS_FILE,
+    PROPERTY_PROJECTION_MANIFEST_MAX_BYTES, PROPERTY_SPILL_MANIFEST_MAX_BYTES,
+    STABLE_ID_MAPPING_FILE, STORAGE_VERSION, WAL_BINARY_FILE_HEADER_BYTES,
 };
 use crate::error::{Result, SkeinError};
 use crate::schema::{Catalog, GraphStatistics};
@@ -48,7 +47,9 @@ use skein_storage::{
     RelationalIndexGenerationArtifacts, RelationalOverflowArtifactMetadata,
     RelationalOverflowGenerationArtifacts, RelationalRowPageArtifactMetadata,
     RelationalRowPageGenerationArtifacts, RelationalState, ScanSegmentManifest,
-    SearchProjectionGraphChange, SegmentCache, StorageBackupReport, StorageDebtController,
+    SearchProjectionGraphChange, SegmentCache, StableIdentityKey, StableIdentityMappingConfig,
+    StableIdentityMappingError, StableIdentityMappingReader, StableIdentityMappingWriter,
+    StableIdentityMaterializeLimits, StorageBackupReport, StorageDebtController,
     StoragePressureSignals, StorageScrubReport, StoreId, StoreStableIdMapping, WalReplayConfig,
     WalSyncGroupFlush, WalSyncGroupProgress, WalSyncGroupState,
 };
@@ -58,6 +59,10 @@ use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+fn stable_identity_error(error: StableIdentityMappingError) -> SkeinError {
+    SkeinError::Storage(error.to_string())
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct DurableStore {
@@ -109,6 +114,7 @@ pub(super) struct DurableStore {
     pub(super) canonical_segments: Option<CanonicalSegmentReader>,
     pub(super) canonical_adjacency: Option<CanonicalAdjacencyReader>,
     pub(super) persistent_property_projection: Option<PersistentPropertyProjectionReader>,
+    stable_id_mapping_reader: Option<Arc<StableIdentityMappingReader>>,
     pub(super) source_scan_reader: FileSegmentRangeReader,
     durability: DurabilityPolicy,
     pub(super) read_only: bool,
@@ -500,6 +506,7 @@ impl DurableStore {
             canonical_segments,
             canonical_adjacency,
             persistent_property_projection,
+            stable_id_mapping_reader: None,
             source_scan_reader,
             durability,
             read_only,
@@ -1058,6 +1065,31 @@ impl DurableStore {
                 artifact.artifact_sha256,
                 "property projection artifact",
             )?;
+        }
+
+        match (
+            self.stable_id_mapping_path.exists(),
+            self.stable_id_mapping_reader.as_ref(),
+        ) {
+            (true, Some(reader)) => {
+                let report = reader.deep_scrub().map_err(stable_identity_error)?;
+                scrub.checked_file_count = scrub.checked_file_count.saturating_add(1);
+                scrub.checked_bytes = scrub.checked_bytes.saturating_add(report.checked_bytes);
+                scrub.sha256_verified_file_count =
+                    scrub.sha256_verified_file_count.saturating_add(1);
+            }
+            (true, None) => {
+                return Err(SkeinError::Storage(
+                    "stable identity mapping exists without a selected reader during scrub"
+                        .to_string(),
+                ));
+            }
+            (false, Some(_)) => {
+                return Err(SkeinError::Storage(
+                    "selected stable identity mapping is missing during scrub".to_string(),
+                ));
+            }
+            (false, None) => {}
         }
 
         let mut overflow_extent_generations = BTreeSet::new();
@@ -2089,34 +2121,61 @@ impl DurableStore {
         }
     }
 
-    pub(super) fn write_stable_id_mapping(&self, mapping: &StoreStableIdMapping) -> Result<()> {
-        let body = encode_stable_id_mapping(mapping);
-        let checksum = checksum_bytes(body.as_bytes());
-        let data = format!("{body}checksum\t{checksum}\n");
-        let tmp_path = self.stable_id_mapping_path.with_extension("skein.tmp");
-        {
-            let mut file = File::create(&tmp_path)?;
-            let encoded = encode_durable_text(&data, DurableCompression::default())?;
-            file.write_all(&encoded)?;
-            file.sync_all()?;
-        }
-        durable_replace_file(&tmp_path, &self.stable_id_mapping_path)?;
-        Ok(())
+    pub(super) fn write_stable_id_mapping(
+        &mut self,
+        mapping: &StoreStableIdMapping,
+        covered_commit_epoch: u64,
+    ) -> Result<()> {
+        let entries = mapping
+            .node_stable_ids
+            .iter()
+            .map(|(id, value)| (StableIdentityKey::node(id.0), value))
+            .chain(
+                mapping
+                    .relationship_stable_ids
+                    .iter()
+                    .map(|(id, value)| (StableIdentityKey::relationship(id.0), value)),
+            );
+        StableIdentityMappingWriter::publish(
+            &self.stable_id_mapping_path,
+            covered_commit_epoch,
+            entries,
+            StableIdentityMappingConfig::default(),
+        )
+        .map_err(stable_identity_error)?;
+        self.open_stable_id_mapping_reader()
     }
 
-    pub(super) fn load_stable_id_mapping(&self) -> Result<StoreStableIdMapping> {
+    pub(super) fn load_stable_id_mapping(&mut self) -> Result<()> {
         if !self.stable_id_mapping_path.exists() {
-            return Ok(StoreStableIdMapping::default());
+            self.stable_id_mapping_reader = None;
+            return Ok(());
         }
-        let text = read_durable_text(&self.stable_id_mapping_path, "stable id mapping")?;
-        let (body, checksum) = split_stable_id_mapping_checksum(&text)?;
-        let actual = checksum_bytes(body.as_bytes());
-        if checksum != actual {
-            return Err(SkeinError::Storage(format!(
-                "stable id mapping checksum mismatch: expected {checksum}, got {actual}"
-            )));
-        }
-        decode_stable_id_mapping(body)
+        self.open_stable_id_mapping_reader()
+    }
+
+    pub(super) fn materialize_stable_id_mapping(&self) -> Result<StoreStableIdMapping> {
+        self.stable_id_mapping_reader.as_ref().map_or_else(
+            || Ok(StoreStableIdMapping::default()),
+            |reader| {
+                reader
+                    .materialize(StableIdentityMaterializeLimits::default())
+                    .map(|(mapping, _)| mapping)
+                    .map_err(stable_identity_error)
+            },
+        )
+    }
+
+    fn open_stable_id_mapping_reader(&mut self) -> Result<()> {
+        let reader = StableIdentityMappingReader::open_with_cache(
+            &self.stable_id_mapping_path,
+            StableIdentityMappingConfig::default(),
+            Arc::clone(&self.segment_cache),
+            self.store_id,
+        )
+        .map_err(stable_identity_error)?;
+        self.stable_id_mapping_reader = Some(Arc::new(reader));
+        Ok(())
     }
 
     pub(super) fn open_bound_relational_overflow(
