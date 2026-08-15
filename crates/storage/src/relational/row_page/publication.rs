@@ -6,6 +6,7 @@ use crate::relational::RelationalOverflowRootBinding;
 use skein_integrity::Sha256Digest;
 use std::fmt;
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::path::Path;
 
 mod manifest;
 mod publisher;
@@ -146,6 +147,7 @@ pub enum RelationalRowPagePublicationPhase {
     CandidateRootDurable,
     CandidateManifestDurable,
     BaseRevalidated,
+    CanonicalSelectionDeferred,
     LatestManifestPublished,
 }
 
@@ -158,6 +160,33 @@ const COMPLETE_PUBLICATION_TRACE: [RelationalRowPagePublicationPhase; 6] = [
     RelationalRowPagePublicationPhase::LatestManifestPublished,
 ];
 
+const CANDIDATE_PUBLICATION_TRACE: [RelationalRowPagePublicationPhase; 6] = [
+    RelationalRowPagePublicationPhase::CandidateStarted,
+    RelationalRowPagePublicationPhase::CandidatePagesDurable,
+    RelationalRowPagePublicationPhase::CandidateRootDurable,
+    RelationalRowPagePublicationPhase::CandidateManifestDurable,
+    RelationalRowPagePublicationPhase::BaseRevalidated,
+    RelationalRowPagePublicationPhase::CanonicalSelectionDeferred,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelationalRowPageGenerationArtifacts {
+    pub generation: u64,
+    pub source_commit_epoch: u64,
+    pub root_set_digest: Sha256Digest,
+    pub manifest_artifact: RelationalRowPageArtifactMetadata,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RelationalRowPageGenerationRequest<'a> {
+    pub directory: &'a Path,
+    pub generation: u64,
+    pub source_commit_epoch: u64,
+    pub base: Option<&'a RelationalRowPageRootReader>,
+    pub expected_previous_generation: Option<u64>,
+    pub overflow_root: Option<&'a crate::relational::RelationalOverflowRootReader>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationalRowPagePublicationReport {
     pub generation: u64,
@@ -169,6 +198,7 @@ pub struct RelationalRowPagePublicationReport {
     pub root_descriptor_bytes: u64,
     pub root_key_bytes: u64,
     pub manifest_bytes: u64,
+    pub generation_artifacts: RelationalRowPageGenerationArtifacts,
     pub events: [RelationalRowPagePublicationPhase; 6],
 }
 

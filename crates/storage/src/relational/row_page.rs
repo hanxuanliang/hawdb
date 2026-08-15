@@ -35,7 +35,8 @@ pub use mutation::{
 pub use publication::{
     relational_row_page_artifact_file, relational_row_page_manifest_generation_file,
     relational_row_page_root_descriptor_file, relational_row_page_root_key_file,
-    RelationalRowPageArtifactMetadata, RelationalRowPagePublicationConfig,
+    RelationalRowPageArtifactMetadata, RelationalRowPageGenerationArtifacts,
+    RelationalRowPageGenerationRequest, RelationalRowPagePublicationConfig,
     RelationalRowPagePublicationError, RelationalRowPagePublicationPhase,
     RelationalRowPagePublicationReport, RelationalRowPagePublisher,
     RelationalRowPageRootDescriptor, RelationalRowPageRootManifest, RelationalRowPageRootReader,
@@ -57,7 +58,7 @@ const INTEGRITY_PREFIX_BYTES: usize = 104;
 pub const DEFAULT_RELATIONAL_ROW_PAGE_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_RELATIONAL_ROW_PAGE_ROWS: usize = 256;
 pub const DEFAULT_RELATIONAL_ROW_PAGE_COLUMNS: usize = 4096;
-pub const DEFAULT_RELATIONAL_ROW_PAGE_KEY_BYTES: usize = 16 * 1024;
+pub const DEFAULT_RELATIONAL_ROW_PAGE_KEY_BYTES: usize = 64 * 1024;
 pub const DEFAULT_RELATIONAL_ROW_PAGE_ROW_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_RELATIONAL_ROW_PAGE_INLINE_VALUE_BYTES: usize = 64 * 1024;
 pub const DEFAULT_RELATIONAL_ROW_PAGE_VALUE_BYTES: usize = 64 * 1024 * 1024;

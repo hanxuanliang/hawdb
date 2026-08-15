@@ -1,12 +1,12 @@
 use super::{
     durability, manifest, relational_row_page_artifact_file,
     relational_row_page_manifest_generation_file, relational_row_page_root_descriptor_file,
-    relational_row_page_root_key_file, root, RelationalRowPagePublicationConfig,
-    RelationalRowPagePublicationError, RelationalRowPagePublicationPhase,
-    RelationalRowPagePublicationReport, RelationalRowPageRootDescriptor,
-    RelationalRowPageRootManifest, RelationalRowPageRootReader, RelationalRowPageTableDelta,
-    COMPLETE_PUBLICATION_TRACE, RELATIONAL_ROW_PAGE_MANIFEST_FILE,
-    RELATIONAL_ROW_PAGE_PUBLICATION_LOCK_FILE,
+    relational_row_page_root_key_file, root, RelationalRowPageGenerationRequest,
+    RelationalRowPagePublicationConfig, RelationalRowPagePublicationError,
+    RelationalRowPagePublicationPhase, RelationalRowPagePublicationReport,
+    RelationalRowPageRootDescriptor, RelationalRowPageRootManifest, RelationalRowPageRootReader,
+    RelationalRowPageTableDelta, CANDIDATE_PUBLICATION_TRACE, COMPLETE_PUBLICATION_TRACE,
+    RELATIONAL_ROW_PAGE_MANIFEST_FILE, RELATIONAL_ROW_PAGE_PUBLICATION_LOCK_FILE,
 };
 use crate::relational::{
     RelationalOverflowPublicationError, RelationalOverflowRef, RelationalOverflowRootReader,
@@ -14,7 +14,7 @@ use crate::relational::{
 };
 use crate::{durable_replace_file, sync_directory};
 use fs2::FileExt;
-use skein_integrity::Sha256Digest;
+use skein_integrity::{integrity_digest, Sha256Digest};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -72,6 +72,29 @@ impl RelationalRowPagePublisher {
         )
     }
 
+    /// Persists a complete immutable generation while leaving the independent
+    /// latest selector untouched. The returned generation must be selected by
+    /// the canonical checkpoint manifest before production readers may use it.
+    pub fn persist_generation(
+        &self,
+        request: RelationalRowPageGenerationRequest<'_>,
+        deltas: Vec<RelationalRowPageTableDelta>,
+    ) -> Result<RelationalRowPagePublicationReport, RelationalRowPagePublicationError> {
+        self.persist_generation_inner(
+            GenerationPublication {
+                directory: request.directory,
+                generation: request.generation,
+                source_commit_epoch: request.source_commit_epoch,
+                base: request.base,
+                expected_previous_generation: request.expected_previous_generation,
+                overflow_root: request.overflow_root,
+                select_latest: false,
+                stop_after: None,
+            },
+            deltas,
+        )
+    }
+
     pub(super) fn publish_inner(
         &self,
         directory: &Path,
@@ -81,10 +104,39 @@ impl RelationalRowPagePublisher {
         deltas: Vec<RelationalRowPageTableDelta>,
         controls: PublicationControls<'_>,
     ) -> Result<RelationalRowPagePublicationReport, RelationalRowPagePublicationError> {
-        validate_publication_identity(generation, source_commit_epoch)?;
-        let overflow_binding = controls
-            .overflow_root
-            .map(|reader| reader.manifest().binding());
+        let base = RelationalRowPageRootReader::open_latest(directory, self.config)?;
+        self.persist_generation_inner(
+            GenerationPublication {
+                directory,
+                generation,
+                source_commit_epoch,
+                base: base.as_ref(),
+                expected_previous_generation,
+                overflow_root: controls.overflow_root,
+                select_latest: true,
+                stop_after: controls.stop_after,
+            },
+            deltas,
+        )
+    }
+
+    fn persist_generation_inner(
+        &self,
+        publication: GenerationPublication<'_>,
+        deltas: Vec<RelationalRowPageTableDelta>,
+    ) -> Result<RelationalRowPagePublicationReport, RelationalRowPagePublicationError> {
+        let GenerationPublication {
+            directory,
+            generation,
+            source_commit_epoch,
+            base,
+            expected_previous_generation,
+            overflow_root,
+            select_latest,
+            stop_after,
+        } = publication;
+        validate_publication_identity(generation, source_commit_epoch, deltas.is_empty())?;
+        let overflow_binding = overflow_root.map(|reader| reader.manifest().binding());
         if overflow_binding.is_some_and(|binding| {
             binding.generation != generation || binding.source_commit_epoch != source_commit_epoch
         }) {
@@ -96,7 +148,7 @@ impl RelationalRowPagePublisher {
             deltas,
             generation,
             source_commit_epoch,
-            controls.overflow_root,
+            overflow_root,
             self.config,
         )?;
         fs::create_dir_all(directory).map_err(durability("create row-page directory"))?;
@@ -105,15 +157,21 @@ impl RelationalRowPagePublisher {
         paths.remove_temps()?;
         paths.require_fresh_generation()?;
 
-        let base = RelationalRowPageRootReader::open_latest(directory, self.config)?;
-        let actual_previous = base.as_ref().map(|reader| reader.manifest.generation);
-        if actual_previous != expected_previous_generation {
+        let base_generation = base.map(|reader| reader.manifest.generation);
+        if (select_latest || base.is_some()) && base_generation != expected_previous_generation {
             return Err(RelationalRowPagePublicationError::StaleGeneration {
                 expected_previous: expected_previous_generation,
-                actual_previous,
+                actual_previous: base_generation,
             });
         }
-        if let Some(base) = &base {
+        if let Some(previous) = expected_previous_generation
+            && generation <= previous
+        {
+            return Err(RelationalRowPagePublicationError::Admission(format!(
+                "new row-page generation {generation} must exceed previous generation {previous}"
+            )));
+        }
+        if let Some(base) = base {
             if base.manifest.overflow_root.is_some() && overflow_binding.is_none() {
                 return Err(RelationalRowPagePublicationError::Admission(
                     "a row root descended from overflow-bearing pages requires the next generation-bound overflow root"
@@ -133,17 +191,18 @@ impl RelationalRowPagePublisher {
                 )));
             }
         }
-        preflight_root_resources(base.as_ref(), &deltas, self.config)?;
+        preflight_root_resources(base, &deltas, self.config)?;
 
         let result = self.build_and_publish(PublicationBuild {
             paths: &paths,
-            base: base.as_ref(),
+            base,
             generation,
             source_commit_epoch,
             expected_previous_generation,
             overflow_root: overflow_binding,
             deltas: &mut deltas,
-            stop_after: controls.stop_after,
+            select_latest,
+            stop_after,
         });
         let _ = paths.remove_temps();
         result
@@ -206,25 +265,31 @@ impl RelationalRowPagePublisher {
             RelationalRowPagePublicationPhase::CandidateManifestDurable,
         )?;
 
-        let actual_previous =
-            manifest::read_manifest_if_exists(&build.paths.latest_manifest, self.config)?
-                .map(|manifest| manifest.generation);
-        if actual_previous != build.expected_previous_generation {
-            return Err(RelationalRowPagePublicationError::StaleGeneration {
-                expected_previous: build.expected_previous_generation,
-                actual_previous,
-            });
+        if build.select_latest {
+            let actual_previous =
+                manifest::read_manifest_if_exists(&build.paths.latest_manifest, self.config)?
+                    .map(|manifest| manifest.generation);
+            if actual_previous != build.expected_previous_generation {
+                return Err(RelationalRowPagePublicationError::StaleGeneration {
+                    expected_previous: build.expected_previous_generation,
+                    actual_previous,
+                });
+            }
         }
         maybe_stop(
             build.stop_after,
             RelationalRowPagePublicationPhase::BaseRevalidated,
         )?;
-        write_synced(&build.paths.latest_manifest_tmp, &encoded_manifest)?;
-        durable_replace_file(
-            &build.paths.latest_manifest_tmp,
-            &build.paths.latest_manifest,
-        )
-        .map_err(durability("publish latest row-page manifest"))?;
+        if build.select_latest {
+            write_synced(&build.paths.latest_manifest_tmp, &encoded_manifest)?;
+            durable_replace_file(
+                &build.paths.latest_manifest_tmp,
+                &build.paths.latest_manifest,
+            )
+            .map_err(durability("publish latest row-page manifest"))?;
+        }
+
+        let manifest_digest = integrity_digest(&encoded_manifest);
 
         Ok(RelationalRowPagePublicationReport {
             generation: build.generation,
@@ -236,9 +301,34 @@ impl RelationalRowPagePublisher {
             root_descriptor_bytes: manifest.root_descriptor_artifact.encoded_len,
             root_key_bytes: manifest.root_key_artifact.encoded_len,
             manifest_bytes: encoded_manifest.len() as u64,
-            events: COMPLETE_PUBLICATION_TRACE,
+            generation_artifacts: super::RelationalRowPageGenerationArtifacts {
+                generation: manifest.generation,
+                source_commit_epoch: manifest.source_commit_epoch,
+                root_set_digest: manifest.root_set_digest,
+                manifest_artifact: super::RelationalRowPageArtifactMetadata {
+                    encoded_len: encoded_manifest.len() as u64,
+                    encoded_crc32c: manifest_digest.crc32c.get(),
+                    encoded_sha256: manifest_digest.sha256,
+                },
+            },
+            events: if build.select_latest {
+                COMPLETE_PUBLICATION_TRACE
+            } else {
+                CANDIDATE_PUBLICATION_TRACE
+            },
         })
     }
+}
+
+struct GenerationPublication<'a> {
+    directory: &'a Path,
+    generation: u64,
+    source_commit_epoch: u64,
+    base: Option<&'a RelationalRowPageRootReader>,
+    expected_previous_generation: Option<u64>,
+    overflow_root: Option<&'a RelationalOverflowRootReader>,
+    select_latest: bool,
+    stop_after: Option<RelationalRowPagePublicationPhase>,
 }
 
 pub(super) struct PublicationControls<'a> {
@@ -254,6 +344,7 @@ struct PublicationBuild<'a> {
     expected_previous_generation: Option<u64>,
     overflow_root: Option<crate::relational::RelationalOverflowRootBinding>,
     deltas: &'a mut BTreeMap<String, PreparedTableDelta>,
+    select_latest: bool,
     stop_after: Option<RelationalRowPagePublicationPhase>,
 }
 
@@ -467,10 +558,11 @@ fn overflow_dependency_error(
 fn validate_publication_identity(
     generation: u64,
     source_commit_epoch: u64,
+    root_is_empty: bool,
 ) -> Result<(), RelationalRowPagePublicationError> {
-    if generation == 0 || source_commit_epoch == 0 {
+    if generation == 0 || (source_commit_epoch == 0 && !root_is_empty) {
         return Err(RelationalRowPagePublicationError::Admission(format!(
-            "row-page generation and source epoch must be non-zero, got {generation}/{source_commit_epoch}"
+            "row-page generation must be non-zero and epoch zero requires an empty root, got {generation}/{source_commit_epoch}"
         )));
     }
     Ok(())

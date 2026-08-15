@@ -161,28 +161,28 @@ overlay from durable WAL.
 The configured instance uses two readers, two logical commit epochs, four
 physical generations, and two logical pages. TLC checks WAL-before-visible,
 manifest-last publication, immutable physical page identity, dirty-only COW,
-stale-builder rejection, pinned-root retention, durable reference closure, and
-crash recovery. `RelationalRowPagePublicationReport.events` maps the runtime
-sequence `CandidateStarted`, `CandidatePagesDurable`, `CandidateRootDurable`,
+stale-builder rejection, pinned-root retention, durable reference closure,
+exact row/overflow generation agreement, candidate isolation before outer
+checkpoint publication, and crash recovery.
+`RelationalRowPagePublicationReport.events` maps the canonical runtime sequence
+`CandidateStarted`, `CandidatePagesDurable`, `CandidateRootDurable`,
 `CandidateManifestDurable`, `BaseRevalidated`, and
-`LatestManifestPublished` to `BeginCheckpoint`, `PersistCandidatePages`,
+`CanonicalSelectionDeferred` to `BeginCheckpoint`, `PersistCandidatePages`,
 `PersistCandidateRoot`, `PersistCandidateManifest`, the generation fence, and
-`PublishCheckpoint`. `RelationalRowPagePublisher` writes only dirty page slots,
-streams the complete root directory, rejects stale or reused generations, and
-leaves pre-manifest crash artifacts unreachable. `RelationalRowPageRootReader`
-pins one immutable manifest and resolves cross-generation descriptors after a
-new root is selected. The non-serving recovery, immutable row-delta, and
-mutation refinements are specified separately below. Recovery wiring, physical
-page demand reads, reclamation integration, and serving activation remain
-blocked on their separate implementation and regression evidence.
+the pre-publication state before `PublishCheckpoint`.
+`RelationalRowPagePublisher::persist_generation` leaves the immutable candidate
+unselected; `SKEIN_MANIFEST_V1` then binds the exact row and overflow
+generations atomically. Recovery opens those exact generations rather than an
+independent latest selector. Physical page demand reads and serving activation
+remain blocked on their separate implementation and regression evidence.
 
 ## Relational Overflow Publication
 
 `SkeinOverflowPublication.tla` models the generation-bound overflow root used
 before a row generation may contain large-value references. A candidate writes
-only content digests absent from the selected base root, while shared digests
-retain their immutable physical generation and every base digest remains in
-the candidate root. Extent, descriptor-root, and
+only content digests absent from the selected base root, while reachable shared
+digests retain their immutable physical generation and unreachable base
+digests are omitted from the candidate root. Extent, descriptor-root, and
 generation-manifest artifacts become durable before the latest manifest is
 replaced. A competing publisher makes the candidate stale; weak fairness of
 the rejection action guarantees that the stale candidate terminates without
@@ -193,17 +193,18 @@ extent closure. A row-root binding can name only a published overflow root
 whose durable closure is complete. The configured instance explores two
 digests, two readers, and three generations. TLC checks manifest-last
 visibility, content-addressed reuse, fresh placement for new content, stale
-fencing, pinned-root readability, exact row binding, and crash removal of
-volatile candidates.
+fencing, pinned-root readability, exact row binding, physical-closure
+reclamation, and crash removal of volatile candidates.
 
 The runtime refinement is `RelationalOverflowPublisher` and
 `RelationalOverflowRootReader`. The publisher writes a fixed-width sorted
 descriptor root, publishes the immutable generation manifest, revalidates the
-base, and replaces the latest manifest last. `RelationalRowPagePublisher`
-accepts overflow-bearing pages only through `publish_with_overflow_root`,
-resolves every reference before candidate creation, and persists the exact
-overflow root binding in `SKRPGM01`. Physical reclamation and checkpoint-level
-authority remain later protocols.
+base, and either replaces the standalone latest manifest or returns an
+unselected canonical candidate. `RelationalRowPagePublisher` resolves every
+reference before candidate creation and persists the exact overflow root
+binding in `SKRPGM01`. The outer checkpoint manifest selects both roots, while
+`DurableStore::reclaim_old_generations` preserves the physical closure of the
+current and previous roots.
 
 ## Relational Row-Page Mutation
 
@@ -497,15 +498,15 @@ They are implementation evidence, not a machine-checked refinement proof.
 | A grouped WAL sync acknowledges every member after one successful barrier or fails the whole group closed | `WalSyncGroupState`, `finish_wal_sync_group`, `CommitSequencer` | `wal_group_commit_shares_one_sync_without_changing_record_order`, `wal_group_sync_failure_rejects_commit_and_poisons_until_reopen`, `panicking_group_commit_task_completes_followers_and_releases_leader` |
 | Fixed and adaptive collection policies remain bounded scheduling refinements, use a bounded fallback without a recent baseline, and never delay a lone request | `effective_group_commit_delay`, `wait_for_group_commit_peers`, `WalGroupCommitConfig::adaptive_enabled_after_evidence` | `wal_group_commit_skips_the_coalescing_window_without_contention`, `adaptive_delay_is_derived_from_the_completed_baseline`, `adaptive_delay_uses_bounded_fallback_before_the_completed_sample_floor`, `adaptive_delay_falls_back_after_the_recent_window_expires`, `wal_group_commit_requires_performance_and_recovery_evidence` |
 | A table-scoped row-page allocator persists monotonically, COW point mutations read only affected leaves and preserve the old left id across splits, deleted ids are never reused, and streaming bootstrap stays within one page plus one candidate | `RelationalRowPageIdAllocator`, `RelationalRowPageMutationPlanner`, `RelationalRowPageBootstrap`, `RelationalRowPageRootReader::find_table_page_descriptor` | `mutation_planner_reads_only_affected_leaves_and_splits_deterministically`, `mutation_planner_updates_deletes_and_never_reuses_page_ids`, `streaming_bootstrap_keeps_one_page_plus_one_candidate_row`, `streaming_bootstrap_fails_closed_after_emit_error`, `allocator_exhaustion_is_atomic`, `SkeinRowPageMutation.tla` |
-| Overflow extents are content-addressed, publish manifest-last behind a stale-generation fence, preserve pinned cross-generation closure, and are required before an overflow-bearing row root can publish | `RelationalOverflowPublisher`, `RelationalOverflowRootReader`, `RelationalRowPagePublisher::publish_with_overflow_root` | `publish_last_overflow_root_round_trips`, `incremental_root_reuses_content_and_keeps_pinned_generation_readable`, `every_pre_latest_crash_keeps_the_previous_overflow_root_selected`, `row_root_binds_and_resolves_the_exact_overflow_generation`, `row_root_rejects_missing_or_mismatched_overflow_generation`, `SkeinOverflowPublication.tla` |
+| Overflow extents are content-addressed, exact reachable roots reuse immutable extents, canonical candidates remain unselected until the outer checkpoint publishes, and reclamation preserves retained physical closure | `RelationalOverflowPublisher::{persist_generation,publish}`, `RelationalOverflowRootReader`, `DurableStore::reclaim_old_generations` | `publish_last_overflow_root_round_trips`, `incremental_root_reuses_content_and_keeps_pinned_generation_readable`, `persisted_overflow_candidate_does_not_change_latest_selection`, `reclaim_preserves_overflow_extents_referenced_by_retained_roots`, `SkeinOverflowPublication.tla` |
 | A checkpoint-correlated row root remains cold at mount, replays consecutive global epochs and same-epoch relational fragments through a bounded dirty map into immutable runs, publishes the delta manifest last, and pins only a complete base-plus-delta view | `RelationalState::stage_transaction_with_row_changes`, `RelationalRowDeltaBuilder`, `RelationalRowDeltaReader`, `GraphStore::{mount_relational_row_pages_for_recovery,finish_relational_row_page_recovery}` | `relational_row_change_capture_reports_exact_net_primary_key_changes`, `multiple_relational_fragments_share_one_global_epoch`, `point_lookup_selects_the_newest_value_across_immutable_runs`, `read_only_open_reuses_an_exact_published_row_delta`, `durable_open_replays_wal_into_a_generation_pinned_row_delta`, `SkeinRowRecovery.tla` |
 | A live row view stages DML before WAL, publishes only after durability, stages already-durable graph-only identity advances without empty batches, retains bounded immutable DML batches, fails closed on DDL or admission errors, preserves materialized read-your-own-writes, and never drifts pinned snapshots | `RelationalRowPageReadView::advance`, `GraphStore::{stage_relational_row_live_publication,publish_relational_row_live_view,finish_non_relational_commit}` | `capture_validation_rejects_undercharged_and_unordered_changes`, `overlay_admission_is_cumulative_and_atomic`, `durable_open_replays_wal_into_a_generation_pinned_row_delta`, `SkeinRowLiveView.tla` |
 | Immutable relational row-delta runs stay within dirty/run/manifest limits, bind the exact base/schema/overflow closure, publish generation metadata before the latest selector, reject stale row-root or delta publishers, poison partial batches, demand-check run integrity, and preserve pinned readers | `RelationalRowDeltaBuilder`, `RelationalRowDeltaReader`, `RelationalRowPageRootReader`, `RelationalOverflowRootReader` | `immutable_runs_round_trip_across_bounded_flushes`, `builder_is_poisoned_after_a_partial_epoch_error`, `every_pre_latest_stop_keeps_the_previous_delta_selected`, `stale_builder_cannot_replace_a_newer_delta_root`, `builder_cannot_publish_after_its_row_root_becomes_stale`, `overflow_references_require_an_exact_visible_epoch_root`, `corruption_poisoning_is_demand_driven`, `pinned_generation_remains_readable_after_new_publication`, `SkeinRowDeltaRuns.tla` |
 | A torn WAL batch has no partial recovered visibility | `replay_wal` record decode and batch apply | `default_recovery_rejects_torn_wal_tail_until_explicit_doctor_repair`, `doctor_discards_torn_batch_wal_without_partial_path_recovery` |
 | Doctor repair binds destructive truncation to an exact acknowledged plan and resumes a durable pending audit | `DatabaseDoctor::{plan_wal_tail_repair,apply_wal_tail_repair}` | `apply_rejects_toctou_change_without_preparing_repair`, `prepared_repair_blocks_open_and_can_continue`, `truncated_pending_repair_is_resumable_and_blocks_open_until_finalized` |
 | Complete-record corruption and LSN gaps fail closed | `replay_wal` framing, checksum, and expected-LSN checks | `rejects_and_quarantines_checksum_corruption_at_wal_tail`, `rejects_and_quarantines_checksum_corruption_before_valid_wal_suffix`, `rejects_and_quarantines_non_contiguous_wal_lsn` |
-| Checkpoint publication selects one complete generation | checkpoint failpoints and manifest replacement | `checkpoint_publish_failpoints_recover_one_complete_generation`, `subprocess_crash_matrix_recovers_whole_batches_and_artifact_generations` |
-| Reader pins prevent generation reclamation | `ReaderPins`, `reclaim_old_generations` | `read_transaction_pins_checkpoint_manifest_until_drop`, `out_of_core_reader_pin_retains_its_canonical_generation_until_drop` |
+| Checkpoint publication selects one complete graph, row-page, and overflow generation; unbound candidates cannot replace it and corrupt bound generation metadata fails open closed | checkpoint failpoints, `RelationalRowPagePublisher::persist_generation`, `RelationalOverflowPublisher::persist_generation`, and `SKEIN_MANIFEST_V1` replacement | `checkpoint_publish_failpoints_recover_one_complete_generation`, `unbound_row_candidate_does_not_replace_canonical_recovery`, `corrupt_bound_row_root_fails_database_open`, `subprocess_crash_matrix_recovers_whole_batches_and_artifact_generations`, `SkeinCowPagePublication.tla` |
+| Reader pins and retained canonical roots prevent reclamation of every referenced physical page or overflow extent; backup and scrub traverse the same closure | `ReaderPins`, `DurableStore::{reclaim_old_generations,backup_to,scrub_storage}` | `read_transaction_pins_checkpoint_manifest_until_drop`, `out_of_core_reader_pin_retains_its_canonical_generation_until_drop`, `reclaim_preserves_overflow_extents_referenced_by_retained_roots` |
 | Canonical path aliases share one ownership boundary | `DatabaseDirectoryLease::acquire` | `durable_database_open_is_exclusive_until_owner_drops`, `durable_database_rejects_path_alias_until_owner_drops` |
 | Stale optimistic commits fail before publication; relational and graph logical locks preserve compatibility and stay within a hard budget through covering escalation or rejection | `commit_mutation_transaction_and_relational`, `GraphMutationTransaction::lock_footprint_since`, `LockTable` | `optimistic_transactions_prepare_in_parallel_and_reject_the_stale_committer`, `ordinary_snapshot_select_does_not_block_an_exact_update`, `for_update_point_lock_blocks_exact_update_until_owner_finishes`, `relationship_creation_conflicts_with_endpoint_delete_guard`, `narrow_locks_escalate_before_the_next_entry_is_granted`, `lock_table_hard_cap_rejects_without_growing_residency` |
 | A failed graph statement restores its COW workspace and pre-statement lock set without discarding earlier successful work | `GraphMutationSavepoint`, `LockSavepoint`, `LockTable::restore_transaction` | `failed_graph_statement_restores_workspace_and_statement_locks`, `graph_lock_failure_restores_the_failed_statement_only`, `statement_savepoint_restores_replaced_lock_and_budget` |

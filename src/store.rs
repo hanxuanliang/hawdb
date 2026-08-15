@@ -59,10 +59,13 @@ use artifact_files::{
     parse_canonical_adjacency_manifest_generation_file, parse_canonical_manifest_generation_file,
     parse_generation_file, parse_property_projection_manifest_generation_file,
     parse_property_spill_manifest_generation_file, parse_relational_index_artifact_generation_file,
-    parse_relational_index_manifest_generation_file, property_projection_artifact_generation_file,
-    property_projection_manifest_generation_file, property_spill_artifact_generation_file,
-    property_spill_manifest_generation_file, relational_checkpoint_generation_file,
-    storage_generation_for_file, store_id_for_path, wal_generation_file,
+    parse_relational_index_manifest_generation_file,
+    parse_relational_overflow_extent_generation_file, parse_relational_overflow_generation_file,
+    parse_relational_row_generation_file, parse_relational_row_page_artifact_generation_file,
+    property_projection_artifact_generation_file, property_projection_manifest_generation_file,
+    property_spill_artifact_generation_file, property_spill_manifest_generation_file,
+    relational_checkpoint_generation_file, storage_generation_for_file, store_id_for_path,
+    wal_generation_file,
 };
 pub use backup::restore_storage_backup;
 use backup::{
@@ -112,8 +115,10 @@ use skein_storage::{
     encode_relational_checkpoint, encode_relational_wal_batch, sync_parent_directory,
     AdjacencyPostingList, CanonicalEndpointDirection, CanonicalNodeIterator,
     CanonicalRelationshipIterator, CanonicalSegmentError, RelationalCheckpointIndexLoad,
-    RelationalDecodeLimits, RelationalMutationLimits, RelationalOverflowConfig, RelationalState,
-    RelationalTransaction,
+    RelationalDecodeLimits, RelationalMutationLimits, RelationalOverflowConfig,
+    RelationalOverflowPublicationConfig, RelationalOverflowPublisher,
+    RelationalRowPageGenerationRequest, RelationalRowPagePublicationConfig,
+    RelationalRowPagePublisher, RelationalState, RelationalTransaction,
 };
 pub use skein_storage::{
     AdjacencyDirection, AdjacencyGroupConsistencyMismatch, AdjacencyGroupKey, AdjacencyGroupStats,
@@ -1809,7 +1814,7 @@ impl GraphStore {
             // mutations mark their derived shadow tables dirty.
             store.mount_columnar_shadow_for_recovery()?;
         }
-        store.mount_relational_row_pages_for_recovery();
+        store.mount_relational_row_pages_for_recovery()?;
         store.mount_relational_index_shadow_for_recovery();
         let checkpoint_catalog = catalog.clone();
         store.storage_recovery_report = store.replay_wal(catalog, replay_config)?;
@@ -6328,7 +6333,7 @@ mod tests {
             store.backup_to(&catalog, &backup).unwrap()
         };
         assert!(report.generation > 0);
-        assert_eq!(report.file_count, 11);
+        assert_eq!(report.file_count, 18);
 
         let restore = restore_storage_backup(&backup, &restored).unwrap();
         assert_eq!(restore.generation, report.generation);
@@ -6388,7 +6393,10 @@ mod tests {
         let mut catalog = Catalog::default();
         let mut store = GraphStore::open(&path, &mut catalog).unwrap();
         let backup_error = store.backup_to(&catalog, &backup).unwrap_err();
-        assert!(backup_error.to_string().contains("already exists"));
+        assert!(
+            backup_error.to_string().contains("already exists"),
+            "unexpected backup error: {backup_error}"
+        );
 
         std::fs::remove_dir_all(&backup).unwrap();
         store.backup_to(&catalog, &backup).unwrap();
@@ -7838,6 +7846,37 @@ mod tests {
             );
             let memory = catalog.label_id("Memory").unwrap();
             assert_eq!(store.scan_nodes(Some(memory)).count(), 1);
+            match expected_checkpoint_epoch {
+                Some(generation) => {
+                    let durable = store.durable.as_ref().unwrap();
+                    assert_eq!(
+                        durable
+                            .relational_row_generation_artifacts
+                            .unwrap()
+                            .generation,
+                        generation
+                    );
+                    assert_eq!(
+                        durable
+                            .relational_overflow_generation_artifacts
+                            .unwrap()
+                            .generation,
+                        generation
+                    );
+                }
+                None => {
+                    assert!(!path
+                        .join(skein_storage::relational_row_page_manifest_generation_file(
+                            1
+                        ))
+                        .exists());
+                    assert!(!path
+                        .join(skein_storage::relational_overflow_manifest_generation_file(
+                            1
+                        ))
+                        .exists());
+                }
+            }
             std::fs::remove_dir_all(path).unwrap();
         }
     }
@@ -7864,6 +7903,16 @@ mod tests {
         assert!(!path.join("properties.1.manifest.skein").exists());
         assert!(!path.join("property-index.1.skein").exists());
         assert!(!path.join("property-index.1.manifest.skein").exists());
+        assert!(!path
+            .join(skein_storage::relational_row_page_manifest_generation_file(
+                1
+            ))
+            .exists());
+        assert!(!path
+            .join(skein_storage::relational_overflow_manifest_generation_file(
+                1
+            ))
+            .exists());
         assert!(path.join("checkpoint.2.skein").exists());
         assert!(path.join("wal.2.skein").exists());
         assert!(path.join("canonical.2.skein").exists());
@@ -7874,6 +7923,16 @@ mod tests {
         assert!(path.join("properties.2.manifest.skein").exists());
         assert!(path.join("property-index.2.skein").exists());
         assert!(path.join("property-index.2.manifest.skein").exists());
+        assert!(path
+            .join(skein_storage::relational_row_page_manifest_generation_file(
+                2
+            ))
+            .exists());
+        assert!(path
+            .join(skein_storage::relational_overflow_manifest_generation_file(
+                2
+            ))
+            .exists());
         assert!(path.join("checkpoint.3.skein").exists());
         assert!(path.join("wal.3.skein").exists());
         assert!(path.join("canonical.3.skein").exists());
@@ -7884,6 +7943,16 @@ mod tests {
         assert!(path.join("properties.3.manifest.skein").exists());
         assert!(path.join("property-index.3.skein").exists());
         assert!(path.join("property-index.3.manifest.skein").exists());
+        assert!(path
+            .join(skein_storage::relational_row_page_manifest_generation_file(
+                3
+            ))
+            .exists());
+        assert!(path
+            .join(skein_storage::relational_overflow_manifest_generation_file(
+                3
+            ))
+            .exists());
         drop(store);
         std::fs::remove_dir_all(path).unwrap();
     }

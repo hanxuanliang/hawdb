@@ -7,13 +7,14 @@ use super::{
     parse_canonical_adjacency_manifest_generation_file, parse_canonical_manifest_generation_file,
     parse_generation_file, parse_property_projection_manifest_generation_file,
     parse_property_spill_manifest_generation_file, parse_relational_index_artifact_generation_file,
-    parse_relational_index_manifest_generation_file, parse_u64,
-    property_projection_artifact_generation_file, property_projection_manifest_generation_file,
-    property_spill_artifact_generation_file, property_spill_manifest_generation_file,
-    read_durable_text_bytes_with_limit, relational_checkpoint_generation_file,
-    relational_checkpoint_metadata, source_scan, split_checkpoint_checksum, sync_parent_dir,
-    wal_generation_file, BackupFileEntry, BackupManifest, DurableManifest, BACKUP_HEADER_V1,
-    BACKUP_MANIFEST_FILE, MANIFEST_FILE, STABLE_ID_MAPPING_FILE,
+    parse_relational_index_manifest_generation_file, parse_relational_overflow_generation_file,
+    parse_relational_row_generation_file, parse_u64, property_projection_artifact_generation_file,
+    property_projection_manifest_generation_file, property_spill_artifact_generation_file,
+    property_spill_manifest_generation_file, read_durable_text_bytes_with_limit,
+    relational_checkpoint_generation_file, relational_checkpoint_metadata, source_scan,
+    split_checkpoint_checksum, sync_parent_dir, wal_generation_file, BackupFileEntry,
+    BackupManifest, DurableManifest, BACKUP_HEADER_V1, BACKUP_MANIFEST_FILE, MANIFEST_FILE,
+    STABLE_ID_MAPPING_FILE,
 };
 use crate::error::{Result, SkeinError};
 use skein_integrity::{IntegrityHasher, Sha256Digest};
@@ -200,7 +201,9 @@ fn validate_backup_file_name(name: &str) -> Result<()> {
         || parse_generation_file(name, "property-index.").is_some()
         || parse_property_projection_manifest_generation_file(name).is_some()
         || parse_relational_index_artifact_generation_file(name).is_some()
-        || parse_relational_index_manifest_generation_file(name).is_some();
+        || parse_relational_index_manifest_generation_file(name).is_some()
+        || parse_relational_row_generation_file(name).is_some()
+        || parse_relational_overflow_generation_file(name).is_some();
     if !allowed || Path::new(name).file_name().and_then(|value| value.to_str()) != Some(name) {
         return Err(SkeinError::Storage(format!(
             "backup contains unsupported file name: {name}"
@@ -347,6 +350,7 @@ pub(super) fn validate_backup_files(
             "backup checkpoint metadata does not match the durable manifest".to_string(),
         ));
     }
+    validate_backup_relational_roots(root, files, manifest)?;
     validate_backup_relational_index_generation(root, files, manifest)?;
     let checkpoint_text = read_durable_text_bytes_with_limit(
         &fs::read(root.join(&checkpoint_name))?,
@@ -589,6 +593,188 @@ pub(super) fn validate_backup_files(
                     .to_string(),
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_backup_relational_roots(
+    root: &Path,
+    files: &[BackupFileEntry],
+    manifest: DurableManifest,
+) -> Result<()> {
+    let row_binding = manifest
+        .relational_row_generation_artifacts
+        .ok_or_else(|| {
+            SkeinError::Storage("backup manifest has no relational row-page binding".to_string())
+        })?;
+    let overflow_binding = manifest
+        .relational_overflow_generation_artifacts
+        .ok_or_else(|| {
+            SkeinError::Storage("backup manifest has no relational overflow binding".to_string())
+        })?;
+    let row_files = files
+        .iter()
+        .filter(|file| parse_relational_row_generation_file(&file.name).is_some())
+        .map(|file| file.name.clone())
+        .collect::<BTreeSet<_>>();
+    let overflow_files = files
+        .iter()
+        .filter(|file| parse_relational_overflow_generation_file(&file.name).is_some())
+        .map(|file| file.name.clone())
+        .collect::<BTreeSet<_>>();
+
+    let require = |name: &str| {
+        files
+            .iter()
+            .find(|file| file.name == name)
+            .ok_or_else(|| SkeinError::Storage(format!("backup is missing bound file: {name}")))
+    };
+    let overflow_manifest_name =
+        skein_storage::relational_overflow_manifest_generation_file(overflow_binding.generation);
+    let overflow_manifest_file = require(&overflow_manifest_name)?;
+    if overflow_manifest_file.encoded_len != overflow_binding.manifest_artifact.encoded_len
+        || overflow_manifest_file.encoded_checksum
+            != u64::from(overflow_binding.manifest_artifact.encoded_crc32c)
+        || overflow_manifest_file.sha256 != overflow_binding.manifest_artifact.encoded_sha256
+    {
+        return Err(SkeinError::Storage(
+            "backup relational overflow manifest does not match its canonical binding".to_string(),
+        ));
+    }
+    let overflow = skein_storage::RelationalOverflowRootReader::open_generation(
+        root,
+        overflow_binding.generation,
+        skein_storage::RelationalOverflowPublicationConfig::default(),
+    )
+    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+    if overflow.manifest().source_commit_epoch != overflow_binding.source_commit_epoch
+        || overflow.manifest().root_set_digest != overflow_binding.root_set_digest
+    {
+        return Err(SkeinError::Storage(
+            "backup relational overflow identity differs from its canonical binding".to_string(),
+        ));
+    }
+    for (name, metadata) in [
+        (
+            skein_storage::relational_overflow_extent_file(overflow_binding.generation),
+            overflow.manifest().extent_artifact,
+        ),
+        (
+            skein_storage::relational_overflow_descriptor_file(overflow_binding.generation),
+            overflow.manifest().descriptor_artifact,
+        ),
+    ] {
+        let file = require(&name)?;
+        if file.encoded_len != metadata.encoded_len
+            || file.encoded_checksum != u64::from(metadata.encoded_crc32c)
+            || file.sha256 != metadata.encoded_sha256
+        {
+            return Err(SkeinError::Storage(format!(
+                "backup relational overflow artifact does not match its generation manifest: {name}"
+            )));
+        }
+    }
+    let mut expected_overflow_files = BTreeSet::from([
+        overflow_manifest_name,
+        skein_storage::relational_overflow_descriptor_file(overflow_binding.generation),
+        skein_storage::relational_overflow_extent_file(overflow_binding.generation),
+    ]);
+    overflow
+        .visit_descriptors(|descriptor| {
+            expected_overflow_files.insert(skein_storage::relational_overflow_extent_file(
+                descriptor.physical_generation,
+            ));
+            overflow.hydrate(
+                &descriptor.reference,
+                &mut skein_storage::RelationalHydrationBudget::default(),
+                None,
+            )?;
+            Ok(())
+        })
+        .map_err(|error| SkeinError::Storage(error.to_string()))?;
+    if overflow_files != expected_overflow_files {
+        return Err(SkeinError::Storage(
+            "backup relational overflow files do not match the bound physical closure".to_string(),
+        ));
+    }
+
+    let row_manifest_name =
+        skein_storage::relational_row_page_manifest_generation_file(row_binding.generation);
+    let row_manifest_file = require(&row_manifest_name)?;
+    if row_manifest_file.encoded_len != row_binding.manifest_artifact.encoded_len
+        || row_manifest_file.encoded_checksum
+            != u64::from(row_binding.manifest_artifact.encoded_crc32c)
+        || row_manifest_file.sha256 != row_binding.manifest_artifact.encoded_sha256
+    {
+        return Err(SkeinError::Storage(
+            "backup relational row-page manifest does not match its canonical binding".to_string(),
+        ));
+    }
+    let row = skein_storage::RelationalRowPageRootReader::open_generation(
+        root,
+        row_binding.generation,
+        skein_storage::RelationalRowPagePublicationConfig::default(),
+    )
+    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+    if row.manifest().source_commit_epoch != row_binding.source_commit_epoch
+        || row.manifest().root_set_digest != row_binding.root_set_digest
+    {
+        return Err(SkeinError::Storage(
+            "backup relational row-page identity differs from its canonical binding".to_string(),
+        ));
+    }
+    row.validate_overflow_root(&overflow)
+        .map_err(|error| SkeinError::Storage(error.to_string()))?;
+    for (name, metadata) in [
+        (
+            skein_storage::relational_row_page_artifact_file(row_binding.generation),
+            row.manifest().page_artifact,
+        ),
+        (
+            skein_storage::relational_row_page_root_descriptor_file(row_binding.generation),
+            row.manifest().root_descriptor_artifact,
+        ),
+        (
+            skein_storage::relational_row_page_root_key_file(row_binding.generation),
+            row.manifest().root_key_artifact,
+        ),
+    ] {
+        let file = require(&name)?;
+        if file.encoded_len != metadata.encoded_len
+            || file.encoded_checksum != u64::from(metadata.encoded_crc32c)
+            || file.sha256 != metadata.encoded_sha256
+        {
+            return Err(SkeinError::Storage(format!(
+                "backup relational row-page artifact does not match its generation manifest: {name}"
+            )));
+        }
+    }
+    let mut expected_row_files = BTreeSet::from([
+        row_manifest_name,
+        skein_storage::relational_row_page_root_descriptor_file(row_binding.generation),
+        skein_storage::relational_row_page_root_key_file(row_binding.generation),
+        skein_storage::relational_row_page_artifact_file(row_binding.generation),
+    ]);
+    let tables = row
+        .manifest()
+        .tables
+        .iter()
+        .map(|table| table.table.clone())
+        .collect::<Vec<_>>();
+    for table in tables {
+        row.visit_table_pages(&table, |descriptor| {
+            expected_row_files.insert(skein_storage::relational_row_page_artifact_file(
+                descriptor.physical_generation,
+            ));
+            row.read_page(descriptor)?;
+            Ok(())
+        })
+        .map_err(|error| SkeinError::Storage(error.to_string()))?;
+    }
+    if row_files != expected_row_files {
+        return Err(SkeinError::Storage(
+            "backup relational row-page files do not match the bound physical closure".to_string(),
+        ));
     }
     Ok(())
 }

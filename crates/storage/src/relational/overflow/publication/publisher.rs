@@ -6,8 +6,8 @@ use super::{
     RelationalOverflowExtentInput, RelationalOverflowPublicationConfig,
     RelationalOverflowPublicationError, RelationalOverflowPublicationPhase,
     RelationalOverflowPublicationReport, RelationalOverflowRootManifest,
-    RelationalOverflowRootReader, COMPLETE_PUBLICATION_TRACE, RELATIONAL_OVERFLOW_MANIFEST_FILE,
-    RELATIONAL_OVERFLOW_PUBLICATION_LOCK_FILE,
+    RelationalOverflowRootReader, CANDIDATE_PUBLICATION_TRACE, COMPLETE_PUBLICATION_TRACE,
+    RELATIONAL_OVERFLOW_MANIFEST_FILE, RELATIONAL_OVERFLOW_PUBLICATION_LOCK_FILE,
 };
 use crate::relational::RelationalError;
 use crate::{durable_replace_file, sync_directory};
@@ -44,6 +44,33 @@ impl RelationalOverflowPublisher {
         )
     }
 
+    /// Persists one immutable generation without changing the independent
+    /// latest selector. The caller must bind the returned artifacts into a
+    /// stronger publish-last authority, such as the canonical checkpoint
+    /// manifest, before the generation can serve production reads.
+    pub fn persist_generation(
+        &self,
+        directory: &Path,
+        generation: u64,
+        source_commit_epoch: u64,
+        base: Option<&RelationalOverflowRootReader>,
+        expected_previous_generation: Option<u64>,
+        extents: Vec<RelationalOverflowExtentInput>,
+    ) -> Result<RelationalOverflowPublicationReport, RelationalOverflowPublicationError> {
+        self.persist_generation_inner(
+            GenerationPublication {
+                directory,
+                generation,
+                source_commit_epoch,
+                base,
+                expected_previous_generation,
+                select_latest: false,
+                stop_after: None,
+            },
+            extents,
+        )
+    }
+
     pub(super) fn publish_inner(
         &self,
         directory: &Path,
@@ -53,7 +80,36 @@ impl RelationalOverflowPublisher {
         extents: Vec<RelationalOverflowExtentInput>,
         stop_after: Option<RelationalOverflowPublicationPhase>,
     ) -> Result<RelationalOverflowPublicationReport, RelationalOverflowPublicationError> {
-        validate_publication_identity(generation, source_commit_epoch)?;
+        let base = RelationalOverflowRootReader::open_latest(directory, self.config)?;
+        self.persist_generation_inner(
+            GenerationPublication {
+                directory,
+                generation,
+                source_commit_epoch,
+                base: base.as_ref(),
+                expected_previous_generation,
+                select_latest: true,
+                stop_after,
+            },
+            extents,
+        )
+    }
+
+    fn persist_generation_inner(
+        &self,
+        publication: GenerationPublication<'_>,
+        extents: Vec<RelationalOverflowExtentInput>,
+    ) -> Result<RelationalOverflowPublicationReport, RelationalOverflowPublicationError> {
+        let GenerationPublication {
+            directory,
+            generation,
+            source_commit_epoch,
+            base,
+            expected_previous_generation,
+            select_latest,
+            stop_after,
+        } = publication;
+        validate_publication_identity(generation, source_commit_epoch, extents.is_empty())?;
         validate_publication_config(self.config)?;
         let extents = preflight_inputs(extents, self.config)?;
         fs::create_dir_all(directory).map_err(durability("create overflow directory"))?;
@@ -62,15 +118,21 @@ impl RelationalOverflowPublisher {
         paths.remove_temps()?;
         paths.require_fresh_generation()?;
 
-        let base = RelationalOverflowRootReader::open_latest(directory, self.config)?;
-        let actual_previous = base.as_ref().map(|reader| reader.manifest().generation);
-        if actual_previous != expected_previous_generation {
+        let base_generation = base.map(|reader| reader.manifest().generation);
+        if (select_latest || base.is_some()) && base_generation != expected_previous_generation {
             return Err(RelationalOverflowPublicationError::StaleGeneration {
                 expected_previous: expected_previous_generation,
-                actual_previous,
+                actual_previous: base_generation,
             });
         }
-        if let Some(base) = &base {
+        if let Some(previous) = expected_previous_generation
+            && generation <= previous
+        {
+            return Err(RelationalOverflowPublicationError::Admission(format!(
+                "new overflow generation {generation} must exceed previous generation {previous}"
+            )));
+        }
+        if let Some(base) = base {
             if generation <= base.manifest().generation {
                 return Err(RelationalOverflowPublicationError::Admission(format!(
                     "new overflow generation {generation} must exceed published generation {}",
@@ -84,15 +146,16 @@ impl RelationalOverflowPublisher {
                 )));
             }
         }
-        preflight_root_capacity(base.as_ref(), &extents, self.config)?;
+        preflight_root_capacity(base, &extents, self.config)?;
 
         let result = self.build_and_publish(PublicationBuild {
             paths: &paths,
-            base: base.as_ref(),
+            base,
             generation,
             source_commit_epoch,
             expected_previous_generation,
             extents: &extents,
+            select_latest,
             stop_after,
         });
         let _ = paths.remove_temps();
@@ -147,25 +210,31 @@ impl RelationalOverflowPublisher {
             RelationalOverflowPublicationPhase::CandidateManifestDurable,
         )?;
 
-        let actual_previous =
-            manifest::read_manifest_if_exists(&build.paths.latest_manifest, self.config)?
-                .map(|manifest| manifest.generation);
-        if actual_previous != build.expected_previous_generation {
-            return Err(RelationalOverflowPublicationError::StaleGeneration {
-                expected_previous: build.expected_previous_generation,
-                actual_previous,
-            });
+        if build.select_latest {
+            let actual_previous =
+                manifest::read_manifest_if_exists(&build.paths.latest_manifest, self.config)?
+                    .map(|manifest| manifest.generation);
+            if actual_previous != build.expected_previous_generation {
+                return Err(RelationalOverflowPublicationError::StaleGeneration {
+                    expected_previous: build.expected_previous_generation,
+                    actual_previous,
+                });
+            }
         }
         maybe_stop(
             build.stop_after,
             RelationalOverflowPublicationPhase::BaseRevalidated,
         )?;
-        write_synced(&build.paths.latest_manifest_tmp, &encoded_manifest)?;
-        durable_replace_file(
-            &build.paths.latest_manifest_tmp,
-            &build.paths.latest_manifest,
-        )
-        .map_err(durability("publish latest overflow manifest"))?;
+        if build.select_latest {
+            write_synced(&build.paths.latest_manifest_tmp, &encoded_manifest)?;
+            durable_replace_file(
+                &build.paths.latest_manifest_tmp,
+                &build.paths.latest_manifest,
+            )
+            .map_err(durability("publish latest overflow manifest"))?;
+        }
+
+        let manifest_digest = integrity_digest(&encoded_manifest);
 
         Ok(RelationalOverflowPublicationReport {
             generation: build.generation,
@@ -176,9 +245,33 @@ impl RelationalOverflowPublisher {
             extent_artifact_bytes: manifest.extent_artifact.encoded_len,
             descriptor_artifact_bytes: manifest.descriptor_artifact.encoded_len,
             manifest_bytes: encoded_manifest.len() as u64,
-            events: COMPLETE_PUBLICATION_TRACE,
+            generation_artifacts: super::RelationalOverflowGenerationArtifacts {
+                generation: manifest.generation,
+                source_commit_epoch: manifest.source_commit_epoch,
+                root_set_digest: manifest.root_set_digest,
+                manifest_artifact: RelationalOverflowArtifactMetadata {
+                    encoded_len: encoded_manifest.len() as u64,
+                    encoded_crc32c: manifest_digest.crc32c.get(),
+                    encoded_sha256: manifest_digest.sha256,
+                },
+            },
+            events: if build.select_latest {
+                COMPLETE_PUBLICATION_TRACE
+            } else {
+                CANDIDATE_PUBLICATION_TRACE
+            },
         })
     }
+}
+
+struct GenerationPublication<'a> {
+    directory: &'a Path,
+    generation: u64,
+    source_commit_epoch: u64,
+    base: Option<&'a RelationalOverflowRootReader>,
+    expected_previous_generation: Option<u64>,
+    select_latest: bool,
+    stop_after: Option<RelationalOverflowPublicationPhase>,
 }
 
 struct PublicationBuild<'a> {
@@ -188,6 +281,7 @@ struct PublicationBuild<'a> {
     source_commit_epoch: u64,
     expected_previous_generation: Option<u64>,
     extents: &'a [RelationalOverflowExtentInput],
+    select_latest: bool,
     stop_after: Option<RelationalOverflowPublicationPhase>,
 }
 
@@ -244,7 +338,6 @@ fn write_artifacts(
                         )?;
                     }
                     std::cmp::Ordering::Greater => {
-                        writer.emit_reused(existing)?;
                         advance_base_descriptor(
                             base.expect("base descriptor exists only with a base reader"),
                             base_file.as_mut().expect("base descriptor file is open"),
@@ -258,15 +351,7 @@ fn write_artifacts(
                 writer.emit_input(input)?;
                 input_ordinal += 1;
             }
-            (None, Some(existing)) => {
-                writer.emit_reused(existing)?;
-                advance_base_descriptor(
-                    base.expect("base descriptor exists only with a base reader"),
-                    base_file.as_mut().expect("base descriptor file is open"),
-                    &mut base_ordinal,
-                    &mut base_descriptor,
-                )?;
-            }
+            (None, Some(_)) => break,
             (None, None) => break,
         }
     }
@@ -554,7 +639,6 @@ fn preflight_root_capacity(
                 .read_descriptor_from(base_file.as_mut().expect("base descriptor file is open"), 0)
         })
         .transpose()?;
-    let mut added = 0u64;
     let mut new_extent_bytes = 0u64;
     for input in inputs {
         if let RelationalOverflowExtentInput::Write { reference, encoded } = input {
@@ -601,11 +685,6 @@ fn preflight_root_capacity(
                         })?;
                 }
             }
-            added = added.checked_add(1).ok_or_else(|| {
-                RelationalOverflowPublicationError::Admission(
-                    "overflow root extent count overflow".to_string(),
-                )
-            })?;
         }
     }
     if new_extent_bytes > config.max_new_extent_bytes.get() {
@@ -614,14 +693,11 @@ fn preflight_root_capacity(
             config.max_new_extent_bytes
         )));
     }
-    let root_extent_count = base
-        .map_or(0, |reader| reader.manifest().extent_count)
-        .checked_add(added)
-        .ok_or_else(|| {
-            RelationalOverflowPublicationError::Admission(
-                "overflow root extent count overflow".to_string(),
-            )
-        })?;
+    let root_extent_count = u64::try_from(inputs.len()).map_err(|_| {
+        RelationalOverflowPublicationError::Admission(
+            "overflow root extent count does not fit u64".to_string(),
+        )
+    })?;
     if root_extent_count > config.max_extents.get() {
         return Err(RelationalOverflowPublicationError::Admission(format!(
             "overflow root contains {root_extent_count} extents, exceeding limit {}",
@@ -660,10 +736,11 @@ fn validate_publication_config(
 fn validate_publication_identity(
     generation: u64,
     source_commit_epoch: u64,
+    root_is_empty: bool,
 ) -> Result<(), RelationalOverflowPublicationError> {
-    if generation == 0 || source_commit_epoch == 0 {
+    if generation == 0 || (source_commit_epoch == 0 && !root_is_empty) {
         return Err(RelationalOverflowPublicationError::Admission(format!(
-            "overflow generation and source epoch must be non-zero, got {generation}/{source_commit_epoch}"
+            "overflow generation must be non-zero and epoch zero requires an empty root, got {generation}/{source_commit_epoch}"
         )));
     }
     Ok(())

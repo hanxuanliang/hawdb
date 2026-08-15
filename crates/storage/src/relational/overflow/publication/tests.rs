@@ -60,6 +60,28 @@ fn publish_last_overflow_root_round_trips() {
 }
 
 #[test]
+fn persisted_overflow_candidate_does_not_change_latest_selection() {
+    let directory = unique_test_dir("candidate");
+    let config = RelationalOverflowPublicationConfig::default();
+    let (input, reference) = encoded_input(RelationalScalarType::Text, b"candidate payload");
+    let report = RelationalOverflowPublisher::new(config)
+        .persist_generation(&directory, 1, 10, None, None, vec![input])
+        .unwrap();
+
+    assert_eq!(report.events, CANDIDATE_PUBLICATION_TRACE);
+    assert_eq!(report.generation_artifacts.generation, 1);
+    assert!(
+        RelationalOverflowRootReader::open_latest(&directory, config)
+            .unwrap()
+            .is_none()
+    );
+    let candidate = RelationalOverflowRootReader::open_generation(&directory, 1, config).unwrap();
+    assert!(candidate.contains(&reference).unwrap());
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn incremental_root_reuses_content_and_keeps_pinned_generation_readable() {
     let directory = unique_test_dir("reuse");
     let config = RelationalOverflowPublicationConfig::default();
@@ -84,16 +106,16 @@ fn incremental_root_reuses_content_and_keeps_pinned_generation_readable() {
             vec![RelationalOverflowExtentInput::Reuse(first_reference), third],
         )
         .unwrap();
-    assert_eq!(report.extent_count, 3);
+    assert_eq!(report.extent_count, 2);
     assert_eq!(report.new_extent_count, 1);
-    assert_eq!(report.reused_extent_count, 2);
+    assert_eq!(report.reused_extent_count, 1);
 
     let current = RelationalOverflowRootReader::open_latest(&directory, config)
         .unwrap()
         .unwrap();
     assert!(current.contains(&first_reference).unwrap());
     assert!(current.contains(&third_reference).unwrap());
-    assert!(current.contains(&removed_reference).unwrap());
+    assert!(!current.contains(&removed_reference).unwrap());
     assert!(pinned.contains(&removed_reference).unwrap());
     assert_eq!(pinned.manifest().generation, 1);
     assert!(directory.join(relational_overflow_extent_file(1)).exists());
@@ -313,14 +335,23 @@ fn root_capacity_is_admitted_before_generation_artifacts_are_created() {
         ..RelationalOverflowPublicationConfig::default()
     };
     let publisher = RelationalOverflowPublisher::new(config);
-    let (first, _) = encoded_input(RelationalScalarType::Text, b"first");
+    let (first, first_reference) = encoded_input(RelationalScalarType::Text, b"first");
     publisher
         .publish(&directory, 1, 10, None, vec![first])
         .unwrap();
     let (second, _) = encoded_input(RelationalScalarType::Text, b"second");
 
     assert!(matches!(
-        publisher.publish(&directory, 2, 11, Some(1), vec![second]),
+        publisher.publish(
+            &directory,
+            2,
+            11,
+            Some(1),
+            vec![
+                RelationalOverflowExtentInput::Reuse(first_reference),
+                second
+            ],
+        ),
         Err(RelationalOverflowPublicationError::Admission(_))
     ));
     assert!(!directory.join(relational_overflow_extent_file(2)).exists());
@@ -371,7 +402,7 @@ fn empty_overflow_root_is_a_valid_generation() {
     let directory = unique_test_dir("empty");
     let config = RelationalOverflowPublicationConfig::default();
     let report = RelationalOverflowPublisher::new(config)
-        .publish(&directory, 1, 10, None, Vec::new())
+        .publish(&directory, 1, 0, None, Vec::new())
         .unwrap();
     assert_eq!(report.extent_count, 0);
     assert_eq!(report.extent_artifact_bytes, 0);
@@ -381,12 +412,23 @@ fn empty_overflow_root_is_a_valid_generation() {
             .len(),
         0
     );
-    assert!(
-        RelationalOverflowRootReader::open_latest(&directory, config)
-            .unwrap()
-            .is_some()
-    );
+    let reader = RelationalOverflowRootReader::open_latest(&directory, config)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reader.manifest().source_commit_epoch, 0);
     fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn epoch_zero_rejects_a_non_empty_overflow_root_before_artifact_creation() {
+    let directory = unique_test_dir("non-empty-epoch-zero");
+    let config = RelationalOverflowPublicationConfig::default();
+    let (input, _) = encoded_input(RelationalScalarType::Text, b"payload");
+    assert!(matches!(
+        RelationalOverflowPublisher::new(config).publish(&directory, 1, 0, None, vec![input]),
+        Err(RelationalOverflowPublicationError::Admission(_))
+    ));
+    assert!(!directory.exists());
 }
 
 fn encoded_input(

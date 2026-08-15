@@ -237,7 +237,10 @@ fn validate_manifest(
     class: ErrorClass,
 ) -> Result<(), RelationalRowPagePublicationError> {
     let fail = |message| class.error(message);
-    if manifest.generation == 0 || manifest.source_commit_epoch == 0 {
+    if manifest.generation == 0
+        || (manifest.source_commit_epoch == 0
+            && (manifest.root_page_count != 0 || !manifest.tables.is_empty()))
+    {
         return Err(fail(format!(
             "invalid row-page generation/epoch {}/{}",
             manifest.generation, manifest.source_commit_epoch

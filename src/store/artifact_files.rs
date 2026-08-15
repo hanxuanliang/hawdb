@@ -99,6 +99,46 @@ pub(super) fn parse_relational_index_manifest_generation_file(name: &str) -> Opt
         .ok()
 }
 
+fn parse_hyphenated_generation_file(name: &str, prefix: &str, suffix: &str) -> Option<u64> {
+    name.strip_prefix(prefix)?
+        .strip_suffix(suffix)?
+        .parse()
+        .ok()
+}
+
+pub(super) fn parse_relational_row_generation_file(name: &str) -> Option<u64> {
+    parse_hyphenated_generation_file(name, "relational-row-pages-", ".pages.skein")
+        .or_else(|| {
+            parse_hyphenated_generation_file(name, "relational-row-root-", ".descriptors.skein")
+        })
+        .or_else(|| parse_hyphenated_generation_file(name, "relational-row-root-", ".keys.skein"))
+        .or_else(|| {
+            parse_hyphenated_generation_file(name, "relational-row-pages-", ".manifest.skein")
+        })
+}
+
+pub(super) fn parse_relational_row_page_artifact_generation_file(name: &str) -> Option<u64> {
+    parse_hyphenated_generation_file(name, "relational-row-pages-", ".pages.skein")
+}
+
+pub(super) fn parse_relational_overflow_generation_file(name: &str) -> Option<u64> {
+    parse_hyphenated_generation_file(name, "relational-overflow-", ".extents.skein")
+        .or_else(|| {
+            parse_hyphenated_generation_file(
+                name,
+                "relational-overflow-root-",
+                ".descriptors.skein",
+            )
+        })
+        .or_else(|| {
+            parse_hyphenated_generation_file(name, "relational-overflow-", ".manifest.skein")
+        })
+}
+
+pub(super) fn parse_relational_overflow_extent_generation_file(name: &str) -> Option<u64> {
+    parse_hyphenated_generation_file(name, "relational-overflow-", ".extents.skein")
+}
+
 pub(super) fn storage_generation_for_file(name: &str) -> Option<u64> {
     parse_generation_file(name, "checkpoint.")
         .or_else(|| parse_generation_file(name, "wal."))
@@ -113,6 +153,8 @@ pub(super) fn storage_generation_for_file(name: &str) -> Option<u64> {
         .or_else(|| parse_property_projection_manifest_generation_file(name))
         .or_else(|| parse_relational_index_artifact_generation_file(name))
         .or_else(|| parse_relational_index_manifest_generation_file(name))
+        .or_else(|| parse_relational_row_generation_file(name))
+        .or_else(|| parse_relational_overflow_generation_file(name))
 }
 
 fn parse_checkpoint_staging_generation(name: &str) -> Option<u64> {

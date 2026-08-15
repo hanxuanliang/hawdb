@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
 mod codec;
@@ -51,10 +51,10 @@ pub use overflow::{
     relational_overflow_manifest_generation_file, RelationalHydrationBudget,
     RelationalOverflowArtifactMetadata, RelationalOverflowConfig,
     RelationalOverflowExtentDescriptor, RelationalOverflowExtentInput,
-    RelationalOverflowPublicationConfig, RelationalOverflowPublicationError,
-    RelationalOverflowPublicationPhase, RelationalOverflowPublicationReport,
-    RelationalOverflowPublisher, RelationalOverflowRef, RelationalOverflowRootBinding,
-    RelationalOverflowRootManifest, RelationalOverflowRootReader,
+    RelationalOverflowGenerationArtifacts, RelationalOverflowPublicationConfig,
+    RelationalOverflowPublicationError, RelationalOverflowPublicationPhase,
+    RelationalOverflowPublicationReport, RelationalOverflowPublisher, RelationalOverflowRef,
+    RelationalOverflowRootBinding, RelationalOverflowRootManifest, RelationalOverflowRootReader,
     DEFAULT_MAX_RELATIONAL_HYDRATION_BYTES, DEFAULT_RELATIONAL_OVERFLOW_EXTENTS,
     DEFAULT_RELATIONAL_OVERFLOW_MANIFEST_BYTES, DEFAULT_RELATIONAL_OVERFLOW_NEW_EXTENT_BYTES,
     DEFAULT_RELATIONAL_OVERFLOW_THRESHOLD_BYTES, RELATIONAL_OVERFLOW_MANIFEST_FILE,
@@ -69,7 +69,8 @@ pub use row_page::{
     RelationalRowDeltaPublicationPhase, RelationalRowDeltaReadReport, RelationalRowDeltaReader,
     RelationalRowDeltaReport, RelationalRowDeltaTableSchema, RelationalRowPageArtifactMetadata,
     RelationalRowPageBootstrap, RelationalRowPageBootstrapReport, RelationalRowPageEntry,
-    RelationalRowPageError, RelationalRowPageId, RelationalRowPageIdAllocator,
+    RelationalRowPageError, RelationalRowPageGenerationArtifacts,
+    RelationalRowPageGenerationRequest, RelationalRowPageId, RelationalRowPageIdAllocator,
     RelationalRowPageLimits, RelationalRowPageLiveError, RelationalRowPageMutationError,
     RelationalRowPageMutationPlan, RelationalRowPageMutationPlanner,
     RelationalRowPagePublicationConfig, RelationalRowPagePublicationError,
@@ -1246,6 +1247,93 @@ impl RelationalState {
             .flat_map(|segment| segment.rows.iter())
     }
 
+    /// Packs the current relational snapshot into bounded immutable row pages
+    /// for its first canonical checkpoint binding. Large payload bytes remain
+    /// shared through `Arc` or overflow references; only row/page metadata is
+    /// retained until generation publication.
+    pub fn row_page_snapshot_deltas(
+        &self,
+        generation: u64,
+        source_commit_epoch: u64,
+        config: RelationalRowPagePublicationConfig,
+    ) -> Result<Vec<RelationalRowPageTableDelta>, RelationalRowPageMutationError> {
+        if self.schemas.len() > config.max_tables.get() {
+            return Err(RelationalRowPageMutationError::Admission(format!(
+                "row-page snapshot contains {} tables, exceeding limit {}",
+                self.schemas.len(),
+                config.max_tables
+            )));
+        }
+        let mut dirty_pages = 0usize;
+        let mut dirty_bytes = 0u64;
+        let slot_bytes = config.page_limits.max_page_bytes.get() as u64;
+        self.table_schemas()
+            .map(|schema| {
+                let schema_digest = self
+                    .table_schema_digest(&schema.name)
+                    .map_err(|error| {
+                        RelationalRowPageMutationError::Corrupt(error.to_string())
+                    })?
+                    .ok_or_else(|| {
+                        RelationalRowPageMutationError::Corrupt(format!(
+                            "table {} disappeared while packing its row-page snapshot",
+                            schema.name
+                        ))
+                    })?;
+                let mut pages = Vec::new();
+                let mut emit = |page| {
+                    let next_pages = dirty_pages.checked_add(1).ok_or_else(|| {
+                        RelationalRowPageMutationError::Admission(
+                            "row-page snapshot page count overflow".to_string(),
+                        )
+                    })?;
+                    let next_bytes = dirty_bytes.checked_add(slot_bytes).ok_or_else(|| {
+                        RelationalRowPageMutationError::Admission(
+                            "row-page snapshot byte count overflow".to_string(),
+                        )
+                    })?;
+                    if next_pages > config.max_dirty_pages.get()
+                        || next_bytes > config.max_dirty_bytes.get()
+                    {
+                        return Err(RelationalRowPageMutationError::Admission(format!(
+                            "row-page snapshot requires {next_pages} pages/{next_bytes} bytes, exceeding limits {}/{}",
+                            config.max_dirty_pages, config.max_dirty_bytes
+                        )));
+                    }
+                    pages.push(page);
+                    dirty_pages = next_pages;
+                    dirty_bytes = next_bytes;
+                    Ok(())
+                };
+                let mut bootstrap = RelationalRowPageBootstrap::new(
+                    generation,
+                    source_commit_epoch,
+                    schema_digest,
+                    schema.columns.len(),
+                    NonZeroU64::new(1).expect("initial row-page id is non-zero"),
+                    config,
+                )?;
+                for (primary_key, row) in self.rows(&schema.name) {
+                    bootstrap.push(
+                        RelationalRowPageEntry {
+                            primary_key: primary_key.clone(),
+                            row: row.clone(),
+                        },
+                        &mut emit,
+                    )?;
+                }
+                let report = bootstrap.finish(&mut emit)?;
+                Ok(RelationalRowPageTableDelta {
+                    table: schema.name.clone(),
+                    schema_digest,
+                    next_page_id: report.next_page_id,
+                    dirty_pages: pages,
+                    deleted_page_ids: Vec::new(),
+                })
+            })
+            .collect()
+    }
+
     pub fn row_count(&self, table: &str) -> usize {
         self.segments
             .get(table)
@@ -1398,6 +1486,87 @@ impl RelationalState {
             .values()
             .filter(|segment| segment.is_file_backed())
             .count()
+    }
+
+    /// Derives the exact overflow closure for one canonical checkpoint.
+    /// Inline envelopes retain their existing `Arc`; file-backed envelopes are
+    /// reused from the checkpoint-selected base generation. Materializing a
+    /// file-backed envelope is allowed only for the first generation and is
+    /// bounded independently from the resident state.
+    pub fn overflow_generation_inputs(
+        &self,
+        has_base_generation: bool,
+        max_materialized_bytes: usize,
+    ) -> Result<Vec<RelationalOverflowExtentInput>, RelationalError> {
+        let mut references = BTreeMap::new();
+        for row in self
+            .segments
+            .values()
+            .flat_map(|segment| segment.rows.values())
+        {
+            for value in row.values.iter() {
+                let RelationalValue::Overflow(reference) = value else {
+                    continue;
+                };
+                if let Some(previous) = references.insert(reference.digest, *reference)
+                    && previous != *reference
+                {
+                    return Err(RelationalError::Corruption(format!(
+                        "overflow digest {} has conflicting reference metadata",
+                        reference.digest
+                    )));
+                }
+            }
+        }
+        if references.len() != self.overflow_segments.len()
+            || references
+                .keys()
+                .any(|digest| !self.overflow_segments.contains_key(digest))
+        {
+            return Err(RelationalError::Corruption(
+                "relational overflow segments do not match the reachable row closure".to_string(),
+            ));
+        }
+
+        let mut materialized_bytes = 0usize;
+        references
+            .into_iter()
+            .map(|(digest, reference)| {
+                let segment = self.overflow_segments.get(&digest).ok_or_else(|| {
+                    RelationalError::Corruption(format!(
+                        "missing overflow segment for reachable digest {digest}"
+                    ))
+                })?;
+                match segment {
+                    RelationalOverflowSegment::Inline(encoded) => {
+                        Ok(RelationalOverflowExtentInput::Write {
+                            reference,
+                            encoded: Arc::clone(encoded),
+                        })
+                    }
+                    RelationalOverflowSegment::FileRange { .. } if has_base_generation => {
+                        Ok(RelationalOverflowExtentInput::Reuse(reference))
+                    }
+                    RelationalOverflowSegment::FileRange { .. } => {
+                        let encoded = segment.read()?;
+                        materialized_bytes = materialized_bytes
+                            .checked_add(encoded.len())
+                            .ok_or_else(|| {
+                                RelationalError::Admission(
+                                    "checkpoint overflow materialization byte count overflow"
+                                        .to_string(),
+                                )
+                            })?;
+                        if materialized_bytes > max_materialized_bytes {
+                            return Err(RelationalError::Admission(format!(
+                                "checkpoint overflow materialization uses {materialized_bytes} bytes, exceeding limit {max_materialized_bytes}"
+                            )));
+                        }
+                        Ok(RelationalOverflowExtentInput::Write { reference, encoded })
+                    }
+                }
+            })
+            .collect()
     }
 }
 

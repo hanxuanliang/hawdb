@@ -28,6 +28,7 @@ PendingPhases == {"none", "appended", "durable"}
 CandidatePhases == {
     "idle",
     "building",
+    "overflowDurable",
     "pagesDurable",
     "rootDurable",
     "manifestDurable"
@@ -56,6 +57,9 @@ VARIABLES
     publishedRoots,
     rootByGeneration,
     generationEpoch,
+    durableOverflowRoots,
+    overflowEpoch,
+    canonicalOverflowGeneration,
     durablePages,
     pageEpoch,
     candidatePhase,
@@ -82,6 +86,9 @@ vars == <<
     publishedRoots,
     rootByGeneration,
     generationEpoch,
+    durableOverflowRoots,
+    overflowEpoch,
+    canonicalOverflowGeneration,
     durablePages,
     pageEpoch,
     candidatePhase,
@@ -139,6 +146,11 @@ Init ==
     /\ generationEpoch =
         [generation \in Generations |->
             IF generation = 0 THEN 0 ELSE -1]
+    /\ durableOverflowRoots = {0}
+    /\ overflowEpoch =
+        [generation \in Generations |->
+            IF generation = 0 THEN 0 ELSE -1]
+    /\ canonicalOverflowGeneration = 0
     /\ durablePages = {ref \in PageRefs : ref.generation = 0}
     /\ pageEpoch =
         [ref \in PageRefs |-> IF ref.generation = 0 THEN 0 ELSE -1]
@@ -169,6 +181,9 @@ BeginCommit ==
         publishedRoots,
         rootByGeneration,
         generationEpoch,
+        durableOverflowRoots,
+        overflowEpoch,
+        canonicalOverflowGeneration,
         durablePages,
         pageEpoch,
         candidatePhase,
@@ -200,6 +215,9 @@ SyncWal ==
         publishedRoots,
         rootByGeneration,
         generationEpoch,
+        durableOverflowRoots,
+        overflowEpoch,
+        canonicalOverflowGeneration,
         durablePages,
         pageEpoch,
         candidatePhase,
@@ -231,6 +249,9 @@ PublishCommit ==
         publishedRoots,
         rootByGeneration,
         generationEpoch,
+        durableOverflowRoots,
+        overflowEpoch,
+        canonicalOverflowGeneration,
         durablePages,
         pageEpoch,
         candidatePhase,
@@ -274,13 +295,16 @@ BeginCheckpoint ==
         publishedRoots,
         rootByGeneration,
         generationEpoch,
+        durableOverflowRoots,
+        overflowEpoch,
+        canonicalOverflowGeneration,
         durablePages,
         pageEpoch,
         readerGeneration
         >>
 
 PersistCandidatePages ==
-    /\ candidatePhase = "building"
+    /\ candidatePhase = "overflowDurable"
     /\ LET refs == {
             PageRef(candidateGeneration, page) :
                 page \in candidateDirtyPages
@@ -306,6 +330,44 @@ PersistCandidatePages ==
         publishedRoots,
         rootByGeneration,
         generationEpoch,
+        durableOverflowRoots,
+        overflowEpoch,
+        canonicalOverflowGeneration,
+        candidateGeneration,
+        candidateEpoch,
+        candidateBaseGeneration,
+        candidateDirtyPages,
+        candidateRoot,
+        readerGeneration,
+        staleCandidateRejected
+        >>
+
+PersistCandidateOverflow ==
+    /\ candidatePhase = "building"
+    /\ candidateGeneration \notin durableOverflowRoots
+    /\ durableOverflowRoots' =
+        durableOverflowRoots \cup {candidateGeneration}
+    /\ overflowEpoch' =
+        [overflowEpoch EXCEPT ![candidateGeneration] = candidateEpoch]
+    /\ candidatePhase' = "overflowDurable"
+    /\ UNCHANGED <<
+        walDurableEpoch,
+        walDirtyByEpoch,
+        visibleEpoch,
+        dirtyPages,
+        pendingPhase,
+        pendingEpoch,
+        pendingPage,
+        activeGeneration,
+        previousGeneration,
+        manifestEpoch,
+        nextGeneration,
+        publishedRoots,
+        rootByGeneration,
+        generationEpoch,
+        canonicalOverflowGeneration,
+        durablePages,
+        pageEpoch,
         candidateGeneration,
         candidateEpoch,
         candidateBaseGeneration,
@@ -333,6 +395,9 @@ PersistCandidateRoot ==
         publishedRoots,
         rootByGeneration,
         generationEpoch,
+        durableOverflowRoots,
+        overflowEpoch,
+        canonicalOverflowGeneration,
         durablePages,
         pageEpoch,
         candidateGeneration,
@@ -362,6 +427,9 @@ PersistCandidateManifest ==
         publishedRoots,
         rootByGeneration,
         generationEpoch,
+        durableOverflowRoots,
+        overflowEpoch,
+        canonicalOverflowGeneration,
         durablePages,
         pageEpoch,
         candidateGeneration,
@@ -376,10 +444,13 @@ PersistCandidateManifest ==
 PublishCheckpoint ==
     /\ candidatePhase = "manifestDurable"
     /\ candidateBaseGeneration = activeGeneration
+    /\ candidateGeneration \in durableOverflowRoots
+    /\ overflowEpoch[candidateGeneration] = candidateEpoch
     /\ \A page \in candidateDirtyPages:
         PageRef(candidateGeneration, page) \in durablePages
     /\ previousGeneration' = activeGeneration
     /\ activeGeneration' = candidateGeneration
+    /\ canonicalOverflowGeneration' = candidateGeneration
     /\ manifestEpoch' = candidateEpoch
     /\ publishedRoots' = publishedRoots \cup {candidateGeneration}
     /\ rootByGeneration' =
@@ -400,6 +471,8 @@ PublishCheckpoint ==
         pendingEpoch,
         pendingPage,
         nextGeneration,
+        durableOverflowRoots,
+        overflowEpoch,
         durablePages,
         pageEpoch,
         candidateRoot,
@@ -427,6 +500,10 @@ PublishCompetingCheckpoint ==
               [rootByGeneration EXCEPT ![generation] = root]
           /\ generationEpoch' =
               [generationEpoch EXCEPT ![generation] = visibleEpoch]
+          /\ durableOverflowRoots' = durableOverflowRoots \cup {generation}
+          /\ overflowEpoch' =
+              [overflowEpoch EXCEPT ![generation] = visibleEpoch]
+          /\ canonicalOverflowGeneration' = generation
           /\ publishedRoots' = publishedRoots \cup {generation}
           /\ previousGeneration' = activeGeneration
           /\ activeGeneration' = generation
@@ -474,6 +551,9 @@ RejectStaleCandidate ==
         publishedRoots,
         rootByGeneration,
         generationEpoch,
+        durableOverflowRoots,
+        overflowEpoch,
+        canonicalOverflowGeneration,
         durablePages,
         pageEpoch,
         candidateRoot,
@@ -499,6 +579,9 @@ BeginRead(reader) ==
         publishedRoots,
         rootByGeneration,
         generationEpoch,
+        durableOverflowRoots,
+        overflowEpoch,
+        canonicalOverflowGeneration,
         durablePages,
         pageEpoch,
         candidatePhase,
@@ -528,6 +611,9 @@ EndRead(reader) ==
         publishedRoots,
         rootByGeneration,
         generationEpoch,
+        durableOverflowRoots,
+        overflowEpoch,
+        canonicalOverflowGeneration,
         durablePages,
         pageEpoch,
         candidatePhase,
@@ -545,6 +631,8 @@ Reclaim ==
        \/ durablePages # RequiredPageRefs
     /\ publishedRoots' = RequiredRootGenerations
     /\ durablePages' = durablePages \cap RequiredPageRefs
+    /\ durableOverflowRoots' =
+        durableOverflowRoots \cap RequiredRootGenerations
     /\ UNCHANGED <<
         walDurableEpoch,
         walDirtyByEpoch,
@@ -559,6 +647,8 @@ Reclaim ==
         nextGeneration,
         rootByGeneration,
         generationEpoch,
+        overflowEpoch,
+        canonicalOverflowGeneration,
         pageEpoch,
         candidatePhase,
         candidateGeneration,
@@ -596,6 +686,9 @@ CrashAndRecover ==
         publishedRoots,
         rootByGeneration,
         generationEpoch,
+        durableOverflowRoots,
+        overflowEpoch,
+        canonicalOverflowGeneration,
         durablePages,
         pageEpoch,
         candidateRoot,
@@ -607,6 +700,7 @@ Next ==
     \/ SyncWal
     \/ PublishCommit
     \/ BeginCheckpoint
+    \/ PersistCandidateOverflow
     \/ PersistCandidatePages
     \/ PersistCandidateRoot
     \/ PersistCandidateManifest
@@ -633,6 +727,9 @@ TypeOK ==
     /\ publishedRoots \subseteq Generations
     /\ rootByGeneration \in [Generations -> RootType]
     /\ generationEpoch \in [Generations -> (-1)..MaxEpoch]
+    /\ durableOverflowRoots \subseteq Generations
+    /\ overflowEpoch \in [Generations -> (-1)..MaxEpoch]
+    /\ canonicalOverflowGeneration \in Generations
     /\ durablePages \subseteq PageRefs
     /\ pageEpoch \in [PageRefs -> (-1)..MaxEpoch]
     /\ candidatePhase \in CandidatePhases
@@ -679,6 +776,16 @@ PublishedRootsReferenceDurablePages ==
             IN /\ pageEpoch[ref] >= 0
                /\ pageEpoch[ref] <= generationEpoch[generation]
 
+PublishedRootsReferenceDurableOverflow ==
+    \A generation \in publishedRoots:
+        /\ generation \in durableOverflowRoots
+        /\ overflowEpoch[generation] = generationEpoch[generation]
+
+CanonicalRowOverflowGenerationAgreement ==
+    /\ activeGeneration = canonicalOverflowGeneration
+    /\ generationEpoch[activeGeneration] =
+        overflowEpoch[canonicalOverflowGeneration]
+
 CandidateUsesFreshImmutableIdentity ==
     candidatePhase = "idle" \/
         /\ candidateGeneration < nextGeneration
@@ -686,6 +793,9 @@ CandidateUsesFreshImmutableIdentity ==
         /\ generationEpoch[candidateGeneration] = -1
         /\ candidateBaseGeneration \in publishedRoots
         /\ candidateEpoch <= visibleEpoch
+
+DurableCandidateIsNotCanonicalUntilCheckpointPublication ==
+    candidatePhase = "idle" \/ candidateGeneration # canonicalOverflowGeneration
 
 CandidateRootCopiesOnlyDirtyPages ==
     candidatePhase = "idle" \/
@@ -715,6 +825,7 @@ ManifestCandidateHasDurableClosure ==
 ReclamationPreservesRequiredClosure ==
     /\ RequiredRootGenerations \subseteq publishedRoots
     /\ RequiredPageRefs \subseteq durablePages
+    /\ RequiredRootGenerations \subseteq durableOverflowRoots
 
 StaleCandidateRejectionIsTerminal ==
     staleCandidateRejected => candidatePhase = "idle"

@@ -398,9 +398,9 @@ The default codec envelope is one MiB and 256 rows, matching the current COW
 row-page split target. It separately limits columns, key bytes, row bytes,
 inline-value bytes, logical overflow bytes, and projected-field count. The
 encoder applies the same limits as the decoder and rejects a page before
-accumulating payload beyond the page budget. The codec and shadow publication
-path are not yet a serving or recovery path; WAL overlays, cache admission, and
-SQL late hydration remain separate activation stages.
+accumulating payload beyond the page budget. Checkpoint-bound roots now use the
+codec as a recovery dependency. SQL serving, shared-cache admission, projected
+field decoding, and late hydration remain separate activation stages.
 
 ### Relational overflow-root v1 publication
 
@@ -415,11 +415,11 @@ relational-overflow.manifest.skein
 ```
 
 The extent artifact contains only envelopes first introduced by the new
-generation. A digest already selected by the base root reuses its immutable
-physical generation and byte range. Every new root inherits the complete base
-set; omission cannot remove a digest while a reused row page may still refer to
-it. Reachability-based removal is deferred until the row-generation lifecycle
-can prove and retain the complete closure needed by active and pinned roots.
+generation. The caller supplies the exact digest set reachable from the row
+generation being prepared. A reachable digest already selected by the base
+root reuses its immutable physical generation and byte range; a base digest
+omitted from that set is absent from the new root. A pinned older root retains
+its own logical set and physical closure independently.
 
 Descriptors are exactly 120 bytes, strictly ordered by binary SHA-256 digest,
 and contain the logical reference, physical generation, physical byte range,
@@ -433,18 +433,24 @@ The fixed 208-byte `SKOVRM01` manifest binds generation, source commit epoch,
 optional previous generation, total and newly written extent counts, exact
 length plus CRC32C/SHA-256 metadata for the extent and descriptor artifacts,
 and the exact root-set digest. The manifest carries its own CRC32C and SHA-256.
+Generation is always non-zero. Source commit epoch zero is valid only for the
+empty root needed to back up and reopen a newly created database.
 Normal open reads only this fixed manifest and the two current-generation file
 lengths. It does not enumerate descriptors or hash extent payloads.
 
 Publication holds one directory-scoped exclusive lock and synchronizes the new
 extent artifact, descriptor root, and immutable generation manifest in order.
-It then revalidates the caller's selected base and atomically replaces the
-latest manifest last. A target generation is fresh and immutable. A crash or a
-stale publisher can leave only unreachable generation artifacts. A reader pins
-one immutable root manifest; reused descriptors retain their physical
-generation, so the pinned reader stays readable while a newer root is
-published. Reclamation remains a later lifecycle stage and MUST retain the
-physical closure of every active or pinned root.
+It then revalidates the caller's selected base. Standalone publication may
+atomically replace `relational-overflow.manifest.skein` last. Canonical
+checkpoint preparation instead stops at `CanonicalSelectionDeferred` and
+returns typed generation artifacts; only `SKEIN_MANIFEST_V1` may select that
+exact generation together with its row root. A target generation is fresh and
+immutable. A crash or stale publisher can leave only unbound generation
+artifacts. A reader pins one immutable root manifest; reused descriptors retain
+their physical generation, so the pinned reader stays readable while a newer
+root is published. Reclamation enumerates descriptors for the current and
+immediately previous canonical roots before deletion and retains every
+referenced physical extent generation.
 
 `RelationalOverflowRootReader` binary-searches descriptors without loading the
 root, validates the selected descriptor binding, and admits the declared
@@ -514,9 +520,11 @@ the table-root-set SHA-256, and an optional exact overflow-root generation,
 source epoch, and root-set digest. The manifest has its own CRC32C and SHA-256.
 Table names and key bounds are length-prefixed and bounded before allocation.
 Table descriptor ranges MUST be contiguous and cover the declared root page
-count exactly.
+count exactly. Source commit epoch zero is valid only when both the table set
+and root page count are empty.
 
-Publication holds one directory-scoped exclusive lock and follows this order:
+Standalone publication holds one directory-scoped exclusive lock and follows
+this order:
 
 1. pre-admit table count, dirty page count, fixed-slot dirty bytes, root pages,
    root-key bytes, and manifest bytes before creating a candidate;
@@ -527,6 +535,14 @@ Publication holds one directory-scoped exclusive lock and follows this order:
 6. re-read and compare the selected latest generation with the caller's
    expected base;
 7. atomically replace `relational-row-pages.manifest.skein` last.
+
+Canonical checkpoint preparation uses the same first six steps but calls
+`persist_generation`, records `CanonicalSelectionDeferred`, and returns typed
+generation artifacts instead of updating the independent latest selector. The
+publish-last `SKEIN_MANIFEST_V1` binds the row generation, source commit epoch,
+root-set digest, generation-manifest length, CRC32C, and SHA-256 together with
+the exact overflow generation. Row and overflow bindings are both mandatory
+for every non-empty canonical checkpoint.
 
 A target generation is immutable and MUST be fresh. A stale publisher or a
 generation whose files already exist fails without replacing the latest
@@ -546,7 +562,9 @@ epoch. Every referenced digest is resolved before row candidate creation, and
 the row manifest records the exact overflow root binding. A missing, corrupt,
 or differently bound root rejects the complete row publication.
 
-`RelationalRowPagePublicationReport.events` is the fixed refinement trace:
+`RelationalRowPagePublicationReport.events` has two fixed refinement traces.
+Standalone publication ends with `LatestManifestPublished`; canonical
+candidate persistence ends with `CanonicalSelectionDeferred`:
 
 ```text
 CandidateStarted
@@ -554,16 +572,15 @@ CandidatePagesDurable
 CandidateRootDurable
 CandidateManifestDurable
 BaseRevalidated
-LatestManifestPublished
+LatestManifestPublished | CanonicalSelectionDeferred
 ```
 
 These events map in order to `BeginCheckpoint`, `PersistCandidatePages`,
 `PersistCandidateRoot`, `PersistCandidateManifest`, the generation fence, and
-`PublishCheckpoint` in `SkeinCowPagePublication.tla`. The non-serving recovery
-shadow, immutable row-delta generation, and deterministic mutation planner are
-specified below. Recovery wiring, physical page demand reads, overflow
-hydration, reclamation, and production serving activation remain later
-contracts.
+`PublishCheckpoint` in `SkeinCowPagePublication.tla`. The canonical trace does
+not make the candidate visible at its final publisher event; the outer
+checkpoint manifest selects both roots atomically. Physical page demand reads
+and production SQL serving activation remain later contracts.
 
 ### Relational row-page mutation planning
 
@@ -599,26 +616,30 @@ until `finish` succeeds and MUST discard the candidate after any callback or
 encoding error. A bootstrap instance fails closed after its first error and
 cannot be resumed.
 
-This planner remains non-serving. It does not bind a row root to the canonical
-checkpoint, publish overflow extents, or select SQL reads.
+This planner remains non-serving. Checkpoint bootstrap currently publishes a
+complete bounded row snapshot rather than using this incremental mutation
+plan. Activating dirty-only COW checkpoint construction and SQL row selection
+remain separate steps.
 `SkeinRowPageMutation.tla` covers persistent allocator
 monotonicity, split identity, deletion without reuse, one-leaf point mutation,
 pinned-base immutability, and bounded streaming bootstrap.
 
 ### Disk-backed relational row-root recovery
 
-The current recovery integration is a non-serving refinement over an optional
-row-root publication. It does not make the independently published latest
-row-root manifest a canonical checkpoint dependency. At open, the store accepts
-a candidate only when its generation and source commit epoch equal the loaded
-checkpoint and every table schema digest matches. Missing, stale, corrupt, or
-schema-drifted candidates are isolated from canonical checkpoint plus WAL
-recovery and never become SQL inputs.
+The current recovery integration is a non-serving SQL refinement over a
+mandatory checkpoint-bound row and overflow root pair. Writable checkpoint
+preparation persists both candidates first, verifies their exact generation and
+source commit epoch, and publishes their identities atomically in
+`SKEIN_MANIFEST_V1`. Open never consults either subsystem's independent latest
+selector. It opens only the exact bound generations and rejects the database if
+a selected generation manifest is missing, corrupt, or identity-mismatched.
+Unbound future candidates are ignored and reclaimed by writable open.
 
-Mounting reads and validates the bounded row-root manifest and exact artifact
-file lengths only. It does not enumerate root descriptors, read row-page slots,
-or hash database-scale artifacts. First descriptor and page integrity checks
-remain demand-read obligations.
+Mounting validates the outer generation-manifest length, CRC32C, and SHA-256,
+then reads the bounded row and overflow manifests and exact current-generation
+artifact file lengths. It verifies row-to-overflow binding and table schemas,
+but does not read row-page slots or hash database-scale payload artifacts.
+Descriptor and page integrity checks remain demand-read or scrub obligations.
 
 Relational transaction apply derives exact primary-key changes from the
 authoritative before and after states. Multiple relational fragments in one
@@ -629,12 +650,13 @@ same epoch with an empty change. `GraphStore` sends every fragment directly to
 rather than rejecting an otherwise admitted WAL suffix or retaining a
 database-sized `BTreeMap`.
 
-Recovery never skips a durable WAL record. An individual capture outside its
-hard entry/byte envelope, an epoch gap, DDL or schema replacement, missing
-overflow closure, run/manifest budget exhaustion, or corruption makes the
-non-authoritative row view unavailable without changing canonical checkpoint
-plus WAL recovery. A partial batch poisons the builder and its already durable
-candidate runs remain unreachable.
+Recovery never skips a durable WAL record. A corrupt checkpoint-bound base root
+rejects database open. After that base is pinned, an individual capture outside
+its hard entry/byte envelope, an epoch gap, DDL or schema replacement, missing
+live overflow closure, or row-delta run/manifest budget exhaustion makes the
+non-serving WAL overlay unavailable without changing the already recovered
+materialized relational state. A partial batch poisons the builder and its
+already durable candidate runs remain unreachable.
 
 After the complete WAL prefix is consumed, a writable open synchronizes all
 runs, publishes the immutable delta-generation manifest, revalidates the
@@ -668,10 +690,20 @@ pinned snapshots retain their prior immutable view. Writable transaction
 workspaces continue to read the materialized staged state, so
 read-your-own-writes never consults a lagging read view.
 
-This view remains diagnostic and differential evidence only: SQL, constraints,
-checkpoint authority, backup, and reclamation do not select it. The removed
-in-memory recovery builder has no compatibility path. The disk-backed view is
-the sole unreleased v1 recovery design.
+This view remains diagnostic and differential evidence only for SQL and
+constraints. Checkpoint authority, backup, restore, scrub, orphan cleanup, and
+generation reclamation now select and preserve the exact bound base roots.
+Reclamation computes the physical row-page and overflow-extent closure of the
+current and immediately previous roots before deleting older metadata. The
+disk-backed view is the sole unreleased v1 recovery design.
+
+Backup copies the current row/overflow manifests and descriptor roots plus
+every physical page or extent generation reachable from their descriptors; a
+generation-local filename is not a complete backup boundary. Backup validation
+and restore demand-verify every reachable row page and overflow envelope before
+publishing the destination. Deep scrub applies the same descriptor closure, so
+corruption in an older physical artifact reused by the current root fails
+closed even after that artifact's obsolete root manifest has been reclaimed.
 
 ### Immutable relational row-delta v1 generation
 
@@ -741,9 +773,9 @@ manifest and remains readable after a newer generation publishes.
 This is the only relational row-delta representation. Skein has not published
 a durable database format, so the reader recognizes no legacy magic, version,
 layout, filename, or migration path. WAL recovery and immutable live views now
-pin `base + delta + live` through this representation. Exact checkpoint
-binding, SQL row selection, and reclamation of orphan or pinned generations
-remain separate activation and lifecycle contracts.
+pin `base + delta + live` through this representation. Exact base checkpoint
+binding is active; SQL row selection and delta-generation lifecycle
+reclamation remain separate activation contracts.
 
 ### Graph layout
 

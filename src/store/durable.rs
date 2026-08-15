@@ -11,22 +11,23 @@ use super::{
     encode_optional_sha256, encode_optional_u64, encode_property_type, encode_schema_object_state,
     encode_stable_id_mapping, encode_string, encode_string_vec, encode_table_kind, encode_u64_vec,
     encode_value_vec, encode_wal_header, file_checksum, frame_binary_wal_record,
-    has_storage_artifacts, parse_optional_sha256, parse_optional_u64, parse_u64,
-    process_crash_failpoint, property_projection_artifact_generation_file,
-    property_projection_manifest_generation_file, property_spill_artifact_generation_file,
-    property_spill_manifest_generation_file, read_durable_text, read_durable_text_bytes_with_limit,
-    relational_checkpoint_generation_file, remove_source_scan_artifacts, safe_reclaim_commit_epoch,
-    sniff_wal_format, source_scan, split_manifest_checksum,
-    split_projected_graph_artifact_checksum, split_stable_id_mapping_checksum,
-    storage_generation_for_file, store_id_for_path, sync_parent_dir, validate_backup_files,
-    validate_new_backup_destination, validate_search_projection_checkpoint_changes,
-    validate_storage_version, verify_integrity, wal_generation_file, wal_group_sync_failpoint,
-    CheckpointPublishStage, ProjectedGraphArtifact, WalCursorEvent, WalEntry, WalFileFormat, WalOp,
-    WalOpenOutcome, WalRecordCursor, BACKUP_MANIFEST_FILE, CANONICAL_ADJACENCY_MANIFEST_MAX_BYTES,
-    CANONICAL_MANIFEST_MAX_BYTES, CHECKPOINT_HEADER_V1, MANIFEST_FILE, MANIFEST_HEADER_V1,
-    PROJECTED_GRAPHS_FILE, PROPERTY_PROJECTION_MANIFEST_MAX_BYTES,
-    PROPERTY_SPILL_MANIFEST_MAX_BYTES, STABLE_ID_MAPPING_FILE, STORAGE_VERSION,
-    WAL_BINARY_FILE_HEADER_BYTES,
+    has_storage_artifacts, parse_optional_sha256, parse_optional_u64,
+    parse_relational_overflow_extent_generation_file,
+    parse_relational_row_page_artifact_generation_file, parse_u64, process_crash_failpoint,
+    property_projection_artifact_generation_file, property_projection_manifest_generation_file,
+    property_spill_artifact_generation_file, property_spill_manifest_generation_file,
+    read_durable_text, read_durable_text_bytes_with_limit, relational_checkpoint_generation_file,
+    remove_source_scan_artifacts, safe_reclaim_commit_epoch, sniff_wal_format, source_scan,
+    split_manifest_checksum, split_projected_graph_artifact_checksum,
+    split_stable_id_mapping_checksum, storage_generation_for_file, store_id_for_path,
+    sync_parent_dir, validate_backup_files, validate_new_backup_destination,
+    validate_search_projection_checkpoint_changes, validate_storage_version, verify_integrity,
+    wal_generation_file, wal_group_sync_failpoint, CheckpointPublishStage, ProjectedGraphArtifact,
+    WalCursorEvent, WalEntry, WalFileFormat, WalOp, WalOpenOutcome, WalRecordCursor,
+    BACKUP_MANIFEST_FILE, CANONICAL_ADJACENCY_MANIFEST_MAX_BYTES, CANONICAL_MANIFEST_MAX_BYTES,
+    CHECKPOINT_HEADER_V1, MANIFEST_FILE, MANIFEST_HEADER_V1, PROJECTED_GRAPHS_FILE,
+    PROPERTY_PROJECTION_MANIFEST_MAX_BYTES, PROPERTY_SPILL_MANIFEST_MAX_BYTES,
+    STABLE_ID_MAPPING_FILE, STORAGE_VERSION, WAL_BINARY_FILE_HEADER_BYTES,
 };
 use crate::error::{Result, SkeinError};
 use crate::schema::{Catalog, GraphStatistics};
@@ -44,7 +45,9 @@ use skein_storage::{
     PersistentPropertyProjectionManifest, PersistentPropertyProjectionReader,
     PersistentPropertyProjectionWriter, ProjectedGraphDefinition, PropertySpillConfig,
     PropertySpillManifest, PropertySpillReader, RelId, RelRecord, RelationalDecodeLimits,
-    RelationalIndexArtifactMetadata, RelationalIndexGenerationArtifacts, RelationalState,
+    RelationalIndexArtifactMetadata, RelationalIndexGenerationArtifacts,
+    RelationalOverflowArtifactMetadata, RelationalOverflowGenerationArtifacts,
+    RelationalRowPageArtifactMetadata, RelationalRowPageGenerationArtifacts, RelationalState,
     ScanSegmentManifest, SearchProjectionGraphChange, SegmentCache, StorageBackupReport,
     StorageDebtController, StoragePressureSignals, StorageScrubReport, StoreId,
     StoreStableIdMapping, WalReplayConfig, WalSyncGroupFlush, WalSyncGroupProgress,
@@ -84,6 +87,9 @@ pub(super) struct DurableStore {
     property_projection_manifest_encoded_len: Option<u64>,
     property_projection_manifest_encoded_checksum: Option<u64>,
     property_projection_manifest_encoded_sha256: Option<Sha256Digest>,
+    pub(super) relational_row_generation_artifacts: Option<RelationalRowPageGenerationArtifacts>,
+    pub(super) relational_overflow_generation_artifacts:
+        Option<RelationalOverflowGenerationArtifacts>,
     pub(super) relational_index_generation_artifacts: Option<RelationalIndexGenerationArtifacts>,
     pub(super) wal_generation: u64,
     pub(super) checkpoint_epoch: u64,
@@ -115,6 +121,52 @@ pub(super) struct DurableStore {
     max_batch_operations: Option<usize>,
     pub(super) telemetry: Option<Arc<dyn TelemetrySink>>,
     wal_sync_group: Option<WalSyncGroupState>,
+}
+
+struct StorageScrubCounters {
+    checked_file_count: usize,
+    checked_bytes: u64,
+    sha256_verified_file_count: usize,
+}
+
+impl StorageScrubCounters {
+    fn new(manifest_bytes: u64) -> Self {
+        Self {
+            checked_file_count: 1,
+            checked_bytes: manifest_bytes,
+            sha256_verified_file_count: 0,
+        }
+    }
+
+    fn verify_path(
+        &mut self,
+        path: &Path,
+        expected_len: u64,
+        expected_checksum: u64,
+        expected_sha256: Sha256Digest,
+        artifact: &str,
+    ) -> Result<()> {
+        let (actual_len, actual_checksum, actual_sha256) = file_checksum(path)?;
+        if actual_len != expected_len {
+            return Err(SkeinError::Storage(format!(
+                "{artifact} length mismatch during scrub: expected {expected_len}, got {actual_len}"
+            )));
+        }
+        if actual_checksum != expected_checksum {
+            return Err(SkeinError::Storage(format!(
+                "{artifact} CRC32C mismatch during scrub: expected {expected_checksum}, got {actual_checksum}"
+            )));
+        }
+        if actual_sha256 != expected_sha256 {
+            return Err(SkeinError::Storage(format!(
+                "{artifact} SHA-256 mismatch during scrub: expected {expected_sha256}, got {actual_sha256}"
+            )));
+        }
+        self.checked_file_count = self.checked_file_count.saturating_add(1);
+        self.checked_bytes = self.checked_bytes.saturating_add(actual_len);
+        self.sha256_verified_file_count = self.sha256_verified_file_count.saturating_add(1);
+        Ok(())
+    }
 }
 
 pub(super) struct CheckpointImage<'a> {
@@ -191,6 +243,8 @@ pub(super) struct CheckpointManifestArtifacts {
     pub(super) canonical_adjacency_manifest: DurableArtifactMetadata,
     pub(super) property_spill_manifest: DurableArtifactMetadata,
     pub(super) property_projection_manifest: DurableArtifactMetadata,
+    pub(super) relational_row: RelationalRowPageGenerationArtifacts,
+    pub(super) relational_overflow: RelationalOverflowGenerationArtifacts,
     pub(super) relational_index: Option<RelationalIndexGenerationArtifacts>,
 }
 
@@ -431,6 +485,9 @@ impl DurableStore {
                 .property_projection_manifest_encoded_checksum,
             property_projection_manifest_encoded_sha256: manifest
                 .property_projection_manifest_encoded_sha256,
+            relational_row_generation_artifacts: manifest.relational_row_generation_artifacts,
+            relational_overflow_generation_artifacts: manifest
+                .relational_overflow_generation_artifacts,
             relational_index_generation_artifacts: manifest.relational_index_generation_artifacts,
             wal_generation: manifest.wal_generation,
             checkpoint_epoch: manifest.checkpoint_epoch,
@@ -541,18 +598,18 @@ impl DurableStore {
         fs::create_dir(destination)?;
 
         let result = (|| {
-            let mut sources = vec![
+            let mut sources = BTreeMap::from([
                 (MANIFEST_FILE.to_string(), self.manifest_path.clone()),
                 (
                     checkpoint_generation_file(generation),
                     self.checkpoint_path.clone(),
                 ),
                 (wal_generation_file(generation), self.wal_path.clone()),
-            ];
+            ]);
             let relational_checkpoint_name = relational_checkpoint_generation_file(generation);
             let relational_checkpoint_path = self.root_path.join(&relational_checkpoint_name);
             if self.relational_checkpoint_encoded_len.is_some() {
-                sources.push((relational_checkpoint_name, relational_checkpoint_path));
+                sources.insert(relational_checkpoint_name, relational_checkpoint_path);
             }
             if let Some(binding) = self.relational_index_generation_artifacts {
                 let page_name =
@@ -560,56 +617,106 @@ impl DurableStore {
                 let manifest_name = skein_storage::relational_index_shadow_manifest_generation_file(
                     binding.generation,
                 );
-                sources.push((page_name.clone(), self.root_path.join(page_name)));
-                sources.push((manifest_name.clone(), self.root_path.join(manifest_name)));
+                sources.insert(page_name.clone(), self.root_path.join(page_name));
+                sources.insert(manifest_name.clone(), self.root_path.join(manifest_name));
+            }
+            if let Some(binding) = self.relational_row_generation_artifacts {
+                for name in [
+                    skein_storage::relational_row_page_root_descriptor_file(binding.generation),
+                    skein_storage::relational_row_page_root_key_file(binding.generation),
+                    skein_storage::relational_row_page_manifest_generation_file(binding.generation),
+                ] {
+                    sources.insert(name.clone(), self.root_path.join(name));
+                }
+            }
+            if let Some(binding) = self.relational_overflow_generation_artifacts {
+                for name in [
+                    skein_storage::relational_overflow_descriptor_file(binding.generation),
+                    skein_storage::relational_overflow_manifest_generation_file(binding.generation),
+                ] {
+                    sources.insert(name.clone(), self.root_path.join(name));
+                }
+            }
+            let overflow_root = self.open_bound_relational_overflow()?;
+            let mut overflow_extent_generations =
+                BTreeSet::from([overflow_root.manifest().generation]);
+            overflow_root
+                .visit_descriptors(|descriptor| {
+                    overflow_extent_generations.insert(descriptor.physical_generation);
+                    Ok(())
+                })
+                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            for physical_generation in overflow_extent_generations {
+                let name = skein_storage::relational_overflow_extent_file(physical_generation);
+                sources.insert(name.clone(), self.root_path.join(name));
+            }
+            let row_root = self.open_bound_relational_row_pages(&overflow_root)?;
+            let mut row_page_generations = BTreeSet::from([row_root.manifest().generation]);
+            let tables = row_root
+                .manifest()
+                .tables
+                .iter()
+                .map(|table| table.table.clone())
+                .collect::<Vec<_>>();
+            for table in tables {
+                row_root
+                    .visit_table_pages(&table, |descriptor| {
+                        row_page_generations.insert(descriptor.physical_generation);
+                        Ok(())
+                    })
+                    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            }
+            for physical_generation in row_page_generations {
+                let name = skein_storage::relational_row_page_artifact_file(physical_generation);
+                sources.insert(name.clone(), self.root_path.join(name));
             }
             if self.canonical_manifest_encoded_len.is_some() {
-                sources.push((
+                sources.insert(
                     canonical_artifact_generation_file(generation),
                     self.root_path
                         .join(canonical_artifact_generation_file(generation)),
-                ));
-                sources.push((
+                );
+                sources.insert(
                     canonical_manifest_generation_file(generation),
                     self.root_path
                         .join(canonical_manifest_generation_file(generation)),
-                ));
+                );
             }
             if self.canonical_adjacency_manifest_encoded_len.is_some() {
-                sources.push((
+                sources.insert(
                     canonical_adjacency_artifact_generation_file(generation),
                     self.root_path
                         .join(canonical_adjacency_artifact_generation_file(generation)),
-                ));
-                sources.push((
+                );
+                sources.insert(
                     canonical_adjacency_manifest_generation_file(generation),
                     self.root_path
                         .join(canonical_adjacency_manifest_generation_file(generation)),
-                ));
+                );
             }
             if self.property_spill_manifest_encoded_len.is_some() {
-                sources.push((
+                sources.insert(
                     property_spill_artifact_generation_file(generation),
                     self.root_path
                         .join(property_spill_artifact_generation_file(generation)),
-                ));
-                sources.push((
+                );
+                sources.insert(
                     property_spill_manifest_generation_file(generation),
                     self.root_path
                         .join(property_spill_manifest_generation_file(generation)),
-                ));
+                );
             }
             if self.property_projection_manifest_encoded_len.is_some() {
-                sources.push((
+                sources.insert(
                     property_projection_artifact_generation_file(generation),
                     self.root_path
                         .join(property_projection_artifact_generation_file(generation)),
-                ));
-                sources.push((
+                );
+                sources.insert(
                     property_projection_manifest_generation_file(generation),
                     self.root_path
                         .join(property_projection_manifest_generation_file(generation)),
-                ));
+                );
             }
             let mut files = Vec::with_capacity(sources.len().saturating_add(1));
             for (name, source) in sources {
@@ -653,37 +760,7 @@ impl DurableStore {
 
     pub(super) fn scrub_storage(&self) -> Result<StorageScrubReport> {
         let manifest = DurableManifest::load(&self.manifest_path)?;
-        let mut checked_file_count = 1usize;
-        let mut checked_bytes = fs::metadata(&self.manifest_path)?.len();
-        let mut sha256_verified_file_count = 0usize;
-
-        let mut verify_path = |path: &Path,
-                               expected_len: u64,
-                               expected_checksum: u64,
-                               expected_sha256: Sha256Digest,
-                               artifact: &str|
-         -> Result<()> {
-            let (actual_len, actual_checksum, actual_sha256) = file_checksum(path)?;
-            if actual_len != expected_len {
-                return Err(SkeinError::Storage(format!(
-                    "{artifact} length mismatch during scrub: expected {expected_len}, got {actual_len}"
-                )));
-            }
-            if actual_checksum != expected_checksum {
-                return Err(SkeinError::Storage(format!(
-                    "{artifact} CRC32C mismatch during scrub: expected {expected_checksum}, got {actual_checksum}"
-                )));
-            }
-            if actual_sha256 != expected_sha256 {
-                return Err(SkeinError::Storage(format!(
-                    "{artifact} SHA-256 mismatch during scrub: expected {expected_sha256}, got {actual_sha256}"
-                )));
-            }
-            checked_file_count = checked_file_count.saturating_add(1);
-            checked_bytes = checked_bytes.saturating_add(actual_len);
-            sha256_verified_file_count = sha256_verified_file_count.saturating_add(1);
-            Ok(())
-        };
+        let mut scrub = StorageScrubCounters::new(fs::metadata(&self.manifest_path)?.len());
 
         if let (
             Some(generation),
@@ -696,7 +773,7 @@ impl DurableStore {
             manifest.checkpoint_encoded_checksum,
             manifest.checkpoint_encoded_sha256,
         ) {
-            verify_path(
+            scrub.verify_path(
                 &self.root_path.join(checkpoint_generation_file(generation)),
                 expected_len,
                 expected_checksum,
@@ -713,7 +790,7 @@ impl DurableStore {
             let path = self
                 .root_path
                 .join(relational_checkpoint_generation_file(self.checkpoint_epoch));
-            verify_path(
+            scrub.verify_path(
                 &path,
                 expected_len,
                 expected_checksum,
@@ -737,7 +814,7 @@ impl DurableStore {
                     .join(skein_storage::relational_index_shadow_artifact_file(
                         binding.generation,
                     ));
-            verify_path(
+            scrub.verify_path(
                 &page_path,
                 binding.page_artifact.encoded_len,
                 binding.page_artifact.encoded_crc32c,
@@ -747,7 +824,7 @@ impl DurableStore {
             let generation_manifest_path = self.root_path.join(
                 skein_storage::relational_index_shadow_manifest_generation_file(binding.generation),
             );
-            verify_path(
+            scrub.verify_path(
                 &generation_manifest_path,
                 binding.manifest_artifact.encoded_len,
                 binding.manifest_artifact.encoded_crc32c,
@@ -773,6 +850,94 @@ impl DurableStore {
             }
         }
 
+        let overflow_root = self.open_bound_relational_overflow()?;
+        let overflow_binding = manifest
+            .relational_overflow_generation_artifacts
+            .expect("validated checkpoint has an overflow binding");
+        scrub.verify_path(
+            &self
+                .root_path
+                .join(skein_storage::relational_overflow_manifest_generation_file(
+                    overflow_binding.generation,
+                )),
+            overflow_binding.manifest_artifact.encoded_len,
+            u64::from(overflow_binding.manifest_artifact.encoded_crc32c),
+            overflow_binding.manifest_artifact.encoded_sha256,
+            "relational overflow generation manifest",
+        )?;
+        scrub.verify_path(
+            &self
+                .root_path
+                .join(skein_storage::relational_overflow_extent_file(
+                    overflow_binding.generation,
+                )),
+            overflow_root.manifest().extent_artifact.encoded_len,
+            u64::from(overflow_root.manifest().extent_artifact.encoded_crc32c),
+            overflow_root.manifest().extent_artifact.encoded_sha256,
+            "relational overflow extent artifact",
+        )?;
+        scrub.verify_path(
+            &self
+                .root_path
+                .join(skein_storage::relational_overflow_descriptor_file(
+                    overflow_binding.generation,
+                )),
+            overflow_root.manifest().descriptor_artifact.encoded_len,
+            u64::from(overflow_root.manifest().descriptor_artifact.encoded_crc32c),
+            overflow_root.manifest().descriptor_artifact.encoded_sha256,
+            "relational overflow descriptor artifact",
+        )?;
+
+        let row_root = self.open_bound_relational_row_pages(&overflow_root)?;
+        let row_binding = manifest
+            .relational_row_generation_artifacts
+            .expect("validated checkpoint has a row-page binding");
+        scrub.verify_path(
+            &self
+                .root_path
+                .join(skein_storage::relational_row_page_manifest_generation_file(
+                    row_binding.generation,
+                )),
+            row_binding.manifest_artifact.encoded_len,
+            u64::from(row_binding.manifest_artifact.encoded_crc32c),
+            row_binding.manifest_artifact.encoded_sha256,
+            "relational row-page generation manifest",
+        )?;
+        for (path, metadata, artifact) in [
+            (
+                self.root_path
+                    .join(skein_storage::relational_row_page_artifact_file(
+                        row_binding.generation,
+                    )),
+                row_root.manifest().page_artifact,
+                "relational row-page artifact",
+            ),
+            (
+                self.root_path
+                    .join(skein_storage::relational_row_page_root_descriptor_file(
+                        row_binding.generation,
+                    )),
+                row_root.manifest().root_descriptor_artifact,
+                "relational row-page descriptor artifact",
+            ),
+            (
+                self.root_path
+                    .join(skein_storage::relational_row_page_root_key_file(
+                        row_binding.generation,
+                    )),
+                row_root.manifest().root_key_artifact,
+                "relational row-page key artifact",
+            ),
+        ] {
+            scrub.verify_path(
+                &path,
+                metadata.encoded_len,
+                u64::from(metadata.encoded_crc32c),
+                metadata.encoded_sha256,
+                artifact,
+            )?;
+        }
+
         if let (Some(expected_len), Some(expected_checksum), Some(expected_sha256)) = (
             manifest.canonical_manifest_encoded_len,
             manifest.canonical_manifest_encoded_checksum,
@@ -784,7 +949,7 @@ impl DurableStore {
             let manifest_path = self
                 .root_path
                 .join(canonical_manifest_generation_file(generation));
-            verify_path(
+            scrub.verify_path(
                 &manifest_path,
                 expected_len,
                 expected_checksum,
@@ -793,7 +958,7 @@ impl DurableStore {
             )?;
             let artifact = CanonicalSegmentManifest::decode(&fs::read_to_string(&manifest_path)?)
                 .map_err(|error| SkeinError::Storage(error.to_string()))?;
-            verify_path(
+            scrub.verify_path(
                 &self
                     .root_path
                     .join(canonical_artifact_generation_file(generation)),
@@ -815,7 +980,7 @@ impl DurableStore {
             let manifest_path = self
                 .root_path
                 .join(canonical_adjacency_manifest_generation_file(generation));
-            verify_path(
+            scrub.verify_path(
                 &manifest_path,
                 expected_len,
                 expected_checksum,
@@ -824,7 +989,7 @@ impl DurableStore {
             )?;
             let artifact = CanonicalAdjacencyManifest::decode(&fs::read_to_string(&manifest_path)?)
                 .map_err(|error| SkeinError::Storage(error.to_string()))?;
-            verify_path(
+            scrub.verify_path(
                 &self
                     .root_path
                     .join(canonical_adjacency_artifact_generation_file(generation)),
@@ -846,7 +1011,7 @@ impl DurableStore {
             let manifest_path = self
                 .root_path
                 .join(property_spill_manifest_generation_file(generation));
-            verify_path(
+            scrub.verify_path(
                 &manifest_path,
                 expected_len,
                 expected_checksum,
@@ -855,7 +1020,7 @@ impl DurableStore {
             )?;
             let artifact = PropertySpillManifest::decode(&fs::read_to_string(&manifest_path)?)
                 .map_err(|error| SkeinError::Storage(error.to_string()))?;
-            verify_path(
+            scrub.verify_path(
                 &self
                     .root_path
                     .join(property_spill_artifact_generation_file(generation)),
@@ -877,7 +1042,7 @@ impl DurableStore {
             let manifest_path = self
                 .root_path
                 .join(property_projection_manifest_generation_file(generation));
-            verify_path(
+            scrub.verify_path(
                 &manifest_path,
                 expected_len,
                 expected_checksum,
@@ -887,7 +1052,7 @@ impl DurableStore {
             let artifact =
                 PersistentPropertyProjectionManifest::decode(&fs::read_to_string(&manifest_path)?)
                     .map_err(|error| SkeinError::Storage(error.to_string()))?;
-            verify_path(
+            scrub.verify_path(
                 &self
                     .root_path
                     .join(property_projection_artifact_generation_file(generation)),
@@ -898,16 +1063,82 @@ impl DurableStore {
             )?;
         }
 
+        let mut overflow_extent_generations = BTreeSet::new();
+        let mut older_overflow_bytes = 0u64;
+        overflow_root
+            .visit_descriptors(|descriptor| {
+                overflow_extent_generations.insert(descriptor.physical_generation);
+                overflow_root.hydrate(
+                    &descriptor.reference,
+                    &mut skein_storage::RelationalHydrationBudget::default(),
+                    None,
+                )?;
+                if descriptor.physical_generation != overflow_binding.generation {
+                    older_overflow_bytes = older_overflow_bytes
+                        .checked_add(descriptor.envelope_bytes)
+                        .ok_or_else(|| {
+                            skein_storage::RelationalOverflowPublicationError::Admission(
+                                "overflow scrub byte count overflow".to_string(),
+                            )
+                        })?;
+                }
+                Ok(())
+            })
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        let older_overflow_files = overflow_extent_generations
+            .iter()
+            .filter(|generation| **generation != overflow_binding.generation)
+            .count();
+        scrub.checked_file_count = scrub
+            .checked_file_count
+            .saturating_add(older_overflow_files);
+        scrub.checked_bytes = scrub.checked_bytes.saturating_add(older_overflow_bytes);
+
+        let mut row_page_generations = BTreeSet::new();
+        let mut older_row_page_bytes = 0u64;
+        let tables = row_root
+            .manifest()
+            .tables
+            .iter()
+            .map(|table| table.table.clone())
+            .collect::<Vec<_>>();
+        for table in tables {
+            row_root
+                .visit_table_pages(&table, |descriptor| {
+                    row_page_generations.insert(descriptor.physical_generation);
+                    row_root.read_page(descriptor)?;
+                    if descriptor.physical_generation != row_binding.generation {
+                        older_row_page_bytes = older_row_page_bytes
+                            .checked_add(row_root.manifest().page_bytes)
+                            .ok_or_else(|| {
+                                skein_storage::RelationalRowPagePublicationError::Admission(
+                                    "row-page scrub byte count overflow".to_string(),
+                                )
+                            })?;
+                    }
+                    Ok(())
+                })
+                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        }
+        let older_row_page_files = row_page_generations
+            .iter()
+            .filter(|generation| **generation != row_binding.generation)
+            .count();
+        scrub.checked_file_count = scrub
+            .checked_file_count
+            .saturating_add(older_row_page_files);
+        scrub.checked_bytes = scrub.checked_bytes.saturating_add(older_row_page_bytes);
+
         let (wal_record_count, wal_bytes) = self.scrub_wal()?;
         if self.wal_path.exists() {
-            checked_file_count = checked_file_count.saturating_add(1);
-            checked_bytes = checked_bytes.saturating_add(wal_bytes);
+            scrub.checked_file_count = scrub.checked_file_count.saturating_add(1);
+            scrub.checked_bytes = scrub.checked_bytes.saturating_add(wal_bytes);
         }
         Ok(StorageScrubReport {
             generation: manifest.wal_generation,
-            checked_file_count,
-            checked_bytes,
-            sha256_verified_file_count,
+            checked_file_count: scrub.checked_file_count,
+            checked_bytes: scrub.checked_bytes,
+            sha256_verified_file_count: scrub.sha256_verified_file_count,
             wal_record_count,
             wal_bytes,
         })
@@ -1837,6 +2068,13 @@ impl DurableStore {
             property_projection_manifest_generation_file(generation),
             skein_storage::relational_index_shadow_artifact_file(generation),
             skein_storage::relational_index_shadow_manifest_generation_file(generation),
+            skein_storage::relational_row_page_artifact_file(generation),
+            skein_storage::relational_row_page_root_descriptor_file(generation),
+            skein_storage::relational_row_page_root_key_file(generation),
+            skein_storage::relational_row_page_manifest_generation_file(generation),
+            skein_storage::relational_overflow_extent_file(generation),
+            skein_storage::relational_overflow_descriptor_file(generation),
+            skein_storage::relational_overflow_manifest_generation_file(generation),
         ] {
             match fs::remove_file(self.root_path.join(file)) {
                 Ok(()) => {}
@@ -1918,6 +2156,94 @@ impl DurableStore {
         decode_stable_id_mapping(body)
     }
 
+    pub(super) fn open_bound_relational_overflow(
+        &self,
+    ) -> Result<skein_storage::RelationalOverflowRootReader> {
+        let binding = self
+            .relational_overflow_generation_artifacts
+            .ok_or_else(|| {
+                SkeinError::Storage(
+                    "published checkpoint has no relational overflow generation binding"
+                        .to_string(),
+                )
+            })?;
+        let manifest_path =
+            self.root_path
+                .join(skein_storage::relational_overflow_manifest_generation_file(
+                    binding.generation,
+                ));
+        verify_bound_generation_manifest(
+            &manifest_path,
+            binding.manifest_artifact.encoded_len,
+            binding.manifest_artifact.encoded_crc32c,
+            binding.manifest_artifact.encoded_sha256,
+            "relational overflow",
+        )?;
+        let reader = skein_storage::RelationalOverflowRootReader::open_generation(
+            &self.root_path,
+            binding.generation,
+            skein_storage::RelationalOverflowPublicationConfig::default(),
+        )
+        .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        let manifest = reader.manifest();
+        if manifest.source_commit_epoch != binding.source_commit_epoch
+            || manifest.root_set_digest != binding.root_set_digest
+        {
+            return Err(SkeinError::Storage(
+                "relational overflow generation identity differs from canonical binding"
+                    .to_string(),
+            ));
+        }
+        Ok(reader)
+    }
+
+    pub(super) fn open_bound_relational_row_pages(
+        &self,
+        overflow_root: &skein_storage::RelationalOverflowRootReader,
+    ) -> Result<skein_storage::RelationalRowPageRootReader> {
+        let binding = self.relational_row_generation_artifacts.ok_or_else(|| {
+            SkeinError::Storage(
+                "published checkpoint has no relational row-page generation binding".to_string(),
+            )
+        })?;
+        let manifest_path =
+            self.root_path
+                .join(skein_storage::relational_row_page_manifest_generation_file(
+                    binding.generation,
+                ));
+        verify_bound_generation_manifest(
+            &manifest_path,
+            binding.manifest_artifact.encoded_len,
+            binding.manifest_artifact.encoded_crc32c,
+            binding.manifest_artifact.encoded_sha256,
+            "relational row-page",
+        )?;
+        let reader = skein_storage::RelationalRowPageRootReader::open_generation(
+            &self.root_path,
+            binding.generation,
+            skein_storage::RelationalRowPagePublicationConfig::default(),
+        )
+        .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        let manifest = reader.manifest();
+        if manifest.source_commit_epoch != binding.source_commit_epoch
+            || manifest.root_set_digest != binding.root_set_digest
+        {
+            return Err(SkeinError::Storage(
+                "relational row-page generation identity differs from canonical binding"
+                    .to_string(),
+            ));
+        }
+        if manifest.overflow_root.is_none() {
+            return Err(SkeinError::Storage(
+                "canonical relational row-page generation has no overflow binding".to_string(),
+            ));
+        }
+        reader
+            .validate_overflow_root(overflow_root)
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        Ok(reader)
+    }
+
     pub(super) fn prepare_wal_generation(&self, generation: u64) -> Result<()> {
         // New WAL generations always use the binary format; an existing
         // text database therefore upgrades at its next checkpoint.
@@ -1953,6 +2279,8 @@ impl DurableStore {
             canonical_adjacency_manifest,
             property_spill_manifest,
             property_projection_manifest,
+            relational_row,
+            relational_overflow,
             relational_index,
         } = artifacts;
         let manifest = DurableManifest {
@@ -1986,6 +2314,8 @@ impl DurableStore {
             property_projection_manifest_encoded_sha256: Some(
                 property_projection_manifest.encoded_sha256,
             ),
+            relational_row_generation_artifacts: Some(relational_row),
+            relational_overflow_generation_artifacts: Some(relational_overflow),
             relational_index_generation_artifacts: relational_index,
             wal_generation: generation,
             checkpoint_epoch: generation,
@@ -2032,6 +2362,9 @@ impl DurableStore {
             manifest.property_projection_manifest_encoded_checksum;
         self.property_projection_manifest_encoded_sha256 =
             manifest.property_projection_manifest_encoded_sha256;
+        self.relational_row_generation_artifacts = manifest.relational_row_generation_artifacts;
+        self.relational_overflow_generation_artifacts =
+            manifest.relational_overflow_generation_artifacts;
         self.relational_index_generation_artifacts = manifest.relational_index_generation_artifacts;
         self.wal_generation = manifest.wal_generation;
         self.checkpoint_epoch = manifest.checkpoint_epoch;
@@ -2088,6 +2421,8 @@ impl DurableStore {
             return Ok(());
         }
         let retain_from = current_generation.saturating_sub(1);
+        let (retained_row_page_generations, retained_overflow_extent_generations) =
+            self.retained_relational_physical_generations(current_generation)?;
         for entry in fs::read_dir(&self.root_path)? {
             let entry = entry?;
             let name = entry.file_name();
@@ -2096,10 +2431,78 @@ impl DurableStore {
             };
             let generation = storage_generation_for_file(name);
             if generation.is_some_and(|generation| generation < retain_from) {
+                if parse_relational_row_page_artifact_generation_file(name)
+                    .is_some_and(|generation| retained_row_page_generations.contains(&generation))
+                    || parse_relational_overflow_extent_generation_file(name).is_some_and(
+                        |generation| retained_overflow_extent_generations.contains(&generation),
+                    )
+                {
+                    continue;
+                }
                 fs::remove_file(entry.path())?;
             }
         }
         sync_parent_dir(&self.manifest_path)
+    }
+
+    fn retained_relational_physical_generations(
+        &self,
+        current_generation: u64,
+    ) -> Result<(BTreeSet<u64>, BTreeSet<u64>)> {
+        let mut row_page_generations = BTreeSet::new();
+        let mut overflow_extent_generations = BTreeSet::new();
+        let first_retained_generation = current_generation.saturating_sub(1).max(1);
+
+        for generation in first_retained_generation..=current_generation {
+            let overflow_manifest =
+                self.root_path
+                    .join(skein_storage::relational_overflow_manifest_generation_file(
+                        generation,
+                    ));
+            if overflow_manifest.exists() {
+                let overflow = skein_storage::RelationalOverflowRootReader::open_generation(
+                    &self.root_path,
+                    generation,
+                    skein_storage::RelationalOverflowPublicationConfig::default(),
+                )
+                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                overflow
+                    .visit_descriptors(|descriptor| {
+                        overflow_extent_generations.insert(descriptor.physical_generation);
+                        Ok(())
+                    })
+                    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            }
+
+            let row_manifest =
+                self.root_path
+                    .join(skein_storage::relational_row_page_manifest_generation_file(
+                        generation,
+                    ));
+            if row_manifest.exists() {
+                let rows = skein_storage::RelationalRowPageRootReader::open_generation(
+                    &self.root_path,
+                    generation,
+                    skein_storage::RelationalRowPagePublicationConfig::default(),
+                )
+                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                let tables = rows
+                    .manifest()
+                    .tables
+                    .iter()
+                    .map(|table| table.table.clone())
+                    .collect::<Vec<_>>();
+                for table in tables {
+                    rows.visit_table_pages(&table, |descriptor| {
+                        row_page_generations.insert(descriptor.physical_generation);
+                        Ok(())
+                    })
+                    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                }
+            }
+        }
+
+        Ok((row_page_generations, overflow_extent_generations))
     }
 }
 
@@ -2121,6 +2524,9 @@ pub(super) struct DurableManifest {
     pub(super) property_projection_manifest_encoded_len: Option<u64>,
     pub(super) property_projection_manifest_encoded_checksum: Option<u64>,
     pub(super) property_projection_manifest_encoded_sha256: Option<Sha256Digest>,
+    pub(super) relational_row_generation_artifacts: Option<RelationalRowPageGenerationArtifacts>,
+    pub(super) relational_overflow_generation_artifacts:
+        Option<RelationalOverflowGenerationArtifacts>,
     pub(super) relational_index_generation_artifacts: Option<RelationalIndexGenerationArtifacts>,
     pub(super) wal_generation: u64,
     pub(super) checkpoint_epoch: u64,
@@ -2145,6 +2551,106 @@ struct RelationalIndexManifestFields {
     manifest_encoded_len: Option<u64>,
     manifest_encoded_checksum: Option<u64>,
     manifest_encoded_sha256: Option<Sha256Digest>,
+}
+
+#[derive(Default)]
+struct RelationalRootManifestFields {
+    generation: Option<u64>,
+    source_commit_epoch: Option<u64>,
+    root_set_digest: Option<Sha256Digest>,
+    manifest_encoded_len: Option<u64>,
+    manifest_encoded_checksum: Option<u64>,
+    manifest_encoded_sha256: Option<Sha256Digest>,
+}
+
+impl RelationalRootManifestFields {
+    fn presence(&self) -> [bool; 6] {
+        [
+            self.generation.is_some(),
+            self.source_commit_epoch.is_some(),
+            self.root_set_digest.is_some(),
+            self.manifest_encoded_len.is_some(),
+            self.manifest_encoded_checksum.is_some(),
+            self.manifest_encoded_sha256.is_some(),
+        ]
+    }
+
+    fn require_complete(&self, artifact: &str) -> Result<bool> {
+        let presence = self.presence();
+        if presence.iter().all(|present| !present) {
+            return Ok(false);
+        }
+        if !presence.iter().all(|present| *present) {
+            return Err(SkeinError::Storage(format!(
+                "manifest {artifact} generation binding is incomplete"
+            )));
+        }
+        Ok(true)
+    }
+
+    fn finish_row(self) -> Result<Option<RelationalRowPageGenerationArtifacts>> {
+        if !self.require_complete("relational row-page")? {
+            return Ok(None);
+        }
+        Ok(Some(RelationalRowPageGenerationArtifacts {
+            generation: self.generation.expect("complete binding has generation"),
+            source_commit_epoch: self
+                .source_commit_epoch
+                .expect("complete binding has source commit epoch"),
+            root_set_digest: self
+                .root_set_digest
+                .expect("complete binding has root-set digest"),
+            manifest_artifact: RelationalRowPageArtifactMetadata {
+                encoded_len: self
+                    .manifest_encoded_len
+                    .expect("complete binding has manifest length"),
+                encoded_crc32c: u32::try_from(
+                    self.manifest_encoded_checksum
+                        .expect("complete binding has manifest checksum"),
+                )
+                .map_err(|_| {
+                    SkeinError::Storage(
+                        "relational row-page manifest checksum exceeds CRC32C range".to_string(),
+                    )
+                })?,
+                encoded_sha256: self
+                    .manifest_encoded_sha256
+                    .expect("complete binding has manifest SHA-256"),
+            },
+        }))
+    }
+
+    fn finish_overflow(self) -> Result<Option<RelationalOverflowGenerationArtifacts>> {
+        if !self.require_complete("relational overflow")? {
+            return Ok(None);
+        }
+        Ok(Some(RelationalOverflowGenerationArtifacts {
+            generation: self.generation.expect("complete binding has generation"),
+            source_commit_epoch: self
+                .source_commit_epoch
+                .expect("complete binding has source commit epoch"),
+            root_set_digest: self
+                .root_set_digest
+                .expect("complete binding has root-set digest"),
+            manifest_artifact: RelationalOverflowArtifactMetadata {
+                encoded_len: self
+                    .manifest_encoded_len
+                    .expect("complete binding has manifest length"),
+                encoded_crc32c: u32::try_from(
+                    self.manifest_encoded_checksum
+                        .expect("complete binding has manifest checksum"),
+                )
+                .map_err(|_| {
+                    SkeinError::Storage(
+                        "relational overflow manifest checksum exceeds CRC32C range".to_string(),
+                    )
+                })?,
+                encoded_sha256: self
+                    .manifest_encoded_sha256
+                    .expect("complete binding has manifest SHA-256"),
+            },
+        }))
+    }
 }
 
 impl RelationalIndexManifestFields {
@@ -2215,6 +2721,25 @@ pub(super) fn artifact_metadata_presence_consistent(
     encoded_checksum.is_some() == present && encoded_sha256.is_some() == present
 }
 
+fn verify_bound_generation_manifest(
+    path: &Path,
+    expected_len: u64,
+    expected_checksum: u32,
+    expected_sha256: Sha256Digest,
+    artifact: &str,
+) -> Result<()> {
+    let (actual_len, actual_checksum, actual_sha256) = file_checksum(path)?;
+    if actual_len != expected_len
+        || actual_checksum != u64::from(expected_checksum)
+        || actual_sha256 != expected_sha256
+    {
+        return Err(SkeinError::Storage(format!(
+            "canonical {artifact} generation manifest integrity mismatch"
+        )));
+    }
+    Ok(())
+}
+
 impl Default for DurableManifest {
     fn default() -> Self {
         Self::initial_generation()
@@ -2240,6 +2765,8 @@ impl DurableManifest {
             property_projection_manifest_encoded_len: None,
             property_projection_manifest_encoded_checksum: None,
             property_projection_manifest_encoded_sha256: None,
+            relational_row_generation_artifacts: None,
+            relational_overflow_generation_artifacts: None,
             relational_index_generation_artifacts: None,
             wal_generation: 0,
             checkpoint_epoch: 0,
@@ -2339,6 +2866,50 @@ impl DurableManifest {
                 "manifest property projections require canonical segments".to_string(),
             ));
         }
+        for (artifact, binding) in [
+            (
+                "relational row-page",
+                self.relational_row_generation_artifacts.map(|binding| {
+                    (
+                        binding.generation,
+                        binding.source_commit_epoch,
+                        binding.manifest_artifact.encoded_len,
+                    )
+                }),
+            ),
+            (
+                "relational overflow",
+                self.relational_overflow_generation_artifacts
+                    .map(|binding| {
+                        (
+                            binding.generation,
+                            binding.source_commit_epoch,
+                            binding.manifest_artifact.encoded_len,
+                        )
+                    }),
+            ),
+        ] {
+            if let Some((generation, source_commit_epoch, manifest_bytes)) = binding {
+                if generation == 0 {
+                    return Err(SkeinError::Storage(format!(
+                        "manifest {artifact} generation must be non-zero"
+                    )));
+                }
+                if generation != self.checkpoint_epoch
+                    || source_commit_epoch != self.checkpoint_commit_epoch
+                {
+                    return Err(SkeinError::Storage(format!(
+                        "manifest {artifact} generation/epoch {generation}/{source_commit_epoch} does not match checkpoint {}/{}",
+                        self.checkpoint_epoch, self.checkpoint_commit_epoch
+                    )));
+                }
+                if manifest_bytes == 0 {
+                    return Err(SkeinError::Storage(format!(
+                        "manifest {artifact} generation manifest must not be empty"
+                    )));
+                }
+            }
+        }
         if let Some(binding) = self.relational_index_generation_artifacts {
             if binding.generation == 0 {
                 return Err(SkeinError::Storage(
@@ -2384,6 +2955,14 @@ impl DurableManifest {
                         "manifest checkpoint artifact metadata is incomplete".to_string(),
                     ));
                 }
+                if self.relational_row_generation_artifacts.is_none()
+                    || self.relational_overflow_generation_artifacts.is_none()
+                {
+                    return Err(SkeinError::Storage(
+                        "published checkpoint must bind relational row-page and overflow generations"
+                            .to_string(),
+                    ));
+                }
             }
             None => {
                 if self.checkpoint_epoch != 0
@@ -2403,6 +2982,8 @@ impl DurableManifest {
                     || self.property_projection_manifest_encoded_len.is_some()
                     || self.property_projection_manifest_encoded_checksum.is_some()
                     || self.property_projection_manifest_encoded_sha256.is_some()
+                    || self.relational_row_generation_artifacts.is_some()
+                    || self.relational_overflow_generation_artifacts.is_some()
                     || self.relational_index_generation_artifacts.is_some()
                 {
                     return Err(SkeinError::Storage(
@@ -2430,6 +3011,8 @@ impl DurableManifest {
             ));
         }
         let mut manifest = Self::initial_generation();
+        let mut relational_row = RelationalRootManifestFields::default();
+        let mut relational_overflow = RelationalRootManifestFields::default();
         let mut relational_index = RelationalIndexManifestFields::default();
         let mut seen_fields = BTreeSet::new();
         for line in lines {
@@ -2508,6 +3091,54 @@ impl DurableManifest {
                 ["property_projection_manifest_encoded_sha256", raw] => {
                     manifest.property_projection_manifest_encoded_sha256 =
                         parse_optional_sha256(raw, "property projection manifest encoded SHA-256")?;
+                }
+                ["relational_row_generation", raw] => {
+                    relational_row.generation =
+                        parse_optional_u64(raw, "relational row-page generation")?;
+                }
+                ["relational_row_source_commit_epoch", raw] => {
+                    relational_row.source_commit_epoch =
+                        parse_optional_u64(raw, "relational row-page source commit epoch")?;
+                }
+                ["relational_row_root_set_sha256", raw] => {
+                    relational_row.root_set_digest =
+                        parse_optional_sha256(raw, "relational row-page root-set SHA-256")?;
+                }
+                ["relational_row_manifest_encoded_len", raw] => {
+                    relational_row.manifest_encoded_len =
+                        parse_optional_u64(raw, "relational row-page manifest encoded length")?;
+                }
+                ["relational_row_manifest_encoded_checksum", raw] => {
+                    relational_row.manifest_encoded_checksum =
+                        parse_optional_u64(raw, "relational row-page manifest encoded checksum")?;
+                }
+                ["relational_row_manifest_encoded_sha256", raw] => {
+                    relational_row.manifest_encoded_sha256 =
+                        parse_optional_sha256(raw, "relational row-page manifest encoded SHA-256")?;
+                }
+                ["relational_overflow_generation", raw] => {
+                    relational_overflow.generation =
+                        parse_optional_u64(raw, "relational overflow generation")?;
+                }
+                ["relational_overflow_source_commit_epoch", raw] => {
+                    relational_overflow.source_commit_epoch =
+                        parse_optional_u64(raw, "relational overflow source commit epoch")?;
+                }
+                ["relational_overflow_root_set_sha256", raw] => {
+                    relational_overflow.root_set_digest =
+                        parse_optional_sha256(raw, "relational overflow root-set SHA-256")?;
+                }
+                ["relational_overflow_manifest_encoded_len", raw] => {
+                    relational_overflow.manifest_encoded_len =
+                        parse_optional_u64(raw, "relational overflow manifest encoded length")?;
+                }
+                ["relational_overflow_manifest_encoded_checksum", raw] => {
+                    relational_overflow.manifest_encoded_checksum =
+                        parse_optional_u64(raw, "relational overflow manifest encoded checksum")?;
+                }
+                ["relational_overflow_manifest_encoded_sha256", raw] => {
+                    relational_overflow.manifest_encoded_sha256 =
+                        parse_optional_sha256(raw, "relational overflow manifest encoded SHA-256")?;
                 }
                 ["relational_index_generation", raw] => {
                     relational_index.generation =
@@ -2605,6 +3236,18 @@ impl DurableManifest {
             "property_projection_manifest_encoded_len",
             "property_projection_manifest_encoded_checksum",
             "property_projection_manifest_encoded_sha256",
+            "relational_row_generation",
+            "relational_row_source_commit_epoch",
+            "relational_row_root_set_sha256",
+            "relational_row_manifest_encoded_len",
+            "relational_row_manifest_encoded_checksum",
+            "relational_row_manifest_encoded_sha256",
+            "relational_overflow_generation",
+            "relational_overflow_source_commit_epoch",
+            "relational_overflow_root_set_sha256",
+            "relational_overflow_manifest_encoded_len",
+            "relational_overflow_manifest_encoded_checksum",
+            "relational_overflow_manifest_encoded_sha256",
             "relational_index_generation",
             "relational_index_source_commit_epoch",
             "relational_index_catalog_schema_sha256",
@@ -2631,6 +3274,9 @@ impl DurableManifest {
                 )));
             }
         }
+        manifest.relational_row_generation_artifacts = relational_row.finish_row()?;
+        manifest.relational_overflow_generation_artifacts =
+            relational_overflow.finish_overflow()?;
         manifest.relational_index_generation_artifacts = relational_index.finish()?;
         if manifest.safe_reclaim_commit_epoch == 0 && manifest.checkpoint_commit_epoch > 0 {
             manifest.safe_reclaim_commit_epoch = safe_reclaim_commit_epoch(
@@ -2709,6 +3355,69 @@ impl DurableManifest {
         body.push_str(&format!(
             "property_projection_manifest_encoded_sha256\t{}\n",
             encode_optional_sha256(self.property_projection_manifest_encoded_sha256)
+        ));
+        let relational_row = self.relational_row_generation_artifacts;
+        body.push_str(&format!(
+            "relational_row_generation\t{}\n",
+            encode_optional_u64(relational_row.map(|binding| binding.generation))
+        ));
+        body.push_str(&format!(
+            "relational_row_source_commit_epoch\t{}\n",
+            encode_optional_u64(relational_row.map(|binding| binding.source_commit_epoch))
+        ));
+        body.push_str(&format!(
+            "relational_row_root_set_sha256\t{}\n",
+            encode_optional_sha256(relational_row.map(|binding| binding.root_set_digest))
+        ));
+        body.push_str(&format!(
+            "relational_row_manifest_encoded_len\t{}\n",
+            encode_optional_u64(
+                relational_row.map(|binding| binding.manifest_artifact.encoded_len)
+            )
+        ));
+        body.push_str(&format!(
+            "relational_row_manifest_encoded_checksum\t{}\n",
+            encode_optional_u64(
+                relational_row.map(|binding| u64::from(binding.manifest_artifact.encoded_crc32c))
+            )
+        ));
+        body.push_str(&format!(
+            "relational_row_manifest_encoded_sha256\t{}\n",
+            encode_optional_sha256(
+                relational_row.map(|binding| binding.manifest_artifact.encoded_sha256)
+            )
+        ));
+        let relational_overflow = self.relational_overflow_generation_artifacts;
+        body.push_str(&format!(
+            "relational_overflow_generation\t{}\n",
+            encode_optional_u64(relational_overflow.map(|binding| binding.generation))
+        ));
+        body.push_str(&format!(
+            "relational_overflow_source_commit_epoch\t{}\n",
+            encode_optional_u64(relational_overflow.map(|binding| binding.source_commit_epoch))
+        ));
+        body.push_str(&format!(
+            "relational_overflow_root_set_sha256\t{}\n",
+            encode_optional_sha256(relational_overflow.map(|binding| binding.root_set_digest))
+        ));
+        body.push_str(&format!(
+            "relational_overflow_manifest_encoded_len\t{}\n",
+            encode_optional_u64(
+                relational_overflow.map(|binding| binding.manifest_artifact.encoded_len)
+            )
+        ));
+        body.push_str(&format!(
+            "relational_overflow_manifest_encoded_checksum\t{}\n",
+            encode_optional_u64(
+                relational_overflow
+                    .map(|binding| u64::from(binding.manifest_artifact.encoded_crc32c))
+            )
+        ));
+        body.push_str(&format!(
+            "relational_overflow_manifest_encoded_sha256\t{}\n",
+            encode_optional_sha256(
+                relational_overflow.map(|binding| binding.manifest_artifact.encoded_sha256)
+            )
         ));
         let relational_index = self.relational_index_generation_artifacts;
         body.push_str(&format!(

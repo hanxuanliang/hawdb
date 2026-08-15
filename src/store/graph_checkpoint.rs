@@ -231,6 +231,62 @@ impl GraphStore {
                     .map_err(|error| SkeinError::Storage(error.to_string()))
                 })
                 .transpose()?;
+            let overflow_publication_config = RelationalOverflowPublicationConfig::default();
+            let previous_overflow = durable
+                .relational_overflow_generation_artifacts
+                .map(|_| durable.open_bound_relational_overflow())
+                .transpose()?;
+            let max_materialized_overflow_bytes =
+                usize::try_from(overflow_publication_config.max_new_extent_bytes.get())
+                    .unwrap_or(usize::MAX);
+            let overflow_inputs = self
+                .relational_state
+                .overflow_generation_inputs(
+                    previous_overflow.is_some(),
+                    max_materialized_overflow_bytes,
+                )
+                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            let relational_overflow_report =
+                RelationalOverflowPublisher::new(overflow_publication_config)
+                    .persist_generation(
+                        durable.root_path(),
+                        generation,
+                        commit_epoch,
+                        previous_overflow.as_ref(),
+                        durable
+                            .relational_overflow_generation_artifacts
+                            .map(|binding| binding.generation),
+                        overflow_inputs,
+                    )
+                    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            let relational_overflow_root =
+                skein_storage::RelationalOverflowRootReader::open_generation(
+                    durable.root_path(),
+                    generation,
+                    overflow_publication_config,
+                )
+                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+
+            let row_publication_config = RelationalRowPagePublicationConfig::default();
+            let row_deltas = self
+                .relational_state
+                .row_page_snapshot_deltas(generation, commit_epoch, row_publication_config)
+                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            let relational_row_report = RelationalRowPagePublisher::new(row_publication_config)
+                .persist_generation(
+                    RelationalRowPageGenerationRequest {
+                        directory: durable.root_path(),
+                        generation,
+                        source_commit_epoch: commit_epoch,
+                        base: None,
+                        expected_previous_generation: durable
+                            .relational_row_generation_artifacts
+                            .map(|binding| binding.generation),
+                        overflow_root: Some(&relational_overflow_root),
+                    },
+                    row_deltas,
+                )
+                .map_err(|error| SkeinError::Storage(error.to_string()))?;
             let relational_index_candidate =
                 self.prepare_relational_index_candidate(generation, commit_epoch);
             self.require_authoritative_relational_index_candidate(&relational_index_candidate)?;
@@ -278,6 +334,8 @@ impl GraphStore {
                     canonical_adjacency_manifest: canonical_adjacency_manifest_artifact,
                     property_spill_manifest: property_spill_manifest_artifact,
                     property_projection_manifest: property_projection_manifest_artifact,
+                    relational_row: relational_row_report.generation_artifacts,
+                    relational_overflow: relational_overflow_report.generation_artifacts,
                     relational_index,
                 },
                 staging_path: staging_path.clone(),
@@ -380,6 +438,7 @@ impl GraphStore {
             self.full_text_property_index = CowSegmentedMap::default();
             self.relationship_property_index = CowSegmentedMap::default();
         }
+        self.mount_relational_row_pages_for_recovery()?;
         self.install_prepared_relational_index_candidate(prepared.relational_index_candidate);
         self.validate_authoritative_relational_index_open()?;
         // Derived shadow double-write: published after the row-oriented

@@ -62,6 +62,63 @@ fn publish_last_root_round_trips_with_a_concrete_refinement_trace() {
 }
 
 #[test]
+fn persisted_row_candidate_does_not_change_latest_selection() {
+    let directory = unique_test_dir("candidate");
+    let config = RelationalRowPagePublicationConfig::default();
+    let report = RelationalRowPagePublisher::new(config)
+        .persist_generation(
+            RelationalRowPageGenerationRequest {
+                directory: &directory,
+                generation: 1,
+                source_commit_epoch: 10,
+                base: None,
+                expected_previous_generation: None,
+                overflow_root: None,
+            },
+            vec![table_delta("documents", vec![page(1, 1, 10, 1, 2)])],
+        )
+        .unwrap();
+
+    assert_eq!(report.events, CANDIDATE_PUBLICATION_TRACE);
+    assert_eq!(report.generation_artifacts.generation, 1);
+    assert!(RelationalRowPageRootReader::open_latest(&directory, config)
+        .unwrap()
+        .is_none());
+    let candidate = RelationalRowPageRootReader::open_generation(&directory, 1, config).unwrap();
+    assert_eq!(candidate.manifest().root_page_count, 1);
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn epoch_zero_accepts_only_an_empty_row_root() {
+    let directory = unique_test_dir("empty-epoch-zero");
+    let config = RelationalRowPagePublicationConfig::default();
+    RelationalRowPagePublisher::new(config)
+        .publish(&directory, 1, 0, None, Vec::new())
+        .unwrap();
+    let reader = RelationalRowPageRootReader::open_latest(&directory, config)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reader.manifest().source_commit_epoch, 0);
+    assert_eq!(reader.manifest().root_page_count, 0);
+
+    let rejected_directory = unique_test_dir("non-empty-epoch-zero");
+    assert!(matches!(
+        RelationalRowPagePublisher::new(config).publish(
+            &rejected_directory,
+            1,
+            0,
+            None,
+            vec![table_delta("documents", vec![page(1, 1, 0, 1, 2)])],
+        ),
+        Err(RelationalRowPagePublicationError::Admission(_))
+    ));
+    assert!(!rejected_directory.exists());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn incremental_publication_reuses_clean_pages_and_keeps_pinned_roots() {
     let directory = unique_test_dir("reuse");
     let config = RelationalRowPagePublicationConfig::default();
@@ -408,7 +465,13 @@ fn row_root_binds_and_resolves_the_exact_overflow_generation() {
     ));
 
     RelationalOverflowPublisher::new(overflow_config)
-        .publish(&directory, 2, 11, Some(1), Vec::new())
+        .publish(
+            &directory,
+            2,
+            11,
+            Some(1),
+            vec![RelationalOverflowExtentInput::Reuse(reference)],
+        )
         .unwrap();
     let next_overflow_root = RelationalOverflowRootReader::open_latest(&directory, overflow_config)
         .unwrap()

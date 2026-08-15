@@ -134,7 +134,8 @@ fn validate_manifest(
     class: ErrorClass,
 ) -> Result<(), RelationalOverflowPublicationError> {
     let fail = |message| class.error(message);
-    if manifest.generation == 0 || manifest.source_commit_epoch == 0 {
+    if manifest.generation == 0 || (manifest.source_commit_epoch == 0 && manifest.extent_count != 0)
+    {
         return Err(fail(format!(
             "invalid overflow generation/epoch {}/{}",
             manifest.generation, manifest.source_commit_epoch

@@ -23,6 +23,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_ROW_DELTA_GENERATION: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowRootSelection {
+    IndependentLatest,
+    CanonicalCheckpoint,
+}
+
 #[derive(Debug)]
 pub struct RelationalRowDeltaBuilder {
     directory: PathBuf,
@@ -41,6 +47,7 @@ pub struct RelationalRowDeltaBuilder {
     run_bytes: u64,
     peak_dirty_entries: usize,
     peak_dirty_bytes: usize,
+    row_root_selection: RowRootSelection,
     invalidated: Option<String>,
 }
 
@@ -62,16 +69,7 @@ impl RelationalRowDeltaBuilder {
         state: &RelationalState,
         config: RelationalRowDeltaConfig,
     ) -> Result<Self, RelationalRowDeltaError> {
-        let minimum = expected_previous
-            .filter(|previous| previous.base_generation == base.manifest().generation)
-            .map_or(Ok(1), |previous| {
-                previous.delta_generation.checked_add(1).ok_or_else(|| {
-                    RelationalRowDeltaError::Admission(
-                        "row delta generation space is exhausted".to_string(),
-                    )
-                })
-            })?;
-        let delta_generation = next_row_delta_generation().max(minimum);
+        let delta_generation = next_recovery_delta_generation(base, expected_previous)?;
         Self::new_for_state(
             directory,
             base,
@@ -79,6 +77,29 @@ impl RelationalRowDeltaBuilder {
             expected_previous,
             state,
             config,
+        )
+    }
+
+    /// Creates a recovery builder whose immutable base is selected by an
+    /// enclosing canonical checkpoint manifest rather than the row-page
+    /// subsystem's independent latest selector.
+    pub fn new_for_checkpoint_recovery(
+        directory: &Path,
+        base: &RelationalRowPageRootReader,
+        expected_previous: Option<RelationalRowDeltaGeneration>,
+        state: &RelationalState,
+        config: RelationalRowDeltaConfig,
+    ) -> Result<Self, RelationalRowDeltaError> {
+        let delta_generation = next_recovery_delta_generation(base, expected_previous)?;
+        let tables = table_schemas_for_state(state)?;
+        Self::new_inner(
+            directory,
+            base,
+            delta_generation,
+            expected_previous,
+            tables,
+            config,
+            RowRootSelection::CanonicalCheckpoint,
         )
     }
 
@@ -108,6 +129,26 @@ impl RelationalRowDeltaBuilder {
         expected_previous: Option<RelationalRowDeltaGeneration>,
         tables: Vec<RelationalRowDeltaTableSchema>,
         config: RelationalRowDeltaConfig,
+    ) -> Result<Self, RelationalRowDeltaError> {
+        Self::new_inner(
+            directory,
+            base,
+            delta_generation,
+            expected_previous,
+            tables,
+            config,
+            RowRootSelection::IndependentLatest,
+        )
+    }
+
+    fn new_inner(
+        directory: &Path,
+        base: &RelationalRowPageRootReader,
+        delta_generation: u64,
+        expected_previous: Option<RelationalRowDeltaGeneration>,
+        tables: Vec<RelationalRowDeltaTableSchema>,
+        config: RelationalRowDeltaConfig,
+        row_root_selection: RowRootSelection,
     ) -> Result<Self, RelationalRowDeltaError> {
         if delta_generation == 0 {
             return Err(RelationalRowDeltaError::Admission(
@@ -161,6 +202,7 @@ impl RelationalRowDeltaBuilder {
             run_bytes: 0,
             peak_dirty_entries: 0,
             peak_dirty_bytes: 0,
+            row_root_selection,
             invalidated: None,
         })
     }
@@ -275,10 +317,22 @@ impl RelationalRowDeltaBuilder {
         )?;
 
         let _row_page_lock = super::super::publication::acquire_publication_lock(&self.directory)?;
-        let actual_base =
-            RelationalRowPageRootReader::open_latest(&self.directory, self.row_page_config)?
-                .as_ref()
-                .map(RelationalRowDeltaBaseBinding::from_reader);
+        let actual_base = match self.row_root_selection {
+            RowRootSelection::IndependentLatest => {
+                RelationalRowPageRootReader::open_latest(&self.directory, self.row_page_config)?
+                    .as_ref()
+                    .map(RelationalRowDeltaBaseBinding::from_reader)
+            }
+            RowRootSelection::CanonicalCheckpoint => {
+                Some(RelationalRowDeltaBaseBinding::from_reader(
+                    &RelationalRowPageRootReader::open_generation(
+                        &self.directory,
+                        self.base.generation,
+                        self.row_page_config,
+                    )?,
+                ))
+            }
+        };
         if actual_base != Some(self.base) {
             return Err(RelationalRowDeltaError::StaleBase {
                 expected: self.base,
@@ -633,6 +687,22 @@ fn maybe_stop(
         )));
     }
     Ok(())
+}
+
+fn next_recovery_delta_generation(
+    base: &RelationalRowPageRootReader,
+    expected_previous: Option<RelationalRowDeltaGeneration>,
+) -> Result<u64, RelationalRowDeltaError> {
+    let minimum = expected_previous
+        .filter(|previous| previous.base_generation == base.manifest().generation)
+        .map_or(Ok(1), |previous| {
+            previous.delta_generation.checked_add(1).ok_or_else(|| {
+                RelationalRowDeltaError::Admission(
+                    "row delta generation space is exhausted".to_string(),
+                )
+            })
+        })?;
+    Ok(next_row_delta_generation().max(minimum))
 }
 
 fn next_row_delta_generation() -> u64 {

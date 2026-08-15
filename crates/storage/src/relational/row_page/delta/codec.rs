@@ -555,7 +555,6 @@ fn validate_manifest(
 ) -> Result<(), RelationalRowDeltaError> {
     let fail = |message| class.error(message);
     if manifest.base.generation == 0
-        || manifest.base.source_commit_epoch == 0
         || manifest.delta_generation == 0
         || manifest.visible_commit_epoch < manifest.base.source_commit_epoch
     {

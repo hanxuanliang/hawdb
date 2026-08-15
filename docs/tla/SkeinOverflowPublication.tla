@@ -3,12 +3,12 @@ EXTENDS Integers, Naturals, FiniteSets
 
 (***************************************************************************)
 (* Relational overflow values are content-addressed immutable envelopes. A  *)
-(* generation writes only new envelopes, reuses physical generations for   *)
-(* digests selected by the base root, then publishes descriptor and         *)
+(* generation writes only new envelopes, reuses physical generations only  *)
+(* for reachable digests selected by the base root, then publishes          *)
 (* generation-manifest artifacts before replacing the latest manifest. A    *)
 (* row root can bind only the exact selected overflow generation. Readers   *)
-(* pin immutable roots; this implementation slice never reclaims their      *)
-(* transitive physical extent closure.                                      *)
+(* pin immutable roots; reclamation retains the transitive physical extent  *)
+(* closure of the active, previous, row-bound, and reader-pinned roots.      *)
 (***************************************************************************)
 
 CONSTANT Readers, Extents, MaxGeneration
@@ -71,8 +71,21 @@ vars == <<
 PinnedReaders == {reader \in Readers : readerGeneration[reader] # -1}
 PinnedGenerations == {readerGeneration[reader] : reader \in PinnedReaders}
 
+RetainedGenerations ==
+    {0, activeGeneration, previousGeneration}
+    \cup PinnedGenerations
+    \cup rowBindings
+
 PhysicalClosure(root, physical) ==
     {physical[extent] : extent \in root}
+
+RetainedPhysicalArtifacts ==
+    UNION {
+        PhysicalClosure(
+            rootByGeneration[generation],
+            physicalByGeneration[generation]
+        ) : generation \in RetainedGenerations
+    }
 
 RootReadable(generation) ==
     /\ generation \in publishedRoots
@@ -110,16 +123,16 @@ Init ==
 BeginPublication ==
     /\ candidatePhase = "idle"
     /\ nextGeneration <= MaxGeneration
-    /\ \E additions \in SUBSET Extents:
-        /\ candidateRoot' =
-            rootByGeneration[activeGeneration] \cup additions
+    /\ \E target \in SUBSET Extents:
+        /\ candidateRoot' = target
         /\ candidatePhysical' =
             [extent \in Extents |->
-                IF extent \in rootByGeneration[activeGeneration]
+                IF extent \in target
+                    /\ extent \in rootByGeneration[activeGeneration]
                 THEN physicalByGeneration[activeGeneration][extent]
-                ELSE IF extent \in additions
+                ELSE IF extent \in target
                      THEN nextGeneration
-                ELSE 0]
+                     ELSE 0]
     /\ candidatePhase' = "building"
     /\ candidateGeneration' = nextGeneration
     /\ candidateBaseGeneration' = activeGeneration
@@ -343,7 +356,7 @@ UnpinReader(reader) ==
 PublishRowBinding ==
     /\ activeGeneration # 0
     /\ RootReadable(activeGeneration)
-    /\ rowBindings' = rowBindings \cup {activeGeneration}
+    /\ rowBindings' = {activeGeneration}
     /\ UNCHANGED <<
         activeGeneration,
         previousGeneration,
@@ -360,6 +373,28 @@ PublishRowBinding ==
         candidateRoot,
         candidatePhysical,
         readerGeneration,
+        staleCandidateRejected
+        >>
+
+Reclaim ==
+    /\ candidatePhase = "idle"
+    /\ publishedRoots' = RetainedGenerations
+    /\ durableExtentArtifacts' = RetainedPhysicalArtifacts
+    /\ durableRootArtifacts' = RetainedGenerations
+    /\ durableGenerationManifests' = RetainedGenerations
+    /\ UNCHANGED <<
+        activeGeneration,
+        previousGeneration,
+        nextGeneration,
+        rootByGeneration,
+        physicalByGeneration,
+        candidatePhase,
+        candidateGeneration,
+        candidateBaseGeneration,
+        candidateRoot,
+        candidatePhysical,
+        readerGeneration,
+        rowBindings,
         staleCandidateRejected
         >>
 
@@ -396,6 +431,7 @@ Next ==
     \/ \E reader \in Readers: PinReader(reader)
     \/ \E reader \in Readers: UnpinReader(reader)
     \/ PublishRowBinding
+    \/ Reclaim
     \/ Crash
 
 Spec == Init /\ [][Next]_vars /\ WF_vars(RejectStaleCandidate)
@@ -435,10 +471,6 @@ CandidateUsesContentAddressedReuse ==
         candidatePhysical[extent] =
             physicalByGeneration[candidateBaseGeneration][extent]
 
-CandidateRetainsBaseRoot ==
-    candidatePhase = "idle"
-    \/ rootByGeneration[candidateBaseGeneration] \subseteq candidateRoot
-
 CandidateWritesNewContentToFreshGeneration ==
     candidatePhase = "idle"
     \/ \A extent \in candidateRoot
@@ -452,6 +484,13 @@ DurableCandidateRootHasExtentClosure ==
 
 RowBindingsSelectCompleteOverflowRoots ==
     \A generation \in rowBindings: RootReadable(generation)
+
+ReclamationPreservesRequiredPhysicalClosure ==
+    \A generation \in RetainedGenerations:
+        PhysicalClosure(
+            rootByGeneration[generation],
+            physicalByGeneration[generation]
+        ) \subseteq durableExtentArtifacts
 
 PublishedGenerationDoesNotRegress == previousGeneration <= activeGeneration
 

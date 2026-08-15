@@ -140,6 +140,7 @@ pub enum RelationalOverflowPublicationPhase {
     CandidateRootDurable,
     CandidateManifestDurable,
     BaseRevalidated,
+    CanonicalSelectionDeferred,
     LatestManifestPublished,
 }
 
@@ -152,6 +153,23 @@ const COMPLETE_PUBLICATION_TRACE: [RelationalOverflowPublicationPhase; 6] = [
     RelationalOverflowPublicationPhase::LatestManifestPublished,
 ];
 
+const CANDIDATE_PUBLICATION_TRACE: [RelationalOverflowPublicationPhase; 6] = [
+    RelationalOverflowPublicationPhase::CandidateStarted,
+    RelationalOverflowPublicationPhase::CandidateExtentsDurable,
+    RelationalOverflowPublicationPhase::CandidateRootDurable,
+    RelationalOverflowPublicationPhase::CandidateManifestDurable,
+    RelationalOverflowPublicationPhase::BaseRevalidated,
+    RelationalOverflowPublicationPhase::CanonicalSelectionDeferred,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelationalOverflowGenerationArtifacts {
+    pub generation: u64,
+    pub source_commit_epoch: u64,
+    pub root_set_digest: Sha256Digest,
+    pub manifest_artifact: RelationalOverflowArtifactMetadata,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationalOverflowPublicationReport {
     pub generation: u64,
@@ -162,6 +180,7 @@ pub struct RelationalOverflowPublicationReport {
     pub extent_artifact_bytes: u64,
     pub descriptor_artifact_bytes: u64,
     pub manifest_bytes: u64,
+    pub generation_artifacts: RelationalOverflowGenerationArtifacts,
     pub events: [RelationalOverflowPublicationPhase; 6],
 }
 

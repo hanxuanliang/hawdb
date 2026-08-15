@@ -4,8 +4,7 @@ use super::GraphStore;
 use skein_storage::{
     RelationalRowChangeCapture, RelationalRowChangeCaptureLimits, RelationalRowDeltaBuilder,
     RelationalRowDeltaConfig, RelationalRowDeltaError, RelationalRowDeltaReader,
-    RelationalRowDeltaReport, RelationalRowPagePublicationConfig, RelationalRowPageReadView,
-    RelationalRowPageReadViewIdentity, RelationalRowPageRootReader,
+    RelationalRowDeltaReport, RelationalRowPageReadView, RelationalRowPageReadViewIdentity,
 };
 use std::sync::Arc;
 
@@ -151,58 +150,43 @@ pub(super) struct RelationalRowLiveUnavailable {
 }
 
 impl GraphStore {
-    pub(super) fn mount_relational_row_pages_for_recovery(&mut self) {
+    pub(super) fn mount_relational_row_pages_for_recovery(&mut self) -> crate::error::Result<()> {
         let Some(durable) = self.durable.as_ref() else {
-            return;
+            return Ok(());
         };
+        if durable.checkpoint_epoch == 0 {
+            self.relational_row_pages = RelationalRowPageState::default();
+            return Ok(());
+        }
         let checkpoint_generation = durable.checkpoint_epoch;
         let checkpoint_commit_epoch = durable.checkpoint_commit_epoch;
         let read_only = durable.read_only;
         let root = durable.root_path().to_path_buf();
-        let publication_config = RelationalRowPagePublicationConfig::default();
         let delta_config = self.relational_row_pages.delta_config;
-        let reader = match RelationalRowPageRootReader::open_latest(&root, publication_config) {
-            Ok(Some(reader)) => reader,
-            Ok(None) => {
-                self.relational_row_pages = RelationalRowPageState::default();
-                return;
-            }
-            Err(error) => {
-                self.mark_relational_row_page_recovery_unavailable(
-                    self.commit_epoch,
-                    format!("published relational row root could not be opened: {error}"),
-                );
-                return;
-            }
-        };
+        let overflow_root = durable.open_bound_relational_overflow()?;
+        let reader = durable.open_bound_relational_row_pages(&overflow_root)?;
         let manifest = reader.manifest();
         if manifest.generation != checkpoint_generation
             || manifest.source_commit_epoch != checkpoint_commit_epoch
         {
-            self.relational_row_pages.recovery_status = RelationalRowPageRecoveryStatus::Stale {
-                generation: manifest.generation,
-                source_commit_epoch: manifest.source_commit_epoch,
-                checkpoint_generation,
-                checkpoint_commit_epoch,
-            };
-            self.relational_row_pages.recovery_builder = None;
-            self.relational_row_pages.read_view = None;
-            return;
+            return Err(crate::error::SkeinError::Storage(format!(
+                "canonical relational row root {}/{} does not match checkpoint {checkpoint_generation}/{checkpoint_commit_epoch}",
+                manifest.generation, manifest.source_commit_epoch
+            )));
         }
         let root_pages = manifest.root_page_count;
         let generation = manifest.generation;
         let source_commit_epoch = manifest.source_commit_epoch;
-        if let Err(error) = RelationalRowDeltaBuilder::validate_base_state(
+        RelationalRowDeltaBuilder::validate_base_state(
             &reader,
             &self.relational_state,
             delta_config,
-        ) {
-            self.mark_relational_row_page_recovery_unavailable(
-                self.commit_epoch,
-                format!("published relational row root could not be pinned: {error}"),
-            );
-            return;
-        }
+        )
+        .map_err(|error| {
+            crate::error::SkeinError::Storage(format!(
+                "canonical relational row root could not be pinned: {error}"
+            ))
+        })?;
         let expected_previous =
             match RelationalRowDeltaReader::latest_generation(&root, delta_config) {
                 Ok(generation) => generation,
@@ -211,7 +195,7 @@ impl GraphStore {
                         self.commit_epoch,
                         format!("published relational row delta selector is invalid: {error}"),
                     );
-                    return;
+                    return Ok(());
                 }
             };
         let reader = Arc::new(reader);
@@ -226,7 +210,7 @@ impl GraphStore {
                 root_pages,
             };
         if !read_only {
-            match RelationalRowDeltaBuilder::new_for_recovery(
+            match RelationalRowDeltaBuilder::new_for_checkpoint_recovery(
                 &root,
                 &reader,
                 expected_previous,
@@ -240,6 +224,7 @@ impl GraphStore {
                 ),
             }
         }
+        Ok(())
     }
 
     pub(super) fn relational_row_recovery_capture_limits(
@@ -494,13 +479,14 @@ mod tests {
     use crate::schema::Catalog;
     use crate::store::GraphStore;
     use skein_storage::{
-        DurabilityPolicy, ImmutableRelationalRowPage, RelationalColumnSchema, RelationalInsertMode,
-        RelationalKey, RelationalRow, RelationalRowPageEntry, RelationalRowPageId,
-        RelationalRowPagePublisher, RelationalRowPageTableDelta, RelationalScalarType,
+        relational_overflow_extent_file, relational_overflow_manifest_generation_file,
+        relational_row_page_manifest_generation_file, DurabilityPolicy, RelationalColumnSchema,
+        RelationalHydrationBudget, RelationalInsertMode, RelationalKey, RelationalRow,
+        RelationalRowPagePublicationConfig, RelationalRowPagePublisher, RelationalScalarType,
         RelationalTableSchema, RelationalTransaction, RelationalValue, RelationalWrite,
-        WalReplayConfig, RELATIONAL_ROW_PAGE_MANIFEST_FILE,
+        WalReplayConfig,
     };
-    use std::{collections::BTreeMap, num::NonZeroU64};
+    use std::collections::BTreeMap;
 
     #[test]
     fn durable_open_replays_wal_into_a_generation_pinned_row_delta() {
@@ -515,17 +501,21 @@ mod tests {
             replay,
         )
         .unwrap();
-        assert!(matches!(
-            store.relational_row_page_recovery_status(),
-            RelationalRowPageRecoveryStatus::WalRecovered {
-                base_generation: 1,
-                base_commit_epoch: 1,
-                recovered_commit_epoch: 2,
-                delta_entries: 1,
-                peak_dirty_bytes: Some(_),
-                ..
-            }
-        ));
+        let recovery_status = store.relational_row_page_recovery_status();
+        assert!(
+            matches!(
+                recovery_status,
+                RelationalRowPageRecoveryStatus::WalRecovered {
+                    base_generation: 1,
+                    base_commit_epoch: 1,
+                    recovered_commit_epoch: 2,
+                    delta_entries: 1,
+                    peak_dirty_bytes: Some(_),
+                    ..
+                }
+            ),
+            "unexpected recovery status: {recovery_status:?}"
+        );
         let report = store.relational_row_delta_recovery_report().unwrap();
         assert_eq!(report.replayed_batches, 1);
         assert_eq!(report.entries, 1);
@@ -657,14 +647,18 @@ mod tests {
             replay,
         )
         .unwrap();
-        assert!(matches!(
-            writable.relational_row_page_recovery_status(),
-            RelationalRowPageRecoveryStatus::WalRecovered {
-                recovered_commit_epoch: 2,
-                peak_dirty_bytes: Some(_),
-                ..
-            }
-        ));
+        let recovery_status = writable.relational_row_page_recovery_status();
+        assert!(
+            matches!(
+                recovery_status,
+                RelationalRowPageRecoveryStatus::WalRecovered {
+                    recovered_commit_epoch: 2,
+                    peak_dirty_bytes: Some(_),
+                    ..
+                }
+            ),
+            "unexpected recovery status: {recovery_status:?}"
+        );
         drop(writable);
 
         let mut read_only_catalog = Catalog::default();
@@ -695,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_row_root_is_observable_but_does_not_replace_canonical_recovery() {
+    fn unbound_row_candidate_does_not_replace_canonical_recovery() {
         let path = unique_test_dir("stale");
         let replay = WalReplayConfig::default();
         let mut catalog = Catalog::default();
@@ -715,9 +709,6 @@ mod tests {
             )
             .unwrap();
         store.checkpoint(&catalog).unwrap();
-        RelationalRowPagePublisher::new(RelationalRowPagePublicationConfig::default())
-            .publish(&path, 1, 1, None, Vec::new())
-            .unwrap();
         store
             .commit_relational_transaction(
                 &mut catalog,
@@ -731,6 +722,19 @@ mod tests {
             )
             .unwrap();
         store.checkpoint(&catalog).unwrap();
+        RelationalRowPagePublisher::new(RelationalRowPagePublicationConfig::default())
+            .persist_generation(
+                skein_storage::RelationalRowPageGenerationRequest {
+                    directory: &path,
+                    generation: 3,
+                    source_commit_epoch: 2,
+                    base: None,
+                    expected_previous_generation: Some(2),
+                    overflow_root: None,
+                },
+                Vec::new(),
+            )
+            .unwrap();
         drop(store);
 
         let mut reopened_catalog = Catalog::default();
@@ -743,21 +747,20 @@ mod tests {
         .unwrap();
         assert!(matches!(
             reopened.relational_row_page_recovery_status(),
-            RelationalRowPageRecoveryStatus::Stale {
-                generation: 1,
-                source_commit_epoch: 1,
-                checkpoint_generation: 2,
-                checkpoint_commit_epoch: 2,
+            RelationalRowPageRecoveryStatus::CheckpointReady {
+                generation: 2,
+                source_commit_epoch: 2,
+                root_pages: 1,
             }
         ));
         assert_eq!(reopened.relational_state.row_count("documents"), 1);
-        assert!(reopened.relational_row_pages.read_view.is_none());
+        assert!(reopened.relational_row_pages.read_view.is_some());
 
         std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
-    fn corrupt_row_root_isolated_from_canonical_checkpoint_recovery() {
+    fn corrupt_bound_row_root_fails_database_open() {
         let path = unique_test_dir("corrupt");
         let replay = WalReplayConfig::default();
         let mut catalog = Catalog::default();
@@ -784,64 +787,122 @@ mod tests {
             )
             .unwrap();
         store.checkpoint(&catalog).unwrap();
-        let schema_digest = store
-            .relational_state
-            .table_schema_digest("documents")
-            .unwrap()
-            .unwrap();
-        RelationalRowPagePublisher::new(RelationalRowPagePublicationConfig::default())
-            .publish(
-                &path,
-                1,
-                1,
-                None,
-                vec![RelationalRowPageTableDelta {
-                    table: "documents".to_string(),
-                    schema_digest,
-                    next_page_id: NonZeroU64::new(2).unwrap(),
-                    dirty_pages: vec![ImmutableRelationalRowPage {
-                        generation: 1,
-                        source_commit_epoch: 1,
-                        page_id: RelationalRowPageId::new(NonZeroU64::new(1).unwrap()),
-                        schema_digest,
-                        column_count: 2,
-                        rows: vec![RelationalRowPageEntry {
-                            primary_key: key(1),
-                            row: row(1, "one"),
-                        }],
-                    }],
-                    deleted_page_ids: Vec::new(),
-                }],
-            )
-            .unwrap();
         drop(store);
 
-        let latest = path.join(RELATIONAL_ROW_PAGE_MANIFEST_FILE);
-        let mut encoded = std::fs::read(&latest).unwrap();
+        let manifest = path.join(relational_row_page_manifest_generation_file(1));
+        let mut encoded = std::fs::read(&manifest).unwrap();
         *encoded.last_mut().unwrap() ^= 1;
-        std::fs::write(latest, encoded).unwrap();
+        std::fs::write(manifest, encoded).unwrap();
 
         let mut reopened_catalog = Catalog::default();
-        let reopened = GraphStore::open_with_durability_and_replay_config(
+        let error = GraphStore::open_with_durability_and_replay_config(
             &path,
+            &mut reopened_catalog,
+            DurabilityPolicy::default(),
+            replay,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("canonical relational row-page generation manifest integrity mismatch"));
+
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn reclaim_preserves_overflow_extents_referenced_by_retained_roots() {
+        let path = unique_test_dir("overflow-reclaim-closure");
+        let backup = unique_test_dir("overflow-backup-closure");
+        let restored = unique_test_dir("overflow-restore-closure");
+        let replay = WalReplayConfig::default();
+        let body = "x".repeat(8 * 1024);
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::open_with_durability_and_replay_config(
+            &path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            replay,
+        )
+        .unwrap();
+        store
+            .commit_relational_transaction(
+                &mut catalog,
+                RelationalTransaction {
+                    writes: vec![
+                        RelationalWrite::CreateTable(schema()),
+                        RelationalWrite::Insert {
+                            table: "documents".to_string(),
+                            rows: vec![row(1, &body)],
+                            mode: RelationalInsertMode::Error,
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        store.checkpoint(&catalog).unwrap();
+        for generation in 2..=3 {
+            store
+                .create_node(
+                    &mut catalog,
+                    "CheckpointMarker",
+                    BTreeMap::from([("generation".to_string(), crate::Value::Int(generation))]),
+                )
+                .unwrap();
+            store.checkpoint(&catalog).unwrap();
+        }
+
+        assert!(!path
+            .join(relational_overflow_manifest_generation_file(1))
+            .exists());
+        assert!(path.join(relational_overflow_extent_file(1)).exists());
+        let overflow = store
+            .durable
+            .as_ref()
+            .unwrap()
+            .open_bound_relational_overflow()
+            .unwrap();
+        let mut reference = None;
+        overflow
+            .visit_descriptors(|descriptor| {
+                assert_eq!(descriptor.physical_generation, 1);
+                reference = Some(descriptor.reference);
+                Ok(())
+            })
+            .unwrap();
+        let hydrated = overflow
+            .hydrate(
+                &reference.expect("overflow descriptor"),
+                &mut RelationalHydrationBudget::default(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(hydrated, RelationalValue::Text(body));
+        store.backup_to(&catalog, &backup).unwrap();
+        assert!(backup.join(relational_overflow_extent_file(1)).exists());
+        assert!(backup.join(relational_overflow_extent_file(4)).exists());
+        let extent = path.join(relational_overflow_extent_file(1));
+        let mut corrupted = std::fs::read(&extent).unwrap();
+        *corrupted.last_mut().expect("non-empty overflow extent") ^= 1;
+        std::fs::write(extent, corrupted).unwrap();
+        let scrub_error = store.scrub_storage().unwrap_err();
+        assert!(scrub_error.to_string().contains("checksum mismatch"));
+        drop(store);
+
+        crate::store::restore_storage_backup(&backup, &restored).unwrap();
+        let mut reopened_catalog = Catalog::default();
+        let reopened = GraphStore::open_with_durability_and_replay_config(
+            &restored,
             &mut reopened_catalog,
             DurabilityPolicy::default(),
             replay,
         )
         .unwrap();
         assert_eq!(reopened.relational_state.row_count("documents"), 1);
-        assert!(matches!(
-            reopened.relational_row_page_recovery_status(),
-            RelationalRowPageRecoveryStatus::Unavailable {
-                base_generation: None,
-                base_commit_epoch: None,
-                recovered_commit_epoch: 1,
-                reason,
-            } if reason.contains("could not be opened")
-        ));
-        assert!(reopened.relational_row_pages.read_view.is_none());
 
         std::fs::remove_dir_all(path).unwrap();
+        std::fs::remove_dir_all(backup).unwrap();
+        drop(reopened);
+        std::fs::remove_dir_all(restored).unwrap();
     }
 
     fn seed_row_root_with_wal_insert(name: &str, replay: WalReplayConfig) -> std::path::PathBuf {
@@ -870,39 +931,6 @@ mod tests {
             )
             .unwrap();
         store.checkpoint(&catalog).unwrap();
-        let durable = store.durable.as_ref().unwrap();
-        let generation = durable.checkpoint_epoch;
-        let source_commit_epoch = durable.checkpoint_commit_epoch;
-        let schema_digest = store
-            .relational_state
-            .table_schema_digest("documents")
-            .unwrap()
-            .unwrap();
-        RelationalRowPagePublisher::new(RelationalRowPagePublicationConfig::default())
-            .publish(
-                &path,
-                generation,
-                source_commit_epoch,
-                None,
-                vec![RelationalRowPageTableDelta {
-                    table: "documents".to_string(),
-                    schema_digest,
-                    next_page_id: NonZeroU64::new(2).unwrap(),
-                    dirty_pages: vec![ImmutableRelationalRowPage {
-                        generation,
-                        source_commit_epoch,
-                        page_id: RelationalRowPageId::new(NonZeroU64::new(1).unwrap()),
-                        schema_digest,
-                        column_count: 2,
-                        rows: vec![RelationalRowPageEntry {
-                            primary_key: key(1),
-                            row: row(1, "one"),
-                        }],
-                    }],
-                    deleted_page_ids: Vec::new(),
-                }],
-            )
-            .unwrap();
         store
             .commit_relational_transaction(
                 &mut catalog,
