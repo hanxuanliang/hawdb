@@ -889,14 +889,6 @@ fn emit_overlay_row(
         return Ok(true);
     };
     context.checkpoint()?;
-    let has_overflow = fields
-        .iter()
-        .any(|field| matches!(field.value, RelationalValue::Overflow(_)));
-    if has_overflow && overflow_root.is_none() {
-        return Err(context.corrupt(
-            "overlay row contains an overflow reference without a visible overlay root".to_string(),
-        ));
-    }
     context.admit_row()?;
     let mut row = RelationalProjectedRow {
         primary_key,
@@ -904,8 +896,6 @@ fn emit_overlay_row(
     };
     if let Some(overflow_root) = overflow_root {
         context.hydrate_projected_row_from(&mut row, overflow_root)?;
-    } else {
-        context.hydrate_projected_row(&mut row)?;
     }
     context.report.rows_decoded += 1;
     context.report.rows_emitted += 1;

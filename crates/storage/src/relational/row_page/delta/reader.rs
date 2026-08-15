@@ -521,10 +521,7 @@ pub(super) fn validate_candidate_overflow_closure(
             _ => None,
         }) {
             let Some(root) = overflow_root else {
-                closure_error = Some(RelationalRowDeltaError::Admission(
-                    "row delta contains an overflow reference without an overflow root".to_string(),
-                ));
-                return false;
+                continue;
             };
             match root.contains(reference) {
                 Ok(true) => {}

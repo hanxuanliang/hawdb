@@ -8,7 +8,8 @@ EXTENDS Integers, Naturals, Sequences, FiniteSets
 (* range can stream. Live versions override recovery versions, tombstones  *)
 (* suppress checkpoint rows, and a later current view cannot move the      *)
 (* pinned reader. Admission, cancellation, and callback panic do not poison*)
-(* the reader; corruption does.                                             *)
+(* the reader; corruption does. An unresolved overflow reference is resolved*)
+(* only through the relational state pinned at the same visible epoch.      *)
 (***************************************************************************)
 
 CONSTANT MaxOverlayEntries, MaxOverlayBytes
@@ -22,6 +23,7 @@ Deleted == 0
 Values == {NoVersion, Deleted, 1, 2, 3, 4, 5}
 BaseEpoch == 1
 VisibleEpoch == 3
+OverflowValue == 5
 
 Base == [key \in Keys |-> key]
 Recovery == [key \in Keys |->
@@ -59,6 +61,9 @@ ExpectedRows(lower, upper) ==
     (IF InRange(3, lower, upper) /\ VisibleValue(3) # Deleted
      THEN <<3>> ELSE <<>>)
 
+OverlayNeedsResolution(candidate) ==
+    \E key \in Keys: candidate[key] = OverflowValue
+
 IsPrefix(prefix, sequence) ==
     Len(prefix) <= Len(sequence)
     /\ \A index \in 1..Len(prefix): prefix[index] = sequence[index]
@@ -75,6 +80,7 @@ VARIABLES
     overlayBytes,
     cursor,
     emittedRows,
+    resolvedOverflow,
     poisoned,
     stoppedEarly,
     currentViewEpoch
@@ -91,6 +97,7 @@ vars == <<
     overlayBytes,
     cursor,
     emittedRows,
+    resolvedOverflow,
     poisoned,
     stoppedEarly,
     currentViewEpoch
@@ -108,6 +115,7 @@ Init ==
     /\ overlayBytes = 0
     /\ cursor = 1
     /\ emittedRows = <<>>
+    /\ resolvedOverflow = FALSE
     /\ poisoned = FALSE
     /\ stoppedEarly = FALSE
     /\ currentViewEpoch = VisibleEpoch
@@ -130,6 +138,7 @@ BeginRead(lower, upper, entries, bytes) ==
     /\ overlayBytes' = 0
     /\ cursor' = 1
     /\ emittedRows' = <<>>
+    /\ resolvedOverflow' = FALSE
     /\ stoppedEarly' = FALSE
     /\ UNCHANGED <<poisoned, currentViewEpoch>>
 
@@ -153,7 +162,7 @@ SkipCandidate ==
     /\ cursor' = cursor + 1
     /\ UNCHANGED <<
         readState, outcome, lowerBound, upperBound, entryBudget, byteBudget,
-        overlay, overlayEntries, overlayBytes, emittedRows, poisoned,
+        overlay, overlayEntries, overlayBytes, emittedRows, resolvedOverflow, poisoned,
         stoppedEarly, currentViewEpoch
         >>
 
@@ -170,7 +179,7 @@ AdmitCandidate ==
     /\ cursor' = cursor + 1
     /\ UNCHANGED <<
         readState, outcome, lowerBound, upperBound, entryBudget, byteBudget,
-        emittedRows, poisoned, stoppedEarly, currentViewEpoch
+        emittedRows, resolvedOverflow, poisoned, stoppedEarly, currentViewEpoch
         >>
 
 RejectCandidate ==
@@ -183,7 +192,7 @@ RejectCandidate ==
     /\ outcome' = "admission"
     /\ UNCHANGED <<
         lowerBound, upperBound, entryBudget, byteBudget, overlay,
-        overlayEntries, overlayBytes, cursor, emittedRows, poisoned,
+        overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
         stoppedEarly, currentViewEpoch
         >>
 
@@ -194,19 +203,41 @@ BeginLiveCollection ==
     /\ cursor' = 1
     /\ UNCHANGED <<
         outcome, lowerBound, upperBound, entryBudget, byteBudget, overlay,
-        overlayEntries, overlayBytes, emittedRows, poisoned, stoppedEarly,
+        overlayEntries, overlayBytes, emittedRows, resolvedOverflow, poisoned, stoppedEarly,
         currentViewEpoch
         >>
 
 BeginStreaming ==
     /\ readState = "live"
     /\ cursor > 3
-    /\ readState' = "reading"
+    /\ readState' = IF OverlayNeedsResolution(overlay) THEN "resolving" ELSE "reading"
     /\ cursor' = 1
     /\ UNCHANGED <<
         outcome, lowerBound, upperBound, entryBudget, byteBudget, overlay,
-        overlayEntries, overlayBytes, emittedRows, poisoned, stoppedEarly,
+        overlayEntries, overlayBytes, emittedRows, resolvedOverflow, poisoned, stoppedEarly,
         currentViewEpoch
+        >>
+
+ResolveOverflowFromPinnedState ==
+    /\ readState = "resolving"
+    /\ OverlayNeedsResolution(overlay)
+    /\ readState' = "reading"
+    /\ resolvedOverflow' = TRUE
+    /\ UNCHANGED <<
+        outcome, lowerBound, upperBound, entryBudget, byteBudget, overlay,
+        overlayEntries, overlayBytes, cursor, emittedRows, poisoned, stoppedEarly,
+        currentViewEpoch
+        >>
+
+RejectOverflowAdmission ==
+    /\ readState = "resolving"
+    /\ OverlayNeedsResolution(overlay)
+    /\ readState' = "failed"
+    /\ outcome' = "admission"
+    /\ UNCHANGED <<
+        lowerBound, upperBound, entryBudget, byteBudget, overlay,
+        overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
+        stoppedEarly, currentViewEpoch
         >>
 
 ReadNextKey ==
@@ -220,7 +251,7 @@ ReadNextKey ==
     /\ cursor' = cursor + 1
     /\ UNCHANGED <<
         readState, outcome, lowerBound, upperBound, entryBudget, byteBudget,
-        overlay, overlayEntries, overlayBytes, poisoned, stoppedEarly,
+        overlay, overlayEntries, overlayBytes, resolvedOverflow, poisoned, stoppedEarly,
         currentViewEpoch
         >>
 
@@ -231,7 +262,7 @@ FinishRead ==
     /\ outcome' = "success"
     /\ UNCHANGED <<
         lowerBound, upperBound, entryBudget, byteBudget, overlay,
-        overlayEntries, overlayBytes, cursor, emittedRows, poisoned,
+        overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
         stoppedEarly, currentViewEpoch
         >>
 
@@ -243,17 +274,17 @@ StopEarly ==
     /\ stoppedEarly' = TRUE
     /\ UNCHANGED <<
         lowerBound, upperBound, entryBudget, byteBudget, overlay,
-        overlayEntries, overlayBytes, cursor, emittedRows, poisoned,
+        overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
         currentViewEpoch
         >>
 
 CancelRead ==
-    /\ readState \in {"recovery", "live", "reading"}
+    /\ readState \in {"recovery", "live", "resolving", "reading"}
     /\ readState' = "stopped"
     /\ outcome' = "cancel"
     /\ UNCHANGED <<
         lowerBound, upperBound, entryBudget, byteBudget, overlay,
-        overlayEntries, overlayBytes, cursor, emittedRows, poisoned,
+        overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
         stoppedEarly, currentViewEpoch
         >>
 
@@ -264,18 +295,18 @@ CallbackPanics ==
     /\ outcome' = "panic"
     /\ UNCHANGED <<
         lowerBound, upperBound, entryBudget, byteBudget, overlay,
-        overlayEntries, overlayBytes, cursor, emittedRows, poisoned,
+        overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
         stoppedEarly, currentViewEpoch
         >>
 
 DetectCorruption ==
-    /\ readState \in {"recovery", "live", "reading"}
+    /\ readState \in {"recovery", "live", "resolving", "reading"}
     /\ readState' = "failed"
     /\ outcome' = "corruption"
     /\ poisoned' = TRUE
     /\ UNCHANGED <<
         lowerBound, upperBound, entryBudget, byteBudget, overlay,
-        overlayEntries, overlayBytes, cursor, emittedRows, stoppedEarly,
+        overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, stoppedEarly,
         currentViewEpoch
         >>
 
@@ -284,7 +315,7 @@ AdvanceCurrentView ==
     /\ currentViewEpoch' = VisibleEpoch + 1
     /\ UNCHANGED <<
         readState, outcome, lowerBound, upperBound, entryBudget, byteBudget,
-        overlay, overlayEntries, overlayBytes, cursor, emittedRows, poisoned,
+        overlay, overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
         stoppedEarly
         >>
 
@@ -297,6 +328,8 @@ Next ==
     \/ RejectCandidate
     \/ BeginLiveCollection
     \/ BeginStreaming
+    \/ ResolveOverflowFromPinnedState
+    \/ RejectOverflowAdmission
     \/ ReadNextKey
     \/ FinishRead
     \/ StopEarly
@@ -309,7 +342,7 @@ Spec == Init /\ [][Next]_vars
 
 TypeOK ==
     /\ readState \in {
-        "idle", "recovery", "live", "reading", "succeeded", "failed", "stopped"
+        "idle", "recovery", "live", "resolving", "reading", "succeeded", "failed", "stopped"
         }
     /\ outcome \in {"none", "success", "admission", "cancel", "panic", "corruption"}
     /\ lowerBound \in 0..2
@@ -321,18 +354,23 @@ TypeOK ==
     /\ overlayBytes \in 0..8
     /\ cursor \in 1..4
     /\ emittedRows \in Seq(Keys)
+    /\ resolvedOverflow \in BOOLEAN
     /\ poisoned \in BOOLEAN
     /\ stoppedEarly \in BOOLEAN
     /\ currentViewEpoch \in VisibleEpoch..(VisibleEpoch + 1)
 
 ActiveOverlayStaysWithinAdmission ==
-    readState \in {"recovery", "live", "reading", "succeeded"} =>
+    readState \in {"recovery", "live", "resolving", "reading", "succeeded"} =>
         /\ overlayEntries <= entryBudget
         /\ overlayBytes <= byteBudget
 
 CollectedOverlayUsesNewestVersion ==
-    readState \in {"reading", "succeeded"} =>
+    readState \in {"resolving", "reading", "succeeded"} =>
         overlay = ExpectedOverlay(lowerBound, upperBound)
+
+OverflowIsResolvedBeforeStreaming ==
+    (readState \in {"reading", "succeeded"} /\ OverlayNeedsResolution(overlay)) =>
+        resolvedOverflow
 
 EmittedRowsStayOrderedAndVisible ==
     IsPrefix(emittedRows, ExpectedRows(lowerBound, upperBound))

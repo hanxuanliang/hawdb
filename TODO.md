@@ -112,8 +112,9 @@ database-sized base-row collection.
   - Require checkpoint/reopen, WAL replay, corruption, cancellation, locking,
     cold/warm latency, RSS, page-fault, and write-amplification evidence under
     the 512 MiB desktop profile before enabling the path by default.
-  - Keep rollback at the reader-selection boundary so disabling the new path
-    does not require rewriting canonical bytes.
+  - Because no storage format has shipped, activation is destructive: remove
+    the ordinary materialized row selector instead of retaining a compatibility
+    or rollback path. Keep the differential oracle in qualification code only.
 
 - [ ] Persist and activate the remaining canonical graph indexes.
   - Publish stable-id, composite-property, relationship-property, forward

@@ -1,12 +1,12 @@
 use super::*;
 use crate::relational::{
     estimated_row_change_encoding_bytes, ImmutableRelationalRowPage,
-    RelationalOverflowPublicationConfig, RelationalOverflowPublisher, RelationalRow,
-    RelationalRowChange, RelationalRowChangeCapture, RelationalRowChangeCaptureLimits,
-    RelationalRowDeltaBuilder, RelationalRowDeltaConfig, RelationalRowDeltaReader,
-    RelationalRowDeltaTableSchema, RelationalRowPageEntry, RelationalRowPageId,
-    RelationalRowPagePublicationConfig, RelationalRowPagePublisher, RelationalRowPageRootReader,
-    RelationalRowPageTableDelta, RelationalValue,
+    RelationalOverflowPublicationConfig, RelationalOverflowPublisher, RelationalOverflowRef,
+    RelationalRow, RelationalRowChange, RelationalRowChangeCapture,
+    RelationalRowChangeCaptureLimits, RelationalRowDeltaBuilder, RelationalRowDeltaConfig,
+    RelationalRowDeltaReader, RelationalRowDeltaTableSchema, RelationalRowPageEntry,
+    RelationalRowPageId, RelationalRowPagePublicationConfig, RelationalRowPagePublisher,
+    RelationalRowPageRootReader, RelationalRowPageTableDelta, RelationalValue,
 };
 use skein_core::{RuntimeCancellationToken, RuntimeTaskContext};
 use skein_integrity::{integrity_digest, Sha256Digest};
@@ -199,7 +199,7 @@ fn overlay_projection_drops_unrequested_large_values_before_residency() {
         RelationalValue::Text("selected".to_string()),
         RelationalValue::Bytea(large),
     ]));
-    validate_overlay_row(&value, 3, false).unwrap();
+    validate_overlay_row(&value, 3).unwrap();
     let resident_bytes = projected_overlay_resident_bytes(&value, &[1]).unwrap();
     assert!(resident_bytes < 1024);
     let projected = project_overlay_value(&value, &[1]);
@@ -212,6 +212,65 @@ fn overlay_projection_drops_unrequested_large_values_before_residency() {
         fields[0].value,
         RelationalValue::Text("selected".to_string())
     );
+}
+
+#[test]
+fn live_overflow_stays_unresolved_until_the_pinned_state_resolves_it() {
+    let fixture = SnapshotFixture::new("live-overflow");
+    let reference = RelationalOverflowRef {
+        digest: integrity_digest(b"live-overflow").sha256,
+        scalar_type: crate::relational::RelationalScalarType::Text,
+        compressed_bytes: 128,
+        uncompressed_bytes: 1024,
+    };
+    let change = RelationalRowChange {
+        table: "documents".to_string(),
+        primary_key: key(7),
+        row: Some(RelationalRow::new(vec![
+            RelationalValue::BigInt(7),
+            RelationalValue::Overflow(reference),
+        ])),
+    };
+    let encoded_bytes = estimated_row_change_encoding_bytes(&change).unwrap();
+    let view = Arc::new(
+        fixture
+            .view
+            .advance(
+                16,
+                Some(RelationalRowChangeCapture::Captured {
+                    changes: vec![change],
+                    encoded_bytes,
+                }),
+                RelationalRowChangeCaptureLimits::default(),
+            )
+            .expect("advance live view with an overflow reference"),
+    );
+    let reader = RelationalRowPageSnapshotReader::new(
+        view,
+        Arc::clone(&fixture.overflow_root),
+        None,
+        Arc::new(SegmentCache::new(64 * 1024)),
+        StoreId(905),
+    )
+    .expect("open snapshot reader without an overlay overflow root");
+    let mut hydration = RelationalHydrationBudget::default();
+    let (row, report) = reader
+        .point_projected(
+            "documents",
+            &key(7),
+            &[1],
+            RelationalRowPageSnapshotReadLimits::default(),
+            &mut hydration,
+            &RuntimeTaskContext::default(),
+        )
+        .expect("read unresolved live overflow reference");
+    let row = row.expect("live row");
+    assert_eq!(row.fields[0].value, RelationalValue::Overflow(reference));
+    assert_eq!(report.source, RelationalRowPageSnapshotRowSource::Live);
+    assert_eq!(report.demand.hydrated_values, 0);
+    assert_eq!(hydration.hydrated_rows, 0);
+    assert!(!reader.is_poisoned());
+    fixture.remove();
 }
 
 #[test]

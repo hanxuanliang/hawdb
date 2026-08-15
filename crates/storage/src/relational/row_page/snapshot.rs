@@ -219,7 +219,7 @@ impl RelationalRowPageSnapshotReader {
                     self.view.base().publication_config().page_limits,
                 )
                 .map_err(|error| self.map_row_error(error))?;
-                validate_overlay_row(&value, column_count, self.overlay_overflow.is_some())?;
+                validate_overlay_row(&value, column_count)?;
                 let value_resident_bytes =
                     projected_overlay_resident_bytes(&value, requested_fields)?;
                 let overlay_resident_bytes =
@@ -351,7 +351,6 @@ impl RelationalRowPageSnapshotReader {
             self.identity(),
             column_count,
             range.requested_fields,
-            self.overlay_overflow.is_some(),
             limits,
         );
         let mut collection_error = None;
@@ -479,7 +478,6 @@ struct OverlayCollector<'a> {
     identity: RelationalRowPageReadViewIdentity,
     column_count: usize,
     requested_fields: &'a [usize],
-    has_overlay_overflow: bool,
     limits: RelationalRowPageSnapshotReadLimits,
 }
 
@@ -488,7 +486,6 @@ impl<'a> OverlayCollector<'a> {
         identity: RelationalRowPageReadViewIdentity,
         column_count: usize,
         requested_fields: &'a [usize],
-        has_overlay_overflow: bool,
         limits: RelationalRowPageSnapshotReadLimits,
     ) -> Self {
         Self {
@@ -498,7 +495,6 @@ impl<'a> OverlayCollector<'a> {
             identity,
             column_count,
             requested_fields,
-            has_overlay_overflow,
             limits,
         }
     }
@@ -525,7 +521,7 @@ impl<'a> OverlayCollector<'a> {
                 return Ok(());
             }
         }
-        validate_overlay_row(value, self.column_count, self.has_overlay_overflow)?;
+        validate_overlay_row(value, self.column_count)?;
         let value_resident_bytes = projected_overlay_resident_bytes(value, self.requested_fields)?;
         if let Some(current) = self.rows.get_mut(key) {
             let next_bytes = self
@@ -624,7 +620,6 @@ impl<'a> OverlayCollector<'a> {
 fn validate_overlay_row(
     value: &RelationalRowPageRecoveredValue,
     column_count: usize,
-    has_overlay_overflow: bool,
 ) -> Result<(), RelationalRowPageSnapshotReadError> {
     let RelationalRowPageRecoveredValue::Present(row) = value else {
         return Ok(());
@@ -634,16 +629,6 @@ fn validate_overlay_row(
             "overlay row contains {} columns, expected {column_count}",
             row.values().len()
         )));
-    }
-    if !has_overlay_overflow
-        && row
-            .values()
-            .iter()
-            .any(|value| matches!(value, RelationalValue::Overflow(_)))
-    {
-        return Err(RelationalRowPageSnapshotReadError::Corrupt(
-            "overlay row references overflow without a generation-bound overlay root".to_string(),
-        ));
     }
     Ok(())
 }

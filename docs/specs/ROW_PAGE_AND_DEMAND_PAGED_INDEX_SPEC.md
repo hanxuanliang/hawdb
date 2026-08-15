@@ -686,8 +686,8 @@ database-sized `BTreeMap`.
 
 Recovery never skips a durable WAL record. A corrupt checkpoint-bound base root
 rejects database open. After that base is pinned, an individual capture outside
-its hard entry/byte envelope, an epoch gap, DDL or schema replacement, missing
-live overflow closure, or row-delta run/manifest budget exhaustion makes the
+its hard entry/byte envelope, an epoch gap, DDL or schema replacement, or
+row-delta run/manifest budget exhaustion makes the
 non-serving WAL overlay unavailable without changing the already recovered
 materialized relational state. A partial batch poisons the builder and its
 already durable candidate runs remain unreachable.
@@ -715,9 +715,15 @@ before its global epoch becomes visible and does not add an empty batch. The
 default cumulative live envelope is 100,000 entries and 64 MiB.
 
 Only a successful durable commit installs the staged view. An epoch gap,
-unordered or undercharged capture, DDL/schema rewrite, an overflow reference
-without live overflow publication, or cumulative admission failure makes the
-current acceleration view unavailable. The status retains both the last
+unordered or undercharged capture, DDL/schema rewrite, or cumulative admission
+failure makes the current acceleration view unavailable. A live or recovery
+row may retain a content-addressed overflow reference without copying its large
+payload into the row overlay. Such a reference is unresolved storage evidence,
+not a result value: a serving query MUST resolve it through the exact
+`RelationalState` pinned at the same visible epoch under the statement hydration
+budget before predicate, aggregate, sort, or projection evaluation. A missing
+row, missing digest, type mismatch, or different value at that key is
+corruption; admission or cancellation is non-poisoning. The status retains both the last
 visible and failed commit epochs. The canonical WAL and materialized relational
 state still commit because this row view is not yet an authority. Already
 pinned snapshots retain their prior immutable view. Writable transaction
@@ -793,7 +799,9 @@ unselected suffix.
 Publication is manifest-last:
 
 1. synchronize every immutable run;
-2. validate every overflow reference against the exact visible-epoch root;
+2. validate every overflow reference against the exact visible-epoch root when
+   one is published; otherwise retain the reference for the mandatory pinned
+   state resolver;
 3. synchronize and publish the immutable generation manifest;
 4. acquire the row-root publication lock and re-read the latest row root;
 5. acquire the delta publication lock and revalidate the expected previous
@@ -1042,10 +1050,13 @@ following precedence order:
 The reader validates the read-view identity against the pinned row root before
 serving. Recovery runs MUST bind the same base generation, source commit epoch,
 root-set digest, table schema digest, and column count. The checkpoint overflow
-root and the optional recovery overflow root are separately generation-bound;
-an overlay overflow reference without its exact root is corruption. Live
-captures currently reject overflow references, so they cannot create an
-unbound large-value dependency.
+root and an optional recovery overflow root are separately generation-bound.
+When the recovery root exists, every selected overlay reference is resolved and
+validated through it. When it does not exist, the snapshot reader returns the
+content-addressed reference only to the internal SQL row runtime; that runtime
+MUST resolve it through the exact `RelationalState` pinned at the same visible
+epoch before the value participates in query semantics. It MUST NOT consult a
+newer state, the checkpoint overflow root, or a latest-generation selector.
 
 Point lookup retains at most one selected overlay row and otherwise delegates
 to one checkpoint point read. A tombstone suppresses the checkpoint without
@@ -1053,7 +1064,7 @@ opening its row page. Range lookup reads only intersecting recovery runs,
 visits only in-range live entries, and coalesces them into a primary-key-ordered
 map where a higher commit epoch replaces a lower one. Equal-epoch duplicate
 versions are corruption. The collector validates the complete row shape and
-overflow closure but retains only requested fields; an unselected large value
+retains only requested fields; an unselected large value
 is dropped after its one bounded decode/callback wave. Distinct projected
 overlay entries and conservative resident bytes are admitted from borrowed
 values before cloning or checkpoint streaming begins. The range then performs
@@ -1073,16 +1084,19 @@ cache behavior, emitted rows, and hydration bytes make each read explainable.
 
 Admission, cancellation, deadline, callback stop, and callback unwind do not
 poison the pinned reader. Checksum, binding, epoch, schema-shape, immutable
-identity, overflow-closure, or durability failures poison it and make later
-operations fail closed. Callback effects remain provisional until the complete
-method returns `Ok`.
+identity, bound overflow-closure, or durability failures poison it and make
+later operations fail closed. A missing or mismatched reference in the pinned
+state resolver is also corruption at the SQL composition boundary. Callback
+effects remain provisional until both snapshot reading and pinned-state
+resolution return `Ok`.
 
 This is the only v1 snapshot-composition contract. Skein is not released, so
 there is no legacy row-root reader, manifest migration, compatibility fallback,
 or base-only serving mode to preserve. Production SQL selection remains a
-separate differential activation step: until that step succeeds, SQL continues
-to use the materialized canonical path rather than silently falling back from a
-partially constructed snapshot reader.
+separate differential activation step. Differential execution is development
+evidence only; once activated, the exact snapshot reader is the sole ordinary
+read path and an unavailable reader fails closed instead of selecting a
+materialized compatibility path.
 
 The current relational shadow reader uses the existing shared `SegmentCache`
 for immutable base-page slots and WAL recovery-delta pages. Cache entries retain

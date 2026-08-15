@@ -875,16 +875,6 @@ fn validate_capture_against_base(
                 change.table
             )));
         }
-        if change.row.as_ref().is_some_and(|row| {
-            row.values()
-                .iter()
-                .any(|value| matches!(value, RelationalValue::Overflow(_)))
-        }) {
-            return Err(RelationalRowPageLiveError::Invalidated(
-                "live row view cannot retain overflow references before live overflow publication is active"
-                    .to_string(),
-            ));
-        }
     }
     Ok(())
 }

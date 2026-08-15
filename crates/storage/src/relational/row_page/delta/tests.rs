@@ -511,7 +511,7 @@ fn descriptor_binding_rejects_valid_entries_swapped_between_ordinals() {
 }
 
 #[test]
-fn overflow_references_require_an_exact_visible_epoch_root() {
+fn overflow_references_allow_a_pinned_state_resolver_or_exact_root() {
     let directory = unique_test_dir("overflow");
     let base = publish_and_open_base(&directory);
     let config = RelationalRowDeltaConfig::default();
@@ -533,13 +533,47 @@ fn overflow_references_require_an_exact_visible_epoch_root() {
         }],
         encoded_bytes: 0,
     };
-    let mut missing = builder(&directory, &base, 1, None, config);
-    missing.record(2, overflow_capture.clone()).unwrap();
+    let mut unresolved = builder(&directory, &base, 1, None, config);
+    unresolved.record(2, overflow_capture.clone()).unwrap();
+    unresolved.finish(2, None).unwrap();
+    let unresolved_reader = RelationalRowDeltaReader::open_latest(&directory, &base, 2, config)
+        .unwrap()
+        .unwrap();
+    unresolved_reader.validate_overflow_root(None).unwrap();
+    let mut observed = None;
+    unresolved_reader
+        .visit_entries(|_, _, value, _| {
+            observed = Some(value.clone());
+            true
+        })
+        .unwrap();
     assert!(matches!(
-        missing.finish(2, None),
-        Err(RelationalRowDeltaError::Admission(_))
+        observed,
+        Some(RelationalRowPageRecoveredValue::Present(row))
+            if row.values()[1] == RelationalValue::Overflow(reference)
     ));
-    assert!(!directory.join(RELATIONAL_ROW_DELTA_MANIFEST_FILE).exists());
+
+    fs::remove_dir_all(&directory).unwrap();
+    let directory = unique_test_dir("overflow-root");
+    let base = publish_and_open_base(&directory);
+    let overflow_input = RelationalOverflowExtentInput::encode(
+        RelationalScalarType::Text,
+        b"large payload",
+        RelationalOverflowConfig::default(),
+    )
+    .unwrap();
+    let reference = *overflow_input.reference();
+    let overflow_capture = RelationalRowChangeCapture::Captured {
+        changes: vec![RelationalRowChange {
+            table: "documents".to_string(),
+            primary_key: key(2),
+            row: Some(RelationalRow::new(vec![
+                RelationalValue::BigInt(2),
+                RelationalValue::Overflow(reference),
+            ])),
+        }],
+        encoded_bytes: 0,
+    };
 
     RelationalOverflowPublisher::new(RelationalOverflowPublicationConfig::default())
         .publish(&directory, 1, 2, None, vec![overflow_input])
@@ -550,7 +584,7 @@ fn overflow_references_require_an_exact_visible_epoch_root() {
     )
     .unwrap()
     .unwrap();
-    let mut admitted = builder(&directory, &base, 2, None, config);
+    let mut admitted = builder(&directory, &base, 1, None, config);
     admitted.record(2, overflow_capture).unwrap();
     admitted.finish(2, Some(&overflow_root)).unwrap();
     let reader = RelationalRowDeltaReader::open_latest(&directory, &base, 2, config)
