@@ -502,6 +502,49 @@ actual caller-declared envelope. Contract tests prove the runner and redaction
 rules, but only a report from the representative imported copy is production
 evidence.
 
+`run_production_content_store_mutation_qualification` is the separate writable
+production-copy gate. The caller MUST provide one read-only source directory
+and four distinct disposable Skein replicas for exactly 1, 4, 8, and 10
+writers. The runner canonicalizes every path, opens the source only with
+`read_only`, and rejects any replica that aliases the source or another case.
+It never copies, checkpoints, or mutates the source. Every worker owns one
+explicit conflict domain and executes the same non-empty sequence containing
+both a frozen `INSERT` and a frozen `UPDATE`; SQL lowering, parameter arity,
+and corpus ownership are checked before any replica is opened for writes.
+
+Each mutation uses a pessimistic transaction and a separate durable commit.
+The report retains statement and parameter digests, statement and commit
+latency, commit-epoch progression, WAL/group-commit counters, cache/pin/live
+row/live index bytes, RSS, and supported page faults. It MUST use an
+evidence-validated group-commit configuration, but coalescing on a particular
+workload run is diagnostic rather than a readiness invariant: arrival timing
+is workload-dependent and the paired group-commit benchmark remains the
+activation gate. Commit p95 is compared with a caller-supplied same-shape
+accepted-revision reference bound to the same configuration digest and dataset
+fingerprint, with a maximum regression budget of 5%, and also with an absolute
+case budget.
+
+After writes, the runner drops all handles and reopens the dirty replica before
+checkpoint. This open MUST replay non-empty WAL into current row and index
+recovery views, preserve every verification digest, and report its total open
+latency and replayed entries and bytes. It then checkpoints, reopens again, and
+requires a manifest-selected current view with no WAL replay and no remaining
+live or recovery delta. These two open shapes are retained independently; the
+runner does not subtract their wall-clock durations and label the difference
+as exact WAL replay time. Exact phase timings require engine instrumentation
+rather than an inferred benchmark value.
+
+The writer matrix uses the same resource-profile meanings as the read-only
+gate. `Capability512Mib` proves that an explicitly configured Skein workload can
+complete inside a 512 MiB envelope; it is neither the default capacity nor a
+universal release cutoff. `DesktopBound8Gib` continues to mean an 8 GiB host
+whose automatic Skein capacity is dynamically bounded at 2 GiB. Every initial
+source and replica row/index artifact MUST exceed the cache, so passing the
+matrix cannot depend on full database residency. Synthetic matrix tests prove
+the isolation, replay, checkpoint, digest, and evidence contracts only; release
+readiness still requires retained reports from disposable copies of the
+representative production import.
+
 The focused Rust tests cover:
 
 - parser preparation and every statement in the qualification corpus;

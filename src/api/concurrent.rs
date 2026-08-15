@@ -29,7 +29,8 @@ use crate::store::DurabilityPolicy;
 use crate::value::Value;
 use skein_storage::{
     RelationalConflictAction, RelationalKey, RelationalRow, RelationalState, RelationalTableSchema,
-    RelationalTransaction, RelationalValue, RelationalWrite,
+    RelationalTransaction, RelationalValue, RelationalWrite, StoragePressureSnapshot,
+    StorageRecoveryReport,
 };
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -152,6 +153,24 @@ impl ConcurrentDatabase {
 
     pub fn wal_group_commit_snapshot(&self) -> Result<WalGroupCommitSnapshot> {
         self.inner.commits.group_commit_snapshot()
+    }
+
+    /// Returns storage debt and cache accounting from the same serialized
+    /// commit view used by writers.
+    pub fn storage_pressure_snapshot(&self) -> Result<StoragePressureSnapshot> {
+        Ok(self.inner.commits.lock()?.storage_pressure_snapshot())
+    }
+
+    /// Returns the generation-pinned storage residency view without scanning
+    /// candidate artifacts or materializing rows.
+    pub fn storage_residency_report(&self) -> Result<crate::store::StorageResidencyReport> {
+        Ok(self.inner.commits.lock()?.storage_residency_report())
+    }
+
+    /// Returns the recovery boundary observed by the currently published
+    /// database handle.
+    pub fn storage_recovery_report(&self) -> Result<StorageRecoveryReport> {
+        Ok(self.inner.commits.lock()?.storage_recovery_report())
     }
 
     pub fn begin_read_transaction(&self) -> Result<DatabaseReadTransaction> {

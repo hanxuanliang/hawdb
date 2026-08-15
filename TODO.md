@@ -24,6 +24,14 @@ and algorithms outside active routes are not implied backlog items.
     artifacts, cache rejection, leaked pins, or explicit resource-budget
     violations. Run it against the imported representative Skein copy; its
     synthetic contract test is not production evidence.
+  - The typed writable Content Store runner now requires four distinct
+    disposable replicas separate from the read-only source, exercises frozen
+    insert/update transactions at exactly 1, 4, 8, and 10 writers, retains
+    commit p95, WAL/group-commit, RSS, page-fault, cache, row/index delta,
+    replay-open, checkpoint, and manifest-only-open evidence, and rejects more
+    than 5% regression against same-shape accepted-revision references. Run the
+    matrix on disposable copies of the representative import; synthetic matrix
+    coverage is contract evidence only.
   - The typed graph runner now retains every ordered cold/warm resource run,
     its recomputed aggregate, and lifecycle process memory. The final bundle
     rejects missing, truncated, reordered, over-budget, or inconsistent run
