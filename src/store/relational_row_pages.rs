@@ -694,6 +694,22 @@ impl GraphStore {
                 match self.open_relational_row_delta_view(self.commit_epoch, recovery_source) {
                     Ok((view, delta)) => {
                         let manifest = delta.manifest();
+                        if self.relational_state.canonical_row_metadata_only()
+                            && let Err(error) = self.relational_state.adopt_recovered_row_counts(
+                                manifest
+                                    .tables()
+                                    .iter()
+                                    .map(|table| (table.table.as_str(), table.row_count)),
+                            )
+                        {
+                            self.mark_relational_row_page_recovery_unavailable(
+                                self.commit_epoch,
+                                format!(
+                                    "read-only recovery row counts do not match the canonical catalog: {error}"
+                                ),
+                            );
+                            return;
+                        }
                         self.relational_row_pages.read_view = Some(view);
                         self.relational_row_pages.recovery_status =
                             RelationalRowPageRecoveryStatus::WalRecovered {
@@ -922,7 +938,7 @@ mod tests {
         RelationalRowPagePublicationConfig, RelationalRowPagePublisher,
         RelationalRowPageRootReader, RelationalRowPageSnapshotReadLimits, RelationalScalarType,
         RelationalTableSchema, RelationalTransaction, RelationalValue, RelationalWrite,
-        StorageResidencyMode, WalReplayConfig,
+        StorageResidencyMode, WalReplayConfig, RELATIONAL_INDEX_RECOVERY_MANIFEST_FILE,
     };
     use std::collections::BTreeMap;
 
@@ -1212,6 +1228,125 @@ mod tests {
             Some(skein_storage::RelationalRowPageRecoveredValue::Present(value))
                 if value == row(2, "two")
         ));
+
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn read_only_authoritative_wal_reuse_stays_metadata_only() {
+        let replay = WalReplayConfig {
+            relational_index_mode: RelationalIndexMode::Shadow,
+            ..WalReplayConfig::default()
+        };
+        let path = seed_row_root_with_wal_insert("read-only-sparse-wal", replay);
+
+        let mut writable_catalog = Catalog::default();
+        let writable = GraphStore::open_with_durability_and_replay_config(
+            &path,
+            &mut writable_catalog,
+            DurabilityPolicy::default(),
+            replay,
+        )
+        .unwrap();
+        assert!(matches!(
+            writable.relational_row_page_recovery_status(),
+            RelationalRowPageRecoveryStatus::WalRecovered {
+                recovered_commit_epoch: 2,
+                ..
+            }
+        ));
+        assert!(matches!(
+            writable.relational_index_shadow_recovery_status(),
+            crate::store::RelationalIndexShadowRecoveryStatus::WalRecovered {
+                recovered_commit_epoch: 2,
+                ..
+            }
+        ));
+        drop(writable);
+
+        let mut read_only_catalog = Catalog::default();
+        let read_only = GraphStore::open_read_only_with_durability_and_replay_config(
+            &path,
+            &mut read_only_catalog,
+            DurabilityPolicy::default(),
+            WalReplayConfig {
+                residency_mode: StorageResidencyMode::OutOfCore,
+                relational_index_mode: RelationalIndexMode::Authoritative,
+                ..WalReplayConfig::default()
+            },
+        )
+        .unwrap();
+
+        assert!(!read_only.relational_state.materialized_rows_resident());
+        assert!(read_only.relational_state.canonical_row_metadata_only());
+        assert_eq!(read_only.relational_state.materialized_row_count(), 0);
+        assert_eq!(read_only.relational_state.total_row_count(), 2);
+        assert_eq!(read_only.relational_state.row_count("documents"), 2);
+        assert!(matches!(
+            read_only.relational_row_page_recovery_status(),
+            RelationalRowPageRecoveryStatus::WalRecovered {
+                recovered_commit_epoch: 2,
+                delta_entries: 1,
+                peak_dirty_bytes: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            read_only.relational_index_shadow_recovery_status(),
+            crate::store::RelationalIndexShadowRecoveryStatus::WalRecovered {
+                recovered_commit_epoch: 2,
+                delta_entries: 1,
+                peak_dirty_bytes: 0,
+                ..
+            }
+        ));
+        let residency = read_only.storage_residency_report();
+        assert!(residency.relational_rows.serving);
+        assert_eq!(residency.relational_rows.materialized_row_bytes, 0);
+        assert_eq!(residency.relational_rows.logical_row_count, 2);
+        assert!(residency.relational_indexes.serving);
+        assert_eq!(residency.relational_indexes.recovery_delta_entries, 1);
+
+        let reader = read_only
+            .open_relational_row_snapshot_reader()
+            .unwrap()
+            .expect("source-exact row recovery reader");
+        let mut hydration = RelationalHydrationBudget::default();
+        let (projected, _) = reader
+            .point_projected(
+                "documents",
+                &key(2),
+                &[1],
+                RelationalRowPageSnapshotReadLimits::default(),
+                &mut hydration,
+                &RuntimeTaskContext::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            projected.unwrap().fields[0].value,
+            RelationalValue::Text("two".to_string())
+        );
+
+        drop(reader);
+        drop(read_only);
+        std::fs::remove_file(path.join(RELATIONAL_INDEX_RECOVERY_MANIFEST_FILE)).unwrap();
+        let mut missing_index_catalog = Catalog::default();
+        let error = match GraphStore::open_read_only_with_durability_and_replay_config(
+            &path,
+            &mut missing_index_catalog,
+            DurabilityPolicy::default(),
+            WalReplayConfig {
+                residency_mode: StorageResidencyMode::OutOfCore,
+                relational_index_mode: RelationalIndexMode::Authoritative,
+                ..WalReplayConfig::default()
+            },
+        ) {
+            Ok(_) => panic!("missing source-exact index recovery artifact must fail closed"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("authoritative relational index view is unavailable"));
 
         std::fs::remove_dir_all(path).unwrap();
     }

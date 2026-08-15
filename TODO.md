@@ -147,8 +147,12 @@ crash; read-only recovery remains fail closed.
     exact final per-table counts required to reconstruct that state after WAL.
     Row and index recovery manifests also bind the exact WAL generation, LSN
     interval, and ordered-record digest, so an epoch-only derived artifact
-    cannot be reused. WAL-bearing recovery still needs a sparse mutation
-    workspace before its startup peak can be removed.
+    cannot be reused. A read-only `OutOfCore` plus `Authoritative` reopen now
+    avoids a database-sized mutation workspace when those exact row and index
+    recovery artifacts already exist: it validates the whole WAL source, keeps
+    only schema/count metadata, adopts row counts from the fenced row manifest,
+    and fails closed on DDL, missing artifacts, or source drift. Writable
+    recovery still materializes the full mutation state.
   - The typed runner now qualifies `content_documents`, `thread_messages`,
     `content_chunks`, and `content_anchors` using the frozen PostgreSQL statement
     corpus and graph-plus-relational commits that publish one shared epoch.
@@ -226,8 +230,11 @@ crash; read-only recovery remains fail closed.
     the ordinary materialized row selector instead of retaining a compatibility
     or rollback path. The read-only authoritative serving handle now has no row
     fallback and a clean checkpoint no longer constructs that oracle. The
-    remaining work is sparse WAL mutation recovery before the full oracle can
-    be kept only in offline qualification code.
+    read-only authoritative WAL path now reuses exact pre-published row/index
+    deltas without reconstructing that oracle. The remaining online dependency
+    is writable WAL recovery; removing it requires a demand-hydrated sparse
+    mutation workspace before the full oracle can be kept only in offline
+    qualification code.
 
 - [ ] Differentially qualify and production-activate persistent graph indexes.
   - Equality, range, full-text, ordered composite-equality, relationship

@@ -32,7 +32,8 @@ use skein_storage::{
     RelationalIndexShadowBuildReport, RelationalIndexShadowConfig, RelationalIndexShadowError,
     RelationalIndexShadowManifest, RelationalIndexShadowReader, RelationalIndexShadowWriter,
     RelationalKey, RelationalRecoveryFence, RelationalRecoverySourceIdentity, RelationalScalarType,
-    RelationalTableSchema, RelationalTransaction, RelationalValue, RELATIONAL_PRIMARY_INDEX_NAME,
+    RelationalTableSchema, RelationalTransaction, RelationalValue, StorageResidencyMode,
+    RELATIONAL_PRIMARY_INDEX_NAME,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -1235,6 +1236,18 @@ impl GraphStore {
         }
     }
 
+    pub(super) fn uses_sparse_read_only_relational_recovery(&self) -> bool {
+        self.durable
+            .as_ref()
+            .is_some_and(|durable| durable.read_only)
+            && self.residency_mode == StorageResidencyMode::OutOfCore
+            && self
+                .relational_index_shadow
+                .mode
+                .requires_authoritative_indexes()
+            && self.relational_state.canonical_row_metadata_only()
+    }
+
     /// Completes one already-durable non-relational commit.
     ///
     /// Callers invoke this only after applying the canonical graph or catalog
@@ -1737,15 +1750,37 @@ impl GraphStore {
             } = self.relational_index_shadow.recovery_status
                 && self.commit_epoch > source_commit_epoch
             {
-                self.relational_index_shadow.read_view = None;
-                self.relational_index_shadow.recovery_status =
-                    RelationalIndexShadowRecoveryStatus::RecoveryUnavailable {
-                        base_generation: generation,
-                        base_commit_epoch: source_commit_epoch,
-                        recovered_commit_epoch: self.commit_epoch,
-                        reason: "read-only recovery cannot publish derived WAL index deltas"
+                let Some(recovery_source) = recovery_source else {
+                    self.mark_relational_index_recovery_unavailable(
+                        self.commit_epoch,
+                        "WAL recovery did not produce a relational recovery source identity"
                             .to_string(),
-                    };
+                    );
+                    return;
+                };
+                match self
+                    .open_recovered_relational_index_read_view(self.commit_epoch, recovery_source)
+                {
+                    Ok(view) => {
+                        let residency = view.residency_report();
+                        self.relational_index_shadow.read_view = Some(view);
+                        self.relational_index_shadow.recovery_status =
+                            RelationalIndexShadowRecoveryStatus::WalRecovered {
+                                base_generation: generation,
+                                base_commit_epoch: source_commit_epoch,
+                                recovered_commit_epoch: self.commit_epoch,
+                                delta_pages: residency.recovery_delta_pages,
+                                delta_entries: residency.recovery_delta_entries,
+                                peak_dirty_bytes: 0,
+                            };
+                    }
+                    Err(error) => self.mark_relational_index_recovery_unavailable(
+                        self.commit_epoch,
+                        format!(
+                            "read-only recovery requires an exact published index delta: {error}"
+                        ),
+                    ),
+                }
             }
             return;
         };

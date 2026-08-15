@@ -678,10 +678,25 @@ impl GraphStore {
                         batch.epoch
                     )));
                 }
-                self.stage_recovered_relational_transaction(batch.transaction, expected_epoch)
-                    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                if self.uses_sparse_read_only_relational_recovery() {
+                    if batch.transaction.changes_schema() {
+                        return Err(SkeinError::Storage(
+                            "read-only sparse relational recovery rejects schema-changing WAL until a new canonical checkpoint is published"
+                                .to_string(),
+                        ));
+                    }
+                } else {
+                    self.stage_recovered_relational_transaction(batch.transaction, expected_epoch)
+                        .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                }
             }
             WalOp::RelationalSnapshot { record } => {
+                if self.uses_sparse_read_only_relational_recovery() {
+                    return Err(SkeinError::Storage(
+                        "read-only sparse relational recovery rejects snapshot WAL until a new canonical checkpoint is published"
+                            .to_string(),
+                    ));
+                }
                 let index_load = self.relational_checkpoint_index_load();
                 let checkpoint = decode_relational_checkpoint_with_index_load(
                     &record,

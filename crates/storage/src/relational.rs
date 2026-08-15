@@ -1118,6 +1118,54 @@ impl RelationalState {
         })
     }
 
+    /// Advances the logical counts of a metadata-only state from an exact,
+    /// source-fenced recovery artifact without materializing checkpoint rows.
+    pub fn adopt_recovered_row_counts<'a>(
+        &mut self,
+        row_counts: impl IntoIterator<Item = (&'a str, u64)>,
+    ) -> Result<(), RelationalError> {
+        if self.materialized_rows_resident || !self.canonical_row_metadata_only {
+            return Err(RelationalError::Corruption(
+                "recovered row counts require a canonical metadata-only relational state"
+                    .to_string(),
+            ));
+        }
+        let mut counts = BTreeMap::new();
+        let mut total = 0usize;
+        for (table, row_count) in row_counts {
+            if !self.schemas.contains_key(table) {
+                return Err(RelationalError::Corruption(format!(
+                    "recovered row counts contain unknown table {table}"
+                )));
+            }
+            let row_count = usize::try_from(row_count).map_err(|_| {
+                RelationalError::Admission(format!(
+                    "recovered row count {row_count} for table {table} exceeds platform capacity"
+                ))
+            })?;
+            total = total.checked_add(row_count).ok_or_else(|| {
+                RelationalError::Admission(
+                    "recovered total row count exceeds platform capacity".to_string(),
+                )
+            })?;
+            if counts.insert(table.to_string(), row_count).is_some() {
+                return Err(RelationalError::Corruption(format!(
+                    "recovered row counts repeat table {table}"
+                )));
+            }
+        }
+        if counts.len() != self.schemas.len()
+            || self.schemas.keys().any(|table| !counts.contains_key(table))
+        {
+            return Err(RelationalError::Corruption(
+                "recovered row counts do not cover the canonical schema set".to_string(),
+            ));
+        }
+        self.detached_total_row_count = total;
+        self.detached_row_counts = Arc::new(counts);
+        Ok(())
+    }
+
     pub fn require_materialized_rows(&self, context: &str) -> Result<(), RelationalError> {
         if self.materialized_rows_resident {
             return Ok(());
@@ -1887,7 +1935,7 @@ pub struct RelationalTransaction {
 }
 
 impl RelationalTransaction {
-    fn changes_index_schema(&self) -> bool {
+    pub fn changes_schema(&self) -> bool {
         self.writes.iter().any(|write| {
             matches!(
                 write,
@@ -1896,6 +1944,10 @@ impl RelationalTransaction {
                     | RelationalWrite::CreateIndex { .. }
             )
         })
+    }
+
+    fn changes_index_schema(&self) -> bool {
+        self.changes_schema()
     }
 
     pub fn estimated_mutation_rows(&self) -> usize {

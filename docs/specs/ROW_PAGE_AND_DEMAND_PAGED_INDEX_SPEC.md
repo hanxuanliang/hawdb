@@ -425,12 +425,17 @@ activation changes constraint and fallback semantics and omits materialized
 postings. A read-only `OutOfCore` plus `Authoritative` open additionally drops
 the transitional materialized checkpoint rows after both the canonical row
 view and authoritative index view are validated at the current epoch. The
-writable transaction workspace remains materialized. When the WAL has no
-records after the checkpoint, cold open constructs only schemas and exact row
-counts from the self-describing canonical row root and never decodes or
-constructs the transitional checkpoint rows. WAL-bearing and writable recovery
-still use the materialized recovery state until sparse mutation recovery is
-implemented.
+writable transaction workspace remains materialized. Cold open constructs only
+schemas and exact row counts from the self-describing canonical row root and
+never decodes or constructs the transitional checkpoint rows. With a non-empty
+WAL, the read-only profile validates every frame and record but does not apply
+schema-stable relational DML to a materialized row oracle. It may serve only
+after both pre-published row and index recovery artifacts match the recomputed
+WAL generation, LSN interval, ordered-record digest, and recovered epoch. Exact
+final counts come from the row recovery manifest. Schema-changing or snapshot
+WAL, a missing artifact, or any identity drift rejects open. Writable recovery
+still uses the materialized recovery state until a demand-hydrated sparse
+mutation workspace is implemented.
 
 ## Identities and terminology
 
@@ -806,11 +811,15 @@ artifact file lengths. It verifies row-to-overflow binding and table schemas,
 but does not read row-page slots or hash database-scale payload artifacts.
 Descriptor and page integrity checks remain demand-read or scrub obligations.
 
-A read-only `OutOfCore` plus `Authoritative` handle with an empty post-checkpoint
-WAL builds a metadata-only `RelationalState` directly from the validated row
-root. An already decoded state may otherwise detach its checkpoint-row oracle
-only after the current canonical row snapshot reader and the current
-authoritative index view both open successfully. Both paths keep
+A read-only `OutOfCore` plus `Authoritative` handle builds a metadata-only
+`RelationalState` directly from the validated row root. With an empty
+post-checkpoint WAL it pins the canonical row/index views directly. With a
+non-empty WAL it validates the complete source without applying relational DML
+and requires matching pre-published row and index recovery artifacts before it
+may advance the logical counts and visible epoch. An already decoded state may
+otherwise detach its checkpoint-row oracle only after the current canonical
+row snapshot reader and the current authoritative index view both open
+successfully. All paths keep
 the complete schemas, exact manifest-derived logical row counts, and overflow
 resolvers, while reporting zero materialized row count and bytes. SQL must then
 serve only through the pinned row pages and persistent indexes. Mutation,
@@ -843,8 +852,10 @@ to become durable, and then synchronously performs a full-row schema checkpoint
 barrier before returning success. The barrier writes row, overflow, and required
 index candidates before publishing the outer checkpoint manifest last. If the
 process stops after WAL durability but before that publication, writable open
-replays the complete WAL first and retries the same barrier. A read-only open
-never writes the repair candidate and leaves the reader explicitly unavailable.
+replays the complete WAL first and retries the same barrier. A metadata-only
+read-only open rejects schema-changing or snapshot WAL before materializing
+checkpoint rows, never writes the repair candidate, and leaves the reader
+explicitly unavailable.
 Failure of the post-WAL barrier poisons the current handle and reports that the
 durable commit will be retried by writable reopen.
 
@@ -854,9 +865,11 @@ selected row root and previous delta selector, and atomically replaces the
 latest delta manifest last. It then reopens that exact generation and exposes
 one immutable `Arc` view containing the pinned base root, disk delta reader,
 and recovered visible epoch. A read-only open never writes recovery artifacts;
-it may reuse only an already-published delta whose base identity, visible
-epoch, WAL generation, LSN interval, and ordered-record digest exactly match
-the replayed database. `GraphStore::snapshot()` retains
+it may reuse only already-published row and index deltas whose base identities,
+visible epoch, WAL generation, LSN interval, and ordered-record digest exactly
+match the replayed database. Both are required before authoritative serving,
+and the row manifest supplies the metadata-only state's exact per-table counts.
+`GraphStore::snapshot()` retains
 that exact view only for the matching commit epoch.
 
 Every later relational commit stages the next row view before appending WAL.

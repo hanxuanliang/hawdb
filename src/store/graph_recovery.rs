@@ -295,7 +295,6 @@ impl GraphStore {
             && config
                 .relational_index_mode
                 .requires_authoritative_indexes()
-            && durable.wal_replay_start_lsn == durable.next_lsn
         {
             let overflow = durable.open_bound_relational_overflow()?;
             Some(
