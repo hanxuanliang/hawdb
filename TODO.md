@@ -191,8 +191,8 @@ qualification justifies moving them.
   - Complete the remaining graph-plus-relational write ownership for every
     caller currently classified as `partial`; do not infer readiness from
     parser feature counts. `upsert_source_chunks` is now `covered`; ownership
-    moves and Thread message UPSERT are now `covered`; thread reconciliation,
-    tail deletion, and whole-thread deletion remain incomplete.
+    moves, Thread message UPSERT, and occurrence-preserving reconciliation are
+    now `covered`; tail deletion and whole-thread deletion remain incomplete.
   - Acceptance: every active Mem caller is `covered`, and cutover fails closed
     when the corpus protocol, revision, or digest differs from the qualified
     Skein artifact.

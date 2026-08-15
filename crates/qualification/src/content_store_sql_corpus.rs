@@ -600,6 +600,24 @@ mod tests {
     }
 
     #[test]
+    fn thread_message_reconcile_is_bound_to_occurrence_preserving_evidence() {
+        let corpus = nowledge_content_store_sql_corpus().unwrap();
+        let caller = corpus
+            .source_inventory
+            .iter()
+            .find(|caller| caller.symbol == "reconcile_thread_messages_preserving")
+            .expect("thread message reconcile caller must be inventoried");
+        assert_eq!(caller.coverage, ContentStoreSqlCallerCoverage::Covered);
+        assert!(caller
+            .statements
+            .iter()
+            .any(|name| name == "thread_messages_page"));
+        assert!(caller.note.contains("exact preserve-mapping validation"));
+        assert!(caller.note.contains("legacy anchor reordering"));
+        assert!(caller.note.contains("checkpoint/reopen identity"));
+    }
+
+    #[test]
     fn source_ownership_move_is_bound_to_mixed_transaction_evidence() {
         let corpus = nowledge_content_store_sql_corpus().unwrap();
         let caller = corpus

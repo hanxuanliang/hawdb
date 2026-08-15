@@ -360,6 +360,27 @@ MUST retain identical ordered output. `SkeinContentThreadUpsert.tla` models
 complete durable publication, conflict-time creation identity, and rejected
 statement atomicity.
 
+`reconcile_thread_messages_preserving` first reads the bounded ordered
+occurrence set and MUST reject a mapping that omits, duplicates, or invents an
+existing `content_message_id`. Rejection occurs before the mutation transaction
+and MUST NOT advance the commit epoch. A valid mapping may interleave new
+occurrences with preserved occurrences. Existing message payload, creation
+identity, and anchor payload MUST remain byte-identical while message and
+anchor order changes.
+
+Anchors carrying `content_message_id` follow that exact occurrence. A legacy
+anchor with a null occurrence id follows only the matching `message_id` at its
+previous order, preventing an anchor from moving to another duplicate message.
+The graph Thread update, storage-owned document UPSERT, message and anchor
+reordering, new message insertion, and exact document summary publish through
+one mixed transaction. The v1 Skein schema has no historical unique-order
+migration constraint, so it applies target orders directly rather than using
+SQLite's temporary negative-order displacement. Live overlay and
+checkpoint/reopen output, occurrence identity, and anchor state MUST match.
+`SkeinContentThreadReconcile.tla` models mapping rejection, arbitrary staging,
+anchor-following, immutable preserved payloads, and complete durable
+publication.
+
 This gate deliberately covers the selected storage lifecycle, transaction,
 locking, cancellation, injected corruption, and synthetic resource evidence;
 it does not claim complete Content Store cutover. Callers still marked

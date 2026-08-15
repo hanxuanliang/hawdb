@@ -22,7 +22,7 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
 
     assert!(report.ready);
     assert_eq!(report.qualified_tables, QUALIFIED_TABLES);
-    assert_eq!(report.corpus.partial_caller_count, 3);
+    assert_eq!(report.corpus.partial_caller_count, 2);
     assert_eq!(report.final_message_count, 7);
     assert_eq!(report.base_chunk_count, 5);
     assert_eq!(report.final_chunk_count, 2);
@@ -357,6 +357,89 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
     assert_eq!(
         report.thread_message_upsert.live_read.output_sha256,
         report.thread_message_upsert.reopened_read.output_sha256
+    );
+    assert_eq!(report.thread_message_reconcile.initial_message_count, 2);
+    assert_eq!(report.thread_message_reconcile.final_message_count, 3);
+    assert_ne!(
+        report.thread_message_reconcile.thread_id,
+        report.thread_message_reconcile.thread_storage_id
+    );
+    assert!(report.thread_message_reconcile.duplicate_mapping_rejected);
+    assert!(report.thread_message_reconcile.incomplete_mapping_rejected);
+    assert!(report.thread_message_reconcile.unknown_mapping_rejected);
+    assert!(
+        report
+            .thread_message_reconcile
+            .invalid_mapping_epoch_unchanged
+    );
+    assert!(report.thread_message_reconcile.explicit_anchor_reordered);
+    assert!(report.thread_message_reconcile.legacy_anchor_reordered);
+    assert!(
+        report
+            .thread_message_reconcile
+            .occurrence_identity_preserved
+    );
+    assert_eq!(report.thread_message_reconcile.summary_item_count, 3);
+    assert!(report.thread_message_reconcile.summary_size_bytes > 0);
+    assert_eq!(
+        report
+            .thread_message_reconcile
+            .preserved_message_payload_sha256_before,
+        report
+            .thread_message_reconcile
+            .preserved_message_payload_sha256_after_live
+    );
+    assert_eq!(
+        report
+            .thread_message_reconcile
+            .preserved_message_payload_sha256_before,
+        report
+            .thread_message_reconcile
+            .preserved_message_payload_sha256_after_reopen
+    );
+    assert_eq!(
+        report
+            .thread_message_reconcile
+            .preserved_anchor_payload_sha256_before,
+        report
+            .thread_message_reconcile
+            .preserved_anchor_payload_sha256_after_live
+    );
+    assert_eq!(
+        report
+            .thread_message_reconcile
+            .preserved_anchor_payload_sha256_before,
+        report
+            .thread_message_reconcile
+            .preserved_anchor_payload_sha256_after_reopen
+    );
+    assert_eq!(
+        report
+            .thread_message_reconcile
+            .live_read
+            .execution
+            .visible_commit_epoch,
+        report.thread_message_reconcile.committed_epoch
+    );
+    assert!(
+        report
+            .thread_message_reconcile
+            .live_read
+            .execution
+            .overlay_entries
+            > 0
+    );
+    assert_eq!(
+        report.thread_message_reconcile.live_read.output_sha256,
+        report.thread_message_reconcile.reopened_read.output_sha256
+    );
+    assert_eq!(
+        report.thread_message_reconcile.live_anchor_sha256,
+        report.thread_message_reconcile.reopened_anchor_sha256
+    );
+    assert!(
+        report.thread_message_reconcile.checkpoint_generation
+            > report.thread_message_reconcile.seed_checkpoint_generation
     );
     assert_eq!(
         report.multi_statement_transaction.index_runtime_path,

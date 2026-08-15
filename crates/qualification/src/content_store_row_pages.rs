@@ -9,7 +9,9 @@ mod source_replacement;
 mod space_merge_ownership;
 #[cfg(test)]
 mod tests;
+mod thread_fixture;
 mod thread_ownership;
+mod thread_reconcile;
 mod thread_upsert;
 mod transaction;
 
@@ -36,6 +38,7 @@ use source_replacement::qualify_source_chunk_replacement;
 use space_merge_ownership::qualify_space_merge_ownership;
 use std::path::PathBuf;
 use thread_ownership::qualify_thread_ownership_moves;
+use thread_reconcile::qualify_thread_message_reconcile;
 use thread_upsert::qualify_thread_message_upsert;
 use transaction::qualify_multi_statement_transaction;
 
@@ -272,6 +275,7 @@ pub struct ContentStoreInitialRowPageQualificationReport {
     pub thread_ownership_move: ContentStoreThreadOwnershipMoveQualificationReport,
     pub space_merge_ownership: ContentStoreSpaceMergeOwnershipQualificationReport,
     pub thread_message_upsert: ContentStoreThreadUpsertQualificationReport,
+    pub thread_message_reconcile: ContentStoreThreadReconcileQualificationReport,
     pub multi_statement_transaction: ContentStoreTransactionQualificationReport,
     pub resources: ContentStoreResourceEvidence,
     pub corruption: ContentStoreCorruptionQualificationReport,
@@ -406,6 +410,37 @@ pub struct ContentStoreThreadUpsertQualificationReport {
     pub live_read: ContentStoreRowPageReadReport,
     pub checkpoint_generation: u64,
     pub reopened_read: ContentStoreRowPageReadReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContentStoreThreadReconcileQualificationReport {
+    pub thread_id: String,
+    pub thread_storage_id: String,
+    pub initial_message_count: usize,
+    pub final_message_count: usize,
+    pub duplicate_mapping_rejected: bool,
+    pub incomplete_mapping_rejected: bool,
+    pub unknown_mapping_rejected: bool,
+    pub invalid_mapping_epoch_unchanged: bool,
+    pub explicit_anchor_reordered: bool,
+    pub legacy_anchor_reordered: bool,
+    pub occurrence_identity_preserved: bool,
+    pub summary_item_count: i64,
+    pub summary_size_bytes: i64,
+    pub seed_commit_epoch: u64,
+    pub seed_checkpoint_generation: u64,
+    pub committed_epoch: u64,
+    pub preserved_message_payload_sha256_before: String,
+    pub preserved_message_payload_sha256_after_live: String,
+    pub preserved_message_payload_sha256_after_reopen: String,
+    pub preserved_anchor_payload_sha256_before: String,
+    pub preserved_anchor_payload_sha256_after_live: String,
+    pub preserved_anchor_payload_sha256_after_reopen: String,
+    pub live_read: ContentStoreRowPageReadReport,
+    pub live_anchor_sha256: String,
+    pub checkpoint_generation: u64,
+    pub reopened_read: ContentStoreRowPageReadReport,
+    pub reopened_anchor_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -740,6 +775,13 @@ pub fn run_content_store_initial_row_page_qualification(
         &corpus,
     )?;
     database = thread_upsert_database;
+    let (thread_reconcile_database, thread_message_reconcile) = qualify_thread_message_reconcile(
+        database,
+        &config.database_path,
+        &authoritative_config,
+        &corpus,
+    )?;
+    database = thread_reconcile_database;
     let isolation = qualify_content_store_isolation(
         database,
         &corpus,
@@ -782,6 +824,7 @@ pub fn run_content_store_initial_row_page_qualification(
         thread_ownership_move,
         space_merge_ownership,
         thread_message_upsert,
+        thread_message_reconcile,
         multi_statement_transaction,
         resources,
         corruption,

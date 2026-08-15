@@ -1,5 +1,9 @@
 use super::evidence::execute_qualified_read;
 use super::fixture::corpus_statement;
+use super::thread_fixture::{
+    thread_document_parameters, thread_message_parameters, thread_page_parameters,
+    ThreadDocumentParameters, ThreadMessageParameters,
+};
 use super::{ContentStoreRowPageReadPhase, ContentStoreThreadUpsertQualificationReport};
 use crate::evidence_digest::rows_sha256;
 use crate::ContentStoreSqlCorpus;
@@ -42,7 +46,7 @@ pub(super) fn qualify_thread_message_upsert(
     let summary = corpus_statement(corpus, "thread_document_payload_summary")?;
     let update_summary = corpus_statement(corpus, "update_content_document_summary")?;
     let page = corpus_statement(corpus, "thread_messages_page")?;
-    let page_parameters = thread_page_parameters();
+    let page_parameters = thread_page_parameters(THREAD_STORAGE_ID, MESSAGE_COUNT);
     let base_epoch = database.commit_epoch();
 
     let mut transaction = database.begin_transaction();
@@ -263,7 +267,7 @@ fn require_persisted_state(
     let page = corpus_statement(corpus, "thread_messages_page")?;
     let messages = database.query_sql_with_params_options(
         &page.sql,
-        &thread_page_parameters(),
+        &thread_page_parameters(THREAD_STORAGE_ID, MESSAGE_COUNT),
         QueryStreamOptions {
             max_rows: Some(MESSAGE_COUNT),
             max_payload_bytes: Some(page.max_payload_bytes),
@@ -399,16 +403,14 @@ fn graph_identity_parameters() -> BTreeMap<String, Value> {
 }
 
 fn document_parameters(created_at: &str) -> Vec<Value> {
-    vec![
-        Value::String(CONTENT_DOCUMENT_ID.to_string()),
-        Value::String("thread".to_string()),
-        Value::String(THREAD_STORAGE_ID.to_string()),
-        Value::String(SPACE_ID.to_string()),
-        Value::String(MEDIA_TYPE.to_string()),
-        Value::Int(1),
-        Value::String(created_at.to_string()),
-        Value::String(UPDATED_AT.to_string()),
-    ]
+    thread_document_parameters(ThreadDocumentParameters {
+        content_document_id: CONTENT_DOCUMENT_ID,
+        thread_storage_id: THREAD_STORAGE_ID,
+        space_id: SPACE_ID,
+        media_type: MEDIA_TYPE,
+        created_at,
+        updated_at: UPDATED_AT,
+    })
 }
 
 fn message_parameters(
@@ -418,38 +420,31 @@ fn message_parameters(
     content: &str,
     created_at: &str,
 ) -> Vec<Value> {
-    vec![
-        Value::String(content_message_id.to_string()),
-        Value::String(message_id.to_string()),
-        Value::String(THREAD_STORAGE_ID.to_string()),
-        Value::String(THREAD_ID.to_string()),
-        Value::String(CONTENT_DOCUMENT_ID.to_string()),
-        Value::String(SPACE_ID.to_string()),
-        Value::Int(order_index),
-        Value::String(
-            if order_index == 0 {
-                "user"
-            } else {
-                "assistant"
-            }
-            .to_string(),
-        ),
-        Value::String(content.to_string()),
-        Value::String(UPDATED_AT.to_string()),
-        Value::Int(4 + order_index),
-        Value::String(format!("{{\"message\":{order_index}}}")),
-        Value::String(format!("external-{message_id}")),
-        Value::Bool(false),
-        Value::String(format!("hash-{message_id}")),
-        Value::String(created_at.to_string()),
-        Value::String(UPDATED_AT.to_string()),
-    ]
-}
-
-fn thread_page_parameters() -> Vec<Value> {
-    vec![
-        Value::String(THREAD_STORAGE_ID.to_string()),
-        Value::Int(MESSAGE_COUNT_I64),
-        Value::Int(0),
-    ]
+    let role = if order_index == 0 {
+        "user"
+    } else {
+        "assistant"
+    };
+    let metadata_json = format!("{{\"message\":{order_index}}}");
+    let external_id = format!("external-{message_id}");
+    let content_hash = format!("hash-{message_id}");
+    thread_message_parameters(ThreadMessageParameters {
+        content_message_id,
+        message_id,
+        thread_storage_id: THREAD_STORAGE_ID,
+        thread_id: THREAD_ID,
+        content_document_id: CONTENT_DOCUMENT_ID,
+        space_id: SPACE_ID,
+        order_index,
+        role,
+        content,
+        timestamp: UPDATED_AT,
+        token_count: 4 + order_index,
+        metadata_json: &metadata_json,
+        external_id: &external_id,
+        exclude_from_distillation: false,
+        content_hash: &content_hash,
+        created_at,
+        updated_at: UPDATED_AT,
+    })
 }
