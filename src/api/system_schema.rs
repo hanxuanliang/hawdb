@@ -160,11 +160,12 @@ impl Database {
         }
 
         let applied = if registry_table_present {
-            read_applied_migrations(
-                self.store.relational_state(),
-                &registry.owner,
-                registry.migrations.len().saturating_add(1),
-            )?
+            let max_rows = registry.migrations.len().saturating_add(1);
+            if self.store.relational_state().materialized_rows_resident() {
+                read_applied_migrations(self.store.relational_state(), &registry.owner, max_rows)?
+            } else {
+                self.read_applied_migrations_query(&registry.owner, max_rows)?
+            }
         } else {
             Vec::new()
         };
@@ -233,6 +234,27 @@ impl Database {
             commit_epoch_before,
             commit_epoch_after: self.commit_epoch(),
         })
+    }
+
+    fn read_applied_migrations_query(
+        &mut self,
+        owner: &str,
+        max_rows: usize,
+    ) -> Result<Vec<AppliedMigration>> {
+        let limit = i64::try_from(max_rows).map_err(|_| {
+            SkeinError::Execution("system schema migration read limit exceeds BIGINT".to_string())
+        })?;
+        let output = self.query_sql_with_params_bounded(
+            "SELECT version, name, checksum FROM skein_schema_migrations \
+             WHERE owner = $1 ORDER BY version ASC LIMIT $2",
+            &[Value::String(owner.to_string()), Value::Int(limit)],
+            Some(max_rows),
+        )?;
+        output
+            .rows
+            .iter()
+            .map(|row| applied_migration_from_query_row(owner, row))
+            .collect()
     }
 
     pub(super) fn has_only_engine_system_schema_bootstrap(&self) -> Result<bool> {
@@ -353,6 +375,9 @@ fn validate_engine_system_schema_state(state: &RelationalState) -> Result<()> {
 }
 
 fn state_with_engine_system_schema(state: &RelationalState) -> Result<RelationalState> {
+    state
+        .require_materialized_rows("Skein Lightning relational export")
+        .map_err(|error| SkeinError::Storage(error.to_string()))?;
     if state.table_schema(REGISTRY_TABLE).is_some() {
         validate_engine_system_schema_state(state)?;
         return Ok(state.clone());
@@ -435,6 +460,45 @@ fn applied_migration_from_row(
     };
     let checksum = match row.values().get(4) {
         Some(RelationalValue::Text(checksum)) => checksum.clone(),
+        _ => {
+            return Err(SkeinError::Storage(format!(
+                "system schema {owner} contains an invalid migration checksum"
+            )))
+        }
+    };
+    Ok(AppliedMigration {
+        version,
+        name,
+        checksum,
+    })
+}
+
+fn applied_migration_from_query_row(
+    owner: &str,
+    row: &std::collections::BTreeMap<String, Value>,
+) -> Result<AppliedMigration> {
+    let version = match row.get("version") {
+        Some(Value::Int(version)) => u64::try_from(*version).map_err(|_| {
+            SkeinError::Storage(format!(
+                "system schema {owner} contains a negative migration version"
+            ))
+        })?,
+        _ => {
+            return Err(SkeinError::Storage(format!(
+                "system schema {owner} contains an invalid migration version"
+            )))
+        }
+    };
+    let name = match row.get("name") {
+        Some(Value::String(name)) => name.clone(),
+        _ => {
+            return Err(SkeinError::Storage(format!(
+                "system schema {owner} contains an invalid migration name"
+            )))
+        }
+    };
+    let checksum = match row.get("checksum") {
+        Some(Value::String(checksum)) => checksum.clone(),
         _ => {
             return Err(SkeinError::Storage(format!(
                 "system schema {owner} contains an invalid migration checksum"

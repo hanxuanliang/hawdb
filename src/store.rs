@@ -986,6 +986,10 @@ pub struct StorageResidencyReport {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RelationalRowStorageResidencyReport {
     pub serving: bool,
+    pub materialized_rows_resident: bool,
+    pub materialized_row_count: usize,
+    pub materialized_row_bytes: u64,
+    pub logical_row_count: usize,
     pub base_generation: Option<u64>,
     pub recovery_delta_generation: Option<u64>,
     pub base_commit_epoch: Option<u64>,
@@ -1780,7 +1784,9 @@ impl GraphStore {
                 replay_config.max_batch_operations,
             )?,
         };
-        Self::finish_open(durable, catalog, replay_config).map(|(store, _)| store)
+        let (mut store, _) = Self::finish_open(durable, catalog, replay_config)?;
+        store.activate_read_only_out_of_core_rows()?;
+        Ok(store)
     }
 
     fn finish_open(

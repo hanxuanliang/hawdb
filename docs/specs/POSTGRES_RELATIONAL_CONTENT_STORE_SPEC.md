@@ -482,7 +482,11 @@ missing admission, rejection, overcommit, or a leaked permit blocks readiness.
 The selected relational row and index
 views MUST both serve at the database epoch, share their base generation, base
 epoch, and visible epoch, and report checkpoint, recovery-delta, and live
-overlay bytes independently. Both canonical row and canonical index artifacts
+overlay bytes independently. A read-only `OutOfCore` plus `Authoritative`
+handle MUST report that materialized checkpoint rows are absent while retaining
+the exact logical row count, and system-schema validation plus ordinary SQL
+must use the same canonical row snapshot rather than a direct state scan. Both
+canonical row and canonical index artifacts
 MUST exceed the configured cache while an individual admitted read wave still
 fits: cache admission rejection or a leaked pin blocks readiness.
 Per-run physical page and byte limits cover the sum of relational row and index

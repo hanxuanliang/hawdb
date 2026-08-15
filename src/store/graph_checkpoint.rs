@@ -721,7 +721,7 @@ impl GraphStore {
             graph_index_reads: self.graph_index_read_metrics.snapshot(),
             relational_rows: self
                 .relational_row_pages
-                .residency_report(self.commit_epoch),
+                .residency_report(self.commit_epoch, &self.relational_state),
             relational_indexes: self
                 .relational_index_shadow
                 .residency_report(self.commit_epoch),

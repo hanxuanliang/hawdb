@@ -1401,6 +1401,9 @@ impl GraphStore {
         &self,
         options: RelationalIndexViewQualificationOptions,
     ) -> crate::Result<RelationalIndexViewQualificationReport> {
+        self.relational_state
+            .require_materialized_rows("relational index differential qualification")
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
         let view = self
             .relational_index_shadow
             .current_read_view(self.commit_epoch)

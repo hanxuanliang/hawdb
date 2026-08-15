@@ -234,6 +234,10 @@ fn relational_row_residency_json(
 ) -> serde_json::Value {
     serde_json::json!({
         "serving": report.serving,
+        "materialized_rows_resident": report.materialized_rows_resident,
+        "materialized_row_count": report.materialized_row_count,
+        "materialized_row_bytes": report.materialized_row_bytes,
+        "logical_row_count": report.logical_row_count,
         "base_generation": report.base_generation,
         "recovery_delta_generation": report.recovery_delta_generation,
         "base_commit_epoch": report.base_commit_epoch,

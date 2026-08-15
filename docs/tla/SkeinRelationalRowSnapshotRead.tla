@@ -10,6 +10,8 @@ EXTENDS Integers, Naturals, Sequences, FiniteSets
 (* pinned reader. Admission, cancellation, and callback panic do not poison*)
 (* the reader; corruption does. An unresolved overflow reference is resolved*)
 (* only through the relational state pinned at the same visible epoch.      *)
+(* A read-only out-of-core activation may detach its materialized base only *)
+(* after the canonical serving view is ready; it never falls back afterward.*)
 (***************************************************************************)
 
 CONSTANT MaxOverlayEntries, MaxOverlayBytes
@@ -107,7 +109,9 @@ vars == <<
     schemaWalDurable
 >>
 
-ServingReady == servingState \in {"ready", "readyAfterSchema"}
+ServingReady == servingState \in {"ready", "readyAfterSchema", "readyDetached"}
+
+DetachedBase == servingState \in {"readyDetached", "unavailableDetached"}
 
 Init ==
     /\ readState = "idle"
@@ -322,6 +326,7 @@ DetectCorruption ==
 
 AdvanceCurrentView ==
     /\ ServingReady
+    /\ servingState # "readyDetached"
     /\ currentViewEpoch = VisibleEpoch
     /\ currentViewEpoch' = VisibleEpoch + 1
     /\ UNCHANGED <<
@@ -356,7 +361,8 @@ ReadInMemoryCanonical ==
 LoseServingResources ==
     /\ readState = "idle"
     /\ ServingReady
-    /\ servingState' = "unavailable"
+    /\ servingState' =
+        IF servingState = "readyDetached" THEN "unavailableDetached" ELSE "unavailable"
     /\ UNCHANGED <<
         readState, outcome, lowerBound, upperBound, entryBudget, byteBudget,
         overlay, overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
@@ -365,7 +371,7 @@ LoseServingResources ==
 
 RejectUnavailableReader ==
     /\ readState = "idle"
-    /\ servingState \in {"unavailable", "schemaRequired"}
+    /\ servingState \in {"unavailable", "unavailableDetached", "schemaRequired"}
     /\ readState' = "failed"
     /\ outcome' = "corruption"
     /\ poisoned' = TRUE
@@ -442,6 +448,16 @@ PublishSchemaCheckpoint ==
         stoppedEarly, schemaWalDurable
         >>
 
+DetachMaterializedBase ==
+    /\ readState = "idle"
+    /\ servingState \in {"ready", "readyAfterSchema"}
+    /\ servingState' = "readyDetached"
+    /\ UNCHANGED <<
+        readState, outcome, lowerBound, upperBound, entryBudget, byteBudget,
+        overlay, overlayEntries, overlayBytes, cursor, emittedRows, resolvedOverflow, poisoned,
+        stoppedEarly, currentViewEpoch, schemaWalDurable
+        >>
+
 Next ==
     \/ \E lower \in 0..2, upper \in 2..4,
           entries \in 1..MaxOverlayEntries, bytes \in 1..MaxOverlayBytes:
@@ -470,6 +486,7 @@ Next ==
     \/ BeginSchemaCheckpoint
     \/ CrashBeforeSchemaManifest
     \/ PublishSchemaCheckpoint
+    \/ DetachMaterializedBase
 
 Spec == Init /\ [][Next]_vars
 
@@ -492,7 +509,8 @@ TypeOK ==
     /\ stoppedEarly \in BOOLEAN
     /\ currentViewEpoch \in VisibleEpoch..(VisibleEpoch + 1)
     /\ servingState \in {
-        "ready", "readyAfterSchema", "missing", "unavailable", "schemaRequired", "checkpointing"
+        "ready", "readyAfterSchema", "readyDetached", "missing", "unavailable",
+        "unavailableDetached", "schemaRequired", "checkpointing"
         }
     /\ schemaWalDurable \in BOOLEAN
 
@@ -512,8 +530,15 @@ OverflowIsResolvedBeforeStreaming ==
 ServingAuthorityIsFailClosed ==
     /\ readState \in {"recovery", "live", "resolving", "reading"} =>
         ServingReady
-    /\ servingState \in {"unavailable", "schemaRequired", "checkpointing"} =>
+    /\ servingState \in {
+        "unavailable", "unavailableDetached", "schemaRequired", "checkpointing"
+        } =>
         readState \notin {"recovery", "live", "resolving", "reading", "succeeded"}
+
+DetachedBaseNeverFallsBack ==
+    /\ DetachedBase => servingState # "missing"
+    /\ (DetachedBase /\ readState \in {"recovery", "live", "resolving", "reading", "succeeded"}) =>
+        servingState = "readyDetached"
 
 SchemaCheckpointPublishesBeforeServing ==
     /\ servingState \in {"schemaRequired", "checkpointing"} =>

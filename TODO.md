@@ -138,9 +138,12 @@ crash; read-only recovery remains fail closed.
   - The selected row-page generation is now self-describing: each checksummed
     table root carries the complete digest-bound schema, non-zero column count,
     and exact descriptor-derived row count. New tables without schema bytes and
-    incremental schema drift fail before artifact creation. This is the durable
-    prerequisite for removing full materialized-row checkpoint residency on
-    open; the removal itself remains pending.
+    incremental schema drift fail before artifact creation. A read-only
+    `OutOfCore` plus `Authoritative` open now validates the current row and index
+    views and then releases its transitional materialized checkpoint rows while
+    retaining schemas and exact logical counts. Cold open still fully decodes
+    those rows before release, so schema-only open is required to remove the
+    startup peak rather than only steady-state residency.
   - The typed runner now qualifies `content_documents`, `thread_messages`,
     `content_chunks`, and `content_anchors` using the frozen PostgreSQL statement
     corpus and graph-plus-relational commits that publish one shared epoch.
@@ -216,7 +219,9 @@ crash; read-only recovery remains fail closed.
     policy report alone does not prove peak RSS.
   - Because no storage format has shipped, activation is destructive: remove
     the ordinary materialized row selector instead of retaining a compatibility
-    or rollback path. Keep the differential oracle in qualification code only.
+    or rollback path. The read-only authoritative serving handle now has no row
+    fallback; the remaining work is to avoid constructing that oracle during
+    cold open and keep it only in offline qualification code.
 
 - [ ] Differentially qualify and production-activate persistent graph indexes.
   - Equality, range, full-text, ordered composite-equality, relationship

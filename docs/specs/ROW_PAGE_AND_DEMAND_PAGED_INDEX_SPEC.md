@@ -413,8 +413,13 @@ generations, commit epochs, root-set digest, logical and physical page bytes,
 cache outcomes, recovery-delta work, live-overlay work, and index rows. It
 distinguishes `demand_paged`, `authoritative`, canonical fallback, and mixed
 execution. Plain `EXPLAIN` remains history-independent. Authoritative
-activation changes constraint and fallback semantics, but it does not yet
-remove materialized postings or make row pages demand-resident.
+activation changes constraint and fallback semantics and omits materialized
+postings. A read-only `OutOfCore` plus `Authoritative` open additionally drops
+the transitional materialized checkpoint rows after both the canonical row
+view and authoritative index view are validated at the current epoch. The
+writable transaction workspace remains materialized. Cold open still decodes
+the relational checkpoint before releasing those rows, so eliminating that
+startup peak is a separate activation step.
 
 ## Identities and terminology
 
@@ -789,6 +794,17 @@ then reads the bounded row and overflow manifests and exact current-generation
 artifact file lengths. It verifies row-to-overflow binding and table schemas,
 but does not read row-page slots or hash database-scale payload artifacts.
 Descriptor and page integrity checks remain demand-read or scrub obligations.
+
+A read-only `OutOfCore` plus `Authoritative` handle may detach the decoded
+checkpoint-row oracle only after the current canonical row snapshot reader and
+the current authoritative index view both open successfully. Detachment keeps
+the complete schemas, exact manifest-derived logical row counts, and overflow
+resolvers, while reporting zero materialized row count and bytes. SQL must then
+serve only through the pinned row pages and persistent indexes. Mutation,
+checkpoint preparation, differential qualification, and Skein Lightning export
+fail closed instead of treating detached rows as an empty database or silently
+falling back. Derived repair opens retain materialized rows until their writable
+repair phase completes.
 
 Relational transaction apply derives exact primary-key changes from the
 authoritative before and after states. Multiple relational fragments in one
@@ -1585,7 +1601,9 @@ from graph residency. Each relational report is derived from the currently
 pinned serving view rather than a directory scan: it records the base and
 recovery generations, base and visible epochs, immutable artifact bytes, and
 bounded live-overlay counts and bytes. Row residency additionally records root
-descriptors, root keys, overflow extents, and conservative live resident bytes;
+descriptors, root keys, overflow extents, conservative live resident bytes,
+whether checkpoint rows remain materialized, materialized row count and bytes,
+and the exact logical row count retained after detachment;
 index residency records roots, base pages, and immutable recovery-delta pages.
 If no read view is current at the database epoch, `serving` MUST be false and
 the report MUST NOT manufacture a generation from stale files. Production-copy

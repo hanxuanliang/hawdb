@@ -7,7 +7,8 @@ use skein_storage::{
     RelationalRowDeltaReader, RelationalRowDeltaReport, RelationalRowPageLiveError,
     RelationalRowPageMutationPlanner, RelationalRowPagePublicationConfig,
     RelationalRowPageReadView, RelationalRowPageReadViewIdentity, RelationalRowPageRootReader,
-    RelationalRowPageSnapshotReader, RelationalRowPageTableDelta, SegmentCache, StoreId,
+    RelationalRowPageSnapshotReader, RelationalRowPageTableDelta, RelationalState, SegmentCache,
+    StorageResidencyMode, StoreId,
 };
 use std::collections::BTreeMap;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -97,38 +98,46 @@ impl RelationalRowPageState {
     pub(super) fn residency_report(
         &self,
         commit_epoch: u64,
+        state: &RelationalState,
     ) -> RelationalRowStorageResidencyReport {
+        let mut report = RelationalRowStorageResidencyReport {
+            materialized_rows_resident: state.materialized_rows_resident(),
+            materialized_row_count: state.materialized_row_count(),
+            materialized_row_bytes: state.estimated_materialized_row_bytes(),
+            logical_row_count: state.total_row_count(),
+            ..RelationalRowStorageResidencyReport::default()
+        };
         let Some(view) = self.current_read_view(commit_epoch) else {
-            return RelationalRowStorageResidencyReport::default();
+            return report;
         };
         let Some(resources) = self.serving_resources.as_ref() else {
-            return RelationalRowStorageResidencyReport::default();
+            return report;
         };
         let identity = view.identity();
         let base = view.base().manifest();
         let overflow = resources.base_overflow.manifest();
         let recovery = view.recovery_delta().map(|delta| delta.manifest());
-        RelationalRowStorageResidencyReport {
-            serving: true,
-            base_generation: Some(identity.base_generation),
-            recovery_delta_generation: identity.delta_generation,
-            base_commit_epoch: Some(identity.base_commit_epoch),
-            visible_commit_epoch: Some(identity.visible_commit_epoch),
-            root_page_count: base.root_page_count,
-            page_artifact_bytes: base.page_artifact.encoded_len,
-            root_descriptor_artifact_bytes: base.root_descriptor_artifact.encoded_len,
-            root_key_artifact_bytes: base.root_key_artifact.encoded_len,
-            overflow_extent_count: overflow.extent_count,
-            overflow_extent_artifact_bytes: overflow.extent_artifact.encoded_len,
-            overflow_descriptor_artifact_bytes: overflow.descriptor_artifact.encoded_len,
-            recovery_delta_runs: recovery.map_or(0, |manifest| manifest.run_count()),
-            recovery_delta_entries: recovery.map_or(0, |manifest| manifest.total_entries()),
-            recovery_delta_artifact_bytes: recovery.map_or(0, |manifest| manifest.artifact_bytes()),
-            live_batches: view.live_batch_count(),
-            live_entries: view.live_entry_count(),
-            live_encoded_bytes: view.live_encoded_bytes(),
-            live_resident_bytes: view.live_resident_bytes(),
-        }
+        report.serving = true;
+        report.base_generation = Some(identity.base_generation);
+        report.recovery_delta_generation = identity.delta_generation;
+        report.base_commit_epoch = Some(identity.base_commit_epoch);
+        report.visible_commit_epoch = Some(identity.visible_commit_epoch);
+        report.root_page_count = base.root_page_count;
+        report.page_artifact_bytes = base.page_artifact.encoded_len;
+        report.root_descriptor_artifact_bytes = base.root_descriptor_artifact.encoded_len;
+        report.root_key_artifact_bytes = base.root_key_artifact.encoded_len;
+        report.overflow_extent_count = overflow.extent_count;
+        report.overflow_extent_artifact_bytes = overflow.extent_artifact.encoded_len;
+        report.overflow_descriptor_artifact_bytes = overflow.descriptor_artifact.encoded_len;
+        report.recovery_delta_runs = recovery.map_or(0, |manifest| manifest.run_count());
+        report.recovery_delta_entries = recovery.map_or(0, |manifest| manifest.total_entries());
+        report.recovery_delta_artifact_bytes =
+            recovery.map_or(0, |manifest| manifest.artifact_bytes());
+        report.live_batches = view.live_batch_count();
+        report.live_entries = view.live_entry_count();
+        report.live_encoded_bytes = view.live_encoded_bytes();
+        report.live_resident_bytes = view.live_resident_bytes();
+        report
     }
 
     pub(super) fn snapshot_at_epoch(&self, commit_epoch: u64) -> Self {
@@ -219,6 +228,41 @@ pub(super) struct RelationalRowLiveUnavailable {
 }
 
 impl GraphStore {
+    pub(super) fn activate_read_only_out_of_core_rows(&mut self) -> crate::error::Result<()> {
+        let read_only = self
+            .durable
+            .as_ref()
+            .is_some_and(|durable| durable.read_only);
+        if !read_only
+            || self.residency_mode != StorageResidencyMode::OutOfCore
+            || !matches!(
+                self.relational_checkpoint_index_load(),
+                skein_storage::RelationalCheckpointIndexLoad::OmitMaterializedPostings
+            )
+            || self.relational_state.is_empty()
+        {
+            return Ok(());
+        }
+        self.open_relational_row_snapshot_reader()?.ok_or_else(|| {
+            crate::error::SkeinError::StorageIntegrity(
+                "read-only out-of-core relational activation requires a canonical row view"
+                    .to_string(),
+            )
+        })?;
+        if !self
+            .relational_index_shadow
+            .residency_report(self.commit_epoch)
+            .serving
+        {
+            return Err(crate::error::SkeinError::StorageIntegrity(
+                "read-only out-of-core relational activation requires an authoritative index view"
+                    .to_string(),
+            ));
+        }
+        self.relational_state.omit_materialized_rows();
+        Ok(())
+    }
+
     pub(super) fn plan_relational_row_page_checkpoint(
         &self,
         base: Option<RelationalRowPageRootReader>,
@@ -845,11 +889,12 @@ mod tests {
     use skein_storage::{
         relational_overflow_extent_file, relational_overflow_manifest_generation_file,
         relational_row_page_manifest_generation_file, DurabilityPolicy, RelationalColumnSchema,
-        RelationalHydrationBudget, RelationalInsertMode, RelationalKey, RelationalRow,
+        RelationalHydrationBudget, RelationalIndexMode, RelationalInsertMode, RelationalKey,
+        RelationalMutationLimits, RelationalOverflowConfig, RelationalRow,
         RelationalRowPagePublicationConfig, RelationalRowPagePublisher,
         RelationalRowPageRootReader, RelationalRowPageSnapshotReadLimits, RelationalScalarType,
         RelationalTableSchema, RelationalTransaction, RelationalValue, RelationalWrite,
-        WalReplayConfig,
+        StorageResidencyMode, WalReplayConfig,
     };
     use std::collections::BTreeMap;
 
@@ -1126,6 +1171,117 @@ mod tests {
             Some(skein_storage::RelationalRowPageRecoveredValue::Present(value))
                 if value == row(2, "two")
         ));
+
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn read_only_out_of_core_authoritative_open_detaches_checkpoint_rows() {
+        let path = unique_test_dir("read-only-detached-rows");
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::open_with_durability_and_replay_config(
+            &path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            WalReplayConfig {
+                relational_index_mode: RelationalIndexMode::Shadow,
+                ..WalReplayConfig::default()
+            },
+        )
+        .unwrap();
+        store
+            .commit_relational_transaction(
+                &mut catalog,
+                RelationalTransaction {
+                    writes: vec![
+                        RelationalWrite::CreateTable(schema()),
+                        RelationalWrite::Insert {
+                            table: "documents".to_string(),
+                            rows: vec![row(1, "one"), row(2, "two")],
+                            mode: RelationalInsertMode::Error,
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        store.checkpoint(&catalog).unwrap();
+        drop(store);
+
+        let mut catalog = Catalog::default();
+        let read_only = GraphStore::open_read_only_with_durability_and_replay_config(
+            &path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            WalReplayConfig {
+                residency_mode: StorageResidencyMode::OutOfCore,
+                relational_index_mode: RelationalIndexMode::Authoritative,
+                ..WalReplayConfig::default()
+            },
+        )
+        .unwrap();
+
+        assert!(!read_only.relational_state.materialized_rows_resident());
+        assert_eq!(read_only.relational_state.materialized_row_count(), 0);
+        assert_eq!(
+            read_only
+                .relational_state
+                .estimated_materialized_row_bytes(),
+            0
+        );
+        assert_eq!(read_only.relational_state.row_count("documents"), 2);
+        assert_eq!(read_only.relational_state.total_row_count(), 2);
+        let residency = read_only.storage_residency_report().relational_rows;
+        assert!(residency.serving);
+        assert!(!residency.materialized_rows_resident);
+        assert_eq!(residency.materialized_row_count, 0);
+        assert_eq!(residency.materialized_row_bytes, 0);
+        assert_eq!(residency.logical_row_count, 2);
+
+        let reader = read_only
+            .open_relational_row_snapshot_reader()
+            .unwrap()
+            .expect("canonical row reader");
+        let mut hydration = RelationalHydrationBudget::default();
+        let (projected, _) = reader
+            .point_projected(
+                "documents",
+                &key(2),
+                &[1],
+                RelationalRowPageSnapshotReadLimits::default(),
+                &mut hydration,
+                &RuntimeTaskContext::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            projected.unwrap().fields[0].value,
+            RelationalValue::Text("two".to_string())
+        );
+
+        let mutation_error = read_only
+            .relational_state
+            .stage_transaction(
+                RelationalTransaction {
+                    writes: vec![RelationalWrite::Insert {
+                        table: "documents".to_string(),
+                        rows: vec![row(3, "three")],
+                        mode: RelationalInsertMode::Error,
+                    }],
+                },
+                RelationalMutationLimits::default(),
+                RelationalOverflowConfig::default(),
+            )
+            .unwrap_err();
+        assert!(mutation_error
+            .to_string()
+            .contains("requires materialized relational rows"));
+        let qualification_error = read_only
+            .qualify_relational_index_read_view(
+                crate::store::RelationalIndexViewQualificationOptions::default(),
+            )
+            .unwrap_err();
+        assert!(qualification_error
+            .to_string()
+            .contains("requires materialized relational rows"));
 
         std::fs::remove_dir_all(path).unwrap();
     }

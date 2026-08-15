@@ -203,6 +203,9 @@ impl SkeinLightningGraphStream {
 
 impl SkeinLightningRelationalStream {
     pub(crate) fn from_state(database_commit_epoch: u64, state: &RelationalState) -> Result<Self> {
+        state
+            .require_materialized_rows("Skein Lightning relational export")
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
         let encoded = encode_relational_checkpoint(database_commit_epoch, state)
             .map_err(|error| SkeinError::Storage(error.to_string()))?;
         let table_count = state.table_schemas().count();

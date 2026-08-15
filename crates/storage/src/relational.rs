@@ -926,6 +926,9 @@ pub struct RelationalState {
     segments: BTreeMap<String, Arc<RelationalTableSegment>>,
     overflow_segments: BTreeMap<Sha256Digest, RelationalOverflowSegment>,
     materialized_index_postings_resident: bool,
+    materialized_rows_resident: bool,
+    detached_row_counts: Arc<BTreeMap<String, usize>>,
+    detached_row_bytes: u64,
 }
 
 impl Default for RelationalState {
@@ -935,6 +938,9 @@ impl Default for RelationalState {
             segments: BTreeMap::new(),
             overflow_segments: BTreeMap::new(),
             materialized_index_postings_resident: true,
+            materialized_rows_resident: true,
+            detached_row_counts: Arc::new(BTreeMap::new()),
+            detached_row_bytes: 0,
         }
     }
 }
@@ -974,6 +980,62 @@ impl RelationalState {
         self.materialized_index_postings_resident
     }
 
+    pub fn materialized_rows_resident(&self) -> bool {
+        self.materialized_rows_resident
+    }
+
+    pub fn materialized_row_count(&self) -> usize {
+        if !self.materialized_rows_resident {
+            return 0;
+        }
+        self.segments
+            .values()
+            .map(|segment| segment.rows.len())
+            .sum()
+    }
+
+    pub fn estimated_materialized_row_bytes(&self) -> u64 {
+        if !self.materialized_rows_resident {
+            return 0;
+        }
+        self.segments.values().fold(0u64, |bytes, segment| {
+            segment.rows.iter().fold(bytes, |bytes, (key, row)| {
+                bytes.saturating_add(relational_row_entry_bytes(key, row) as u64)
+            })
+        })
+    }
+
+    /// Releases the transitional checkpoint-row oracle after a current
+    /// canonical row and authoritative index view have been pinned by the
+    /// caller. Schemas, exact logical counts, and overflow resolvers remain
+    /// available to the bounded SQL serving path.
+    pub fn omit_materialized_rows(&mut self) {
+        if !self.materialized_rows_resident {
+            return;
+        }
+        let counts = self
+            .segments
+            .iter()
+            .map(|(table, segment)| (table.clone(), segment.rows.len()))
+            .collect();
+        self.detached_row_bytes = self.estimated_materialized_row_bytes();
+        self.detached_row_counts = Arc::new(counts);
+        for segment in self.segments.values_mut() {
+            *segment = Arc::new(RelationalTableSegment::default());
+        }
+        self.materialized_rows_resident = false;
+        self.materialized_index_postings_resident = false;
+    }
+
+    pub fn require_materialized_rows(&self, context: &str) -> Result<(), RelationalError> {
+        if self.materialized_rows_resident {
+            return Ok(());
+        }
+        Err(RelationalError::Admission(format!(
+            "{context} requires materialized relational rows; this read-only out-of-core state is served by canonical row pages"
+        )))
+    }
+
     /// Drops the transitional in-memory posting maps while preserving rows,
     /// schema, and overflow values. Ordinary materialized mutations fail
     /// closed afterward; callers must provide the authoritative index path.
@@ -993,6 +1055,7 @@ impl RelationalState {
         limits: RelationalMutationLimits,
         overflow_config: RelationalOverflowConfig,
     ) -> Result<Self, RelationalError> {
+        self.require_materialized_rows("relational transaction")?;
         admit_transaction(&transaction, limits)?;
         apply_transaction(self, transaction, limits, overflow_config)
     }
@@ -1004,6 +1067,7 @@ impl RelationalState {
         overflow_config: RelationalOverflowConfig,
         capture_limits: RelationalIndexChangeCaptureLimits,
     ) -> Result<(Self, RelationalIndexChangeCapture), RelationalError> {
+        self.require_materialized_rows("relational transaction")?;
         admit_transaction(&transaction, limits)?;
         apply_transaction_with_index_changes(
             self,
@@ -1031,6 +1095,7 @@ impl RelationalState {
         ),
         RelationalError,
     > {
+        self.require_materialized_rows("relational transaction")?;
         admit_transaction(&transaction, limits)?;
         let (state, index_capture, row_capture) = apply_transaction_inner(
             self,
@@ -1057,6 +1122,7 @@ impl RelationalState {
         overflow_config: RelationalOverflowConfig,
         capture_limits: RelationalRowChangeCaptureLimits,
     ) -> Result<(Self, RelationalRowChangeCapture), RelationalError> {
+        self.require_materialized_rows("relational transaction")?;
         admit_transaction(&transaction, limits)?;
         let (state, _, capture) = apply_transaction_inner(
             self,
@@ -1086,6 +1152,7 @@ impl RelationalState {
         overflow_config: RelationalOverflowConfig,
         capture_limits: RelationalIndexChangeCaptureLimits,
     ) -> Result<(Self, RelationalIndexChangeCapture), RelationalError> {
+        self.require_materialized_rows("relational recovery")?;
         admit_transaction(&transaction, limits)?;
         if transaction.changes_index_schema() {
             return Err(RelationalError::Admission(
@@ -1119,6 +1186,7 @@ impl RelationalState {
         ),
         RelationalError,
     > {
+        self.require_materialized_rows("relational recovery")?;
         admit_transaction(&transaction, limits)?;
         if transaction.changes_index_schema() {
             return Err(RelationalError::Admission(
@@ -1156,6 +1224,7 @@ impl RelationalState {
         capture_limits: RelationalIndexChangeCaptureLimits,
         constraint_index: &dyn RelationalConstraintIndex,
     ) -> Result<(Self, RelationalIndexChangeCapture), RelationalError> {
+        self.require_materialized_rows("relational transaction")?;
         admit_transaction(&transaction, limits)?;
         if transaction.changes_index_schema() {
             return Err(RelationalError::Admission(
@@ -1193,6 +1262,7 @@ impl RelationalState {
         ),
         RelationalError,
     > {
+        self.require_materialized_rows("relational transaction")?;
         admit_transaction(&transaction, limits)?;
         if transaction.changes_index_schema() {
             return Err(RelationalError::Admission(
@@ -1269,6 +1339,8 @@ impl RelationalState {
         source_commit_epoch: u64,
         config: RelationalRowPagePublicationConfig,
     ) -> Result<Vec<RelationalRowPageTableDelta>, RelationalRowPageMutationError> {
+        self.require_materialized_rows("relational row-page snapshot")
+            .map_err(|error| RelationalRowPageMutationError::Admission(error.to_string()))?;
         if self.schemas.len() > config.max_tables.get() {
             return Err(RelationalRowPageMutationError::Admission(format!(
                 "row-page snapshot contains {} tables, exceeding limit {}",
@@ -1362,12 +1434,18 @@ impl RelationalState {
     }
 
     pub fn row_count(&self, table: &str) -> usize {
+        if !self.materialized_rows_resident {
+            return self.detached_row_counts.get(table).copied().unwrap_or(0);
+        }
         self.segments
             .get(table)
             .map_or(0, |segment| segment.rows.len())
     }
 
     pub fn total_row_count(&self) -> usize {
+        if !self.materialized_rows_resident {
+            return self.detached_row_counts.values().copied().sum();
+        }
         self.segments
             .values()
             .map(|segment| segment.rows.len())
@@ -1375,11 +1453,11 @@ impl RelationalState {
     }
 
     pub fn estimated_checkpoint_bytes(&self) -> u64 {
-        let row_bytes = self.segments.values().fold(0u64, |bytes, segment| {
-            segment.rows.iter().fold(bytes, |bytes, (key, row)| {
-                bytes.saturating_add(relational_row_entry_bytes(key, row) as u64)
-            })
-        });
+        let row_bytes = if self.materialized_rows_resident {
+            self.estimated_materialized_row_bytes()
+        } else {
+            self.detached_row_bytes
+        };
         let overflow_bytes = self
             .overflow_segments
             .values()
@@ -1540,6 +1618,7 @@ impl RelationalState {
         has_base_generation: bool,
         max_materialized_bytes: usize,
     ) -> Result<Vec<RelationalOverflowExtentInput>, RelationalError> {
+        self.require_materialized_rows("relational overflow checkpoint")?;
         let mut references = BTreeMap::new();
         for row in self
             .segments

@@ -193,6 +193,49 @@ fn engine_system_schema_bootstraps_during_persistent_open() {
 }
 
 #[test]
+fn read_only_out_of_core_open_validates_system_schema_through_canonical_rows() {
+    let path = unique_test_dir("read_only_out_of_core_system_schema");
+    {
+        let mut db = Database::open_with_config(
+            &path,
+            DatabaseConfig {
+                relational_index_mode: skein_storage::RelationalIndexMode::Shadow,
+                ..DatabaseConfig::default()
+            },
+        )
+        .unwrap();
+        db.apply_system_schema_registry(&registry_v1()).unwrap();
+        db.query_sql("INSERT INTO content_documents (id, body) VALUES ('doc-1', 'body')")
+            .unwrap();
+        db.checkpoint().unwrap();
+    }
+
+    let mut db = Database::open_with_config(
+        &path,
+        DatabaseConfig {
+            read_only: true,
+            storage_residency_mode: skein_storage::StorageResidencyMode::OutOfCore,
+            relational_index_mode: skein_storage::RelationalIndexMode::Authoritative,
+            ..DatabaseConfig::default()
+        },
+    )
+    .unwrap();
+
+    assert!(!db.store.relational_state().materialized_rows_resident());
+    assert_eq!(
+        db.query_sql("SELECT body FROM content_documents WHERE id = 'doc-1'")
+            .unwrap()
+            .rows[0]["body"],
+        Value::String("body".to_string())
+    );
+    let validation = db.apply_system_schema_registry(&registry_v1()).unwrap();
+    assert!(validation.applied_versions.is_empty());
+
+    drop(db);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn application_system_schema_upgrades_and_reopens_idempotently() {
     let path = unique_test_dir("application_system_schema_upgrade");
     {
