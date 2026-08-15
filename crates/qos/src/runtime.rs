@@ -6,7 +6,7 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, RwLock};
 
 const PER_MILLION: u64 = 1_000_000;
-const DESKTOP_MEMORY_FRACTION_PER_MILLION: u32 = 750_000;
+const DESKTOP_MEMORY_FRACTION_PER_MILLION: u32 = 250_000;
 const MOBILE_MEMORY_FRACTION_PER_MILLION: u32 = 500_000;
 const DESKTOP_FALLBACK_MEMORY_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
 const MOBILE_FALLBACK_MEMORY_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
@@ -955,6 +955,30 @@ mod tests {
     }
 
     #[test]
+    fn desktop_default_reserves_three_quarters_for_the_host_process() {
+        let governor = governor(4, 6 * 1024 * 1024 * 1024);
+        let limits = governor.snapshot().limits;
+
+        assert_eq!(limits.memory_capacity_bytes, 2 * 1024 * 1024 * 1024);
+        assert_eq!(limits.memory_budget_bytes, 1536 * 1024 * 1024);
+    }
+
+    #[test]
+    fn explicit_512_mib_profile_remains_supported() {
+        let mut config = RuntimeGovernorConfig::desktop_bound();
+        config.memory_budget_bytes = Some(512 * 1024 * 1024);
+        let governor = RuntimeGovernor::new(
+            config,
+            resources(4, 6 * 1024 * 1024 * 1024),
+            IoConcurrencyBudget::new(4, 1),
+        );
+        let limits = governor.snapshot().limits;
+
+        assert_eq!(limits.memory_capacity_bytes, 512 * 1024 * 1024);
+        assert_eq!(limits.memory_budget_bytes, 512 * 1024 * 1024);
+    }
+
+    #[test]
     fn admission_is_bounded_across_cpu_memory_and_io() {
         let governor = governor(2, 4 * 1024 * 1024 * 1024);
         let first = governor
@@ -1057,7 +1081,7 @@ mod tests {
         };
         let governor = RuntimeGovernor::new(
             RuntimeGovernorConfig::desktop_bound(),
-            snapshot(512 * 1024 * 1024),
+            snapshot(2 * 1024 * 1024 * 1024),
             IoConcurrencyBudget::new(4, 1),
         );
         let permit = governor
@@ -1069,7 +1093,7 @@ mod tests {
 
         assert!(governor.update_resources(snapshot(128 * 1024 * 1024)));
         let shrunk = governor.snapshot();
-        assert_eq!(shrunk.limits.memory_capacity_bytes, 96 * 1024 * 1024);
+        assert_eq!(shrunk.limits.memory_capacity_bytes, 32 * 1024 * 1024);
         assert_eq!(shrunk.admitted_memory_bytes, 256 * 1024 * 1024);
         assert!(shrunk.overcommitted);
 
@@ -1202,7 +1226,7 @@ mod tests {
         assert!(error.is_retryable());
         assert_eq!(
             governor.snapshot().limits.memory_capacity_bytes,
-            384 * 1024 * 1024
+            128 * 1024 * 1024
         );
     }
 

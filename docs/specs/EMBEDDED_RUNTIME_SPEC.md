@@ -282,6 +282,16 @@ requests MAY use the effective CPU budget. Internal background tasks MUST use a
 separate conservative budget and pass QoS admission. Background saturation MUST
 NOT reject an explicit foreground request.
 
+`DesktopBound` defaults reserve most process memory for the host application.
+Its stable Skein capacity is one quarter of the effective host or cgroup policy
+ceiling, and its dynamic budget is further bounded by one quarter of sensed
+headroom. On an 8 GiB machine this yields at most 2 GiB of automatic Skein
+capacity and typically 1--2 GiB of dynamic budget as host headroom changes. The
+fraction is a conservative default, not a universal limit: explicit host
+configuration and cgroup policy remain authoritative. A separately configured
+512 MiB Skein profile is a supported low-memory capability target, not the
+default ceiling or a minimum required machine size.
+
 Runtime reports SHOULD expose host, quota, cpuset, effective, foreground, and
 background parallelism without including host paths or secret configuration.
 
