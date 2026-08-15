@@ -22,7 +22,7 @@ use std::path::Path;
 const SOURCE_SPACE_ID: &str = "work";
 const TARGET_SPACE_ID: &str = "merged";
 const MOVE_UPDATED_AT: &str = "2026-01-01T00:07:00Z";
-const DOCUMENT_STATE_SQL: &str = "SELECT space_id, updated_at, item_count FROM content_documents WHERE owner_kind = $1 AND owner_id = $2";
+const DOCUMENT_STATE_SQL: &str = "SELECT owner_id, space_id, updated_at, item_count FROM content_documents WHERE owner_kind = $1 AND owner_id = $2";
 const DOCUMENT_PAYLOAD_SQL: &str = "SELECT content_doc_id, owner_kind, owner_id, media_type, schema_version, item_count, size_bytes, created_at FROM content_documents WHERE owner_kind = $1 AND owner_id = $2";
 const MESSAGE_PAYLOAD_SQL: &str = "SELECT content_message_id, message_id, thread_storage_id, thread_id, content_doc_id, order_index, role, content, timestamp, token_count, metadata_json, external_id, exclude_from_distillation, content_hash, created_at FROM thread_messages WHERE thread_storage_id = $1 ORDER BY order_index ASC, content_message_id ASC LIMIT $2";
 const SOURCE_PAYLOAD_SQL: &str = "SELECT chunk_id, content_doc_id, chunk_index, text, char_start, char_end, token_count, metadata_json, content_hash, created_at, updated_at FROM content_chunks WHERE content_doc_id = $1 ORDER BY chunk_index ASC, chunk_id ASC LIMIT $2";
@@ -57,7 +57,7 @@ pub(super) fn qualify_space_merge_ownership(
         )?;
         transaction.query_sql_with_params(
             &update_document.sql,
-            &document_move_parameters("thread", thread.thread_id),
+            &document_move_parameters("thread", thread.storage_id),
         )?;
         transaction.query_sql_with_params(
             &update_messages.sql,
@@ -90,11 +90,12 @@ pub(super) fn qualify_space_merge_ownership(
             DOCUMENT_STATE_SQL,
             &[
                 Value::String("thread".to_string()),
-                Value::String(thread.thread_id.to_string()),
+                Value::String(thread.storage_id.to_string()),
             ],
         )?;
-        require_space_and_timestamp(
+        require_document_space_and_timestamp(
             &document,
+            thread.storage_id,
             expected_space,
             expected_updated_at,
             "workspace thread document",
@@ -214,6 +215,7 @@ pub(super) fn qualify_space_merge_ownership(
             requested_sources: 1,
             documents_updated: moved_threads + 1,
             messages_updated: moved_threads,
+            document_owner_uses_storage_id: true,
             stale_guard_preserved: true,
             graph_relational_agreement: true,
             payload_fields_preserved: true,
@@ -338,15 +340,16 @@ fn require_thread_state(
         DOCUMENT_STATE_SQL,
         &[
             Value::String("thread".to_string()),
-            Value::String(thread.thread_id.to_string()),
+            Value::String(thread.storage_id.to_string()),
         ],
         QueryStreamOptions {
             max_rows: Some(1),
             max_payload_bytes: Some(STATE_MAX_PAYLOAD_BYTES),
         },
     )?;
-    require_space_and_timestamp(
+    require_document_space_and_timestamp(
         &document,
+        thread.storage_id,
         expected_space_id,
         expected_updated_at,
         "persisted thread document",
@@ -418,7 +421,7 @@ fn ownership_payload_sha256(
             DOCUMENT_PAYLOAD_SQL,
             &[
                 Value::String("thread".to_string()),
-                Value::String(thread.thread_id.to_string()),
+                Value::String(thread.storage_id.to_string()),
             ],
             QueryStreamOptions {
                 max_rows: Some(1),
@@ -497,6 +500,27 @@ fn require_space_and_timestamp(
     }
 }
 
+fn require_document_space_and_timestamp(
+    output: &QueryOutput,
+    expected_owner_id: &str,
+    expected_space_id: &str,
+    expected_updated_at: &str,
+    phase: &str,
+) -> Result<()> {
+    match output.rows.as_slice() {
+        [row]
+            if matches!(row.get("owner_id"), Some(Value::String(value)) if value == expected_owner_id)
+                && matches!(row.get("space_id"), Some(Value::String(value)) if value == expected_space_id)
+                && matches!(row.get("updated_at"), Some(Value::String(value)) if value == expected_updated_at) =>
+        {
+            Ok(())
+        }
+        rows => Err(SkeinError::Execution(format!(
+            "content-store space merge {phase} expected owner={expected_owner_id}, space={expected_space_id}, updated_at={expected_updated_at}, got {rows:?}"
+        ))),
+    }
+}
+
 fn require_source_graph_state(
     output: &QueryOutput,
     expected_space_id: &str,
@@ -527,7 +551,8 @@ fn require_source_document_state(
 ) -> Result<()> {
     match output.rows.as_slice() {
         [row]
-            if row.get("item_count") == Some(&Value::Int(SOURCE_CHUNK_COUNT_I64))
+            if matches!(row.get("owner_id"), Some(Value::String(value)) if value == SOURCE_OWNER_ID)
+                && row.get("item_count") == Some(&Value::Int(SOURCE_CHUNK_COUNT_I64))
                 && matches!(row.get("space_id"), Some(Value::String(value)) if value == expected_space_id)
                 && expected_updated_at.is_none_or(|expected| {
                     matches!(row.get("updated_at"), Some(Value::String(actual)) if actual == expected)
@@ -536,7 +561,7 @@ fn require_source_document_state(
             Ok(())
         }
         rows => Err(SkeinError::Execution(format!(
-            "content-store space merge {phase} source document expected space={expected_space_id}, chunks={SOURCE_CHUNK_COUNT}, got {rows:?}"
+            "content-store space merge {phase} source document expected owner={SOURCE_OWNER_ID}, space={expected_space_id}, chunks={SOURCE_CHUNK_COUNT}, got {rows:?}"
         ))),
     }
 }

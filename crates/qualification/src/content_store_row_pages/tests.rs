@@ -221,6 +221,7 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
     assert_eq!(report.thread_ownership_move.requested_moves, 3);
     assert_eq!(report.thread_ownership_move.documents_updated, 2);
     assert_eq!(report.thread_ownership_move.messages_updated, 2);
+    assert!(report.thread_ownership_move.document_owner_uses_storage_id);
     assert!(report.thread_ownership_move.stale_guard_preserved);
     assert!(report.thread_ownership_move.graph_relational_agreement);
     assert!(report.thread_ownership_move.payload_fields_preserved);
@@ -270,6 +271,7 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
     assert_eq!(report.space_merge_ownership.requested_sources, 1);
     assert_eq!(report.space_merge_ownership.documents_updated, 3);
     assert_eq!(report.space_merge_ownership.messages_updated, 2);
+    assert!(report.space_merge_ownership.document_owner_uses_storage_id);
     assert!(report.space_merge_ownership.stale_guard_preserved);
     assert!(report.space_merge_ownership.graph_relational_agreement);
     assert!(report.space_merge_ownership.payload_fields_preserved);

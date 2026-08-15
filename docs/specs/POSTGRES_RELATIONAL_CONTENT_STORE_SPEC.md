@@ -329,6 +329,10 @@ preview MUST leave all three representations and their update timestamps
 unchanged while other valid entries in the same batch commit. Apart from the
 intentional workspace and update-time fields, document and message payloads
 MUST retain the same digest through live visibility and checkpoint/reopen.
+The graph Thread is addressed by its public Thread id, while the relational
+document `owner_id` and message `thread_storage_id` are addressed by the
+distinct storage id. Qualification fixtures MUST keep those identities
+different and verify both mappings explicitly.
 `SkeinContentThreadOwnershipMove.tla` models guarded per-owner staging and the
 single durable batch publication.
 

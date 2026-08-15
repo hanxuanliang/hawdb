@@ -228,6 +228,11 @@ graph Thread, relational document, and message set are changed together in the
 transaction workspace. The complete batch becomes canonical only after one
 durability decision.
 
+The concrete refinement keeps identity domains explicit: Cypher addresses the
+graph Thread by public Thread id, while relational document ownership and
+message lookup use the distinct thread storage id. The qualification fixtures
+make those values unequal and assert the relational `owner_id` returned by SQL.
+
 The configured batch moves owners `a` and `b` from different spaces to `work`.
 The `stale` owner has a mismatched preview and therefore remains unchanged in
 all three representations. Payload identity is immutable across partial

@@ -16,7 +16,7 @@ use std::path::Path;
 const TARGET_SPACE_ID: &str = "work";
 const MOVE_UPDATED_AT: &str = "2026-01-01T00:06:00Z";
 const SEED_UPDATED_AT: &str = "2026-01-01T00:05:30Z";
-const DOCUMENT_STATE_SQL: &str = "SELECT space_id, updated_at FROM content_documents WHERE owner_kind = 'thread' AND owner_id = $1";
+const DOCUMENT_STATE_SQL: &str = "SELECT owner_id, space_id, updated_at FROM content_documents WHERE owner_kind = 'thread' AND owner_id = $1";
 const DOCUMENT_PAYLOAD_SQL: &str = "SELECT content_doc_id, owner_kind, owner_id, media_type, schema_version, item_count, size_bytes, created_at FROM content_documents WHERE owner_kind = 'thread' AND owner_id = $1";
 const MESSAGE_PAYLOAD_SQL: &str = "SELECT content_message_id, message_id, thread_storage_id, thread_id, content_doc_id, order_index, role, content, timestamp, token_count, metadata_json, external_id, exclude_from_distillation, content_hash, created_at FROM thread_messages WHERE thread_storage_id = $1 ORDER BY order_index ASC, content_message_id ASC LIMIT $2";
 const STATE_MAX_PAYLOAD_BYTES: usize = 16 * 1024;
@@ -122,7 +122,7 @@ pub(super) fn qualify_thread_ownership_moves(
                 Value::String(TARGET_SPACE_ID.to_string()),
                 Value::String(MOVE_UPDATED_AT.to_string()),
                 Value::String("thread".to_string()),
-                Value::String(fixture.thread_id.to_string()),
+                Value::String(fixture.storage_id.to_string()),
                 Value::String(fixture.expected_space_id.to_string()),
             ],
         )?;
@@ -149,10 +149,11 @@ pub(super) fn qualify_thread_ownership_moves(
         )?;
         let document = transaction.query_sql_with_params(
             DOCUMENT_STATE_SQL,
-            &[Value::String(fixture.thread_id.to_string())],
+            &[Value::String(fixture.storage_id.to_string())],
         )?;
-        require_relational_state(
+        require_document_relational_state(
             &document,
+            fixture.storage_id,
             fixture.expected_final_space_id,
             fixture.expected_updated_at,
             "workspace document",
@@ -256,6 +257,7 @@ pub(super) fn qualify_thread_ownership_moves(
             requested_moves: THREAD_MOVES.len(),
             documents_updated: updated_count,
             messages_updated: updated_count,
+            document_owner_uses_storage_id: true,
             stale_guard_preserved: true,
             graph_relational_agreement: true,
             payload_fields_preserved: true,
@@ -340,14 +342,15 @@ fn require_thread_state(
     )?;
     let document = database.query_sql_with_params_options(
         DOCUMENT_STATE_SQL,
-        &[Value::String(fixture.thread_id.to_string())],
+        &[Value::String(fixture.storage_id.to_string())],
         QueryStreamOptions {
             max_rows: Some(1),
             max_payload_bytes: Some(STATE_MAX_PAYLOAD_BYTES),
         },
     )?;
-    require_relational_state(
+    require_document_relational_state(
         &document,
+        fixture.storage_id,
         expected_space_id,
         fixture.expected_updated_at_for(expected_space_id),
         "persisted document",
@@ -374,7 +377,7 @@ fn thread_payload_sha256(database: &mut Database) -> Result<String> {
     for fixture in THREAD_MOVES {
         let document = database.query_sql_with_params_options(
             DOCUMENT_PAYLOAD_SQL,
-            &[Value::String(fixture.thread_id.to_string())],
+            &[Value::String(fixture.storage_id.to_string())],
             QueryStreamOptions {
                 max_rows: Some(1),
                 max_payload_bytes: Some(PAYLOAD_MAX_BYTES),
@@ -417,6 +420,27 @@ fn require_graph_state(
         }
         rows => Err(SkeinError::Execution(format!(
             "content-store thread ownership {phase} graph expected space={expected_space_id}, updated_at={expected_updated_at}, got {rows:?}"
+        ))),
+    }
+}
+
+fn require_document_relational_state(
+    output: &QueryOutput,
+    expected_owner_id: &str,
+    expected_space_id: &str,
+    expected_updated_at: &str,
+    phase: &str,
+) -> Result<()> {
+    match output.rows.as_slice() {
+        [row]
+            if matches!(row.get("owner_id"), Some(Value::String(value)) if value == expected_owner_id)
+                && matches!(row.get("space_id"), Some(Value::String(value)) if value == expected_space_id)
+                && matches!(row.get("updated_at"), Some(Value::String(value)) if value == expected_updated_at) =>
+        {
+            Ok(())
+        }
+        rows => Err(SkeinError::Execution(format!(
+            "content-store thread ownership {phase} expected owner={expected_owner_id}, space={expected_space_id}, updated_at={expected_updated_at}, got {rows:?}"
         ))),
     }
 }
@@ -497,7 +521,7 @@ fn document_parameters(fixture: ThreadMoveFixture) -> Vec<Value> {
     vec![
         Value::String(fixture.document_id.to_string()),
         Value::String("thread".to_string()),
-        Value::String(fixture.thread_id.to_string()),
+        Value::String(fixture.storage_id.to_string()),
         Value::String(fixture.initial_space_id.to_string()),
         Value::String("application/x-nowledge-thread".to_string()),
         Value::Int(1),
