@@ -201,10 +201,13 @@ crash; read-only recovery remains fail closed.
     warm runs, proves the relevant artifact exceeds the cache, and records a
     bounded non-poisoning cancellation followed by a successful read.
     `SkeinGraphIndexQualification.tla` proves the ordered cache lifecycle,
-    independent same-generation evidence gating, and fail-closed selected
-    corruption. Retain this item until representative production-replica cases
-    for every class are checked in; the synthetic node-equality fixture proves
-    the contract, not production readiness.
+    independent same-generation evidence gating, complete matrix publication,
+    and fail-closed selected corruption. The typed production matrix rejects
+    missing, duplicate, mixed-replica, mixed-runtime, or mixed-generation cases
+    before measurement and reports readiness only when all eight independent
+    class cases pass. Retain this item until representative production-replica
+    cases for every class are checked in; synthetic fixtures prove the contract,
+    not production readiness.
 
 ## P1: PostgreSQL-Dialect Relational Content Store
 

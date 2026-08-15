@@ -162,6 +162,13 @@ requires evidence bound to the same current generation for:
 3. cold/warm cache, page, byte, pin, cancellation, and corruption behavior;
 4. the production-shaped resource and result-digest run.
 
+The typed production matrix requires all eight classes exactly once against
+the same replica and production identity. It sorts the resulting reports by
+class for deterministic evidence, prefixes every blocker with its class, and
+publishes readiness only when all eight independent reports are ready. A
+partial matrix, duplicate class, changed open/runtime configuration, or mixed
+canonical generation is invalid rather than a weaker readiness state.
+
 Missing evidence, stale generation evidence, or an index/row generation
 mismatch leaves that class unqualified while other classes may remain
 qualified. Once a selected page reports corruption, the read fails closed and

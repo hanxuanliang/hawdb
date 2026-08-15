@@ -10,6 +10,7 @@ VARIABLES
     recoveryGeneration,
     cacheEvidence,
     productionGeneration,
+    matrixGeneration,
     activationGeneration,
     corruptGeneration,
     readOutcome
@@ -21,6 +22,7 @@ vars == <<
     recoveryGeneration,
     cacheEvidence,
     productionGeneration,
+    matrixGeneration,
     activationGeneration,
     corruptGeneration,
     readOutcome
@@ -44,6 +46,7 @@ TypeOK ==
     /\ recoveryGeneration \in [IndexClasses -> Generations \cup {0}]
     /\ cacheEvidence \in [IndexClasses -> CacheEvidenceValues]
     /\ productionGeneration \in [IndexClasses -> Generations \cup {0}]
+    /\ matrixGeneration \in Generations \cup {0}
     /\ activationGeneration \in [IndexClasses -> Generations \cup {0}]
     /\ corruptGeneration \in [IndexClasses -> Generations \cup {0}]
     /\ readOutcome \in [IndexClasses -> Outcomes]
@@ -60,6 +63,9 @@ EvidenceReady(class) ==
     /\ CacheEvidenceReady(class)
     /\ productionGeneration[class] = rowGeneration
 
+MatrixEvidenceReady ==
+    \A class \in IndexClasses: EvidenceReady(class)
+
 Activated(class) ==
     /\ activationGeneration[class] = rowGeneration
     /\ EvidenceReady(class)
@@ -71,6 +77,7 @@ Init ==
     /\ recoveryGeneration = [class \in IndexClasses |-> 0]
     /\ cacheEvidence = [class \in IndexClasses |-> CacheState(0, "None")]
     /\ productionGeneration = [class \in IndexClasses |-> 0]
+    /\ matrixGeneration = 0
     /\ activationGeneration = [class \in IndexClasses |-> 0]
     /\ corruptGeneration = [class \in IndexClasses |-> 0]
     /\ readOutcome = [class \in IndexClasses |-> "Idle"]
@@ -86,6 +93,7 @@ PublishRowsOnly(nextGeneration) ==
         recoveryGeneration,
         cacheEvidence,
         productionGeneration,
+        matrixGeneration,
         activationGeneration,
         corruptGeneration
         >>
@@ -100,6 +108,7 @@ PublishMatchingIndex ==
         recoveryGeneration,
         cacheEvidence,
         productionGeneration,
+        matrixGeneration,
         activationGeneration,
         corruptGeneration
         >>
@@ -115,6 +124,7 @@ PublishAlignedCheckpoint(nextGeneration) ==
         recoveryGeneration,
         cacheEvidence,
         productionGeneration,
+        matrixGeneration,
         activationGeneration,
         corruptGeneration
         >>
@@ -129,6 +139,7 @@ RecordDifferential(class) ==
         recoveryGeneration,
         cacheEvidence,
         productionGeneration,
+        matrixGeneration,
         activationGeneration,
         corruptGeneration,
         readOutcome
@@ -144,6 +155,7 @@ RecordRecovery(class) ==
         differentialGeneration,
         cacheEvidence,
         productionGeneration,
+        matrixGeneration,
         activationGeneration,
         corruptGeneration,
         readOutcome
@@ -165,6 +177,7 @@ RecordColdConstrainedRead(class) ==
         differentialGeneration,
         recoveryGeneration,
         productionGeneration,
+        matrixGeneration,
         activationGeneration,
         corruptGeneration,
         readOutcome
@@ -182,6 +195,7 @@ RecordWarmRead(class) ==
         differentialGeneration,
         recoveryGeneration,
         productionGeneration,
+        matrixGeneration,
         activationGeneration,
         corruptGeneration,
         readOutcome
@@ -199,6 +213,7 @@ RecordCancellation(class) ==
         differentialGeneration,
         recoveryGeneration,
         productionGeneration,
+        matrixGeneration,
         activationGeneration,
         corruptGeneration,
         readOutcome
@@ -214,6 +229,23 @@ RecordProduction(class) ==
         differentialGeneration,
         recoveryGeneration,
         cacheEvidence,
+        matrixGeneration,
+        activationGeneration,
+        corruptGeneration,
+        readOutcome
+        >>
+
+PublishQualificationMatrix ==
+    /\ matrixGeneration # rowGeneration
+    /\ MatrixEvidenceReady
+    /\ matrixGeneration' = rowGeneration
+    /\ UNCHANGED <<
+        rowGeneration,
+        indexGeneration,
+        differentialGeneration,
+        recoveryGeneration,
+        cacheEvidence,
+        productionGeneration,
         activationGeneration,
         corruptGeneration,
         readOutcome
@@ -231,6 +263,7 @@ Activate(class) ==
         recoveryGeneration,
         cacheEvidence,
         productionGeneration,
+        matrixGeneration,
         corruptGeneration,
         readOutcome
         >>
@@ -250,6 +283,7 @@ Read(class) ==
         recoveryGeneration,
         cacheEvidence,
         productionGeneration,
+        matrixGeneration,
         activationGeneration,
         corruptGeneration
         >>
@@ -267,6 +301,7 @@ CorruptSelectedPage(class) ==
         recoveryGeneration,
         cacheEvidence,
         productionGeneration,
+        matrixGeneration,
         activationGeneration
         >>
 
@@ -280,6 +315,7 @@ Next ==
     \/ \E class \in IndexClasses: RecordWarmRead(class)
     \/ \E class \in IndexClasses: RecordCancellation(class)
     \/ \E class \in IndexClasses: RecordProduction(class)
+    \/ PublishQualificationMatrix
     \/ \E class \in IndexClasses: Activate(class)
     \/ \E class \in IndexClasses: Read(class)
     \/ \E class \in IndexClasses: CorruptSelectedPage(class)
@@ -294,6 +330,9 @@ ActivationRequiresAllEvidence ==
                 "Cancelled"
                 )
             /\ productionGeneration[class] = activationGeneration[class]
+
+CurrentMatrixRequiresEveryClassEvidence ==
+    matrixGeneration = rowGeneration => MatrixEvidenceReady
 
 SelectedReadUsesCurrentQualifiedGeneration ==
     \A class \in IndexClasses:

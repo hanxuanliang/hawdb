@@ -31,7 +31,7 @@ pub struct ProductionGraphStorageQualificationConfig {
 }
 
 impl ProductionGraphStorageQualificationConfig {
-    fn validate(&self) -> Result<(), ProductionGraphQualificationError> {
+    pub(crate) fn validate(&self) -> Result<(), ProductionGraphQualificationError> {
         if self.open_options.mode != NowledgeMemGraphMode::ShadowReadOnly {
             return Err(ProductionGraphQualificationError::new(
                 "production graph qualification requires shadow read-only mode",

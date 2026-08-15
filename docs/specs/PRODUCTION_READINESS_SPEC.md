@@ -88,6 +88,16 @@ leave zero pinned cache bytes, avoid poisoning the handle, and be followed by
 a successful digest read. A CLI may transport this report, but it MUST NOT
 replace the typed function in the production host.
 
+The complete persistent-index release artifact MUST be produced by
+`run_production_graph_index_qualification_matrix`. The matrix accepts exactly
+one case for each of the eight persistent graph index classes. Every case MUST
+use the same replica, out-of-core open configuration, runtime-governor
+configuration, production identity, dataset fingerprint, and canonical graph
+generation. Duplicate, missing, or requirement-free cases fail before any
+measurement starts. Cases execute independently and retain class-scoped
+blockers; the matrix is ready only when every case is ready. This aggregate
+contract does not make one class's evidence authoritative for another class.
+
 Default reports MUST redact local paths, query text, parameters, row payloads,
 embeddings, credentials, and raw parser or I/O payload fragments. Debug-only
 diagnostics MAY expose local detail through an explicit host decision, but

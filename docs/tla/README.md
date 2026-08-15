@@ -831,8 +831,12 @@ current aligned generation. An unqualified or stale class can only take the
 canonical fallback, while corruption of a selected current-generation page
 transitions the read to a fail-closed outcome. The model does not treat the
 process-local Rust counters as authority; they are inputs to production
-evidence and remain outside query semantics. The checked configuration explores
-1,811,737 distinct states over two index classes and two generations.
+evidence and remain outside query semantics. The model also represents the
+typed all-class matrix as a generation-bound publication: it can become current
+only after every modeled class has complete current-generation evidence, and
+it becomes stale when rows advance. The checked configuration explores the
+finite state space over two index classes and two generations: TLC reaches
+1,965,107 distinct states without an invariant violation.
 
 `SkeinRelationalIndexShadowPublication.tla` models the generation-aligned but
 non-authoritative relational index candidate. Candidate fixed-slot pages become
