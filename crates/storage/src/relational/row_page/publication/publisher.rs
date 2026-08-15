@@ -209,6 +209,7 @@ pub(super) struct PreparedDirtyPage {
 pub(super) struct PreparedTableDelta {
     pub table: String,
     pub schema_digest: Sha256Digest,
+    pub next_page_id: std::num::NonZeroU64,
     pub dirty_pages: Vec<PreparedDirtyPage>,
     pub deleted_page_ids: BTreeSet<super::RelationalRowPageId>,
 }
@@ -268,9 +269,28 @@ fn preflight_deltas(
                 delta.table
             )));
         }
+        if let Some(page_id) = deleted_page_ids
+            .iter()
+            .find(|page_id| page_id.get() >= delta.next_page_id.get())
+        {
+            return Err(RelationalRowPagePublicationError::Admission(format!(
+                "table {} deleted page id {} is not below next page id {}",
+                delta.table,
+                page_id.get(),
+                delta.next_page_id
+            )));
+        }
         let mut seen_page_ids = BTreeSet::new();
         let mut dirty_pages = Vec::with_capacity(delta.dirty_pages.len());
         for page in delta.dirty_pages {
+            if page.page_id.get() >= delta.next_page_id.get() {
+                return Err(RelationalRowPagePublicationError::Admission(format!(
+                    "table {} page id {} is not below next page id {}",
+                    delta.table,
+                    page.page_id.get(),
+                    delta.next_page_id
+                )));
+            }
             if page.generation != generation || page.source_commit_epoch != source_commit_epoch {
                 return Err(RelationalRowPagePublicationError::Admission(format!(
                     "dirty page {} identifies generation/epoch {}/{}, expected {generation}/{source_commit_epoch}",
@@ -331,6 +351,7 @@ fn preflight_deltas(
             PreparedTableDelta {
                 table: delta.table,
                 schema_digest: delta.schema_digest,
+                next_page_id: delta.next_page_id,
                 dirty_pages,
                 deleted_page_ids,
             },
@@ -440,7 +461,7 @@ fn preflight_root_resources(
             }
         }
         manifest_upper_bound = manifest_upper_bound
-            .checked_add(60)
+            .checked_add(68)
             .and_then(|bytes| bytes.checked_add(table_name.len()))
             .and_then(|bytes| bytes.checked_add(lower_len))
             .and_then(|bytes| bytes.checked_add(upper_len))

@@ -8,10 +8,16 @@ use skein_integrity::{IntegrityHasher, Sha256Digest, SHA256_BYTES};
 use std::fmt;
 use std::num::{NonZeroU64, NonZeroUsize};
 
+mod mutation;
 mod publication;
 mod recovery;
 mod value;
 
+pub use mutation::{
+    RelationalRowPageBootstrap, RelationalRowPageBootstrapReport, RelationalRowPageIdAllocator,
+    RelationalRowPageMutationError, RelationalRowPageMutationPlan,
+    RelationalRowPageMutationPlanner,
+};
 pub use publication::{
     relational_row_page_artifact_file, relational_row_page_manifest_generation_file,
     relational_row_page_root_descriptor_file, relational_row_page_root_key_file,
@@ -331,6 +337,7 @@ pub struct RelationalRowPageView<'a> {
     schema_digest: Sha256Digest,
     row_count: usize,
     column_count: usize,
+    encoded_len: usize,
     lower_bound: &'a [u8],
     upper_bound: &'a [u8],
     directory: &'a [u8],
@@ -395,6 +402,7 @@ impl<'a> RelationalRowPageView<'a> {
             schema_digest: header.schema_digest,
             row_count: header.row_count,
             column_count: header.column_count,
+            encoded_len: header.encoded_len,
             lower_bound,
             upper_bound,
             directory,
@@ -447,6 +455,10 @@ impl<'a> RelationalRowPageView<'a> {
 
     pub const fn column_count(&self) -> usize {
         self.column_count
+    }
+
+    pub const fn encoded_len(&self) -> usize {
+        self.encoded_len
     }
 
     pub fn lower_bound_bytes(&self) -> &[u8] {

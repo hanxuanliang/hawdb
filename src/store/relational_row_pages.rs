@@ -361,6 +361,7 @@ mod tests {
                     vec![RelationalRowPageTableDelta {
                         table: "documents".to_string(),
                         schema_digest,
+                        next_page_id: NonZeroU64::new(2).unwrap(),
                         dirty_pages: vec![ImmutableRelationalRowPage {
                             generation,
                             source_commit_epoch,
@@ -564,6 +565,7 @@ mod tests {
                 vec![RelationalRowPageTableDelta {
                     table: "documents".to_string(),
                     schema_digest,
+                    next_page_id: NonZeroU64::new(2).unwrap(),
                     dirty_pages: vec![ImmutableRelationalRowPage {
                         generation: 1,
                         source_commit_epoch: 1,

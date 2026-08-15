@@ -210,6 +210,20 @@ pub(super) fn write_root_artifacts(
             (None, Some(delta)) => delta.schema_digest,
             (None, None) => unreachable!("table name originated from base or delta"),
         };
+        let next_page_id = match (base_table, delta.as_ref()) {
+            (Some(base_table), Some(delta)) => {
+                if delta.next_page_id < base_table.next_page_id {
+                    return Err(RelationalRowPagePublicationError::Admission(format!(
+                        "table {table_name} next page id {} precedes published allocator {}",
+                        delta.next_page_id, base_table.next_page_id
+                    )));
+                }
+                delta.next_page_id
+            }
+            (Some(base_table), None) => base_table.next_page_id,
+            (None, Some(delta)) => delta.next_page_id,
+            (None, None) => unreachable!("table name originated from base or delta"),
+        };
         let first_descriptor = writer.descriptor_count;
         let mut bounds = TableBounds::default();
         match (base, base_table, delta) {
@@ -256,6 +270,7 @@ pub(super) fn write_root_artifacts(
         tables.push(RelationalRowPageTableRoot {
             table: table_name,
             schema_digest,
+            next_page_id,
             first_descriptor,
             page_count,
             lower_bound: bounds.lower.unwrap_or_default(),
@@ -413,6 +428,8 @@ impl RootWriter {
         };
         let mut encoded = wire.encode();
         let mut hasher = IntegrityHasher::new();
+        hasher.update(&self.generation.to_le_bytes());
+        hasher.update(&self.descriptor_count.to_le_bytes());
         hasher.update(&encoded[..ROOT_DESCRIPTOR_BINDING_OFFSET]);
         hasher.update(&descriptor.lower_bound);
         hasher.update(&descriptor.upper_bound);

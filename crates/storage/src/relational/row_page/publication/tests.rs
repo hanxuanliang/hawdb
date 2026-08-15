@@ -45,6 +45,7 @@ fn publish_last_root_round_trips_with_a_concrete_refinement_trace() {
     assert_eq!(reader.manifest().source_commit_epoch, 10);
     assert_eq!(reader.manifest().previous_generation, None);
     assert_eq!(reader.manifest().tables.len(), 1);
+    assert_eq!(reader.manifest().tables[0].next_page_id.get(), 3);
     let descriptors = collect_descriptors(&reader, "documents");
     assert_eq!(page_id_values(&descriptors), vec![1, 2]);
     assert_eq!(physical_generations(&descriptors), vec![1, 1]);
@@ -100,6 +101,7 @@ fn incremental_publication_reuses_clean_pages_and_keeps_pinned_roots() {
         .unwrap();
     assert_eq!(current.manifest().generation, 2);
     assert_eq!(current.manifest().previous_generation, Some(1));
+    assert_eq!(current.manifest().tables[0].next_page_id.get(), 4);
     let current_descriptors = collect_descriptors(&current, "documents");
     assert_eq!(page_id_values(&current_descriptors), vec![1, 2, 3]);
     assert_eq!(physical_generations(&current_descriptors), vec![2, 1, 2]);
@@ -248,6 +250,42 @@ fn descriptor_corruption_fails_when_the_selected_entry_is_read() {
 }
 
 #[test]
+fn descriptor_binding_rejects_valid_entries_swapped_between_ordinals() {
+    let directory = unique_test_dir("descriptor-swap");
+    let config = RelationalRowPagePublicationConfig::default();
+    RelationalRowPagePublisher::new(config)
+        .publish(
+            &directory,
+            1,
+            10,
+            None,
+            vec![table_delta(
+                "documents",
+                vec![page(1, 1, 10, 1, 2), page(2, 1, 10, 3, 4)],
+            )],
+        )
+        .unwrap();
+    let reader = RelationalRowPageRootReader::open_latest(&directory, config)
+        .unwrap()
+        .unwrap();
+    let descriptor_path = directory.join(relational_row_page_root_descriptor_file(1));
+    let mut encoded = fs::read(&descriptor_path).unwrap();
+    let descriptor_bytes = root::ROOT_DESCRIPTOR_BYTES;
+    let first = encoded[..descriptor_bytes].to_vec();
+    encoded.copy_within(descriptor_bytes..descriptor_bytes * 2, 0);
+    encoded[descriptor_bytes..descriptor_bytes * 2].copy_from_slice(&first);
+    fs::write(descriptor_path, encoded).unwrap();
+
+    assert!(matches!(
+        reader.read_table_page_descriptor("documents", 0),
+        Err(RelationalRowPagePublicationError::Corrupt(message))
+            if message.contains("binding checksum")
+    ));
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn overflow_and_overlap_are_rejected_without_selecting_a_root() {
     let directory = unique_test_dir("admission");
     let config = RelationalRowPagePublicationConfig::default();
@@ -321,6 +359,7 @@ fn deletion_requires_a_page_in_the_selected_base() {
             vec![RelationalRowPageTableDelta {
                 table: "documents".to_string(),
                 schema_digest: schema_digest(),
+                next_page_id: NonZeroU64::new(10).unwrap(),
                 dirty_pages: Vec::new(),
                 deleted_page_ids: vec![page_id(9)],
             }],
@@ -365,6 +404,7 @@ fn deleting_every_page_publishes_an_empty_table_without_breaking_pinned_roots() 
         .unwrap();
 
     let mut deletion = table_delta("documents", Vec::new());
+    deletion.next_page_id = NonZeroU64::new(3).unwrap();
     deletion.deleted_page_ids = vec![page_id(1), page_id(2)];
     let report = publisher
         .publish(&directory, 2, 11, Some(1), vec![deletion])
@@ -509,9 +549,18 @@ fn table_delta(
     table: &str,
     dirty_pages: Vec<ImmutableRelationalRowPage>,
 ) -> RelationalRowPageTableDelta {
+    let next_page_id = dirty_pages
+        .iter()
+        .map(|page| page.page_id.get())
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .and_then(NonZeroU64::new)
+        .expect("test row-page allocator must remain representable");
     RelationalRowPageTableDelta {
         table: table.to_string(),
         schema_digest: schema_digest(),
+        next_page_id,
         dirty_pages,
         deleted_page_ids: Vec::new(),
     }

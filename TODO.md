@@ -97,8 +97,6 @@ a stale index or a database-sized resident set to become a correctness
 dependency.
 
 - [ ] Implement the canonical relational row-page runtime.
-  - Add a persistent logical `PageId` allocator plus deterministic leaf lookup,
-    insert, update, delete, split, and streaming bootstrap mechanics.
   - Replace the non-serving in-memory recovery shadow with schema-aware,
     disk-backed WAL and live delta runs so complete replay remains resident
     bounded without skipping durable WAL or scanning all row pages during open.

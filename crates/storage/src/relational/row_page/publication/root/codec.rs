@@ -56,6 +56,8 @@ pub(in crate::relational::row_page::publication) fn read_descriptor(
         "upper",
     )?;
     let mut hasher = IntegrityHasher::new();
+    hasher.update(&manifest.generation.to_le_bytes());
+    hasher.update(&ordinal.to_le_bytes());
     hasher.update(&encoded[..ROOT_DESCRIPTOR_BINDING_OFFSET]);
     hasher.update(&lower_bound);
     hasher.update(&upper_bound);

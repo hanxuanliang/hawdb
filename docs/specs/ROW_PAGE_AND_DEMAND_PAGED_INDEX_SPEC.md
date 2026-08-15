@@ -309,7 +309,8 @@ remove materialized postings or make row pages demand-resident.
 - **Commit epoch**: monotonically increasing visibility identity; one atomic
   graph/relational WAL batch owns one epoch.
 - **Manifest generation**: immutable physical publication identity.
-- **PageId**: stable logical page identity within one store and page kind.
+- **PageId**: stable logical page identity within one owning root namespace. A
+  relational `PageId` is scoped to one table.
 - **RowId**: stable logical record identity. A physical rewrite MUST NOT change
   the row's externally visible identity.
 - **Page descriptor**: compact metadata containing page kind, key bounds,
@@ -429,13 +430,17 @@ u32 descriptor_binding_crc32c
 u8[32] descriptor_binding_sha256
 ```
 
-The descriptor binding digest covers the first 100 descriptor bytes followed
-by the referenced lower and upper key bytes. This rejects corrupted physical
-identity, slot, bounds, lengths, or offsets when that descriptor is selected.
+The descriptor binding digest covers the owning root generation, global
+descriptor ordinal, first 100 descriptor bytes, and referenced lower and upper
+key bytes. This rejects corrupted physical identity, slot, bounds, lengths, or
+offsets and prevents complete valid descriptors from being moved between root
+generations or ordinals without detection when that descriptor is selected.
 The slot digest covers the complete fixed page slot, including the required
 zero tail. Table descriptors are contiguous and ordered by disjoint primary-key
-bounds. A table root in the compact manifest stores only its schema digest,
-descriptor range, and outer bounds.
+bounds. A table root in the compact manifest stores its schema digest, the next
+never-issued table-scoped `PageId`, descriptor range, and outer bounds. The
+allocator value is non-zero, never decreases, and is strictly greater than
+every active, dirty, or deleted page id admitted by that publication.
 
 The `SKRPGM01` version-1 manifest has a fixed 268-byte header followed by a
 bounded table-root payload. Its header binds generation, source commit epoch,
@@ -487,9 +492,50 @@ LatestManifestPublished
 
 These events map in order to `BeginCheckpoint`, `PersistCandidatePages`,
 `PersistCandidateRoot`, `PersistCandidateManifest`, the generation fence, and
-`PublishCheckpoint` in `SkeinCowPagePublication.tla`. Recovery from the
-published root plus WAL, physical page demand reads, overflow hydration,
-reclamation, and production serving activation remain later contracts.
+`PublishCheckpoint` in `SkeinCowPagePublication.tla`. The non-serving recovery
+shadow and deterministic mutation planner are specified below. Disk-backed
+recovery deltas, physical page demand reads, overflow hydration, reclamation,
+and production serving activation remain later contracts.
+
+### Relational row-page mutation planning
+
+Every relational table persists one monotonically increasing `next_page_id` in
+its table root. Allocation is table-scoped. Deleted ids are never reused, even
+after their physical pages become reclaimable, so a pinned old root cannot
+observe ABA aliasing. Allocator exhaustion rejects the complete plan without
+publishing a partial delta.
+
+`RelationalRowPageMutationPlanner` accepts exact primary-key row changes and
+produces one `RelationalRowPageTableDelta`. It binary-searches the ordered root
+descriptors by encoded upper bound and reads only affected base leaves. Sorted
+changes targeting the same leaf reuse the selected descriptor. A key below the
+first leaf targets that leaf; a key between leaves or above the last leaf
+targets the first following leaf or the last leaf respectively. The planner
+does not enumerate a table's descriptors or decode unaffected pages. Changes
+coalesce by encoded key and retain the existing transaction-capture envelope of
+100,000 distinct entries and 64 MiB; replacing the same key replaces its charge
+rather than growing the count or byte total.
+
+Insert, update, and delete are deterministic over the encoded primary-key
+order. The first non-empty output for an affected leaf retains that leaf's
+logical `PageId`; additional right-side split pages consume new ids from the
+persisted allocator. An empty output deletes the old leaf. A later split after
+that deletion still consumes the next never-issued id rather than recycling
+the deleted id. Dirty-page count and fixed-slot byte reservations are admitted
+before the plan can be published.
+
+Empty-table bootstrap consumes strictly ordered rows through a callback. It
+retains at most one page plus the candidate row that proves the page boundary,
+and emits only candidate pages. The caller MUST keep emitted pages unreachable
+until `finish` succeeds and MUST discard the candidate after any callback or
+encoding error. A bootstrap instance fails closed after its first error and
+cannot be resumed.
+
+This planner remains non-serving. It does not bind a row root to the canonical
+checkpoint, publish overflow extents, replace the bounded recovery shadow, or
+select SQL reads. `SkeinRowPageMutation.tla` covers persistent allocator
+monotonicity, split identity, deletion without reuse, one-leaf point mutation,
+pinned-base immutability, and bounded streaming bootstrap.
 
 ### Relational row-root recovery shadow
 

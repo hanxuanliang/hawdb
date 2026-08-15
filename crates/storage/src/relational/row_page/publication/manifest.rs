@@ -5,6 +5,7 @@ use super::{
 use skein_integrity::{IntegrityHasher, Sha256Digest, SHA256_BYTES};
 use std::fs::{self, File};
 use std::io::Read;
+use std::num::NonZeroU64;
 use std::path::Path;
 
 const MANIFEST_MAGIC: &[u8; 8] = b"SKRPGM01";
@@ -337,6 +338,7 @@ fn encode_tables(
     for table in tables {
         encode_bytes(&table.table, &mut encoded)?;
         encoded.extend_from_slice(table.schema_digest.as_bytes());
+        encoded.extend_from_slice(&table.next_page_id.get().to_le_bytes());
         encoded.extend_from_slice(&table.first_descriptor.to_le_bytes());
         encoded.extend_from_slice(&table.page_count.to_le_bytes());
         encode_raw_bytes(&table.lower_bound, &mut encoded)?;
@@ -364,6 +366,17 @@ fn decode_tables(
                 .try_into()
                 .expect("schema digest length was checked"),
         );
+        let next_page_id = NonZeroU64::new(read_u64(take(
+            payload,
+            &mut offset,
+            8,
+            "next logical page id",
+        )?))
+        .ok_or_else(|| {
+            RelationalRowPagePublicationError::Corrupt(
+                "row-page table allocator contains zero".to_string(),
+            )
+        })?;
         let first_descriptor = read_u64(take(payload, &mut offset, 8, "first descriptor ordinal")?);
         let page_count = read_u64(take(payload, &mut offset, 8, "table page count")?);
         let lower_bound = decode_raw_bytes(
@@ -381,6 +394,7 @@ fn decode_tables(
         tables.push(RelationalRowPageTableRoot {
             table,
             schema_digest,
+            next_page_id,
             first_descriptor,
             page_count,
             lower_bound,

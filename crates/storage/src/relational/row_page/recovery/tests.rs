@@ -92,6 +92,7 @@ fn strict_wal_replay_builds_a_pinned_primary_key_overlay() {
             vec![RelationalRowPageTableDelta {
                 table: "documents".to_string(),
                 schema_digest: schema_digest(),
+                next_page_id: NonZeroU64::new(3).unwrap(),
                 dirty_pages: vec![page(2, 3, &[(2, "two-updated"), (3, "three")])],
                 deleted_page_ids: vec![page_id(1)],
             }],
@@ -327,6 +328,7 @@ fn publish_base(directory: &Path, config: RelationalRowPagePublicationConfig) {
             vec![RelationalRowPageTableDelta {
                 table: "documents".to_string(),
                 schema_digest: schema_digest(),
+                next_page_id: NonZeroU64::new(2).unwrap(),
                 dirty_pages: vec![page(1, 1, &[(1, "one"), (2, "two")])],
                 deleted_page_ids: Vec::new(),
             }],

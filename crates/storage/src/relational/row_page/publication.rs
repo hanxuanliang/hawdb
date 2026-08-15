@@ -79,6 +79,7 @@ impl Default for RelationalRowPagePublicationConfig {
 pub struct RelationalRowPageTableDelta {
     pub table: String,
     pub schema_digest: Sha256Digest,
+    pub next_page_id: NonZeroU64,
     pub dirty_pages: Vec<ImmutableRelationalRowPage>,
     pub deleted_page_ids: Vec<RelationalRowPageId>,
 }
@@ -113,6 +114,7 @@ pub struct RelationalRowPageRootDescriptor {
 pub struct RelationalRowPageTableRoot {
     pub table: String,
     pub schema_digest: Sha256Digest,
+    pub next_page_id: NonZeroU64,
     pub first_descriptor: u64,
     pub page_count: u64,
     pub lower_bound: Vec<u8>,

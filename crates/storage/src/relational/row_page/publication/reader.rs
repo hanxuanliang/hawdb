@@ -5,7 +5,13 @@ use super::{
     RelationalRowPagePublicationError, RelationalRowPageRootDescriptor,
     RelationalRowPageRootManifest, RelationalRowPageTableRoot, RELATIONAL_ROW_PAGE_MANIFEST_FILE,
 };
+use crate::relational::{
+    ordered_key::encode_ordered_relational_key, ImmutableRelationalRowPage, RelationalKey,
+    RelationalRowPageView,
+};
+use skein_integrity::integrity_digest;
 use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -82,31 +88,125 @@ impl RelationalRowPageRootReader {
         ordinal: u64,
     ) -> Result<RelationalRowPageRootDescriptor, RelationalRowPagePublicationError> {
         let table_root = self.table_root(table)?;
-        if ordinal >= table_root.page_count {
-            return Err(RelationalRowPagePublicationError::Admission(format!(
-                "row-page ordinal {ordinal} exceeds table {table} page count {}",
-                table_root.page_count
-            )));
-        }
-        let descriptor_ordinal = table_root
-            .first_descriptor
-            .checked_add(ordinal)
-            .ok_or_else(|| {
-                RelationalRowPagePublicationError::Corrupt(
-                    "row-page descriptor ordinal overflow".to_string(),
-                )
-            })?;
         let mut descriptors = File::open(self.descriptor_path())
             .map_err(durability("open row-page root descriptor artifact"))?;
         let mut keys =
             File::open(self.key_path()).map_err(durability("open row-page root key artifact"))?;
-        root::read_descriptor(
+        self.read_table_page_descriptor_from(
             &mut descriptors,
             &mut keys,
-            descriptor_ordinal,
-            &self.manifest,
-            self.config,
+            table,
+            table_root,
+            ordinal,
         )
+    }
+
+    pub fn find_table_page_descriptor(
+        &self,
+        table: &str,
+        primary_key: &RelationalKey,
+    ) -> Result<Option<RelationalRowPageRootDescriptor>, RelationalRowPagePublicationError> {
+        let encoded_key = encode_ordered_relational_key(primary_key).map_err(|error| {
+            RelationalRowPagePublicationError::Admission(format!(
+                "row-page lookup key cannot be encoded: {error}"
+            ))
+        })?;
+        if encoded_key.len() > self.config.page_limits.max_key_bytes.get() {
+            return Err(RelationalRowPagePublicationError::Admission(format!(
+                "row-page lookup key contains {} bytes, exceeding limit {}",
+                encoded_key.len(),
+                self.config.page_limits.max_key_bytes
+            )));
+        }
+        let table_root = self.table_root(table)?;
+        if table_root.page_count == 0 {
+            return Ok(None);
+        }
+        let mut descriptors = File::open(self.descriptor_path())
+            .map_err(durability("open row-page root descriptor artifact"))?;
+        let mut keys =
+            File::open(self.key_path()).map_err(durability("open row-page root key artifact"))?;
+
+        let mut lower = 0u64;
+        let mut upper = table_root.page_count;
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2;
+            let descriptor = self.read_table_page_descriptor_from(
+                &mut descriptors,
+                &mut keys,
+                table,
+                table_root,
+                middle,
+            )?;
+            if descriptor.upper_bound.as_slice() < encoded_key.as_slice() {
+                lower = middle.checked_add(1).ok_or_else(|| {
+                    RelationalRowPagePublicationError::Corrupt(
+                        "row-page descriptor search overflow".to_string(),
+                    )
+                })?;
+            } else {
+                upper = middle;
+            }
+        }
+        let ordinal = lower.min(table_root.page_count - 1);
+        self.read_table_page_descriptor_from(
+            &mut descriptors,
+            &mut keys,
+            table,
+            table_root,
+            ordinal,
+        )
+        .map(Some)
+    }
+
+    pub fn read_page(
+        &self,
+        descriptor: &RelationalRowPageRootDescriptor,
+    ) -> Result<ImmutableRelationalRowPage, RelationalRowPagePublicationError> {
+        let page_bytes = self.config.page_limits.max_page_bytes.get() as u64;
+        let offset = descriptor
+            .physical_slot
+            .checked_mul(page_bytes)
+            .ok_or_else(|| {
+                RelationalRowPagePublicationError::Corrupt(
+                    "row-page physical offset overflow".to_string(),
+                )
+            })?;
+        let mut artifact = File::open(self.directory.join(relational_row_page_artifact_file(
+            descriptor.physical_generation,
+        )))
+        .map_err(durability("open row-page generation artifact"))?;
+        artifact
+            .seek(SeekFrom::Start(offset))
+            .map_err(durability("seek row-page generation slot"))?;
+        let mut slot = vec![0u8; self.config.page_limits.max_page_bytes.get()];
+        artifact
+            .read_exact(&mut slot)
+            .map_err(durability("read row-page generation slot"))?;
+        let digest = integrity_digest(&slot);
+        if digest.crc32c.get() != descriptor.slot_integrity.slot_crc32c
+            || digest.sha256 != descriptor.slot_integrity.slot_sha256
+        {
+            return Err(RelationalRowPagePublicationError::Corrupt(format!(
+                "row-page {} slot checksum mismatch",
+                descriptor.logical_page_id.get()
+            )));
+        }
+        let view = RelationalRowPageView::open_slot(&slot, self.config.page_limits)?;
+        if view.page_id() != descriptor.logical_page_id
+            || view.generation() != descriptor.physical_generation
+            || view.source_commit_epoch() != descriptor.source_commit_epoch
+            || view.row_count() != descriptor.row_count as usize
+            || view.encoded_len() != descriptor.slot_integrity.encoded_len as usize
+            || view.lower_bound_bytes() != descriptor.lower_bound
+            || view.upper_bound_bytes() != descriptor.upper_bound
+        {
+            return Err(RelationalRowPagePublicationError::Corrupt(format!(
+                "row-page {} content does not match its root descriptor",
+                descriptor.logical_page_id.get()
+            )));
+        }
+        ImmutableRelationalRowPage::decode_view(view).map_err(Into::into)
     }
 
     pub fn visit_table_pages<F>(
@@ -153,7 +253,7 @@ impl RelationalRowPageRootReader {
         Ok(())
     }
 
-    fn table_root(
+    pub fn table_root(
         &self,
         table: &str,
     ) -> Result<&RelationalRowPageTableRoot, RelationalRowPagePublicationError> {
@@ -174,6 +274,45 @@ impl RelationalRowPageRootReader {
     fn key_path(&self) -> PathBuf {
         self.directory
             .join(relational_row_page_root_key_file(self.manifest.generation))
+    }
+
+    fn read_table_page_descriptor_from(
+        &self,
+        descriptors: &mut File,
+        keys: &mut File,
+        table: &str,
+        table_root: &RelationalRowPageTableRoot,
+        ordinal: u64,
+    ) -> Result<RelationalRowPageRootDescriptor, RelationalRowPagePublicationError> {
+        if ordinal >= table_root.page_count {
+            return Err(RelationalRowPagePublicationError::Admission(format!(
+                "row-page ordinal {ordinal} exceeds table {table} page count {}",
+                table_root.page_count
+            )));
+        }
+        let descriptor_ordinal = table_root
+            .first_descriptor
+            .checked_add(ordinal)
+            .ok_or_else(|| {
+                RelationalRowPagePublicationError::Corrupt(
+                    "row-page descriptor ordinal overflow".to_string(),
+                )
+            })?;
+        let descriptor = root::read_descriptor(
+            descriptors,
+            keys,
+            descriptor_ordinal,
+            &self.manifest,
+            self.config,
+        )?;
+        if descriptor.logical_page_id.get() >= table_root.next_page_id.get() {
+            return Err(RelationalRowPagePublicationError::Corrupt(format!(
+                "table {table} descriptor page id {} is not below next page id {}",
+                descriptor.logical_page_id.get(),
+                table_root.next_page_id
+            )));
+        }
+        Ok(descriptor)
     }
 }
 
