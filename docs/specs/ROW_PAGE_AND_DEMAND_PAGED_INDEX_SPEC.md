@@ -600,12 +600,12 @@ encoding error. A bootstrap instance fails closed after its first error and
 cannot be resumed.
 
 This planner remains non-serving. It does not bind a row root to the canonical
-checkpoint, publish overflow extents, replace the bounded recovery shadow, or
-select SQL reads. `SkeinRowPageMutation.tla` covers persistent allocator
+checkpoint, publish overflow extents, or select SQL reads.
+`SkeinRowPageMutation.tla` covers persistent allocator
 monotonicity, split identity, deletion without reuse, one-leaf point mutation,
 pinned-base immutability, and bounded streaming bootstrap.
 
-### Relational row-root recovery shadow
+### Disk-backed relational row-root recovery
 
 The current recovery integration is a non-serving refinement over an optional
 row-root publication. It does not make the independently published latest
@@ -622,26 +622,29 @@ remain demand-read obligations.
 
 Relational transaction apply derives exact primary-key changes from the
 authoritative before and after states. Multiple relational fragments in one
-global commit epoch coalesce into the same overlay, and graph-only commits
-advance that epoch with an empty row change. Each fragment is validated and the
-resulting entry and byte totals are admitted before any overlay entry changes.
-An epoch gap, DDL or schema rewrite, an overflow reference without a published
-overflow manifest, or an entry/byte limit violation makes the shadow
-unavailable; it cannot publish a partial recovered view.
+global commit epoch are consumed in order, and graph-only commits advance the
+same epoch with an empty change. `GraphStore` sends every fragment directly to
+`RelationalRowDeltaBuilder`. Its dirty map is capped at 100,000 entries and
+64 MiB of charged resident state; pressure flushes a complete immutable run
+rather than rejecting an otherwise admitted WAL suffix or retaining a
+database-sized `BTreeMap`.
 
-The default shadow envelope is 100,000 primary-key entries and 64 MiB of
-charged resident state. These are hard evidence bounds, not a claim that an
-arbitrary retained WAL suffix fits in memory. Exceeding either bound leaves the
-existing canonical recovery path intact. The immutable row-delta generation
-below supplies the disk-backed artifact boundary, but the current recovery
-mount still uses this in-memory shadow until a separate integration stage
-streams WAL captures into those runs.
+Recovery never skips a durable WAL record. An individual capture outside its
+hard entry/byte envelope, an epoch gap, DDL or schema replacement, missing
+overflow closure, run/manifest budget exhaustion, or corruption makes the
+non-authoritative row view unavailable without changing canonical checkpoint
+plus WAL recovery. A partial batch poisons the builder and its already durable
+candidate runs remain unreachable.
 
-After the complete WAL prefix is consumed, recovery exposes one immutable
-`Arc` read view whose identity contains the base generation, base commit epoch,
-base root-set digest, and fully recovered visible commit epoch.
-`GraphStore::snapshot()` retains that exact view only for the matching commit
-epoch.
+After the complete WAL prefix is consumed, a writable open synchronizes all
+runs, publishes the immutable delta-generation manifest, revalidates the
+selected row root and previous delta selector, and atomically replaces the
+latest delta manifest last. It then reopens that exact generation and exposes
+one immutable `Arc` view containing the pinned base root, disk delta reader,
+and recovered visible epoch. A read-only open never writes recovery artifacts;
+it may reuse only an already-published delta whose base identity and visible
+epoch exactly match the replayed database. `GraphStore::snapshot()` retains
+that exact view only for the matching commit epoch.
 
 Every later relational commit stages the next row view before appending WAL.
 Relational DML derives one strictly ordered immutable primary-key batch from
@@ -666,9 +669,9 @@ workspaces continue to read the materialized staged state, so
 read-your-own-writes never consults a lagging read view.
 
 This view remains diagnostic and differential evidence only: SQL, constraints,
-checkpoint authority, backup, and reclamation do not select it. The format is
-the sole unreleased v1 design; there is no legacy view representation or
-compatibility path.
+checkpoint authority, backup, and reclamation do not select it. The removed
+in-memory recovery builder has no compatibility path. The disk-backed view is
+the sole unreleased v1 recovery design.
 
 ### Immutable relational row-delta v1 generation
 
@@ -737,10 +740,10 @@ manifest and remains readable after a newer generation publishes.
 
 This is the only relational row-delta representation. Skein has not published
 a durable database format, so the reader recognizes no legacy magic, version,
-layout, filename, or migration path. This stage does not replace
-`RelationalRowPageRecoveryBuilder`, bind deltas into the canonical checkpoint,
-merge base plus delta plus the live batches for SQL, or reclaim orphan and
-pinned generations. Those are separate activation and lifecycle contracts.
+layout, filename, or migration path. WAL recovery and immutable live views now
+pin `base + delta + live` through this representation. Exact checkpoint
+binding, SQL row selection, and reclamation of orphan or pinned generations
+remain separate activation and lifecycle contracts.
 
 ### Graph layout
 

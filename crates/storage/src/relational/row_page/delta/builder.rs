@@ -10,14 +10,18 @@ use crate::relational::row_page::RelationalRowPageRootReader;
 use crate::relational::{
     ordered_key::encode_ordered_relational_key, RelationalOverflowRootReader, RelationalRowChange,
     RelationalRowChangeCapture, RelationalRowChangeCaptureLimits,
-    RelationalRowPagePublicationConfig,
+    RelationalRowPagePublicationConfig, RelationalState,
 };
 use crate::{durable_replace_file, sync_directory};
 use fs2::FileExt;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_ROW_DELTA_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
 pub struct RelationalRowDeltaBuilder {
@@ -41,6 +45,62 @@ pub struct RelationalRowDeltaBuilder {
 }
 
 impl RelationalRowDeltaBuilder {
+    pub fn validate_base_state(
+        base: &RelationalRowPageRootReader,
+        state: &RelationalState,
+        config: RelationalRowDeltaConfig,
+    ) -> Result<(), RelationalRowDeltaError> {
+        let tables = table_schemas_for_state(state)?;
+        codec::validate_tables_against_base(base, tables, config)?;
+        Ok(())
+    }
+
+    pub fn new_for_recovery(
+        directory: &Path,
+        base: &RelationalRowPageRootReader,
+        expected_previous: Option<RelationalRowDeltaGeneration>,
+        state: &RelationalState,
+        config: RelationalRowDeltaConfig,
+    ) -> Result<Self, RelationalRowDeltaError> {
+        let minimum = expected_previous
+            .filter(|previous| previous.base_generation == base.manifest().generation)
+            .map_or(Ok(1), |previous| {
+                previous.delta_generation.checked_add(1).ok_or_else(|| {
+                    RelationalRowDeltaError::Admission(
+                        "row delta generation space is exhausted".to_string(),
+                    )
+                })
+            })?;
+        let delta_generation = next_row_delta_generation().max(minimum);
+        Self::new_for_state(
+            directory,
+            base,
+            delta_generation,
+            expected_previous,
+            state,
+            config,
+        )
+    }
+
+    pub fn new_for_state(
+        directory: &Path,
+        base: &RelationalRowPageRootReader,
+        delta_generation: u64,
+        expected_previous: Option<RelationalRowDeltaGeneration>,
+        state: &RelationalState,
+        config: RelationalRowDeltaConfig,
+    ) -> Result<Self, RelationalRowDeltaError> {
+        let tables = table_schemas_for_state(state)?;
+        Self::new(
+            directory,
+            base,
+            delta_generation,
+            expected_previous,
+            tables,
+            config,
+        )
+    }
+
     pub fn new(
         directory: &Path,
         base: &RelationalRowPageRootReader,
@@ -573,4 +633,50 @@ fn maybe_stop(
         )));
     }
     Ok(())
+}
+
+fn next_row_delta_generation() -> u64 {
+    let clock = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let sequence = NEXT_ROW_DELTA_GENERATION.fetch_add(1, Ordering::Relaxed);
+    let generation = clock.rotate_left(17) ^ sequence ^ ((std::process::id() as u64) << 32);
+    generation.max(1)
+}
+
+fn table_schemas_for_state(
+    state: &RelationalState,
+) -> Result<Vec<RelationalRowDeltaTableSchema>, RelationalRowDeltaError> {
+    state
+        .table_schemas()
+        .map(|schema| {
+            let column_count = u32::try_from(schema.columns.len()).map_err(|_| {
+                RelationalRowDeltaError::Admission(format!(
+                    "row delta table {} column count does not fit u32",
+                    schema.name
+                ))
+            })?;
+            let column_count = NonZeroU32::new(column_count).ok_or_else(|| {
+                RelationalRowDeltaError::Corrupt(format!(
+                    "row delta table {} has no columns",
+                    schema.name
+                ))
+            })?;
+            let schema_digest = state
+                .table_schema_digest(&schema.name)
+                .map_err(|error| RelationalRowDeltaError::Corrupt(error.to_string()))?
+                .ok_or_else(|| {
+                    RelationalRowDeltaError::Corrupt(format!(
+                        "row delta table {} disappeared while deriving its schema fence",
+                        schema.name
+                    ))
+                })?;
+            Ok(RelationalRowDeltaTableSchema {
+                table: schema.name.clone(),
+                schema_digest,
+                column_count,
+            })
+        })
+        .collect()
 }

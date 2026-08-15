@@ -94,6 +94,44 @@ fn dirty_run_coalesces_repeated_keys_to_the_latest_epoch() {
 }
 
 #[test]
+fn point_lookup_selects_the_newest_value_across_immutable_runs() {
+    let directory = unique_test_dir("point-lookup");
+    let base = publish_and_open_base(&directory);
+    let config = RelationalRowDeltaConfig {
+        max_dirty_entries: NonZeroUsize::new(1).unwrap(),
+        ..RelationalRowDeltaConfig::default()
+    };
+    let mut builder = builder(&directory, &base, 1, None, config);
+    builder.record(2, capture(2, Some("two-v2"))).unwrap();
+    builder.record(3, capture(1, Some("one-v3"))).unwrap();
+    builder.record(4, capture(2, Some("two-v4"))).unwrap();
+    builder.record(5, capture(2, None)).unwrap();
+    builder.finish(5, None).unwrap();
+
+    let reader = RelationalRowDeltaReader::open_latest(&directory, &base, 5, config)
+        .unwrap()
+        .unwrap();
+    let (two, two_report) = reader.lookup("documents", &key(2)).unwrap();
+    assert!(matches!(
+        two,
+        Some(RelationalRowPageRecoveredValue::Deleted)
+    ));
+    assert_eq!(two_report.runs_read, 1);
+    assert!(two_report.stopped_early);
+
+    let (one, one_report) = reader.lookup("documents", &key(1)).unwrap();
+    assert_eq!(present_text(one.as_ref().unwrap()), Some("one-v3"));
+    assert_eq!(one_report.runs_read, 1);
+    assert!(one_report.stopped_early);
+
+    let (missing, missing_report) = reader.lookup("documents", &key(9)).unwrap();
+    assert!(missing.is_none());
+    assert_eq!(missing_report.runs_read, 0);
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn cumulative_run_byte_admission_precedes_run_creation() {
     let directory = unique_test_dir("artifact-admission");
     let base = publish_and_open_base(&directory);

@@ -1,10 +1,14 @@
-//! Immutable, bounded live overlays over a generation-pinned row recovery view.
+//! Immutable, bounded live overlays over a generation-pinned row root and
+//! optional disk-backed WAL recovery delta.
 //!
 //! Publication is deliberately separate from SQL selection. A caller stages a
 //! complete next-epoch view before its WAL append and installs the returned
 //! `Arc` only after that WAL batch is durable.
 
-use super::{RelationalRowPageRecoveredValue, RelationalRowPageRecoveryView};
+use super::{
+    RelationalRowDeltaError, RelationalRowDeltaReader, RelationalRowPageRecoveredValue,
+    RelationalRowPageRootReader,
+};
 use crate::relational::{
     estimated_row_change_encoding_bytes, RelationalKey, RelationalRowChange,
     RelationalRowChangeCapture, RelationalRowChangeCaptureLimits, RelationalValue,
@@ -197,31 +201,68 @@ impl RelationalRowPageLiveOverlay {
 #[derive(Debug, Clone)]
 pub struct RelationalRowPageReadView {
     identity: RelationalRowPageReadViewIdentity,
-    recovered: Arc<RelationalRowPageRecoveryView>,
+    base: Arc<RelationalRowPageRootReader>,
+    recovery_delta: Option<Arc<RelationalRowDeltaReader>>,
     live: RelationalRowPageLiveOverlay,
 }
 
 impl RelationalRowPageReadView {
-    pub fn from_recovered(recovered: Arc<RelationalRowPageRecoveryView>) -> Self {
-        let identity = recovered.identity();
+    pub fn from_base(base: Arc<RelationalRowPageRootReader>) -> Self {
+        let manifest = base.manifest();
         Self {
             identity: RelationalRowPageReadViewIdentity {
-                base_generation: identity.base_generation,
-                base_commit_epoch: identity.base_commit_epoch,
-                visible_commit_epoch: identity.visible_commit_epoch,
-                root_set_digest: recovered.base().manifest().root_set_digest,
+                base_generation: manifest.generation,
+                base_commit_epoch: manifest.source_commit_epoch,
+                visible_commit_epoch: manifest.source_commit_epoch,
+                root_set_digest: manifest.root_set_digest,
             },
-            recovered,
+            base,
+            recovery_delta: None,
             live: RelationalRowPageLiveOverlay::empty(),
         }
+    }
+
+    pub fn from_recovery_delta(
+        base: Arc<RelationalRowPageRootReader>,
+        recovery_delta: Arc<RelationalRowDeltaReader>,
+    ) -> Result<Self, RelationalRowDeltaError> {
+        let base_manifest = base.manifest();
+        let delta_manifest = recovery_delta.manifest();
+        if delta_manifest.base.generation != base_manifest.generation
+            || delta_manifest.base.source_commit_epoch != base_manifest.source_commit_epoch
+            || delta_manifest.base.root_set_digest != base_manifest.root_set_digest
+        {
+            return Err(RelationalRowDeltaError::Corrupt(
+                "row read view cannot combine mismatched base and delta generations".to_string(),
+            ));
+        }
+        Ok(Self {
+            identity: RelationalRowPageReadViewIdentity {
+                base_generation: base_manifest.generation,
+                base_commit_epoch: base_manifest.source_commit_epoch,
+                visible_commit_epoch: delta_manifest.visible_commit_epoch,
+                root_set_digest: base_manifest.root_set_digest,
+            },
+            base,
+            recovery_delta: Some(recovery_delta),
+            live: RelationalRowPageLiveOverlay::empty(),
+        })
     }
 
     pub const fn identity(&self) -> RelationalRowPageReadViewIdentity {
         self.identity
     }
 
-    pub fn recovered(&self) -> &RelationalRowPageRecoveryView {
-        &self.recovered
+    pub fn base(&self) -> &RelationalRowPageRootReader {
+        &self.base
+    }
+
+    pub fn pinned_base(&self) -> Arc<RelationalRowPageRootReader> {
+        Arc::clone(&self.base)
+    }
+
+    pub fn recovery_delta(&self) -> Option<&RelationalRowDeltaReader> {
+        self.recovery_delta.as_deref()
     }
 
     pub fn advance(
@@ -245,7 +286,7 @@ impl RelationalRowPageReadView {
             )));
         }
         if let Some(capture) = capture.as_ref() {
-            validate_capture_against_base(&self.recovered, capture)?;
+            validate_capture_against_base(&self.base, capture)?;
         }
         let live = capture.map_or_else(
             || Ok(self.live.clone()),
@@ -255,7 +296,8 @@ impl RelationalRowPageReadView {
         identity.visible_commit_epoch = next_commit_epoch;
         Ok(Self {
             identity,
-            recovered: Arc::clone(&self.recovered),
+            base: Arc::clone(&self.base),
+            recovery_delta: self.recovery_delta.as_ref().map(Arc::clone),
             live,
         })
     }
@@ -280,10 +322,15 @@ impl RelationalRowPageReadView {
         &self,
         table: &str,
         primary_key: &RelationalKey,
-    ) -> Option<RelationalRowPageRecoveredValue> {
-        self.live
-            .overlay_value(table, primary_key)
-            .or_else(|| self.recovered.overlay_value(table, primary_key).cloned())
+    ) -> Result<Option<RelationalRowPageRecoveredValue>, RelationalRowDeltaError> {
+        if let Some(value) = self.live.overlay_value(table, primary_key) {
+            return Ok(Some(value));
+        }
+        self.recovery_delta.as_ref().map_or(Ok(None), |delta| {
+            delta
+                .lookup(table, primary_key)
+                .map(|(value, _report)| value)
+        })
     }
 
     pub fn latest_live_commit_epoch(&self) -> Option<u64> {
@@ -292,13 +339,13 @@ impl RelationalRowPageReadView {
 }
 
 fn validate_capture_against_base(
-    recovered: &RelationalRowPageRecoveryView,
+    base: &RelationalRowPageRootReader,
     capture: &RelationalRowChangeCapture,
 ) -> Result<(), RelationalRowPageLiveError> {
     let RelationalRowChangeCapture::Captured { changes, .. } = capture else {
         return Ok(());
     };
-    let tables = &recovered.base().manifest().tables;
+    let tables = &base.manifest().tables;
     for change in changes {
         if tables
             .binary_search_by(|table| table.table.cmp(&change.table))

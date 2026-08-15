@@ -6,8 +6,9 @@ use super::{
 };
 use crate::relational::row_page::RelationalRowPageRecoveredValue;
 use crate::relational::{
-    ordered_key::decode_ordered_relational_key, RelationalKey, RelationalOverflowRootReader,
-    RelationalRow, RelationalRowPageRootReader, RelationalValue,
+    ordered_key::{decode_ordered_relational_key, encode_ordered_relational_key},
+    RelationalKey, RelationalOverflowRootReader, RelationalRow, RelationalRowPageRootReader,
+    RelationalValue,
 };
 use skein_integrity::IntegrityHasher;
 use std::fs::File;
@@ -25,6 +26,14 @@ pub struct RelationalRowDeltaReader {
 }
 
 impl RelationalRowDeltaReader {
+    pub fn latest_generation(
+        directory: &Path,
+        config: RelationalRowDeltaConfig,
+    ) -> Result<Option<RelationalRowDeltaGeneration>, RelationalRowDeltaError> {
+        let path = directory.join(RELATIONAL_ROW_DELTA_MANIFEST_FILE);
+        Ok(codec::read_manifest_if_exists(&path, config)?.map(|manifest| manifest.generation()))
+    }
+
     pub fn open_latest(
         directory: &Path,
         expected_base: &RelationalRowPageRootReader,
@@ -169,6 +178,129 @@ impl RelationalRowDeltaReader {
             self.poisoned.store(true, Ordering::Release);
         }
         result
+    }
+
+    /// Looks up the newest immutable recovery-delta value without materializing
+    /// the complete delta generation. Runs are inspected newest first because
+    /// a later run supersedes the same key in an earlier run.
+    pub fn lookup(
+        &self,
+        table: &str,
+        primary_key: &RelationalKey,
+    ) -> Result<
+        (
+            Option<RelationalRowPageRecoveredValue>,
+            RelationalRowDeltaReadReport,
+        ),
+        RelationalRowDeltaError,
+    > {
+        if self.is_poisoned() {
+            return Err(RelationalRowDeltaError::Corrupt(
+                "row delta reader is poisoned".to_string(),
+            ));
+        }
+        let result = self.lookup_inner(table, primary_key);
+        if result.as_ref().is_err_and(should_poison) {
+            self.poisoned.store(true, Ordering::Release);
+        }
+        result
+    }
+
+    fn lookup_inner(
+        &self,
+        table: &str,
+        primary_key: &RelationalKey,
+    ) -> Result<
+        (
+            Option<RelationalRowPageRecoveredValue>,
+            RelationalRowDeltaReadReport,
+        ),
+        RelationalRowDeltaError,
+    > {
+        let Ok(table_ordinal) = self
+            .manifest
+            .tables
+            .binary_search_by(|candidate| candidate.table.as_str().cmp(table))
+        else {
+            return Ok((None, RelationalRowDeltaReadReport::default()));
+        };
+        let table_ordinal = u32::try_from(table_ordinal).map_err(|_| {
+            RelationalRowDeltaError::Corrupt("row delta table ordinal does not fit u32".to_string())
+        })?;
+        let encoded_key = encode_ordered_relational_key(primary_key).map_err(|error| {
+            RelationalRowDeltaError::Admission(format!(
+                "row delta lookup key cannot be encoded: {error}"
+            ))
+        })?;
+        if encoded_key.len() > self.config.row_limits.max_key_bytes.get() {
+            return Err(RelationalRowDeltaError::Admission(format!(
+                "row delta lookup key contains {} bytes, exceeding limit {}",
+                encoded_key.len(),
+                self.config.row_limits.max_key_bytes
+            )));
+        }
+
+        let target = (table_ordinal, encoded_key.as_slice());
+        let mut report = RelationalRowDeltaReadReport::default();
+        for run in self.manifest.runs.iter().rev() {
+            let lower = (
+                run.lower_bound.table_ordinal,
+                run.lower_bound.encoded_primary_key.as_slice(),
+            );
+            let upper = (
+                run.upper_bound.table_ordinal,
+                run.upper_bound.encoded_primary_key.as_slice(),
+            );
+            if target < lower || target > upper {
+                continue;
+            }
+
+            let mut found = None;
+            let completed = visit_run(
+                &self.directory,
+                &self.manifest,
+                run,
+                self.config,
+                |candidate_table, candidate_key, value, _| {
+                    report.entries_visited =
+                        report.entries_visited.checked_add(1).ok_or_else(|| {
+                            RelationalRowDeltaError::Admission(
+                                "row delta lookup entry counter overflow".to_string(),
+                            )
+                        })?;
+                    match candidate_table
+                        .cmp(table)
+                        .then_with(|| candidate_key.cmp(primary_key))
+                    {
+                        std::cmp::Ordering::Less => Ok(true),
+                        std::cmp::Ordering::Equal => {
+                            found = Some(value.clone());
+                            Ok(false)
+                        }
+                        std::cmp::Ordering::Greater => Ok(false),
+                    }
+                },
+            )?;
+            report.runs_read = report.runs_read.checked_add(1).ok_or_else(|| {
+                RelationalRowDeltaError::Admission(
+                    "row delta lookup run counter overflow".to_string(),
+                )
+            })?;
+            report.bytes_read = report
+                .bytes_read
+                .checked_add(run.encoded_len)
+                .and_then(|bytes| bytes.checked_add(run.descriptor_bytes))
+                .ok_or_else(|| {
+                    RelationalRowDeltaError::Admission(
+                        "row delta lookup byte counter overflow".to_string(),
+                    )
+                })?;
+            report.stopped_early |= !completed;
+            if found.is_some() {
+                return Ok((found, report));
+            }
+        }
+        Ok((None, report))
     }
 }
 

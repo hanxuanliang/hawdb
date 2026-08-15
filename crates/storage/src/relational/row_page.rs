@@ -12,7 +12,6 @@ mod delta;
 mod live;
 mod mutation;
 mod publication;
-mod recovery;
 mod value;
 
 pub use delta::{
@@ -46,14 +45,6 @@ pub use publication::{
     DEFAULT_RELATIONAL_ROW_PAGE_ROOT_PAGES, DEFAULT_RELATIONAL_ROW_PAGE_TABLES,
     RELATIONAL_ROW_PAGE_MANIFEST_FILE,
 };
-pub use recovery::{
-    RelationalRowPageRecoveredValue, RelationalRowPageRecoveryBuilder,
-    RelationalRowPageRecoveryConfig, RelationalRowPageRecoveryError,
-    RelationalRowPageRecoveryIdentity, RelationalRowPageRecoveryReport,
-    RelationalRowPageRecoveryView, DEFAULT_RELATIONAL_ROW_PAGE_RECOVERY_BYTES,
-    DEFAULT_RELATIONAL_ROW_PAGE_RECOVERY_ENTRIES,
-};
-
 use value::{decode_row_fields, encode_row, validate_requested_fields};
 
 const ROW_PAGE_MAGIC: &[u8; 8] = b"SKINROW1";
@@ -70,6 +61,12 @@ pub const DEFAULT_RELATIONAL_ROW_PAGE_KEY_BYTES: usize = 16 * 1024;
 pub const DEFAULT_RELATIONAL_ROW_PAGE_ROW_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_RELATIONAL_ROW_PAGE_INLINE_VALUE_BYTES: usize = 64 * 1024;
 pub const DEFAULT_RELATIONAL_ROW_PAGE_VALUE_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelationalRowPageRecoveredValue {
+    Present(RelationalRow),
+    Deleted,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RelationalRowPageId(NonZeroU64);

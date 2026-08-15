@@ -2,26 +2,26 @@
 EXTENDS Naturals, Sequences, FiniteSets
 
 (***************************************************************************)
-(* A generation-pinned relational row root may be correlated with one      *)
-(* canonical checkpoint without reading any row-page slot. Recovery then   *)
-(* consumes every consecutive global WAL epoch into an exact primary-key   *)
-(* overlay. The overlay is admitted atomically and remains non-serving: a  *)
-(* missing, stale, corrupt, schema-invalidated, or over-budget candidate    *)
-(* cannot affect canonical recovery or SQL. An immutable view is exposed   *)
-(* only after the complete requested WAL prefix has been consumed. A       *)
-(* snapshot pins that view even if a newer shadow root is published or a   *)
-(* live commit invalidates the store's current shadow view.                 *)
+(* A checkpoint-pinned row root is recovered by replaying every consecutive *)
+(* WAL fragment into a bounded dirty map. Pressure flushes complete dirty    *)
+(* maps into immutable disk runs; no database-sized recovery overlay is      *)
+(* retained. The complete base-plus-run state becomes selectable only after  *)
+(* the generation manifest is durable and the latest selector is published. *)
+(* A crash before that final replacement leaves the candidate unreachable.   *)
+(* SQL remains disabled and an Arc-like reader pin never follows later roots.*)
 (***************************************************************************)
 
-CONSTANT MaxEpoch, OverlayBudget
+CONSTANT MaxEpoch, DirtyBudget, RunBudget
 
 ASSUME /\ MaxEpoch \in Nat \ {0, 1}
-       /\ OverlayBudget \in Nat \ {0}
+       /\ DirtyBudget \in Nat \ {0}
+       /\ RunBudget \in Nat \ {0}
 
 Keys == 1..2
 Kinds == {"row", "empty", "schema"}
-Phases == {"unmounted", "replaying", "ready", "unavailable"}
-FailureKinds == {"none", "missing", "stale", "corrupt", "capacity", "schema", "live"}
+Phases == {"unmounted", "replaying", "candidate", "ready", "unavailable"}
+PublicationStages == {"none", "runs", "manifest", "published"}
+FailureKinds == {"none", "missing", "stale", "corrupt", "capacity", "runs", "schema"}
 
 BaseGeneration == 1
 BaseEpoch == 1
@@ -46,11 +46,15 @@ VARIABLES
     wal,
     phase,
     baseGeneration,
-    latestGeneration,
+    latestRootGeneration,
     replayCursor,
     visibleEpoch,
-    overlayKeys,
-    overlayValues,
+    dirtyKeys,
+    dirtyValues,
+    durableRunState,
+    runCount,
+    candidateState,
+    publicationStage,
     viewAvailable,
     viewGeneration,
     viewEpoch,
@@ -69,11 +73,15 @@ vars == <<
     wal,
     phase,
     baseGeneration,
-    latestGeneration,
+    latestRootGeneration,
     replayCursor,
     visibleEpoch,
-    overlayKeys,
-    overlayValues,
+    dirtyKeys,
+    dirtyValues,
+    durableRunState,
+    runCount,
+    candidateState,
+    publicationStage,
     viewAvailable,
     viewGeneration,
     viewEpoch,
@@ -93,11 +101,15 @@ Init ==
     /\ wal = <<>>
     /\ phase = "unmounted"
     /\ baseGeneration = 0
-    /\ latestGeneration = BaseGeneration
+    /\ latestRootGeneration = BaseGeneration
     /\ replayCursor = 1
     /\ visibleEpoch = BaseEpoch
-    /\ overlayKeys = {}
-    /\ overlayValues = [key \in Keys |-> FALSE]
+    /\ dirtyKeys = {}
+    /\ dirtyValues = [key \in Keys |-> FALSE]
+    /\ durableRunState = BaseState
+    /\ runCount = 0
+    /\ candidateState = BaseState
+    /\ publicationStage = "none"
     /\ viewAvailable = FALSE
     /\ viewGeneration = 0
     /\ viewEpoch = 0
@@ -127,10 +139,11 @@ CommitRow ==
                 /\ wal' = Append(wal, record)
     /\ commitEpoch' = commitEpoch + 1
     /\ UNCHANGED <<
-        phase, baseGeneration, latestGeneration, replayCursor, visibleEpoch,
-        overlayKeys, overlayValues, viewAvailable, viewGeneration, viewEpoch,
-        viewState, readerPinned, readerGeneration, readerEpoch, readerState,
-        failureKind, pageSlotsRead, sqlUsesRowView
+        phase, baseGeneration, latestRootGeneration, replayCursor,
+        visibleEpoch, dirtyKeys, dirtyValues, durableRunState, runCount,
+        candidateState, publicationStage, viewAvailable, viewGeneration,
+        viewEpoch, viewState, readerPinned, readerGeneration, readerEpoch,
+        readerState, failureKind, pageSlotsRead, sqlUsesRowView
         >>
 
 CommitTwoFragments ==
@@ -161,52 +174,47 @@ CommitTwoFragments ==
                         /\ wal' = wal \o <<first, second>>
     /\ commitEpoch' = commitEpoch + 1
     /\ UNCHANGED <<
-        phase, baseGeneration, latestGeneration, replayCursor, visibleEpoch,
-        overlayKeys, overlayValues, viewAvailable, viewGeneration, viewEpoch,
-        viewState, readerPinned, readerGeneration, readerEpoch, readerState,
-        failureKind, pageSlotsRead, sqlUsesRowView
+        phase, baseGeneration, latestRootGeneration, replayCursor,
+        visibleEpoch, dirtyKeys, dirtyValues, durableRunState, runCount,
+        candidateState, publicationStage, viewAvailable, viewGeneration,
+        viewEpoch, viewState, readerPinned, readerGeneration, readerEpoch,
+        readerState, failureKind, pageSlotsRead, sqlUsesRowView
         >>
 
 CommitEmpty ==
     /\ phase = "unmounted"
     /\ commitEpoch < MaxEpoch
-    /\ wal' = Append(
-        wal,
-        [
-            epoch |-> commitEpoch + 1,
-            kind |-> "empty",
-            keys |-> {},
-            inserted |-> {}
-            ]
-        )
+    /\ wal' = Append(wal, [
+        epoch |-> commitEpoch + 1,
+        kind |-> "empty",
+        keys |-> {},
+        inserted |-> {}
+        ])
     /\ commitEpoch' = commitEpoch + 1
     /\ UNCHANGED <<
-        canonicalState, phase, baseGeneration, latestGeneration,
-        replayCursor, visibleEpoch, overlayKeys, overlayValues,
-        viewAvailable, viewGeneration, viewEpoch, viewState, readerPinned,
-        readerGeneration, readerEpoch, readerState, failureKind,
-        pageSlotsRead, sqlUsesRowView
+        canonicalState, phase, baseGeneration, latestRootGeneration,
+        replayCursor, visibleEpoch, dirtyKeys, dirtyValues, durableRunState,
+        runCount, candidateState, publicationStage, viewAvailable,
+        viewGeneration, viewEpoch, viewState, readerPinned, readerGeneration,
+        readerEpoch, readerState, failureKind, pageSlotsRead, sqlUsesRowView
         >>
 
 CommitSchema ==
     /\ phase = "unmounted"
     /\ commitEpoch < MaxEpoch
-    /\ wal' = Append(
-        wal,
-        [
-            epoch |-> commitEpoch + 1,
-            kind |-> "schema",
-            keys |-> {},
-            inserted |-> {}
-            ]
-        )
+    /\ wal' = Append(wal, [
+        epoch |-> commitEpoch + 1,
+        kind |-> "schema",
+        keys |-> {},
+        inserted |-> {}
+        ])
     /\ commitEpoch' = commitEpoch + 1
     /\ UNCHANGED <<
-        canonicalState, phase, baseGeneration, latestGeneration,
-        replayCursor, visibleEpoch, overlayKeys, overlayValues,
-        viewAvailable, viewGeneration, viewEpoch, viewState, readerPinned,
-        readerGeneration, readerEpoch, readerState, failureKind,
-        pageSlotsRead, sqlUsesRowView
+        canonicalState, phase, baseGeneration, latestRootGeneration,
+        replayCursor, visibleEpoch, dirtyKeys, dirtyValues, durableRunState,
+        runCount, candidateState, publicationStage, viewAvailable,
+        viewGeneration, viewEpoch, viewState, readerPinned, readerGeneration,
+        readerEpoch, readerState, failureKind, pageSlotsRead, sqlUsesRowView
         >>
 
 MountValidBase ==
@@ -215,14 +223,18 @@ MountValidBase ==
     /\ baseGeneration' = BaseGeneration
     /\ replayCursor' = 1
     /\ visibleEpoch' = BaseEpoch
-    /\ overlayKeys' = {}
-    /\ overlayValues' = [key \in Keys |-> FALSE]
+    /\ dirtyKeys' = {}
+    /\ dirtyValues' = [key \in Keys |-> FALSE]
+    /\ durableRunState' = BaseState
+    /\ runCount' = 0
+    /\ candidateState' = BaseState
+    /\ publicationStage' = "none"
+    /\ viewAvailable' = FALSE
     /\ failureKind' = "none"
     /\ UNCHANGED <<
-        canonicalState, commitEpoch, wal, latestGeneration, viewAvailable,
-        viewGeneration, viewEpoch, viewState, readerPinned,
-        readerGeneration, readerEpoch, readerState, pageSlotsRead,
-        sqlUsesRowView
+        canonicalState, commitEpoch, wal, latestRootGeneration,
+        viewGeneration, viewEpoch, viewState, readerPinned, readerGeneration,
+        readerEpoch, readerState, pageSlotsRead, sqlUsesRowView
         >>
 
 MountInvalidBase(reason) ==
@@ -233,9 +245,27 @@ MountInvalidBase(reason) ==
     /\ viewAvailable' = FALSE
     /\ failureKind' = reason
     /\ UNCHANGED <<
-        canonicalState, commitEpoch, wal, latestGeneration, replayCursor,
-        visibleEpoch, overlayKeys, overlayValues, viewGeneration, viewEpoch,
+        canonicalState, commitEpoch, wal, latestRootGeneration, replayCursor,
+        visibleEpoch, dirtyKeys, dirtyValues, durableRunState, runCount,
+        candidateState, publicationStage, viewGeneration, viewEpoch,
         viewState, readerPinned, readerGeneration, readerEpoch, readerState,
+        pageSlotsRead, sqlUsesRowView
+        >>
+
+FlushDirty ==
+    /\ phase = "replaying"
+    /\ dirtyKeys # {}
+    /\ runCount < RunBudget
+    /\ durableRunState' = ApplyOverlay(durableRunState, dirtyKeys, dirtyValues)
+    /\ dirtyKeys' = {}
+    /\ dirtyValues' = [key \in Keys |-> FALSE]
+    /\ runCount' = runCount + 1
+    /\ publicationStage' = "runs"
+    /\ UNCHANGED <<
+        canonicalState, commitEpoch, wal, phase, baseGeneration,
+        latestRootGeneration, replayCursor, visibleEpoch, candidateState,
+        viewAvailable, viewGeneration, viewEpoch, viewState, readerPinned,
+        readerGeneration, readerEpoch, readerState, failureKind,
         pageSlotsRead, sqlUsesRowView
         >>
 
@@ -244,19 +274,21 @@ ReplayRowFragment ==
     /\ replayCursor <= Len(wal)
     /\ LET record == wal[replayCursor] IN
         /\ record.kind = "row"
-        /\ Cardinality(overlayKeys \cup record.keys) <= OverlayBudget
-        /\ overlayKeys' = overlayKeys \cup record.keys
-        /\ overlayValues' = [key \in Keys |->
+        /\ Cardinality(record.keys) <= DirtyBudget
+        /\ Cardinality(dirtyKeys \cup record.keys) <= DirtyBudget
+        /\ dirtyKeys' = dirtyKeys \cup record.keys
+        /\ dirtyValues' = [key \in Keys |->
             IF key \in record.keys
             THEN key \in record.inserted
-            ELSE overlayValues[key]]
+            ELSE dirtyValues[key]]
         /\ visibleEpoch' = record.epoch
     /\ replayCursor' = replayCursor + 1
     /\ UNCHANGED <<
         canonicalState, commitEpoch, wal, phase, baseGeneration,
-        latestGeneration, viewAvailable, viewGeneration, viewEpoch,
-        viewState, readerPinned, readerGeneration, readerEpoch, readerState,
-        failureKind, pageSlotsRead, sqlUsesRowView
+        latestRootGeneration, durableRunState, runCount, candidateState,
+        publicationStage, viewAvailable, viewGeneration, viewEpoch, viewState,
+        readerPinned, readerGeneration, readerEpoch, readerState, failureKind,
+        pageSlotsRead, sqlUsesRowView
         >>
 
 ReplayEmpty ==
@@ -267,25 +299,45 @@ ReplayEmpty ==
     /\ replayCursor' = replayCursor + 1
     /\ UNCHANGED <<
         canonicalState, commitEpoch, wal, phase, baseGeneration,
-        latestGeneration, overlayKeys, overlayValues, viewAvailable,
-        viewGeneration, viewEpoch, viewState, readerPinned,
-        readerGeneration, readerEpoch, readerState, failureKind,
-        pageSlotsRead, sqlUsesRowView
+        latestRootGeneration, dirtyKeys, dirtyValues, durableRunState,
+        runCount, candidateState, publicationStage, viewAvailable,
+        viewGeneration, viewEpoch, viewState, readerPinned, readerGeneration,
+        readerEpoch, readerState, failureKind, pageSlotsRead, sqlUsesRowView
         >>
 
 RejectCapacity ==
     /\ phase = "replaying"
     /\ replayCursor <= Len(wal)
-    /\ LET record == wal[replayCursor] IN
-        /\ record.kind = "row"
-        /\ Cardinality(overlayKeys \cup record.keys) > OverlayBudget
+    /\ wal[replayCursor].kind = "row"
+    /\ Cardinality(wal[replayCursor].keys) > DirtyBudget
     /\ phase' = "unavailable"
     /\ viewAvailable' = FALSE
     /\ failureKind' = "capacity"
     /\ UNCHANGED <<
-        canonicalState, commitEpoch, wal, baseGeneration, latestGeneration,
-        replayCursor, visibleEpoch, overlayKeys, overlayValues,
-        viewGeneration, viewEpoch, viewState, readerPinned,
+        canonicalState, commitEpoch, wal, baseGeneration,
+        latestRootGeneration, replayCursor, visibleEpoch, dirtyKeys,
+        dirtyValues, durableRunState, runCount, candidateState,
+        publicationStage, viewGeneration, viewEpoch, viewState, readerPinned,
+        readerGeneration, readerEpoch, readerState, pageSlotsRead,
+        sqlUsesRowView
+        >>
+
+RejectRunCapacity ==
+    /\ phase = "replaying"
+    /\ runCount = RunBudget
+    /\ \/ (replayCursor = Len(wal) + 1 /\ dirtyKeys # {})
+       \/ (replayCursor <= Len(wal)
+           /\ wal[replayCursor].kind = "row"
+           /\ Cardinality(wal[replayCursor].keys) <= DirtyBudget
+           /\ Cardinality(dirtyKeys \cup wal[replayCursor].keys) > DirtyBudget)
+    /\ phase' = "unavailable"
+    /\ viewAvailable' = FALSE
+    /\ failureKind' = "runs"
+    /\ UNCHANGED <<
+        canonicalState, commitEpoch, wal, baseGeneration,
+        latestRootGeneration, replayCursor, visibleEpoch, dirtyKeys,
+        dirtyValues, durableRunState, runCount, candidateState,
+        publicationStage, viewGeneration, viewEpoch, viewState, readerPinned,
         readerGeneration, readerEpoch, readerState, pageSlotsRead,
         sqlUsesRowView
         >>
@@ -298,27 +350,85 @@ RejectSchema ==
     /\ viewAvailable' = FALSE
     /\ failureKind' = "schema"
     /\ UNCHANGED <<
-        canonicalState, commitEpoch, wal, baseGeneration, latestGeneration,
-        replayCursor, visibleEpoch, overlayKeys, overlayValues,
-        viewGeneration, viewEpoch, viewState, readerPinned,
+        canonicalState, commitEpoch, wal, baseGeneration,
+        latestRootGeneration, replayCursor, visibleEpoch, dirtyKeys,
+        dirtyValues, durableRunState, runCount, candidateState,
+        publicationStage, viewGeneration, viewEpoch, viewState, readerPinned,
         readerGeneration, readerEpoch, readerState, pageSlotsRead,
         sqlUsesRowView
         >>
 
-FinishRecovery ==
+BeginCandidate ==
     /\ phase = "replaying"
     /\ replayCursor = Len(wal) + 1
     /\ visibleEpoch = commitEpoch
+    /\ dirtyKeys = {} \/ runCount < RunBudget
+    /\ candidateState' = ApplyOverlay(durableRunState, dirtyKeys, dirtyValues)
+    /\ durableRunState' = ApplyOverlay(durableRunState, dirtyKeys, dirtyValues)
+    /\ runCount' = runCount + IF dirtyKeys = {} THEN 0 ELSE 1
+    /\ dirtyKeys' = {}
+    /\ dirtyValues' = [key \in Keys |-> FALSE]
+    /\ phase' = "candidate"
+    /\ publicationStage' = "runs"
+    /\ UNCHANGED <<
+        canonicalState, commitEpoch, wal, baseGeneration,
+        latestRootGeneration, replayCursor, visibleEpoch, viewAvailable,
+        viewGeneration, viewEpoch, viewState, readerPinned, readerGeneration,
+        readerEpoch, readerState, failureKind, pageSlotsRead, sqlUsesRowView
+        >>
+
+PersistCandidateManifest ==
+    /\ phase = "candidate"
+    /\ publicationStage = "runs"
+    /\ publicationStage' = "manifest"
+    /\ UNCHANGED <<
+        canonicalState, commitEpoch, wal, phase, baseGeneration,
+        latestRootGeneration, replayCursor, visibleEpoch, dirtyKeys,
+        dirtyValues, durableRunState, runCount, candidateState,
+        viewAvailable, viewGeneration, viewEpoch, viewState, readerPinned,
+        readerGeneration, readerEpoch, readerState, failureKind,
+        pageSlotsRead, sqlUsesRowView
+        >>
+
+PublishCandidate ==
+    /\ phase = "candidate"
+    /\ publicationStage = "manifest"
+    /\ candidateState = canonicalState
     /\ phase' = "ready"
+    /\ publicationStage' = "published"
     /\ viewAvailable' = TRUE
     /\ viewGeneration' = baseGeneration
     /\ viewEpoch' = visibleEpoch
-    /\ viewState' = ApplyOverlay(BaseState, overlayKeys, overlayValues)
+    /\ viewState' = candidateState
     /\ UNCHANGED <<
-        canonicalState, commitEpoch, wal, baseGeneration, latestGeneration,
-        replayCursor, visibleEpoch, overlayKeys, overlayValues, readerPinned,
+        canonicalState, commitEpoch, wal, baseGeneration,
+        latestRootGeneration, replayCursor, visibleEpoch, dirtyKeys,
+        dirtyValues, durableRunState, runCount, candidateState, readerPinned,
         readerGeneration, readerEpoch, readerState, failureKind,
         pageSlotsRead, sqlUsesRowView
+        >>
+
+CrashCandidate ==
+    /\ phase = "candidate"
+    /\ phase' = "unmounted"
+    /\ baseGeneration' = 0
+    /\ replayCursor' = 1
+    /\ visibleEpoch' = BaseEpoch
+    /\ dirtyKeys' = {}
+    /\ dirtyValues' = [key \in Keys |-> FALSE]
+    /\ durableRunState' = BaseState
+    /\ runCount' = 0
+    /\ candidateState' = BaseState
+    /\ publicationStage' = "none"
+    /\ viewAvailable' = FALSE
+    /\ viewGeneration' = 0
+    /\ viewEpoch' = 0
+    /\ viewState' = {}
+    /\ failureKind' = "none"
+    /\ UNCHANGED <<
+        canonicalState, commitEpoch, wal, latestRootGeneration, readerPinned,
+        readerGeneration, readerEpoch, readerState, pageSlotsRead,
+        sqlUsesRowView
         >>
 
 PinReader ==
@@ -331,70 +441,22 @@ PinReader ==
     /\ readerState' = viewState
     /\ UNCHANGED <<
         canonicalState, commitEpoch, wal, phase, baseGeneration,
-        latestGeneration, replayCursor, visibleEpoch, overlayKeys,
-        overlayValues, viewAvailable, viewGeneration, viewEpoch, viewState,
+        latestRootGeneration, replayCursor, visibleEpoch, dirtyKeys,
+        dirtyValues, durableRunState, runCount, candidateState,
+        publicationStage, viewAvailable, viewGeneration, viewEpoch, viewState,
         failureKind, pageSlotsRead, sqlUsesRowView
         >>
 
-PublishNewShadowRoot ==
+PublishNewRoot ==
     /\ phase = "ready"
-    /\ latestGeneration = BaseGeneration
-    /\ latestGeneration' = BaseGeneration + 1
+    /\ latestRootGeneration = BaseGeneration
+    /\ latestRootGeneration' = BaseGeneration + 1
     /\ UNCHANGED <<
         canonicalState, commitEpoch, wal, phase, baseGeneration,
-        replayCursor, visibleEpoch, overlayKeys, overlayValues,
-        viewAvailable, viewGeneration, viewEpoch, viewState, readerPinned,
-        readerGeneration, readerEpoch, readerState, failureKind,
-        pageSlotsRead, sqlUsesRowView
-        >>
-
-LiveRowCommit ==
-    /\ phase = "ready"
-    /\ commitEpoch < MaxEpoch
-    /\ \E changed \in SUBSET Keys:
-        /\ changed # {}
-        /\ \E inserted \in SUBSET changed:
-            LET record == [
-                epoch |-> commitEpoch + 1,
-                kind |-> "row",
-                keys |-> changed,
-                inserted |-> inserted
-                ]
-            IN
-                /\ canonicalState' = ApplyRecord(canonicalState, record)
-                /\ wal' = Append(wal, record)
-    /\ commitEpoch' = commitEpoch + 1
-    /\ phase' = "unavailable"
-    /\ viewAvailable' = FALSE
-    /\ failureKind' = "live"
-    /\ UNCHANGED <<
-        baseGeneration, latestGeneration, replayCursor, visibleEpoch,
-        overlayKeys, overlayValues, viewGeneration, viewEpoch, viewState,
-        readerPinned, readerGeneration, readerEpoch, readerState,
-        pageSlotsRead, sqlUsesRowView
-        >>
-
-LiveEmptyCommit ==
-    /\ phase = "ready"
-    /\ commitEpoch < MaxEpoch
-    /\ wal' = Append(
-        wal,
-        [
-            epoch |-> commitEpoch + 1,
-            kind |-> "empty",
-            keys |-> {},
-            inserted |-> {}
-            ]
-        )
-    /\ commitEpoch' = commitEpoch + 1
-    /\ phase' = "unavailable"
-    /\ viewAvailable' = FALSE
-    /\ failureKind' = "live"
-    /\ UNCHANGED <<
-        canonicalState, baseGeneration, latestGeneration, replayCursor,
-        visibleEpoch, overlayKeys, overlayValues, viewGeneration, viewEpoch,
-        viewState, readerPinned, readerGeneration, readerEpoch, readerState,
-        pageSlotsRead, sqlUsesRowView
+        replayCursor, visibleEpoch, dirtyKeys, dirtyValues, durableRunState,
+        runCount, candidateState, publicationStage, viewAvailable,
+        viewGeneration, viewEpoch, viewState, readerPinned, readerGeneration,
+        readerEpoch, readerState, failureKind, pageSlotsRead, sqlUsesRowView
         >>
 
 Next ==
@@ -403,17 +465,21 @@ Next ==
     \/ CommitEmpty
     \/ CommitSchema
     \/ MountValidBase
-    \/ \E reason \in {"missing", "stale", "corrupt"}:
-        MountInvalidBase(reason)
+    \/ MountInvalidBase("missing")
+    \/ MountInvalidBase("stale")
+    \/ MountInvalidBase("corrupt")
+    \/ FlushDirty
     \/ ReplayRowFragment
     \/ ReplayEmpty
     \/ RejectCapacity
+    \/ RejectRunCapacity
     \/ RejectSchema
-    \/ FinishRecovery
+    \/ BeginCandidate
+    \/ PersistCandidateManifest
+    \/ PublishCandidate
+    \/ CrashCandidate
     \/ PinReader
-    \/ PublishNewShadowRoot
-    \/ LiveRowCommit
-    \/ LiveEmptyCommit
+    \/ PublishNewRoot
 
 Spec == Init /\ [][Next]_vars
 
@@ -421,27 +487,28 @@ TypeOK ==
     /\ canonicalState \subseteq Keys
     /\ commitEpoch \in BaseEpoch..MaxEpoch
     /\ wal \in Seq([
-        epoch : (BaseEpoch + 1)..MaxEpoch,
+        epoch : BaseEpoch..MaxEpoch,
         kind : Kinds,
         keys : SUBSET Keys,
         inserted : SUBSET Keys
         ])
-    /\ \A index \in 1..Len(wal):
-        /\ wal[index].inserted \subseteq wal[index].keys
-        /\ (wal[index].kind = "row") = (wal[index].keys # {})
     /\ phase \in Phases
-    /\ baseGeneration \in {0, BaseGeneration}
-    /\ latestGeneration \in {BaseGeneration, BaseGeneration + 1}
+    /\ baseGeneration \in 0..BaseGeneration
+    /\ latestRootGeneration \in BaseGeneration..(BaseGeneration + 1)
     /\ replayCursor \in 1..(Len(wal) + 1)
     /\ visibleEpoch \in BaseEpoch..MaxEpoch
-    /\ overlayKeys \subseteq Keys
-    /\ overlayValues \in [Keys -> BOOLEAN]
+    /\ dirtyKeys \subseteq Keys
+    /\ dirtyValues \in [Keys -> BOOLEAN]
+    /\ durableRunState \subseteq Keys
+    /\ runCount \in 0..RunBudget
+    /\ candidateState \subseteq Keys
+    /\ publicationStage \in PublicationStages
     /\ viewAvailable \in BOOLEAN
-    /\ viewGeneration \in {0, BaseGeneration}
+    /\ viewGeneration \in 0..BaseGeneration
     /\ viewEpoch \in 0..MaxEpoch
     /\ viewState \subseteq Keys
     /\ readerPinned \in BOOLEAN
-    /\ readerGeneration \in {0, BaseGeneration}
+    /\ readerGeneration \in 0..BaseGeneration
     /\ readerEpoch \in 0..MaxEpoch
     /\ readerState \subseteq Keys
     /\ failureKind \in FailureKinds
@@ -449,69 +516,52 @@ TypeOK ==
     /\ sqlUsesRowView \in BOOLEAN
 
 WalEpochsAreContiguous ==
-    IF Len(wal) = 0
-    THEN commitEpoch = BaseEpoch
-    ELSE /\ wal[1].epoch = BaseEpoch + 1
-         /\ wal[Len(wal)].epoch = commitEpoch
-         /\ \A index \in 2..Len(wal):
-             \/ wal[index].epoch = wal[index - 1].epoch
-             \/ wal[index].epoch = wal[index - 1].epoch + 1
+    \A position \in 1..Len(wal):
+        /\ wal[position].inserted \subseteq wal[position].keys
+        /\ IF position = 1
+           THEN wal[position].epoch = BaseEpoch + 1
+           ELSE \/ wal[position].epoch = wal[position - 1].epoch
+                \/ wal[position].epoch = wal[position - 1].epoch + 1
 
 CanonicalEqualsWal ==
     canonicalState = ApplyWalPrefix(BaseState, wal, Len(wal))
 
-OverlayIsBounded ==
-    Cardinality(overlayKeys) <= OverlayBudget
+DirtyStateIsBounded == Cardinality(dirtyKeys) <= DirtyBudget
 
 ReplayPrefixEquivalent ==
-    phase = "replaying" =>
-        /\ visibleEpoch = IF replayCursor = 1
-            THEN BaseEpoch
-            ELSE wal[replayCursor - 1].epoch
-        /\ ApplyOverlay(BaseState, overlayKeys, overlayValues) =
+    phase \in {"replaying", "candidate", "ready"} =>
+        ApplyOverlay(durableRunState, dirtyKeys, dirtyValues) =
             ApplyWalPrefix(BaseState, wal, replayCursor - 1)
 
 RejectedFragmentIsAtomic ==
-    failureKind \in {"capacity", "schema"} =>
-        ApplyOverlay(BaseState, overlayKeys, overlayValues) =
+    phase = "unavailable" /\ failureKind \in {"capacity", "runs", "schema"} =>
+        ApplyOverlay(durableRunState, dirtyKeys, dirtyValues) =
             ApplyWalPrefix(BaseState, wal, replayCursor - 1)
 
-OnlyCompleteRecoveryIsVisible ==
+CandidateIsNotVisible == phase = "candidate" => ~viewAvailable
+
+OnlyManifestLastRecoveryIsVisible ==
     viewAvailable =>
         /\ phase = "ready"
-        /\ replayCursor = Len(wal) + 1
+        /\ publicationStage = "published"
+        /\ viewGeneration = BaseGeneration
         /\ viewEpoch = commitEpoch
         /\ viewState = canonicalState
-        /\ viewGeneration = BaseGeneration
 
-NonReadyRecoveryDoesNotPublish ==
-    phase # "ready" => ~viewAvailable
+UnavailableRecoveryNeverServes == phase = "unavailable" => ~viewAvailable
 
-UnavailableShadowNeverServes ==
-    phase = "unavailable" =>
-        /\ ~viewAvailable
-        /\ ~sqlUsesRowView
+ColdMountDoesNotReadPageSlots == ~pageSlotsRead
 
-ColdMountDoesNotReadPageSlots ==
-    ~pageSlotsRead
-
-ProductionSqlRemainsOnCanonicalOracle ==
-    ~sqlUsesRowView
+ProductionSqlRemainsOnCanonicalOracle == ~sqlUsesRowView
 
 PinnedReaderDoesNotDrift ==
     readerPinned =>
         /\ readerGeneration = BaseGeneration
-        /\ readerEpoch \in BaseEpoch..commitEpoch
-        /\ readerState =
-            ApplyWalPrefix(
-                BaseState,
-                wal,
-                Cardinality({index \in 1..Len(wal): wal[index].epoch <= readerEpoch})
-                )
+        /\ readerEpoch <= commitEpoch
+        /\ readerState = ApplyWalPrefix(BaseState, wal, Len(wal))
 
-NewShadowRootDoesNotMovePinnedViews ==
-    latestGeneration > BaseGeneration =>
-        /\ viewGeneration \in {0, BaseGeneration}
-        /\ readerGeneration \in {0, BaseGeneration}
+NewRootDoesNotMovePinnedViews ==
+    readerPinned /\ latestRootGeneration > BaseGeneration =>
+        readerGeneration = BaseGeneration
 
 =============================================================================

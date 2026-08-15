@@ -96,11 +96,10 @@ remaining work below makes those derived foundations canonical without allowing
 a stale index or a database-sized resident set to become a correctness
 dependency.
 
-- [ ] Implement the canonical relational row-page runtime.
-  - Wire the implemented immutable row-delta generation into WAL recovery, then
-    replace the non-serving in-memory recovery shadow so complete replay remains
-    resident bounded without skipping durable WAL or scanning all row pages
-    during open.
+- [ ] Bind canonical relational row pages to checkpoints and their lifecycle.
+  - WAL recovery now streams exact row changes into bounded immutable disk runs
+    and publishes one generation-pinned `base + delta + live` view without a
+    database-sized recovery overlay or row-page scan during open.
   - Automatically publish and bind the exact row root to the canonical
     checkpoint, then cover backup, restore, scrub, orphan cleanup, reader-pin
     reclamation, and Windows file lifecycle behavior.
