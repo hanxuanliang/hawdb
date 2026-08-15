@@ -28,10 +28,9 @@ Files:
   persistent property projection. The property spill artifact remains part of
   canonical checkpoint input and is not eligible for derived repair.
 - `wal.<generation>.skein`: append-only committed mutation records beginning at
-  the replay LSN published by the manifest. New generations use the binary
-  fragment framing (`SKWALB01` file header); generations written by earlier
-  releases use the `SKEIN_WAL_V1` text encoding and stay readable until their
-  next checkpoint rotates them away.
+  the replay LSN published by the manifest. The only v1 encoding uses binary
+  fragment framing with the `SKWALB01` file header. Text WAL bytes and unknown
+  headers fail closed rather than entering a compatibility or upgrade path.
 - `projected_graphs.skein`: checksummed, checkpoint-generated CSR/CSC
   projection artifacts derived from persisted projected graph definitions,
   written through the default zstd compression envelope.
@@ -871,16 +870,13 @@ dictionary per artifact — into a `u32` id in first-seen order, and record
 payloads encode `key id, tagged value` pairs. The manifest publishes the key
 table as `property_key` lines (id plus hex-encoded UTF-8 key bytes, so keys
 containing tabs or newlines survive the tab-separated text format) under the
-`SKEIN_CANONICAL_MANIFEST_V2` header. The manifest reader accepts both
-versions: a `SKEIN_CANONICAL_MANIFEST_V1` manifest carries no key table and
-its record payloads decode with inline string keys, while a V2 manifest's key
-table selects the interned decoding. The artifact header itself is unchanged;
-the manifest version selects the record payload interpretation. The writer
-always writes V2, so the next checkpoint naturally rewrites an old generation
-into the interned encoding. A record referencing an id outside the key table,
-a key table with duplicate keys or non-contiguous ids, and duplicate key ids
-within one record all fail closed as corruption. Keys inside nested map values
-remain inline strings.
+`SKEIN_CANONICAL_MANIFEST_V1` header. The mandatory
+`record_layout\tproperty_key_ids` declaration prevents an inline-key artifact
+from being interpreted as the current format. There is no earlier manifest
+decoder or checkpoint upgrade path. A record referencing an id outside the key
+table, a key table with duplicate keys or non-contiguous ids, and duplicate key
+ids within one record all fail closed as corruption. Keys inside nested map
+values remain inline strings.
 
 Declared range and full-text indexes are also published as rebuildable,
 generation-bound projection artifacts. Their builders use a bounded external

@@ -169,8 +169,8 @@ use wal_codec::frame::{
     encode_binary_wal_header, frame_binary_wal_record, WAL_BINARY_FILE_HEADER_BYTES,
 };
 use wal_codec::{
-    encode_wal_header, quarantine_corrupt_wal, reject_corrupt_wal_record, sniff_wal_format,
-    WalCursorEvent, WalEntry, WalFileFormat, WalOp, WalOpenOutcome, WalRecordCursor,
+    quarantine_corrupt_wal, reject_corrupt_wal_record, WalCursorEvent, WalEntry, WalOp,
+    WalOpenOutcome, WalRecordCursor,
 };
 
 const STORAGE_VERSION: &str = "skein-storage-v1";
@@ -181,7 +181,6 @@ const RELATIONAL_CHECKPOINT_FILE_PREFIX: &str = "relational";
 const PROJECTED_GRAPH_ARTIFACT_VERSION: u64 = 1;
 const CHECKPOINT_HEADER_V1: &str = "SKEIN_CHECKPOINT_V1";
 const MANIFEST_HEADER_V1: &str = "SKEIN_MANIFEST_V1";
-const WAL_HEADER_V1: &str = "SKEIN_WAL_V1";
 const BACKUP_MANIFEST_FILE: &str = "backup.skein";
 const BACKUP_HEADER_V1: &str = "SKEIN_BACKUP_V1";
 const CANONICAL_MANIFEST_MAX_BYTES: u64 = 256 * 1024 * 1024;
@@ -281,12 +280,12 @@ fn wal_apply_failpoint() -> Result<()> {
     Ok(())
 }
 
-/// Test support: renders a WAL file (either format) as its canonical V1
-/// text record lines, one encoded record per line, header excluded. A torn
-/// tail ends the rendering; corruption renders a terminal marker line so
-/// identity comparisons on damaged files stay deterministic.
+/// Test support: renders binary WAL records as deterministic text lines.
+/// The on-disk v1 format remains binary; this representation is never read
+/// by recovery. A torn tail ends the rendering, while corruption appends a
+/// terminal marker so damaged-file comparisons remain deterministic.
 #[cfg(test)]
-pub(crate) fn decode_wal_records_as_v1_text(path: &Path) -> std::io::Result<String> {
+pub(crate) fn render_wal_records_for_test(path: &Path) -> std::io::Result<String> {
     use std::io::{Error, ErrorKind};
     let invalid = |reason: String| Error::new(ErrorKind::InvalidData, reason);
     let mut cursor =
@@ -314,45 +313,6 @@ pub(crate) fn decode_wal_records_as_v1_text(path: &Path) -> std::io::Result<Stri
         }
     }
     Ok(out)
-}
-
-/// Test support: rewrites a cleanly decodable WAL file into the V1 text
-/// encoding with the same generation header and records. Exercises the
-/// text-to-binary upgrade path that real databases cross at checkpoint.
-#[cfg(test)]
-pub(crate) fn rewrite_wal_as_v1_text(path: &Path) -> Result<()> {
-    let mut cursor = match WalRecordCursor::open(path, None)? {
-        WalOpenOutcome::Cursor(cursor) => cursor,
-        _ => {
-            return Err(SkeinError::Storage(
-                "cannot rewrite a WAL without a valid header".to_string(),
-            ));
-        }
-    };
-    let mut text = encode_wal_header(cursor.generation(), cursor.start_lsn());
-    text.push('\n');
-    loop {
-        match cursor.next()? {
-            WalCursorEvent::Entry { entry, .. } => {
-                text.push_str(&entry.encode());
-                text.push('\n');
-            }
-            WalCursorEvent::Eof => break,
-            WalCursorEvent::TornTail { .. } | WalCursorEvent::Corrupt { .. } => {
-                return Err(SkeinError::Storage(
-                    "cannot rewrite a damaged WAL as V1 text".to_string(),
-                ));
-            }
-        }
-    }
-    // Drop the cursor's handle on this exact path before truncating it, and
-    // sync on the write handle itself: Windows FlushFileBuffers denies a
-    // read-only handle, which POSIX fsync happily accepts.
-    drop(cursor);
-    let mut file = File::create(path)?;
-    std::io::Write::write_all(&mut file, text.as_bytes())?;
-    file.sync_all()?;
-    Ok(())
 }
 
 /// Test support: appends one well-formed framed record carrying a stale
@@ -5387,9 +5347,11 @@ pub(crate) fn decode_string(input: &str) -> Result<String> {
     String::from_utf8(bytes).map_err(|error| SkeinError::Storage(error.to_string()))
 }
 
+#[cfg(test)]
 const BASE64_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+#[cfg(test)]
 fn encode_bytes_base64(input: &[u8]) -> String {
     let mut output = String::with_capacity(input.len().div_ceil(3).saturating_mul(4));
     for chunk in input.chunks(3) {
@@ -5410,65 +5372,6 @@ fn encode_bytes_base64(input: &[u8]) -> String {
         }
     }
     output
-}
-
-fn decode_bytes_base64(input: &str) -> Result<Vec<u8>> {
-    if !input.len().is_multiple_of(4) {
-        return Err(SkeinError::Storage(
-            "invalid base64 byte string length".to_string(),
-        ));
-    }
-    let mut output = Vec::with_capacity(input.len() / 4 * 3);
-    let chunks = input.as_bytes().chunks_exact(4);
-    let chunk_count = chunks.len();
-    for (index, chunk) in chunks.enumerate() {
-        let last = index + 1 == chunk_count;
-        let a = decode_base64_digit(chunk[0])?;
-        let b = decode_base64_digit(chunk[1])?;
-        let c_padding = chunk[2] == b'=';
-        let d_padding = chunk[3] == b'=';
-        if !last && (c_padding || d_padding) || c_padding && !d_padding {
-            return Err(SkeinError::Storage(
-                "invalid base64 byte string padding".to_string(),
-            ));
-        }
-        let c = if c_padding {
-            0
-        } else {
-            decode_base64_digit(chunk[2])?
-        };
-        let d = if d_padding {
-            0
-        } else {
-            decode_base64_digit(chunk[3])?
-        };
-        if c_padding && b & 0x0f != 0 || d_padding && !c_padding && c & 0x03 != 0 {
-            return Err(SkeinError::Storage(
-                "non-canonical base64 byte string padding".to_string(),
-            ));
-        }
-        output.push((a << 2) | (b >> 4));
-        if !c_padding {
-            output.push((b << 4) | (c >> 2));
-        }
-        if !d_padding {
-            output.push((c << 6) | d);
-        }
-    }
-    Ok(output)
-}
-
-fn decode_base64_digit(value: u8) -> Result<u8> {
-    match value {
-        b'A'..=b'Z' => Ok(value - b'A'),
-        b'a'..=b'z' => Ok(value - b'a' + 26),
-        b'0'..=b'9' => Ok(value - b'0' + 52),
-        b'+' => Ok(62),
-        b'/' => Ok(63),
-        _ => Err(SkeinError::Storage(
-            "invalid base64 byte string digit".to_string(),
-        )),
-    }
 }
 
 pub(crate) fn checksum_bytes(bytes: &[u8]) -> u64 {
@@ -10248,7 +10151,7 @@ mod tests {
     }
 
     fn read_test_wal(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
-        super::decode_wal_records_as_v1_text(&active_wal_path(path))
+        super::render_wal_records_for_test(&active_wal_path(path))
     }
 
     fn active_generation_path(

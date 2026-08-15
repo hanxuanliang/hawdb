@@ -18,7 +18,6 @@ use std::sync::Arc;
 
 const ARTIFACT_HEADER: &[u8; 16] = b"SKEINCANONICAL01";
 const MANIFEST_HEADER_V1: &str = "SKEIN_CANONICAL_MANIFEST_V1";
-const MANIFEST_HEADER_V2: &str = "SKEIN_CANONICAL_MANIFEST_V2";
 const SEGMENT_HEADER: &[u8; 8] = b"SKNSEG01";
 const ARTIFACT_ID: u64 = 0x534b_4341_4e4f_4e31;
 const MAX_VALUE_DEPTH: usize = 32;
@@ -197,10 +196,9 @@ pub struct CanonicalSegmentManifest {
     pub artifact_sha256: Sha256Digest,
     pub node_count: u64,
     pub relationship_count: u64,
-    /// The record property key table: `Some` for V2 manifests, whose record
-    /// payloads encode `u32` key ids into this table, and `None` for V1
-    /// manifests, whose record payloads carry inline string keys.
-    pub property_keys: Option<Vec<String>>,
+    /// The record property key table. Record payloads encode `u32` ids into
+    /// this manifest-owned table; no inline-key compatibility layout exists.
+    pub property_keys: Vec<String>,
     pub segments: Vec<CanonicalSegmentDescriptor>,
 }
 
@@ -233,15 +231,13 @@ impl CanonicalSegmentManifest {
                 "canonical manifest has an unsupported artifact id".to_string(),
             ));
         }
-        if let Some(keys) = &self.property_keys {
-            u32_len(keys.len(), "canonical property key table")?;
-            let mut seen = BTreeSet::new();
-            for key in keys {
-                if !seen.insert(key.as_str()) {
-                    return Err(CanonicalSegmentError::Corrupt(
-                        "canonical manifest property keys are not unique".to_string(),
-                    ));
-                }
+        u32_len(self.property_keys.len(), "canonical property key table")?;
+        let mut seen = BTreeSet::new();
+        for key in &self.property_keys {
+            if !seen.insert(key.as_str()) {
+                return Err(CanonicalSegmentError::Corrupt(
+                    "canonical manifest property keys are not unique".to_string(),
+                ));
             }
         }
         let mut previous_end = ARTIFACT_HEADER.len() as u64 + 8;
@@ -319,12 +315,8 @@ impl CanonicalSegmentManifest {
 
     pub fn encode(&self) -> Result<String, CanonicalSegmentError> {
         self.validate()?;
-        let header = match self.property_keys {
-            Some(_) => MANIFEST_HEADER_V2,
-            None => MANIFEST_HEADER_V1,
-        };
         let mut body = format!(
-            "{header}\ngeneration\t{}\nartifact_id\t{}\nartifact_len\t{}\nartifact_digest\t{}\nartifact_sha256\t{}\nnode_count\t{}\nrelationship_count\t{}\n",
+            "{MANIFEST_HEADER_V1}\nrecord_layout\tproperty_key_ids\ngeneration\t{}\nartifact_id\t{}\nartifact_len\t{}\nartifact_digest\t{}\nartifact_sha256\t{}\nnode_count\t{}\nrelationship_count\t{}\n",
             self.generation.0,
             self.artifact_id,
             self.artifact_len,
@@ -333,7 +325,7 @@ impl CanonicalSegmentManifest {
             self.node_count,
             self.relationship_count
         );
-        for (id, key) in self.property_keys.iter().flatten().enumerate() {
+        for (id, key) in self.property_keys.iter().enumerate() {
             body.push_str(&format!(
                 "property_key\t{id}\t{}\n",
                 encode_property_key_hex(key)
@@ -391,18 +383,28 @@ impl CanonicalSegmentManifest {
         let mut relationship_count = None;
         let mut property_keys = Vec::new();
         let mut segments = Vec::new();
-        let mut header_version = None;
+        let mut saw_header = false;
+        let mut saw_record_layout = false;
         for line in body.lines() {
             if line == MANIFEST_HEADER_V1 {
-                set_once(&mut header_version, 1u8, "format header")?;
-                continue;
-            }
-            if line == MANIFEST_HEADER_V2 {
-                set_once(&mut header_version, 2u8, "format header")?;
+                if saw_header {
+                    return Err(CanonicalSegmentError::Corrupt(
+                        "canonical manifest has a duplicate format header".to_string(),
+                    ));
+                }
+                saw_header = true;
                 continue;
             }
             let fields = line.split('\t').collect::<Vec<_>>();
             match fields.as_slice() {
+                ["record_layout", "property_key_ids"] => {
+                    if saw_record_layout {
+                        return Err(CanonicalSegmentError::Corrupt(
+                            "canonical manifest has a duplicate record layout".to_string(),
+                        ));
+                    }
+                    saw_record_layout = true;
+                }
                 ["generation", value] => set_once(
                     &mut generation,
                     parse_u64(value, "generation")?,
@@ -480,23 +482,16 @@ impl CanonicalSegmentManifest {
                 }
             }
         }
-        let property_keys = match header_version {
-            None => {
-                return Err(CanonicalSegmentError::Corrupt(
-                    "canonical manifest is missing its format header".to_string(),
-                ));
-            }
-            Some(1) => {
-                if !property_keys.is_empty() {
-                    return Err(CanonicalSegmentError::Corrupt(
-                        "canonical manifest declares property keys without the V2 header"
-                            .to_string(),
-                    ));
-                }
-                None
-            }
-            Some(_) => Some(property_keys),
-        };
+        if !saw_header {
+            return Err(CanonicalSegmentError::Corrupt(
+                "canonical manifest is missing its format header".to_string(),
+            ));
+        }
+        if !saw_record_layout {
+            return Err(CanonicalSegmentError::Corrupt(
+                "canonical manifest is missing its property-key-id record layout".to_string(),
+            ));
+        }
         let manifest = Self {
             generation: ManifestGeneration(required(generation, "generation")?),
             artifact_id: required(artifact_id, "artifact id")?,
@@ -819,7 +814,7 @@ impl CanonicalSegmentWriter {
             artifact_sha256: artifact_integrity.sha256,
             node_count,
             relationship_count,
-            property_keys: Some(property_keys.into_keys()),
+            property_keys: property_keys.into_keys(),
             segments,
         };
         manifest.validate()?;
@@ -1073,8 +1068,8 @@ impl CanonicalSegmentReader {
             .map(PropertySpillReader::manifest)
     }
 
-    fn property_keys(&self) -> Option<&[String]> {
-        self.manifest.property_keys.as_deref()
+    fn property_keys(&self) -> &[String] {
+        &self.manifest.property_keys
     }
 
     pub fn get_node(&self, id: NodeId) -> Result<Option<NodeRecord>, CanonicalSegmentError> {
@@ -1091,7 +1086,7 @@ impl CanonicalSegmentReader {
             segment,
             id.0,
             self.property_spills.as_ref(),
-            self.property_keys(),
+            Some(self.property_keys()),
         )
     }
 
@@ -1110,7 +1105,7 @@ impl CanonicalSegmentReader {
             segment,
             id.0,
             self.property_spills.as_ref(),
-            self.property_keys(),
+            Some(self.property_keys()),
         )
     }
 
@@ -1151,7 +1146,7 @@ impl CanonicalSegmentReader {
                         id,
                         payload,
                         self.property_spills.as_ref(),
-                        self.property_keys(),
+                        Some(self.property_keys()),
                     )?)?;
                     report.records_decoded = report.records_decoded.saturating_add(1);
                     Ok(control)
@@ -1193,7 +1188,7 @@ impl CanonicalSegmentReader {
                         id,
                         payload,
                         self.property_spills.as_ref(),
-                        self.property_keys(),
+                        Some(self.property_keys()),
                     )?)?;
                     report.records_decoded = report.records_decoded.saturating_add(1);
                     Ok(control)
@@ -1240,7 +1235,7 @@ impl CanonicalSegmentReader {
                         id,
                         payload,
                         self.property_spills.as_ref(),
-                        self.property_keys(),
+                        Some(self.property_keys()),
                     )?;
                     report.records_decoded = report.records_decoded.saturating_add(1);
                     let endpoint_matches = match direction {
@@ -1292,7 +1287,7 @@ impl CanonicalSegmentReader {
                         id,
                         payload,
                         self.property_spills.as_ref(),
-                        self.property_keys(),
+                        Some(self.property_keys()),
                     )?;
                     report.records_decoded = report.records_decoded.saturating_add(1);
                     if node.labels.contains(&label_id)
@@ -1393,7 +1388,7 @@ impl Iterator for CanonicalNodeIterator {
                         id,
                         payload,
                         self.reader.property_spills.as_ref(),
-                        self.reader.property_keys(),
+                        Some(self.reader.property_keys()),
                     )?);
                     Ok(())
                 },
@@ -1465,7 +1460,7 @@ impl Iterator for CanonicalRelationshipIterator {
                         id,
                         payload,
                         self.reader.property_spills.as_ref(),
-                        self.reader.property_keys(),
+                        Some(self.reader.property_keys()),
                     )?);
                     Ok(())
                 },
@@ -2937,11 +2932,6 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
-    const V1_FIXTURE_ARTIFACT: &[u8] =
-        include_bytes!("../fixtures/canonical_v1_inline_keys/canonical.1.skein");
-    const V1_FIXTURE_MANIFEST: &str =
-        include_str!("../fixtures/canonical_v1_inline_keys/canonical.1.manifest.skein");
-
     fn fixture_nodes() -> Vec<NodeRecord> {
         vec![
             NodeRecord {
@@ -3065,45 +3055,8 @@ mod tests {
     }
 
     #[test]
-    fn v1_fixture_decodes_with_inline_string_keys() {
-        let path = unique_path("v1_fixture");
-        fs::write(&path, V1_FIXTURE_ARTIFACT).unwrap();
-        let manifest = CanonicalSegmentManifest::decode(V1_FIXTURE_MANIFEST).unwrap();
-        assert_eq!(manifest.property_keys, None);
-        assert_eq!(manifest.encode().unwrap(), V1_FIXTURE_MANIFEST);
-        let reader = CanonicalSegmentReader::open(
-            path.clone(),
-            manifest,
-            Arc::new(SegmentCache::new(8 * 1024 * 1024)),
-            StoreId(1),
-            NonZeroU64::new(16 * 1024 * 1024).unwrap(),
-        )
-        .unwrap();
-        let nodes = reader
-            .node_records()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(nodes, fixture_nodes());
-        let relationships = reader
-            .relationship_records()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(relationships, fixture_relationships());
-        assert_eq!(
-            reader.get_node(NodeId(4)).unwrap(),
-            Some(fixture_nodes()[3].clone())
-        );
-        assert_eq!(
-            reader.get_relationship(RelId(3)).unwrap(),
-            Some(fixture_relationships()[2].clone())
-        );
-        drop(reader);
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn v2_manifest_publishes_property_keys_in_first_seen_order() {
-        let path = unique_path("v2_key_table");
+    fn v1_manifest_publishes_property_keys_in_first_seen_order() {
+        let path = unique_path("v1_key_table");
         let manifest = CanonicalSegmentWriter::new(CanonicalSegmentConfig::default())
             .write(
                 &path,
@@ -3114,26 +3067,43 @@ mod tests {
             .unwrap();
         assert_eq!(
             manifest.property_keys,
-            Some(
-                [
-                    "active", "age", "name", "score", "tags", "meta", "note", "since", "weight",
-                    "kind"
-                ]
+            ["active", "age", "name", "score", "tags", "meta", "note", "since", "weight", "kind"]
                 .map(str::to_string)
                 .to_vec()
-            )
         );
         let encoded = manifest.encode().unwrap();
-        assert!(encoded.starts_with(MANIFEST_HEADER_V2));
+        assert!(encoded.starts_with(MANIFEST_HEADER_V1));
         assert_eq!(
             CanonicalSegmentManifest::decode(&encoded).unwrap(),
             manifest
         );
+        let inline_layout = reseal_manifest(&encoded, |line| {
+            if line == "record_layout\tproperty_key_ids" {
+                "record_layout\tinline_keys".to_string()
+            } else {
+                line.to_string()
+            }
+        });
+        assert!(CanonicalSegmentManifest::decode(&inline_layout)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid canonical manifest line"));
+        let old_header = reseal_manifest(&encoded, |line| {
+            if line == MANIFEST_HEADER_V1 {
+                "SKEIN_CANONICAL_MANIFEST_V2".to_string()
+            } else {
+                line.to_string()
+            }
+        });
+        assert!(CanonicalSegmentManifest::decode(&old_header)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid canonical manifest line"));
         std::fs::remove_file(path).unwrap();
     }
 
     #[test]
-    fn v2_manifest_round_trips_hostile_property_keys() {
+    fn v1_manifest_round_trips_hostile_property_keys() {
         let path = unique_path("hostile_keys");
         let nodes = vec![NodeRecord {
             id: NodeId(1),
@@ -3171,7 +3141,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_manifest_rejects_duplicate_and_non_contiguous_property_keys() {
+    fn v1_manifest_rejects_duplicate_and_non_contiguous_property_keys() {
         let path = unique_path("bad_key_table");
         let manifest = CanonicalSegmentWriter::new(CanonicalSegmentConfig::default())
             .write(
@@ -3211,7 +3181,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_reader_rejects_out_of_range_property_key_ids() {
+    fn v1_reader_rejects_out_of_range_property_key_ids() {
         let path = unique_path("out_of_range_key_id");
         let mut manifest = CanonicalSegmentWriter::new(CanonicalSegmentConfig::default())
             .write(
@@ -3221,7 +3191,7 @@ mod tests {
                 &fixture_relationships(),
             )
             .unwrap();
-        manifest.property_keys = Some(Vec::new());
+        manifest.property_keys = Vec::new();
         let reader = CanonicalSegmentReader::open(
             &path,
             manifest,
@@ -3235,21 +3205,6 @@ mod tests {
             Err(CanonicalSegmentError::Corrupt(message))
                 if message.contains("unknown property key id")
         ));
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn v2_artifact_is_smaller_than_the_v1_fixture_for_repeated_keys() {
-        let path = unique_path("v2_space");
-        let manifest = CanonicalSegmentWriter::new(CanonicalSegmentConfig::default())
-            .write(
-                &path,
-                ManifestGeneration(1),
-                &fixture_nodes(),
-                &fixture_relationships(),
-            )
-            .unwrap();
-        assert!(manifest.artifact_len < V1_FIXTURE_ARTIFACT.len() as u64);
         std::fs::remove_file(path).unwrap();
     }
 

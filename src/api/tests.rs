@@ -8816,7 +8816,7 @@ fn active_checkpoint_path(path: impl AsRef<std::path::Path>) -> std::path::PathB
 }
 
 fn read_test_wal(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
-    crate::store::decode_wal_records_as_v1_text(&active_wal_path(path))
+    crate::store::render_wal_records_for_test(&active_wal_path(path))
 }
 
 fn read_test_plan_cache_metric(read: &DatabaseReadTransaction, metric: &str) -> i64 {

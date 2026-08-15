@@ -1220,61 +1220,23 @@ fn out_of_core_delta_budget_also_bounds_wal_replay() {
 }
 
 #[test]
-fn v1_text_wal_replays_and_upgrades_to_binary_at_next_checkpoint() {
-    let path = unique_test_dir("v1_text_wal_compat");
+fn legacy_text_wal_is_rejected_by_the_single_v1_reader() {
+    let path = unique_test_dir("legacy_text_wal_rejected");
     {
         let mut db = Database::open(&path).unwrap();
-        db.query("CREATE (:Memory {id: 1, title: 'Graph foundations'})")
-            .unwrap();
+        db.query("CREATE (:Memory {id: 1})").unwrap();
     }
-    // Rewrite the WAL into the V1 text encoding (same generation header,
-    // same records), emulating a database written before the binary WAL.
-    let binary_record_count = read_test_wal(&path).unwrap().lines().count();
-    crate::store::rewrite_wal_as_v1_text(&active_wal_path(&path)).unwrap();
-    assert!(std::fs::read(active_wal_path(&path))
-        .unwrap()
-        .starts_with(b"SKEIN_WAL_V1\t"));
-    assert_eq!(
-        read_test_wal(&path).unwrap().lines().count(),
-        binary_record_count
-    );
-    {
-        let mut db = Database::open(&path).unwrap();
-        let output = db
-            .query("MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title")
-            .unwrap();
-        assert_eq!(
-            output.rows[0].get("title"),
-            Some(&Value::String("Graph foundations".to_string()))
-        );
-        // Appends to an existing text generation stay text.
-        db.query("CREATE (:Memory {id: 2, title: 'Still text'})")
-            .unwrap();
-        assert!(std::fs::read(active_wal_path(&path))
-            .unwrap()
-            .starts_with(b"SKEIN_WAL_V1\t"));
-        assert_eq!(
-            read_test_wal(&path).unwrap().lines().count(),
-            binary_record_count + 1
-        );
-        // The next checkpoint rotates the WAL to a new generation, which
-        // is always binary.
-        db.checkpoint().unwrap();
-        assert!(std::fs::read(active_wal_path(&path))
-            .unwrap()
-            .starts_with(b"SKWALB01"));
-        assert_eq!(read_test_wal(&path).unwrap(), "");
-        db.query("CREATE (:Memory {id: 3, title: 'Now binary'})")
-            .unwrap();
-        assert_eq!(read_test_wal(&path).unwrap().lines().count(), 1);
-    }
-    {
-        let mut db = Database::open(&path).unwrap();
-        let output = db
-            .query("MATCH (m:Memory) RETURN count(m) AS count")
-            .unwrap();
-        assert_eq!(output.rows[0].get("count"), Some(&Value::Int(3)));
-    }
+    std::fs::write(
+        active_wal_path(&path),
+        b"SKEIN_WAL_V1\t1\t1\t00000000000000000000\n",
+    )
+    .unwrap();
+
+    let error = Database::open(&path).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("WAL is missing a supported generation header"));
+
     std::fs::remove_dir_all(path).unwrap();
 }
 

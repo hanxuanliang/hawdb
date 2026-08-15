@@ -47,6 +47,12 @@ checksum- or sequence-invalid complete chain always fails closed, and a
 fragment carrying a stale WAL generation reads as end of log
 (recyclable-log discipline), equivalent to clean EOF.
 
+The implementation has one unreleased v1 WAL layout: `SKWALB01` binary
+framing. Text headers and unknown magic are corruption, not a migration state.
+The model therefore has no format-upgrade transition; every modeled WAL record
+already satisfies the single binary framing contract before durability actions
+begin.
+
 The model checks:
 
 - one process owns the database directory at a time;

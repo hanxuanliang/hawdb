@@ -10,24 +10,23 @@ use super::{
     encode_binary_wal_record, encode_bool, encode_durable_text, encode_index_kind, encode_nullable,
     encode_optional_sha256, encode_optional_u64, encode_property_type, encode_schema_object_state,
     encode_stable_id_mapping, encode_string, encode_string_vec, encode_table_kind, encode_u64_vec,
-    encode_value_vec, encode_wal_header, file_checksum, frame_binary_wal_record,
-    has_storage_artifacts, parse_optional_sha256, parse_optional_u64,
-    parse_relational_overflow_extent_generation_file,
+    encode_value_vec, file_checksum, frame_binary_wal_record, has_storage_artifacts,
+    parse_optional_sha256, parse_optional_u64, parse_relational_overflow_extent_generation_file,
     parse_relational_row_page_artifact_generation_file, parse_u64, process_crash_failpoint,
     property_projection_artifact_generation_file, property_projection_manifest_generation_file,
     property_spill_artifact_generation_file, property_spill_manifest_generation_file,
     read_durable_text, read_durable_text_bytes_with_limit, relational_checkpoint_generation_file,
-    remove_source_scan_artifacts, safe_reclaim_commit_epoch, sniff_wal_format, source_scan,
-    split_manifest_checksum, split_projected_graph_artifact_checksum,
-    split_stable_id_mapping_checksum, storage_generation_for_file, store_id_for_path,
-    sync_parent_dir, validate_backup_files, validate_new_backup_destination,
-    validate_search_projection_checkpoint_changes, validate_storage_version, verify_integrity,
-    wal_generation_file, wal_group_sync_failpoint, CheckpointPublishStage, ProjectedGraphArtifact,
-    WalCursorEvent, WalEntry, WalFileFormat, WalOp, WalOpenOutcome, WalRecordCursor,
-    BACKUP_MANIFEST_FILE, CANONICAL_ADJACENCY_MANIFEST_MAX_BYTES, CANONICAL_MANIFEST_MAX_BYTES,
-    CHECKPOINT_HEADER_V1, MANIFEST_FILE, MANIFEST_HEADER_V1, PROJECTED_GRAPHS_FILE,
-    PROPERTY_PROJECTION_MANIFEST_MAX_BYTES, PROPERTY_SPILL_MANIFEST_MAX_BYTES,
-    STABLE_ID_MAPPING_FILE, STORAGE_VERSION, WAL_BINARY_FILE_HEADER_BYTES,
+    remove_source_scan_artifacts, safe_reclaim_commit_epoch, source_scan, split_manifest_checksum,
+    split_projected_graph_artifact_checksum, split_stable_id_mapping_checksum,
+    storage_generation_for_file, store_id_for_path, sync_parent_dir, validate_backup_files,
+    validate_new_backup_destination, validate_search_projection_checkpoint_changes,
+    validate_storage_version, verify_integrity, wal_generation_file, wal_group_sync_failpoint,
+    CheckpointPublishStage, ProjectedGraphArtifact, WalCursorEvent, WalEntry, WalOp,
+    WalOpenOutcome, WalRecordCursor, BACKUP_MANIFEST_FILE, CANONICAL_ADJACENCY_MANIFEST_MAX_BYTES,
+    CANONICAL_MANIFEST_MAX_BYTES, CHECKPOINT_HEADER_V1, MANIFEST_FILE, MANIFEST_HEADER_V1,
+    PROJECTED_GRAPHS_FILE, PROPERTY_PROJECTION_MANIFEST_MAX_BYTES,
+    PROPERTY_SPILL_MANIFEST_MAX_BYTES, STABLE_ID_MAPPING_FILE, STORAGE_VERSION,
+    WAL_BINARY_FILE_HEADER_BYTES,
 };
 use crate::error::{Result, SkeinError};
 use crate::schema::{Catalog, GraphStatistics};
@@ -99,10 +98,6 @@ pub(super) struct DurableStore {
     pub(super) wal_replay_start_lsn: u64,
     pub(super) next_lsn: u64,
     pub(super) wal_bytes: u64,
-    /// Encoding of the active WAL generation file. Existing text (V1)
-    /// generations keep appending text records; every new generation is
-    /// binary, so a database upgrades at its next checkpoint rotation.
-    pub(super) wal_format: WalFileFormat,
     /// Commit epoch recorded in binary WAL records (spec §3.4.3). Advisory:
     /// replay derives commit epochs from LSN order, exactly as before.
     pub(super) wal_commit_epoch: u64,
@@ -404,7 +399,6 @@ impl DurableStore {
         let wal_bytes = fs::metadata(&wal_path)
             .map(|metadata| metadata.len())
             .unwrap_or_default();
-        let wal_format = sniff_wal_format(&wal_path)?;
         let segment_cache = Arc::new(SegmentCache::new(segment_cache_capacity_bytes));
         let store_id = store_id_for_path(path)?;
         let canonical_segments = load_published_canonical_segments(
@@ -497,7 +491,6 @@ impl DurableStore {
             wal_replay_start_lsn: manifest.wal_replay_start_lsn,
             next_lsn: manifest.next_lsn,
             wal_bytes,
-            wal_format,
             wal_commit_epoch: manifest.checkpoint_commit_epoch,
             max_wal_bytes,
             source_scan_commit_epoch: manifest.source_scan_commit_epoch,
@@ -1351,51 +1344,21 @@ impl DurableStore {
             lsn: self.next_lsn,
             op,
         };
-        // Header bytes are written when the record starts a fresh file
-        // (text keeps its original created-file trigger); record bytes are
-        // the framed record itself.
-        let (header_bytes, record_bytes) = match self.wal_format {
-            WalFileFormat::TextV1 => {
-                let encoded_entry = entry.encode();
-                if self
-                    .max_record_bytes
-                    .is_some_and(|limit| encoded_entry.len().saturating_add(1) > limit)
-                {
-                    return Err(SkeinError::Storage(format!(
-                        "WAL record byte limit exceeded before append: max_wal_record_bytes={}",
-                        self.max_record_bytes.unwrap_or_default()
-                    )));
-                }
-                let mut header =
-                    encode_wal_header(self.wal_generation, self.wal_replay_start_lsn).into_bytes();
-                header.push(b'\n');
-                let mut record = encoded_entry.into_bytes();
-                record.push(b'\n');
-                (header, record)
-            }
-            WalFileFormat::BinaryV2 => {
-                let payload =
-                    encode_binary_wal_record(&entry, self.wal_commit_epoch.saturating_add(1));
-                if self
-                    .max_record_bytes
-                    .is_some_and(|limit| payload.len() > limit)
-                {
-                    return Err(SkeinError::Storage(format!(
-                        "WAL record byte limit exceeded before append: max_wal_record_bytes={}",
-                        self.max_record_bytes.unwrap_or_default()
-                    )));
-                }
-                let header =
-                    encode_binary_wal_header(self.wal_generation, self.wal_replay_start_lsn);
-                let position = self
-                    .wal_bytes
-                    .saturating_sub(WAL_BINARY_FILE_HEADER_BYTES as u64);
-                (
-                    header,
-                    frame_binary_wal_record(self.wal_generation, &payload, position),
-                )
-            }
-        };
+        let payload = encode_binary_wal_record(&entry, self.wal_commit_epoch.saturating_add(1));
+        if self
+            .max_record_bytes
+            .is_some_and(|limit| payload.len() > limit)
+        {
+            return Err(SkeinError::Storage(format!(
+                "WAL record byte limit exceeded before append: max_wal_record_bytes={}",
+                self.max_record_bytes.unwrap_or_default()
+            )));
+        }
+        let header_bytes = encode_binary_wal_header(self.wal_generation, self.wal_replay_start_lsn);
+        let position = self
+            .wal_bytes
+            .saturating_sub(WAL_BINARY_FILE_HEADER_BYTES as u64);
+        let record_bytes = frame_binary_wal_record(self.wal_generation, &payload, position);
         let started = std::time::Instant::now();
         let mut byte_count = record_bytes.len() as u64;
         if self.wal_bytes == 0 {
@@ -1406,11 +1369,7 @@ impl DurableStore {
         let sync_deferred = self.wal_sync_group.is_some();
         let result = (|| {
             let (mut file, created) = self.open_wal_append()?;
-            let write_header = match self.wal_format {
-                WalFileFormat::TextV1 => created,
-                WalFileFormat::BinaryV2 => self.wal_bytes == 0,
-            };
-            if write_header {
+            if self.wal_bytes == 0 {
                 file.write_all(&header_bytes)?;
             }
             file.write_all(&record_bytes)?;
@@ -2377,7 +2336,6 @@ impl DurableStore {
         self.safe_reclaim_commit_epoch = manifest.safe_reclaim_commit_epoch;
         self.wal_replay_start_lsn = manifest.wal_replay_start_lsn;
         self.wal_bytes = fs::metadata(&self.wal_path)?.len();
-        self.wal_format = WalFileFormat::BinaryV2;
         self.wal_commit_epoch = manifest.checkpoint_commit_epoch;
         self.source_scan_commit_epoch = manifest.source_scan_commit_epoch;
         self.source_scan_descriptor_checksum = manifest.source_scan_descriptor_checksum;
