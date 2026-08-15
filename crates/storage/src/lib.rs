@@ -214,7 +214,7 @@ pub use scan::{
     PlannedScanSegment, PruningDecision, PruningReason, RangeBound, ReadySegmentScan,
     ScanPredicate, ScanPruningReport, ScanPruningStrategy, ScanPruningTargetKind, ScanScalar,
     ScanSegmentAccessPlan, ScanSegmentFallback, ScanSegmentManifest, ScanSegmentManifestError,
-    SegmentPayloadRange, SegmentPruner, SegmentRangeReader, SegmentReadError,
+    SegmentPayloadRange, SegmentPruner, SegmentRangeRead, SegmentRangeReader, SegmentReadError,
     SegmentReadExecutionError, SegmentReadExecutionReport, SegmentReadExecutor, SegmentReadPayload,
     SegmentReadPool, SegmentReadPoolError, SegmentReadRange, SegmentReadSchedule,
     SegmentReadScheduler, SegmentReadWave, SegmentSummary,

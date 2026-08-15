@@ -138,8 +138,15 @@ binds one required class to the exact production identity and canonical graph
 epoch, a redacted query and parameter digest, a precomputed reference result
 digest and row count, and explicit per-run block and byte budgets. Every
 measurement run MUST observe the required class, at least one admitted page
-read, and no digest mismatch. The runner computes the result digest through a
-bounded streaming consumer and never retains or serializes row payloads.
+read, and no digest mismatch. The first run is cold and the required class MUST
+add at least one cache miss; that class MUST add a cache hit on a subsequent
+run. Generic process-wide cache deltas cannot satisfy either obligation. The
+residency snapshot reports property-projection and adjacency artifact bytes
+separately, so the runner rejects a case unless the artifact for the required
+class is larger than the configured cache. A cancellation probe records latency
+and cache pins, requires a non-poisoned handle, and performs the digest read
+only after cancellation. The runner computes that digest through a bounded
+streaming consumer and never retains or serializes row payloads.
 
 The reference digest is created offline by the canonical fallback oracle over
 the same dataset/query identity. Runtime differential tests additionally clone

@@ -8090,6 +8090,26 @@ impl NowledgeMemEmbeddedStoreHandle {
         Ok(self.read_store()?.runtime_governor_snapshot())
     }
 
+    /// Returns a point-in-time storage residency snapshot through the admitted
+    /// embedded facade. Qualification uses this to prove cancellation does not
+    /// leak cache pins without reaching through to the storage engine.
+    pub fn storage_residency_report(&self) -> Result<crate::StorageResidencyReport> {
+        Ok(self
+            .read_store()?
+            .graph
+            .database()
+            .storage_residency_report())
+    }
+
+    /// Reports whether a fail-closed storage error poisoned this handle.
+    pub fn storage_handle_poisoned(&self) -> Result<bool> {
+        Ok(self
+            .read_store()?
+            .graph
+            .database()
+            .storage_handle_poisoned())
+    }
+
     /// Reports the admitted facade contract. Production hosts must bind this
     /// report to their long-lived runtime identity before using it as evidence.
     pub fn serving_path_readiness(&self) -> NowledgeMemServingPathReadiness {

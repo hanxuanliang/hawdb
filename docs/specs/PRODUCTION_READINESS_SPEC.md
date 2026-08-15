@@ -78,9 +78,15 @@ identity, or any resource-profile blocker. When a persistent graph index class
 is under qualification, the typed requirement additionally binds a reference
 result digest and row count plus per-run page and byte budgets. Every run must
 observe that exact class through the store-owned read counters; the bounded
-streaming digest consumer does not retain or serialize result rows. A CLI may
-transport this report, but it MUST NOT replace the typed function in the
-production host.
+streaming digest consumer does not retain or serialize result rows. At least
+two measurement runs are required. The required index class itself MUST report
+a cache miss on the first run and a cache hit on a later run; process-wide
+cache counters cannot satisfy this obligation. The relevant property-projection
+or adjacency artifact MUST exceed the configured segment-cache capacity. A
+pre-cancelled bounded read MUST terminate within its explicit latency budget,
+leave zero pinned cache bytes, avoid poisoning the handle, and be followed by
+a successful digest read. A CLI may transport this report, but it MUST NOT
+replace the typed function in the production host.
 
 Default reports MUST redact local paths, query text, parameters, row payloads,
 embeddings, credentials, and raw parser or I/O payload fragments. Debug-only

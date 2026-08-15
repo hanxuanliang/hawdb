@@ -6,7 +6,8 @@ use skein::{
     IoConcurrencyBudget, NowledgeGraphStatement, NowledgeMemEmbeddedStoreHandle,
     NowledgeMemGraphMode, NowledgeMemOpenOptions, NowledgeMemReadOptions,
     PersistentGraphIndexClass, ProductionEvidenceBinding, ProductionQualificationIdentity,
-    RuntimeGovernor, RuntimeGovernorConfig, StorageDeviceProfile, StorageResourceProfileLimits,
+    RuntimeCancellationToken, RuntimeGovernor, RuntimeGovernorConfig, RuntimeTaskContext,
+    StorageDeviceProfile, StorageResidencyReport, StorageResourceProfileLimits,
     StorageResourceProfileReport, Value,
 };
 use skein_query::QueryIdentity;
@@ -58,6 +59,11 @@ impl ProductionGraphStorageQualificationConfig {
         }
         if let Some(requirement) = &self.persistent_index_requirement {
             requirement.validate()?;
+            if self.measurement_runs < 2 {
+                return Err(ProductionGraphQualificationError::new(
+                    "persistent graph index qualification requires at least two measurement runs for cold and warm evidence",
+                ));
+            }
         }
         validate_production_identity_for_current_target(
             &self.evidence_binding,
@@ -74,6 +80,7 @@ pub struct PersistentGraphIndexProductionRequirement {
     pub reference_output_rows: usize,
     pub max_blocks_read_per_run: u64,
     pub max_bytes_read_per_run: u64,
+    pub max_cancellation_latency_micros: u64,
 }
 
 impl PersistentGraphIndexProductionRequirement {
@@ -86,6 +93,11 @@ impl PersistentGraphIndexProductionRequirement {
         if self.max_blocks_read_per_run == 0 || self.max_bytes_read_per_run == 0 {
             return Err(ProductionGraphQualificationError::new(
                 "persistent graph index read budgets must be greater than zero",
+            ));
+        }
+        if self.max_cancellation_latency_micros == 0 {
+            return Err(ProductionGraphQualificationError::new(
+                "persistent graph index cancellation latency budget must be greater than zero",
             ));
         }
         Ok(())
@@ -136,6 +148,29 @@ pub struct ProductionGraphExecutionSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PersistentGraphIndexProductionRunEvidence {
+    pub run: usize,
+    pub phase: String,
+    pub operation_count: u64,
+    pub blocks_read: u64,
+    pub bytes_read: u64,
+    pub index_cache_hits: u64,
+    pub index_cache_misses: u64,
+    pub segment_cache_evictions: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PersistentGraphIndexCancellationEvidence {
+    pub cancellation_observed: bool,
+    pub latency_micros: u64,
+    pub max_latency_micros: u64,
+    pub pinned_bytes_before: u64,
+    pub pinned_bytes_after: u64,
+    pub handle_poisoned_after: bool,
+    pub subsequent_read_succeeded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PersistentGraphIndexProductionEvidence {
     pub class: String,
     pub reference_output_digest: String,
@@ -149,6 +184,13 @@ pub struct PersistentGraphIndexProductionEvidence {
     pub operation_count: u64,
     pub max_blocks_read: u64,
     pub max_bytes_read: u64,
+    pub required_artifact_bytes: u64,
+    pub segment_cache_capacity_bytes: u64,
+    pub artifact_exceeds_cache: bool,
+    pub cold_read_observed: bool,
+    pub warm_read_observed: bool,
+    pub runs: Vec<PersistentGraphIndexProductionRunEvidence>,
+    pub cancellation: PersistentGraphIndexCancellationEvidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,6 +263,18 @@ pub fn run_production_graph_storage_qualification(
         durations.push(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
         profiles.push(profile);
     }
+    let cancellation_evidence = config
+        .persistent_index_requirement
+        .as_ref()
+        .map(|requirement| {
+            run_persistent_index_cancellation_probe(
+                &store,
+                &config.statement,
+                &config.limits,
+                requirement.max_cancellation_latency_micros,
+            )
+        })
+        .transpose()?;
     let observed_index_output = config
         .persistent_index_requirement
         .as_ref()
@@ -251,6 +305,9 @@ pub fn run_production_graph_storage_qualification(
     if runtime.admission_rejections_delta != 0 {
         blocker_codes.push("runtime_admission_rejection_observed".to_string());
     }
+    if config.persistent_index_requirement.is_some() && runtime.cancellations_delta == 0 {
+        blocker_codes.push("runtime_cancellation_not_recorded".to_string());
+    }
     if runtime.final_active_foreground_tasks != 0
         || runtime.final_active_background_tasks != 0
         || runtime.final_active_blocking_tasks != 0
@@ -261,6 +318,7 @@ pub fn run_production_graph_storage_qualification(
     if runtime.final_overcommitted {
         blocker_codes.push("runtime_overcommitted".to_string());
     }
+    let post_cancellation_read_succeeded = observed_index_output.is_some();
     let persistent_index_evidence = if let Some(requirement) = &config.persistent_index_requirement
     {
         let (observed_output_digest, observed_output_rows) = observed_index_output
@@ -269,7 +327,8 @@ pub fn run_production_graph_storage_qualification(
         let mut operation_count = 0u64;
         let mut max_blocks_read = 0u64;
         let mut max_bytes_read = 0u64;
-        for profile in &profiles {
+        let mut runs = Vec::with_capacity(profiles.len());
+        for (run, profile) in profiles.iter().enumerate() {
             let reads = profile
                 .after
                 .graph_index_reads
@@ -281,8 +340,24 @@ pub fn run_production_graph_storage_qualification(
             operation_count = operation_count.saturating_add(class_operations);
             let blocks_read = reads.blocks_read(requirement.class);
             let bytes_read = reads.bytes_read(requirement.class);
+            let index_cache_hits = reads.cache_hits(requirement.class);
+            let index_cache_misses = reads.cache_misses(requirement.class);
+            let segment_cache_evictions = profile
+                .after
+                .segment_cache_eviction_count
+                .saturating_sub(profile.before.segment_cache_eviction_count);
             max_blocks_read = max_blocks_read.max(blocks_read);
             max_bytes_read = max_bytes_read.max(bytes_read);
+            runs.push(PersistentGraphIndexProductionRunEvidence {
+                run,
+                phase: if run == 0 { "cold" } else { "warm" }.to_string(),
+                operation_count: class_operations,
+                blocks_read,
+                bytes_read,
+                index_cache_hits,
+                index_cache_misses,
+                segment_cache_evictions,
+            });
             if class_operations == 0 {
                 blocker_codes.push(format!(
                     "persistent_graph_index_{}_not_observed",
@@ -308,6 +383,60 @@ pub fn run_production_graph_storage_qualification(
                 ));
             }
         }
+        let cold_read_observed = runs.first().is_some_and(|run| run.index_cache_misses > 0);
+        let warm_read_observed = runs.iter().skip(1).any(|run| run.index_cache_hits > 0);
+        if !cold_read_observed {
+            blocker_codes.push(format!(
+                "persistent_graph_index_{}_cold_read_not_observed",
+                requirement.class.as_str()
+            ));
+        }
+        if !warm_read_observed {
+            blocker_codes.push(format!(
+                "persistent_graph_index_{}_warm_read_not_observed",
+                requirement.class.as_str()
+            ));
+        }
+        let residency = profiles
+            .last()
+            .map(|profile| &profile.after)
+            .expect("persistent index qualification has at least two profiles");
+        let required_artifact_bytes = persistent_index_artifact_bytes(requirement.class, residency);
+        let segment_cache_capacity_bytes = residency.segment_cache_capacity_bytes;
+        let artifact_exceeds_cache = required_artifact_bytes > segment_cache_capacity_bytes;
+        if required_artifact_bytes == 0 {
+            blocker_codes.push(format!(
+                "persistent_graph_index_{}_artifact_missing",
+                requirement.class.as_str()
+            ));
+        } else if !artifact_exceeds_cache {
+            blocker_codes.push(format!(
+                "persistent_graph_index_{}_artifact_does_not_exceed_cache",
+                requirement.class.as_str()
+            ));
+        }
+        let mut cancellation = cancellation_evidence
+            .clone()
+            .expect("a persistent graph index requirement produces cancellation evidence");
+        cancellation.subsequent_read_succeeded = post_cancellation_read_succeeded;
+        if !cancellation.cancellation_observed {
+            blocker_codes.push("persistent_graph_index_cancellation_not_observed".to_string());
+        }
+        if cancellation.latency_micros > cancellation.max_latency_micros {
+            blocker_codes.push("persistent_graph_index_cancellation_latency_exceeded".to_string());
+        }
+        if cancellation.pinned_bytes_before != 0 {
+            blocker_codes.push("persistent_graph_index_pre_cancellation_pin_leak".to_string());
+        }
+        if cancellation.pinned_bytes_after != 0 {
+            blocker_codes.push("persistent_graph_index_cancellation_pin_leak".to_string());
+        }
+        if cancellation.handle_poisoned_after {
+            blocker_codes.push("persistent_graph_index_cancellation_poisoned_handle".to_string());
+        }
+        if !cancellation.subsequent_read_succeeded {
+            blocker_codes.push("persistent_graph_index_post_cancellation_read_failed".to_string());
+        }
         let exact_result_parity = observed_output_digest == requirement.reference_output_digest
             && observed_output_rows == requirement.reference_output_rows;
         if !exact_result_parity {
@@ -326,6 +455,13 @@ pub fn run_production_graph_storage_qualification(
             operation_count,
             max_blocks_read,
             max_bytes_read,
+            required_artifact_bytes,
+            segment_cache_capacity_bytes,
+            artifact_exceeds_cache,
+            cold_read_observed,
+            warm_read_observed,
+            runs,
+            cancellation,
         })
     } else {
         None
@@ -347,6 +483,70 @@ pub fn run_production_graph_storage_qualification(
         runtime,
         storage_resource_profile,
         persistent_index_evidence,
+    })
+}
+
+fn persistent_index_artifact_bytes(
+    class: PersistentGraphIndexClass,
+    residency: &StorageResidencyReport,
+) -> u64 {
+    match class {
+        PersistentGraphIndexClass::NodeEquality
+        | PersistentGraphIndexClass::NodeRange
+        | PersistentGraphIndexClass::NodeFullText
+        | PersistentGraphIndexClass::NodeCompositeEquality
+        | PersistentGraphIndexClass::RelationshipEquality
+        | PersistentGraphIndexClass::RelationshipRange => {
+            residency.persistent_property_projection_artifact_bytes
+        }
+        PersistentGraphIndexClass::ForwardAdjacency
+        | PersistentGraphIndexClass::ReverseAdjacency => {
+            residency.canonical_adjacency_artifact_bytes
+        }
+    }
+}
+
+fn run_persistent_index_cancellation_probe(
+    store: &NowledgeMemEmbeddedStoreHandle,
+    statement: &NowledgeGraphStatement,
+    limits: &StorageResourceProfileLimits,
+    max_latency_micros: u64,
+) -> Result<PersistentGraphIndexCancellationEvidence, ProductionGraphQualificationError> {
+    let before = store
+        .storage_residency_report()
+        .map_err(ProductionGraphQualificationError::from_error)?;
+    let token = RuntimeCancellationToken::new();
+    token.cancel();
+    let task_context = RuntimeTaskContext::without_deadline(token);
+    let started = Instant::now();
+    let result = store.read_query_with_params_streaming_context(
+        &statement.cypher,
+        &statement.parameters,
+        &NowledgeMemReadOptions {
+            max_rows: Some(limits.max_output_rows),
+            max_estimated_payload_bytes: Some(limits.max_output_payload_bytes),
+        },
+        &task_context,
+        |_| Ok(()),
+    );
+    let latency_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let after = store
+        .storage_residency_report()
+        .map_err(ProductionGraphQualificationError::from_error)?;
+    let handle_poisoned_after = store
+        .storage_handle_poisoned()
+        .map_err(ProductionGraphQualificationError::from_error)?;
+    Ok(PersistentGraphIndexCancellationEvidence {
+        cancellation_observed: matches!(
+            result,
+            Err(ref error) if error.to_string().contains("cancelled")
+        ),
+        latency_micros,
+        max_latency_micros,
+        pinned_bytes_before: before.segment_cache_pinned_bytes,
+        pinned_bytes_after: after.segment_cache_pinned_bytes,
+        handle_poisoned_after,
+        subsequent_read_succeeded: false,
     })
 }
 
@@ -511,7 +711,7 @@ mod tests {
         let graph_path = root.join("database");
         let database_config = DatabaseConfig {
             storage_residency_mode: StorageResidencyMode::OutOfCore,
-            segment_cache_capacity_bytes: 1024,
+            segment_cache_capacity_bytes: 2 * 1024,
             max_read_result_rows: Some(128),
             max_read_result_payload_bytes: Some(1024 * 1024),
             ..DatabaseConfig::default()
@@ -522,6 +722,9 @@ mod tests {
             database
                 .query("CREATE INDEX ON :Memory(id)")
                 .expect("fixture property index should be created");
+            database
+                .query("CREATE INDEX ON :Memory(body)")
+                .expect("fixture padding index should be created");
             let mut transaction = database.begin_transaction();
             for row in 0..64 {
                 transaction
@@ -610,6 +813,7 @@ mod tests {
                     reference_output_rows: 1,
                     max_blocks_read_per_run: 8,
                     max_bytes_read_per_run: 1024 * 1024,
+                    max_cancellation_latency_micros: 100_000,
                 }),
             })
             .expect("qualification should complete");
@@ -631,6 +835,17 @@ mod tests {
         assert_eq!(index_evidence.digest_runs, 1);
         assert_eq!(index_evidence.runs_using_required_class, 3);
         assert_eq!(index_evidence.operation_count, 3);
+        assert!(index_evidence.artifact_exceeds_cache);
+        assert!(index_evidence.cold_read_observed);
+        assert!(index_evidence.warm_read_observed);
+        assert_eq!(index_evidence.runs.len(), 3);
+        assert_eq!(index_evidence.runs[0].phase, "cold");
+        assert_eq!(index_evidence.runs[1].phase, "warm");
+        assert!(index_evidence.cancellation.cancellation_observed);
+        assert_eq!(index_evidence.cancellation.pinned_bytes_after, 0);
+        assert!(!index_evidence.cancellation.handle_poisoned_after);
+        assert!(index_evidence.cancellation.subsequent_read_succeeded);
+        assert_eq!(report.runtime.cancellations_delta, 1);
         let json = report.json().to_string();
         assert!(!json.contains(graph_path.to_string_lossy().as_ref()));
         assert!(!json.contains("MATCH (m:Memory)"));

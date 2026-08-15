@@ -956,6 +956,8 @@ pub struct StorageResidencyReport {
     pub out_of_core: bool,
     pub canonical_generation: Option<u64>,
     pub canonical_artifact_bytes: u64,
+    pub canonical_adjacency_artifact_bytes: u64,
+    pub persistent_property_projection_artifact_bytes: u64,
     pub canonical_node_count: u64,
     pub canonical_relationship_count: u64,
     pub delta_node_count: usize,

@@ -1,8 +1,8 @@
 use crate::canonical::{decode_relationship, encode_relationship, CanonicalScanControl};
 use crate::{
     durable_replace_file, AdjacencyDirection, AdjacencyLayout, ContentDigest,
-    FileSegmentRangeReader, ManifestGeneration, NodeId, RelRecord, SegmentCache,
-    SegmentRangeReader, SegmentReadError, SegmentReadRange, StoreId,
+    FileSegmentRangeReader, ManifestGeneration, NodeId, RelRecord, SegmentCache, SegmentRangeRead,
+    SegmentReadError, SegmentReadRange, StoreId,
 };
 use skein_core::{RelTypeId, Value};
 use skein_integrity::{Crc32cHasher, IntegrityHasher, Sha256Digest};
@@ -1129,6 +1129,8 @@ pub struct CanonicalAdjacencyReadReport {
     pub blocks_considered: u64,
     pub blocks_read: u64,
     pub bytes_read: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
     pub records_decoded: u64,
     pub sparse_blocks_read: u64,
     pub dense_blocks_read: u64,
@@ -1261,9 +1263,13 @@ impl CanonicalAdjacencyReader {
             if rel_type.is_some_and(|expected| block.rel_type != expected) {
                 continue;
             }
-            let bytes = self.read_block(block)?;
+            let read = self.read_block(block)?;
             report.blocks_read = report.blocks_read.saturating_add(1);
-            report.bytes_read = report.bytes_read.saturating_add(bytes.len() as u64);
+            report.bytes_read = report.bytes_read.saturating_add(read.payload.len() as u64);
+            report.cache_hits = report.cache_hits.saturating_add(u64::from(read.cache_hit));
+            report.cache_misses = report
+                .cache_misses
+                .saturating_add(u64::from(read.cache_miss));
             match block.layout {
                 AdjacencyLayout::Sparse => {
                     report.sparse_blocks_read = report.sparse_blocks_read.saturating_add(1)
@@ -1273,14 +1279,19 @@ impl CanonicalAdjacencyReader {
                 }
             }
             let mut control = CanonicalScanControl::Continue;
-            decode_block(&bytes, self.manifest.generation, block, |relationship| {
-                if control == CanonicalScanControl::Stop {
-                    return Ok(());
-                }
-                control = consumer(relationship)?;
-                report.records_decoded = report.records_decoded.saturating_add(1);
-                Ok(())
-            })?;
+            decode_block(
+                &read.payload,
+                self.manifest.generation,
+                block,
+                |relationship| {
+                    if control == CanonicalScanControl::Stop {
+                        return Ok(());
+                    }
+                    control = consumer(relationship)?;
+                    report.records_decoded = report.records_decoded.saturating_add(1);
+                    Ok(())
+                },
+            )?;
             if control == CanonicalScanControl::Stop {
                 return Ok((report, control));
             }
@@ -1291,7 +1302,7 @@ impl CanonicalAdjacencyReader {
     fn read_block(
         &self,
         block: &CanonicalAdjacencyBlockDescriptor,
-    ) -> Result<Arc<[u8]>, CanonicalAdjacencyError> {
+    ) -> Result<SegmentRangeRead, CanonicalAdjacencyError> {
         if block.length.get() > self.max_block_bytes.get() {
             return Err(CanonicalAdjacencyError::BlockTooLarge {
                 block_bytes: block.length.get(),
@@ -1299,7 +1310,7 @@ impl CanonicalAdjacencyReader {
             });
         }
         self.range_reader
-            .read_range(&SegmentReadRange {
+            .read_range_with_report(&SegmentReadRange {
                 artifact_id: self.manifest.artifact_id,
                 segment_ids: vec![block.block_id],
                 offset: block.offset,

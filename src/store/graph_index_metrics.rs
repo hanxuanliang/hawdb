@@ -45,6 +45,8 @@ pub struct GraphIndexReadMetricsSnapshot {
     operation_counts: [u64; PersistentGraphIndexClass::ALL.len()],
     block_read_counts: [u64; PersistentGraphIndexClass::ALL.len()],
     byte_read_counts: [u64; PersistentGraphIndexClass::ALL.len()],
+    cache_hit_counts: [u64; PersistentGraphIndexClass::ALL.len()],
+    cache_miss_counts: [u64; PersistentGraphIndexClass::ALL.len()],
     pub property_blocks_considered: u64,
     pub property_blocks_pruned: u64,
     pub property_blocks_read: u64,
@@ -78,10 +80,20 @@ impl GraphIndexReadMetricsSnapshot {
         self.byte_read_counts[class as usize]
     }
 
+    pub fn cache_hits(self, class: PersistentGraphIndexClass) -> u64 {
+        self.cache_hit_counts[class as usize]
+    }
+
+    pub fn cache_misses(self, class: PersistentGraphIndexClass) -> u64 {
+        self.cache_miss_counts[class as usize]
+    }
+
     pub fn delta_since(self, before: Self) -> Self {
         let mut operation_counts = [0; PersistentGraphIndexClass::ALL.len()];
         let mut block_read_counts = [0; PersistentGraphIndexClass::ALL.len()];
         let mut byte_read_counts = [0; PersistentGraphIndexClass::ALL.len()];
+        let mut cache_hit_counts = [0; PersistentGraphIndexClass::ALL.len()];
+        let mut cache_miss_counts = [0; PersistentGraphIndexClass::ALL.len()];
         for class in PersistentGraphIndexClass::ALL {
             operation_counts[class as usize] = self
                 .operation_count(class)
@@ -92,11 +104,19 @@ impl GraphIndexReadMetricsSnapshot {
             byte_read_counts[class as usize] = self
                 .bytes_read(class)
                 .saturating_sub(before.bytes_read(class));
+            cache_hit_counts[class as usize] = self
+                .cache_hits(class)
+                .saturating_sub(before.cache_hits(class));
+            cache_miss_counts[class as usize] = self
+                .cache_misses(class)
+                .saturating_sub(before.cache_misses(class));
         }
         Self {
             operation_counts,
             block_read_counts,
             byte_read_counts,
+            cache_hit_counts,
+            cache_miss_counts,
             property_blocks_considered: self
                 .property_blocks_considered
                 .saturating_sub(before.property_blocks_considered),
@@ -142,6 +162,8 @@ pub(super) struct GraphIndexReadMetrics {
     operation_counts: [AtomicU64; PersistentGraphIndexClass::ALL.len()],
     block_read_counts: [AtomicU64; PersistentGraphIndexClass::ALL.len()],
     byte_read_counts: [AtomicU64; PersistentGraphIndexClass::ALL.len()],
+    cache_hit_counts: [AtomicU64; PersistentGraphIndexClass::ALL.len()],
+    cache_miss_counts: [AtomicU64; PersistentGraphIndexClass::ALL.len()],
     property_blocks_considered: AtomicU64,
     property_blocks_pruned: AtomicU64,
     property_blocks_read: AtomicU64,
@@ -165,6 +187,8 @@ impl GraphIndexReadMetrics {
         self.operation_counts[class as usize].fetch_add(1, Ordering::Relaxed);
         self.block_read_counts[class as usize].fetch_add(report.blocks_read, Ordering::Relaxed);
         self.byte_read_counts[class as usize].fetch_add(report.bytes_read, Ordering::Relaxed);
+        self.cache_hit_counts[class as usize].fetch_add(report.cache_hits, Ordering::Relaxed);
+        self.cache_miss_counts[class as usize].fetch_add(report.cache_misses, Ordering::Relaxed);
         self.property_blocks_considered
             .fetch_add(report.blocks_considered, Ordering::Relaxed);
         self.property_blocks_pruned
@@ -187,6 +211,8 @@ impl GraphIndexReadMetrics {
         self.operation_counts[class as usize].fetch_add(1, Ordering::Relaxed);
         self.block_read_counts[class as usize].fetch_add(report.blocks_read, Ordering::Relaxed);
         self.byte_read_counts[class as usize].fetch_add(report.bytes_read, Ordering::Relaxed);
+        self.cache_hit_counts[class as usize].fetch_add(report.cache_hits, Ordering::Relaxed);
+        self.cache_miss_counts[class as usize].fetch_add(report.cache_misses, Ordering::Relaxed);
         self.adjacency_blocks_considered
             .fetch_add(report.blocks_considered, Ordering::Relaxed);
         self.adjacency_blocks_read
@@ -205,6 +231,8 @@ impl GraphIndexReadMetrics {
         let mut operation_counts = [0; PersistentGraphIndexClass::ALL.len()];
         let mut block_read_counts = [0; PersistentGraphIndexClass::ALL.len()];
         let mut byte_read_counts = [0; PersistentGraphIndexClass::ALL.len()];
+        let mut cache_hit_counts = [0; PersistentGraphIndexClass::ALL.len()];
+        let mut cache_miss_counts = [0; PersistentGraphIndexClass::ALL.len()];
         for class in PersistentGraphIndexClass::ALL {
             operation_counts[class as usize] =
                 self.operation_counts[class as usize].load(Ordering::Relaxed);
@@ -212,11 +240,17 @@ impl GraphIndexReadMetrics {
                 self.block_read_counts[class as usize].load(Ordering::Relaxed);
             byte_read_counts[class as usize] =
                 self.byte_read_counts[class as usize].load(Ordering::Relaxed);
+            cache_hit_counts[class as usize] =
+                self.cache_hit_counts[class as usize].load(Ordering::Relaxed);
+            cache_miss_counts[class as usize] =
+                self.cache_miss_counts[class as usize].load(Ordering::Relaxed);
         }
         GraphIndexReadMetricsSnapshot {
             operation_counts,
             block_read_counts,
             byte_read_counts,
+            cache_hit_counts,
+            cache_miss_counts,
             property_blocks_considered: self.property_blocks_considered.load(Ordering::Relaxed),
             property_blocks_pruned: self.property_blocks_pruned.load(Ordering::Relaxed),
             property_blocks_read: self.property_blocks_read.load(Ordering::Relaxed),

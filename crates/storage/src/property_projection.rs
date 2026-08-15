@@ -3,7 +3,7 @@ use crate::canonical::{
 };
 use crate::{
     content_digest, durable_replace_file, ContentDigest, FileSegmentRangeReader,
-    ManifestGeneration, NodeId, NodeRecord, RelId, RelRecord, SegmentCache, SegmentRangeReader,
+    ManifestGeneration, NodeId, NodeRecord, RelId, RelRecord, SegmentCache, SegmentRangeRead,
     SegmentReadError, SegmentReadRange, StoreId,
 };
 use skein_core::{LabelId, RelTypeId, Value};
@@ -1484,6 +1484,8 @@ pub struct PersistentPropertyProjectionReadReport {
     pub blocks_pruned: u64,
     pub blocks_read: u64,
     pub bytes_read: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
     pub entries_decoded: u64,
     pub candidates_returned: u64,
 }
@@ -1788,18 +1790,27 @@ impl PersistentPropertyProjectionReader {
                 report.blocks_pruned = report.blocks_pruned.saturating_add(1);
                 continue;
             }
-            let bytes = self.read_block(block)?;
+            let read = self.read_block(block)?;
             report.blocks_read = report.blocks_read.saturating_add(1);
-            report.bytes_read = report.bytes_read.saturating_add(bytes.len() as u64);
+            report.bytes_read = report.bytes_read.saturating_add(read.payload.len() as u64);
+            report.cache_hits = report.cache_hits.saturating_add(u64::from(read.cache_hit));
+            report.cache_misses = report
+                .cache_misses
+                .saturating_add(u64::from(read.cache_miss));
             let mut control = CanonicalScanControl::Continue;
-            decode_projection_block(&bytes, self.manifest.generation, block, |value, node_id| {
-                report.entries_decoded = report.entries_decoded.saturating_add(1);
-                if control == CanonicalScanControl::Continue && value_matches(&value) {
-                    report.candidates_returned = report.candidates_returned.saturating_add(1);
-                    control = consumer(node_id)?;
-                }
-                Ok(())
-            })?;
+            decode_projection_block(
+                &read.payload,
+                self.manifest.generation,
+                block,
+                |value, node_id| {
+                    report.entries_decoded = report.entries_decoded.saturating_add(1);
+                    if control == CanonicalScanControl::Continue && value_matches(&value) {
+                        report.candidates_returned = report.candidates_returned.saturating_add(1);
+                        control = consumer(node_id)?;
+                    }
+                    Ok(())
+                },
+            )?;
             if control == CanonicalScanControl::Stop {
                 return Ok((report, control));
             }
@@ -1826,20 +1837,22 @@ impl PersistentPropertyProjectionReader {
     fn read_block(
         &self,
         block: &PersistentPropertyProjectionBlockDescriptor,
-    ) -> Result<Arc<[u8]>, PersistentPropertyProjectionError> {
+    ) -> Result<SegmentRangeRead, PersistentPropertyProjectionError> {
         if block.length.get() > self.max_block_bytes.get() {
             return Err(PersistentPropertyProjectionError::BlockTooLarge {
                 block_bytes: block.length.get(),
                 max_bytes: self.max_block_bytes.get(),
             });
         }
-        Ok(self.range_reader.read_range(&SegmentReadRange {
-            artifact_id: self.manifest.artifact_id,
-            segment_ids: vec![block.block_id],
-            offset: block.offset,
-            length: block.length,
-            content_digest: Some(block.content_digest),
-        })?)
+        Ok(self
+            .range_reader
+            .read_range_with_report(&SegmentReadRange {
+                artifact_id: self.manifest.artifact_id,
+                segment_ids: vec![block.block_id],
+                offset: block.offset,
+                length: block.length,
+                content_digest: Some(block.content_digest),
+            })?)
     }
 }
 

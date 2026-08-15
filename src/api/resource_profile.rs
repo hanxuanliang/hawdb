@@ -103,6 +103,7 @@ impl StorageResourceProfileReport {
             .after
             .graph_index_reads
             .delta_since(self.before.graph_index_reads);
+        let graph_index_reads_json = graph_index_reads_json(graph_index_reads);
         serde_json::json!({
             "protocol": STORAGE_RESOURCE_PROFILE_PROTOCOL,
             "protocol_version": 2,
@@ -132,6 +133,12 @@ impl StorageResourceProfileReport {
                 "out_of_core": self.after.out_of_core,
                 "canonical_generation": self.after.canonical_generation,
                 "canonical_artifact_bytes": self.after.canonical_artifact_bytes,
+                "canonical_adjacency_artifact_bytes": self
+                    .after
+                    .canonical_adjacency_artifact_bytes,
+                "persistent_property_projection_artifact_bytes": self
+                    .after
+                    .persistent_property_projection_artifact_bytes,
                 "canonical_node_count": self.after.canonical_node_count,
                 "canonical_relationship_count": self.after.canonical_relationship_count,
                 "canonical_exceeds_cache": self.after.canonical_artifact_bytes
@@ -139,6 +146,8 @@ impl StorageResourceProfileReport {
                 "segment_cache_capacity_bytes": self.after.segment_cache_capacity_bytes,
                 "segment_cache_resident_bytes_before": self.before.segment_cache_resident_bytes,
                 "segment_cache_resident_bytes_after": self.after.segment_cache_resident_bytes,
+                "segment_cache_hit_count_delta": self.after.segment_cache_hit_count
+                    .saturating_sub(self.before.segment_cache_hit_count),
                 "segment_cache_miss_count_delta": self.after.segment_cache_miss_count
                     .saturating_sub(self.before.segment_cache_miss_count),
                 "segment_cache_eviction_count_delta": self.after.segment_cache_eviction_count
@@ -151,85 +160,7 @@ impl StorageResourceProfileReport {
                     .after
                     .segment_cache_digest_mismatch_count
                     .saturating_sub(self.before.segment_cache_digest_mismatch_count),
-                "persistent_graph_index_reads": {
-                    "total_operation_count": graph_index_reads.total_operation_count(),
-                    "operation_counts": {
-                        "node_equality": graph_index_reads.operation_count(
-                            crate::store::PersistentGraphIndexClass::NodeEquality,
-                        ),
-                        "node_range": graph_index_reads.operation_count(
-                            crate::store::PersistentGraphIndexClass::NodeRange,
-                        ),
-                        "node_full_text": graph_index_reads.operation_count(
-                            crate::store::PersistentGraphIndexClass::NodeFullText,
-                        ),
-                        "node_composite_equality": graph_index_reads.operation_count(
-                            crate::store::PersistentGraphIndexClass::NodeCompositeEquality,
-                        ),
-                        "relationship_equality": graph_index_reads.operation_count(
-                            crate::store::PersistentGraphIndexClass::RelationshipEquality,
-                        ),
-                        "relationship_range": graph_index_reads.operation_count(
-                            crate::store::PersistentGraphIndexClass::RelationshipRange,
-                        ),
-                        "forward_adjacency": graph_index_reads.operation_count(
-                            crate::store::PersistentGraphIndexClass::ForwardAdjacency,
-                        ),
-                        "reverse_adjacency": graph_index_reads.operation_count(
-                            crate::store::PersistentGraphIndexClass::ReverseAdjacency,
-                        ),
-                    },
-                    "class_reads": {
-                        "node_equality": graph_index_class_read_json(
-                            graph_index_reads,
-                            crate::store::PersistentGraphIndexClass::NodeEquality,
-                        ),
-                        "node_range": graph_index_class_read_json(
-                            graph_index_reads,
-                            crate::store::PersistentGraphIndexClass::NodeRange,
-                        ),
-                        "node_full_text": graph_index_class_read_json(
-                            graph_index_reads,
-                            crate::store::PersistentGraphIndexClass::NodeFullText,
-                        ),
-                        "node_composite_equality": graph_index_class_read_json(
-                            graph_index_reads,
-                            crate::store::PersistentGraphIndexClass::NodeCompositeEquality,
-                        ),
-                        "relationship_equality": graph_index_class_read_json(
-                            graph_index_reads,
-                            crate::store::PersistentGraphIndexClass::RelationshipEquality,
-                        ),
-                        "relationship_range": graph_index_class_read_json(
-                            graph_index_reads,
-                            crate::store::PersistentGraphIndexClass::RelationshipRange,
-                        ),
-                        "forward_adjacency": graph_index_class_read_json(
-                            graph_index_reads,
-                            crate::store::PersistentGraphIndexClass::ForwardAdjacency,
-                        ),
-                        "reverse_adjacency": graph_index_class_read_json(
-                            graph_index_reads,
-                            crate::store::PersistentGraphIndexClass::ReverseAdjacency,
-                        ),
-                    },
-                    "property": {
-                        "blocks_considered": graph_index_reads.property_blocks_considered,
-                        "blocks_pruned": graph_index_reads.property_blocks_pruned,
-                        "blocks_read": graph_index_reads.property_blocks_read,
-                        "bytes_read": graph_index_reads.property_bytes_read,
-                        "entries_decoded": graph_index_reads.property_entries_decoded,
-                        "candidates_returned": graph_index_reads.property_candidates_returned,
-                    },
-                    "adjacency": {
-                        "blocks_considered": graph_index_reads.adjacency_blocks_considered,
-                        "blocks_read": graph_index_reads.adjacency_blocks_read,
-                        "bytes_read": graph_index_reads.adjacency_bytes_read,
-                        "records_decoded": graph_index_reads.adjacency_records_decoded,
-                        "sparse_blocks_read": graph_index_reads.adjacency_sparse_blocks_read,
-                        "dense_blocks_read": graph_index_reads.adjacency_dense_blocks_read,
-                    },
-                },
+                "persistent_graph_index_reads": graph_index_reads_json,
                 "estimated_delta_resident_bytes": self.after.estimated_delta_resident_bytes,
                 "max_out_of_core_delta_bytes": self.after.max_out_of_core_delta_bytes,
                 "delta_within_budget": self.after.delta_within_budget,
@@ -294,6 +225,56 @@ impl StorageResourceProfileReport {
     }
 }
 
+fn graph_index_reads_json(reads: crate::store::GraphIndexReadMetricsSnapshot) -> serde_json::Value {
+    use crate::store::PersistentGraphIndexClass as Class;
+
+    serde_json::json!({
+        "total_operation_count": reads.total_operation_count(),
+        "operation_counts": {
+            "node_equality": reads.operation_count(Class::NodeEquality),
+            "node_range": reads.operation_count(Class::NodeRange),
+            "node_full_text": reads.operation_count(Class::NodeFullText),
+            "node_composite_equality": reads.operation_count(Class::NodeCompositeEquality),
+            "relationship_equality": reads.operation_count(Class::RelationshipEquality),
+            "relationship_range": reads.operation_count(Class::RelationshipRange),
+            "forward_adjacency": reads.operation_count(Class::ForwardAdjacency),
+            "reverse_adjacency": reads.operation_count(Class::ReverseAdjacency),
+        },
+        "class_reads": {
+            "node_equality": graph_index_class_read_json(reads, Class::NodeEquality),
+            "node_range": graph_index_class_read_json(reads, Class::NodeRange),
+            "node_full_text": graph_index_class_read_json(reads, Class::NodeFullText),
+            "node_composite_equality": graph_index_class_read_json(
+                reads,
+                Class::NodeCompositeEquality,
+            ),
+            "relationship_equality": graph_index_class_read_json(
+                reads,
+                Class::RelationshipEquality,
+            ),
+            "relationship_range": graph_index_class_read_json(reads, Class::RelationshipRange),
+            "forward_adjacency": graph_index_class_read_json(reads, Class::ForwardAdjacency),
+            "reverse_adjacency": graph_index_class_read_json(reads, Class::ReverseAdjacency),
+        },
+        "property": {
+            "blocks_considered": reads.property_blocks_considered,
+            "blocks_pruned": reads.property_blocks_pruned,
+            "blocks_read": reads.property_blocks_read,
+            "bytes_read": reads.property_bytes_read,
+            "entries_decoded": reads.property_entries_decoded,
+            "candidates_returned": reads.property_candidates_returned,
+        },
+        "adjacency": {
+            "blocks_considered": reads.adjacency_blocks_considered,
+            "blocks_read": reads.adjacency_blocks_read,
+            "bytes_read": reads.adjacency_bytes_read,
+            "records_decoded": reads.adjacency_records_decoded,
+            "sparse_blocks_read": reads.adjacency_sparse_blocks_read,
+            "dense_blocks_read": reads.adjacency_dense_blocks_read,
+        },
+    })
+}
+
 fn graph_index_class_read_json(
     reads: crate::store::GraphIndexReadMetricsSnapshot,
     class: crate::store::PersistentGraphIndexClass,
@@ -302,6 +283,8 @@ fn graph_index_class_read_json(
         "operation_count": reads.operation_count(class),
         "blocks_read": reads.blocks_read(class),
         "bytes_read": reads.bytes_read(class),
+        "cache_hits": reads.cache_hits(class),
+        "cache_misses": reads.cache_misses(class),
     })
 }
 
@@ -428,8 +411,10 @@ impl Database {
         if after.segment_cache_resident_bytes > after.segment_cache_capacity_bytes {
             blocker_codes.push("segment_cache_capacity_exceeded".to_string());
         }
-        if after.segment_cache_miss_count == before.segment_cache_miss_count {
-            blocker_codes.push("canonical_segment_read_not_observed".to_string());
+        if after.segment_cache_hit_count == before.segment_cache_hit_count
+            && after.segment_cache_miss_count == before.segment_cache_miss_count
+        {
+            blocker_codes.push("storage_segment_access_not_observed".to_string());
         }
         if after.segment_cache_digest_mismatch_count != before.segment_cache_digest_mismatch_count {
             blocker_codes.push("canonical_segment_digest_mismatch".to_string());

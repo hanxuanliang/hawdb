@@ -138,6 +138,13 @@ pub trait SegmentRangeReader: Sync {
     fn read_range(&self, range: &SegmentReadRange) -> Result<Arc<[u8]>, SegmentReadError>;
 }
 
+#[derive(Debug, Clone)]
+pub struct SegmentRangeRead {
+    pub payload: Arc<[u8]>,
+    pub cache_hit: bool,
+    pub cache_miss: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct FileSegmentRangeReader {
     artifacts: BTreeMap<u64, Arc<RegisteredArtifact>>,
@@ -180,10 +187,11 @@ impl FileSegmentRangeReader {
             )
             .map(|artifact| artifact.path.clone())
     }
-}
 
-impl SegmentRangeReader for FileSegmentRangeReader {
-    fn read_range(&self, range: &SegmentReadRange) -> Result<Arc<[u8]>, SegmentReadError> {
+    pub fn read_range_with_report(
+        &self,
+        range: &SegmentReadRange,
+    ) -> Result<SegmentRangeRead, SegmentReadError> {
         let artifact =
             self.artifacts
                 .get(&range.artifact_id)
@@ -207,8 +215,13 @@ impl SegmentRangeReader for FileSegmentRangeReader {
         if let (Some(cache), Some(key)) = (&self.cache, cache_key)
             && let Some(lease) = cache.get(&key)
         {
-            return Ok(lease.into_arc());
+            return Ok(SegmentRangeRead {
+                payload: lease.into_arc(),
+                cache_hit: true,
+                cache_miss: false,
+            });
         }
+        let cache_miss = self.cache.is_some() && cache_key.is_some();
         let length =
             usize::try_from(range.length.get()).map_err(|_| SegmentReadError::RangeTooLarge {
                 artifact_id: range.artifact_id,
@@ -243,7 +256,13 @@ impl SegmentRangeReader for FileSegmentRangeReader {
         }
         if let (Some(cache), Some(key)) = (&self.cache, cache_key) {
             match cache.insert(key, Arc::clone(&payload)) {
-                Ok(lease) => return Ok(lease.into_arc()),
+                Ok(lease) => {
+                    return Ok(SegmentRangeRead {
+                        payload: lease.into_arc(),
+                        cache_hit: false,
+                        cache_miss,
+                    });
+                }
                 Err(SegmentCacheError::EntryTooLarge { .. })
                 | Err(SegmentCacheError::PinnedCapacity { .. }) => {}
                 Err(source) => {
@@ -254,7 +273,17 @@ impl SegmentRangeReader for FileSegmentRangeReader {
                 }
             }
         }
-        Ok(payload)
+        Ok(SegmentRangeRead {
+            payload,
+            cache_hit: false,
+            cache_miss,
+        })
+    }
+}
+
+impl SegmentRangeReader for FileSegmentRangeReader {
+    fn read_range(&self, range: &SegmentReadRange) -> Result<Arc<[u8]>, SegmentReadError> {
+        self.read_range_with_report(range).map(|read| read.payload)
     }
 }
 
@@ -743,10 +772,16 @@ mod tests {
         let first_bytes = b"first";
         let first_range = SegmentReadRange::new(7, 1, 0, NonZeroU64::new(5).unwrap())
             .with_content_digest(content_digest(first_bytes));
-        assert_eq!(&*reader.read_range(&first_range).unwrap(), first_bytes);
+        let cold = reader.read_range_with_report(&first_range).unwrap();
+        assert_eq!(&*cold.payload, first_bytes);
+        assert!(!cold.cache_hit);
+        assert!(cold.cache_miss);
 
         std::fs::write(&path, b"later").unwrap();
-        assert_eq!(&*reader.read_range(&first_range).unwrap(), first_bytes);
+        let warm = reader.read_range_with_report(&first_range).unwrap();
+        assert_eq!(&*warm.payload, first_bytes);
+        assert!(warm.cache_hit);
+        assert!(!warm.cache_miss);
         let snapshot = cache.snapshot();
         assert_eq!(snapshot.hit_count, 1);
         assert_eq!(snapshot.resident_bytes, 5);

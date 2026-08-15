@@ -686,6 +686,14 @@ impl GraphStore {
             out_of_core: self.canonical_base_out_of_core,
             canonical_generation: manifest.map(|manifest| manifest.generation.0),
             canonical_artifact_bytes: manifest.map_or(0, |manifest| manifest.artifact_len),
+            canonical_adjacency_artifact_bytes: self
+                .canonical_adjacency
+                .as_ref()
+                .map_or(0, |reader| reader.manifest().artifact_len),
+            persistent_property_projection_artifact_bytes: self
+                .persistent_property_projection
+                .as_ref()
+                .map_or(0, |reader| reader.manifest().artifact_len),
             canonical_node_count: manifest.map_or(0, |manifest| manifest.node_count),
             canonical_relationship_count: manifest
                 .map_or(0, |manifest| manifest.relationship_count),

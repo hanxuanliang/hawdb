@@ -197,10 +197,14 @@ crash; read-only recovery remains fail closed.
     property/adjacency block, byte, decode, candidate, and layout totals through
     storage resource profiles. The typed production runner can bind one required
     class to an offline reference digest/row count and per-run block/byte
-    budgets without retaining result rows. `SkeinGraphIndexQualification.tla`
-    proves independent same-generation evidence gating and fail-closed selected
-    corruption. Retain this item until production-replica cases for every class
-    and cold/warm, cancellation, and constrained-cache evidence are checked in.
+    budgets without retaining result rows. It now requires distinct cold and
+    warm runs, proves the relevant artifact exceeds the cache, and records a
+    bounded non-poisoning cancellation followed by a successful read.
+    `SkeinGraphIndexQualification.tla` proves the ordered cache lifecycle,
+    independent same-generation evidence gating, and fail-closed selected
+    corruption. Retain this item until representative production-replica cases
+    for every class are checked in; the synthetic node-equality fixture proves
+    the contract, not production readiness.
 
 ## P1: PostgreSQL-Dialect Relational Content Store
 

@@ -822,16 +822,17 @@ capacity; those remain owned by the index-recovery and page-cache obligations.
 `SkeinGraphIndexQualification.tla` models the release-selection gate shared by
 the eight persistent graph index classes. Its finite instance uses one property
 and one adjacency representative because every class follows the same
-generation-indexed evidence function. Differential, recovery, cache-budget,
+generation-indexed evidence function. Differential, recovery, cache lifecycle,
 and production evidence are recorded independently for each class and become
-stale after a row or index generation change. Activation requires all four at
-the current aligned generation. An unqualified or stale class can only take
-the canonical fallback, while corruption of a selected current-generation page
+stale after a row or index generation change. Cache lifecycle evidence advances
+only through constrained cold read, warm read, and cancellation cleanup. An
+activation requires the completed lifecycle plus every other obligation at the
+current aligned generation. An unqualified or stale class can only take the
+canonical fallback, while corruption of a selected current-generation page
 transitions the read to a fail-closed outcome. The model does not treat the
 process-local Rust counters as authority; they are inputs to production
-evidence and remain outside query semantics.
-The checked configuration explores 356,169 distinct states over two index
-classes and two generations.
+evidence and remain outside query semantics. The checked configuration explores
+1,811,737 distinct states over two index classes and two generations.
 
 `SkeinRelationalIndexShadowPublication.tla` models the generation-aligned but
 non-authoritative relational index candidate. Candidate fixed-slot pages become
