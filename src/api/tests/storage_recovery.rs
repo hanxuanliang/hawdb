@@ -1494,6 +1494,106 @@ fn storage_recovery_report_tracks_wal_replay_boundary() {
 }
 
 #[test]
+fn canonical_row_overflow_backup_reopen_and_reclaim_follow_physical_closure() {
+    let path = unique_test_dir("canonical_row_overflow_lifecycle");
+    let backup = unique_test_dir("canonical_row_overflow_backup");
+    let restored = unique_test_dir("canonical_row_overflow_restored");
+    let body = "x".repeat(8 * 1024);
+    let mut db = Database::open(&path).unwrap();
+    db.query_sql("CREATE TABLE public.documents (id BIGINT PRIMARY KEY, body TEXT NOT NULL)")
+        .unwrap();
+    db.query_sql_with_params(
+        "INSERT INTO public.documents (id, body) VALUES ($1, $2)",
+        &[Value::Int(1), Value::String(body.clone())],
+    )
+    .unwrap();
+    db.checkpoint().unwrap();
+
+    let first_generation = db
+        .storage_reclamation_watermark()
+        .checkpoint_epoch
+        .expect("durable checkpoint generation");
+    let first_row_manifest = path.join(
+        skein_storage::relational_row_page_manifest_generation_file(first_generation),
+    );
+    let first_overflow_manifest = path.join(
+        skein_storage::relational_overflow_manifest_generation_file(first_generation),
+    );
+    let first_overflow_extent = path.join(skein_storage::relational_overflow_extent_file(
+        first_generation,
+    ));
+    assert!(first_row_manifest.exists());
+    assert!(first_overflow_manifest.exists());
+    assert!(first_overflow_extent.exists());
+
+    let pinned = db.begin_read_transaction();
+    assert_eq!(
+        pinned
+            .query_sql("SELECT body FROM public.documents WHERE id = 1")
+            .unwrap()
+            .rows[0]["body"],
+        Value::String(body.clone())
+    );
+    for id in 2..=4 {
+        db.query_sql_with_params(
+            "INSERT INTO public.documents (id, body) VALUES ($1, $2)",
+            &[Value::Int(id), Value::String(format!("marker-{id}"))],
+        )
+        .unwrap();
+        db.checkpoint().unwrap();
+    }
+
+    assert!(first_row_manifest.exists());
+    assert!(first_overflow_manifest.exists());
+    assert!(first_overflow_extent.exists());
+    db.backup_to(&backup).unwrap();
+    assert!(backup
+        .join(skein_storage::relational_overflow_extent_file(
+            first_generation
+        ))
+        .exists());
+    Database::restore_backup(&backup, &restored).unwrap();
+    let mut restored_db = Database::open(&restored).unwrap();
+    assert_eq!(
+        restored_db
+            .query_sql("SELECT body FROM public.documents WHERE id = 1")
+            .unwrap()
+            .rows[0]["body"],
+        Value::String(body.clone())
+    );
+    drop(restored_db);
+
+    drop(pinned);
+    db.query_sql("INSERT INTO public.documents (id, body) VALUES (5, 'reclaim')")
+        .unwrap();
+    db.checkpoint().unwrap();
+    assert!(!first_row_manifest.exists());
+    assert!(!first_overflow_manifest.exists());
+    assert!(first_overflow_extent.exists());
+    assert_eq!(
+        db.query_sql("SELECT body FROM public.documents WHERE id = 1")
+            .unwrap()
+            .rows[0]["body"],
+        Value::String(body.clone())
+    );
+    drop(db);
+
+    let mut reopened = Database::open(&path).unwrap();
+    assert_eq!(
+        reopened
+            .query_sql("SELECT body FROM public.documents WHERE id = 1")
+            .unwrap()
+            .rows[0]["body"],
+        Value::String(body)
+    );
+    drop(reopened);
+
+    std::fs::remove_dir_all(path).unwrap();
+    std::fs::remove_dir_all(backup).unwrap();
+    std::fs::remove_dir_all(restored).unwrap();
+}
+
+#[test]
 fn mem_shaped_graph_mutations_recover_across_checkpoint_and_wal() {
     let path = unique_test_dir("mem_shaped_recovery");
     let live_snapshot = {

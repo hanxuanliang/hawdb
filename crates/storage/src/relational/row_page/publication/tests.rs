@@ -1,4 +1,5 @@
 use super::*;
+use crate::durability::fail_durable_replace_for_destination;
 use crate::relational::{
     RelationalHydrationBudget, RelationalKey, RelationalOverflowConfig,
     RelationalOverflowExtentInput, RelationalOverflowPublicationConfig,
@@ -107,6 +108,58 @@ fn persisted_row_candidate_does_not_change_latest_selection() {
         .is_none());
     let candidate = RelationalRowPageRootReader::open_generation(&directory, 1, config).unwrap();
     assert_eq!(candidate.manifest().root_page_count, 1);
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn generation_manifest_replace_failure_leaves_the_canonical_row_root_unselected() {
+    let directory = unique_test_dir("generation-manifest-replace-failure");
+    let config = RelationalRowPagePublicationConfig::default();
+    let publisher = RelationalRowPagePublisher::new(config);
+    publisher
+        .publish(
+            &directory,
+            1,
+            10,
+            None,
+            vec![table_delta("documents", vec![page(1, 1, 10, 1, 2)])],
+        )
+        .unwrap();
+    let base = RelationalRowPageRootReader::open_generation(&directory, 1, config).unwrap();
+    let generation_manifest = relational_row_page_manifest_generation_file(2);
+    let failure = fail_durable_replace_for_destination(generation_manifest.clone());
+
+    let error = publisher
+        .persist_generation(
+            RelationalRowPageGenerationRequest {
+                directory: &directory,
+                generation: 2,
+                source_commit_epoch: 11,
+                base: Some(&base),
+                expected_previous_generation: Some(1),
+                overflow_root: None,
+            },
+            vec![table_delta("documents", vec![page(1, 2, 11, 1, 3)])],
+        )
+        .unwrap_err();
+    drop(failure);
+
+    assert!(matches!(
+        error,
+        RelationalRowPagePublicationError::Durability(message)
+            if message.contains("injected durable replace failure")
+    ));
+    assert!(!directory.join(generation_manifest).exists());
+    assert!(RelationalRowPageRootReader::open_generation(&directory, 2, config).is_err());
+    assert_eq!(
+        RelationalRowPageRootReader::open_latest(&directory, config)
+            .unwrap()
+            .unwrap()
+            .manifest()
+            .generation,
+        1
+    );
 
     fs::remove_dir_all(directory).unwrap();
 }

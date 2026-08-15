@@ -1,4 +1,5 @@
 use super::*;
+use crate::durability::fail_durable_replace_for_destination;
 use crate::relational::{
     RelationalHydrationBudget, RelationalOverflowConfig, RelationalScalarType, RelationalValue,
 };
@@ -77,6 +78,44 @@ fn persisted_overflow_candidate_does_not_change_latest_selection() {
     );
     let candidate = RelationalOverflowRootReader::open_generation(&directory, 1, config).unwrap();
     assert!(candidate.contains(&reference).unwrap());
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn generation_manifest_replace_failure_leaves_the_canonical_overflow_root_unselected() {
+    let directory = unique_test_dir("generation-manifest-replace-failure");
+    let config = RelationalOverflowPublicationConfig::default();
+    let publisher = RelationalOverflowPublisher::new(config);
+    let (first, _) = encoded_input(RelationalScalarType::Text, b"first payload");
+    publisher
+        .publish(&directory, 1, 10, None, vec![first])
+        .unwrap();
+    let base = RelationalOverflowRootReader::open_generation(&directory, 1, config).unwrap();
+    let (second, _) = encoded_input(RelationalScalarType::Text, b"second payload");
+    let generation_manifest = relational_overflow_manifest_generation_file(2);
+    let failure = fail_durable_replace_for_destination(generation_manifest.clone());
+
+    let error = publisher
+        .persist_generation(&directory, 2, 11, Some(&base), Some(1), vec![second])
+        .unwrap_err();
+    drop(failure);
+
+    assert!(matches!(
+        error,
+        RelationalOverflowPublicationError::Durability(message)
+            if message.contains("injected durable replace failure")
+    ));
+    assert!(!directory.join(generation_manifest).exists());
+    assert!(RelationalOverflowRootReader::open_generation(&directory, 2, config).is_err());
+    assert_eq!(
+        RelationalOverflowRootReader::open_latest(&directory, config)
+            .unwrap()
+            .unwrap()
+            .manifest()
+            .generation,
+        1
+    );
 
     fs::remove_dir_all(directory).unwrap();
 }

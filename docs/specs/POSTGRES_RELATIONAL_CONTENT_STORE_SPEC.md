@@ -175,6 +175,23 @@ reading payload bytes, then parses rows and validates the outer and per-overflow
 digests in one pass with a bounded 64 KiB transfer buffer. It never collects the
 checkpoint's overflow section into a resident validation buffer.
 
+Row-page and overflow generation manifests use the common durable-replace
+boundary. A failed generation-manifest replace may leave already synchronized
+immutable page, descriptor, key, or extent artifacts, but it MUST leave the
+generation unopenable and MUST NOT change either the independent latest selector
+or the outer canonical checkpoint. Reopen may discard those unbound artifacts;
+it never infers authority from a filename. Platform tests obstruct the exact
+row-page and overflow manifest destinations, including a Windows handle that
+denies delete sharing, and require the source candidate to remain available for
+diagnosis or cleanup.
+
+Backup copies the physical closure of the selected canonical row/overflow roots,
+not every retained logical generation. A reader pin suppresses generation
+reclamation. After the pin is released, stale logical manifests may be removed,
+while an older overflow extent remains whenever a current row still references
+its content digest. Backup restore and ordinary reopen MUST hydrate the same
+large value before and after that reclaim boundary.
+
 ## Durability Boundary
 
 `GraphStore` owns relational state beside graph state. A mixed mutation stages
@@ -450,6 +467,8 @@ The focused Rust tests cover:
 - raw and Zstd overflow selection, integrity, budgets, snapshot pinning, and
   reachability GC;
 - file-backed overflow checkpoint/reopen/backup/restore and bounded hydration;
+- cross-platform row/overflow generation-manifest replace failure, pinned-reader
+  retention, physical-closure reclaim, backup/restore, and reopen;
 - streaming scan/join/filter/projection, runtime cancellation, shared
   sort/distinct/group spill, and SQL `EXPLAIN`/`EXPLAIN ANALYZE` reports.
 
@@ -466,5 +485,6 @@ an in-memory access-path microbenchmark; it does not qualify file-backed cache,
 page-fault, concurrent writer, or end-to-end SQL behavior.
 
 Production qualification still requires the differential SQLite oracle,
-50,000-message and large-source workloads, fault injection through the unified
-WAL/checkpoint path, shadow traffic, and Windows, Linux, and macOS evidence.
+50,000-message and large-source workloads, shadow traffic, and retained green
+Windows, Linux, and macOS evidence. The deterministic fault-injection tests are
+implementation evidence; they do not replace revision-bound platform results.

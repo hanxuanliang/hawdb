@@ -102,8 +102,15 @@ before WAL append, while schema-changing WAL is followed by a mandatory
 manifest-last canonical row checkpoint that writable recovery retries after a
 crash; read-only recovery remains fail closed.
 
-- [ ] Add Windows rename, reopen, backup, and reclaim fault-injection coverage
-  for the exact canonical row/overflow-root path.
+- [ ] Complete cross-platform row/overflow-root lifecycle evidence.
+  - [x] Inject durable-replace failure at the exact row-page and overflow
+    generation-manifest destinations and prove that neither incomplete
+    candidate becomes selectable.
+  - [x] Run the canonical large-`TEXT` backup/restore, pinned-reader retention,
+    physical-closure reclaim, and reopen regression through the existing
+    macOS/Windows storage-platform test target.
+  - [ ] Retain a green Windows CI artifact for this revision; local non-Windows
+    execution and CI wiring do not substitute for Windows sharing semantics.
 
 - [ ] Qualify canonical row pages for the first Mem relational tables.
   - The SQL runtime now selects one exact checkpoint/recovery/live snapshot

@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::ffi::OsString;
 #[cfg(not(windows))]
 use std::fs;
 use std::io;
@@ -73,6 +75,8 @@ impl WalSyncGroupState {
 /// move because flushing a directory handle is not a supported durability
 /// primitive there.
 pub fn durable_replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    inject_durable_replace_failure(destination)?;
     #[cfg(windows)]
     {
         durable_replace_file_windows(source, destination)
@@ -82,6 +86,58 @@ pub fn durable_replace_file(source: &Path, destination: &Path) -> io::Result<()>
         fs::rename(source, destination)?;
         sync_parent_directory(destination)
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static DURABLE_REPLACE_FAILURE_DESTINATION: std::cell::RefCell<Option<OsString>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct DurableReplaceFailureGuard;
+
+#[cfg(test)]
+impl Drop for DurableReplaceFailureGuard {
+    fn drop(&mut self) {
+        DURABLE_REPLACE_FAILURE_DESTINATION.with(|destination| {
+            destination.replace(None);
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn fail_durable_replace_for_destination(
+    destination: impl Into<OsString>,
+) -> DurableReplaceFailureGuard {
+    DURABLE_REPLACE_FAILURE_DESTINATION.with(|current| {
+        assert!(
+            current.borrow().is_none(),
+            "durable replace failure injection must not be nested"
+        );
+        current.replace(Some(destination.into()));
+    });
+    DurableReplaceFailureGuard
+}
+
+#[cfg(test)]
+fn inject_durable_replace_failure(destination: &Path) -> io::Result<()> {
+    let should_fail = DURABLE_REPLACE_FAILURE_DESTINATION.with(|expected| {
+        expected
+            .borrow()
+            .as_ref()
+            .is_some_and(|expected| destination.file_name() == Some(expected.as_os_str()))
+    });
+    if should_fail {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "injected durable replace failure for {}",
+                destination.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Persists a directory entry change when the platform exposes that primitive.
@@ -152,6 +208,8 @@ fn durable_replace_file_windows(source: &Path, destination: &Path) -> io::Result
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(windows)]
+    use std::fs::OpenOptions;
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -204,6 +262,49 @@ mod tests {
         assert!(!candidate.exists());
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn platform_obstruction_rejects_canonical_row_and_overflow_manifest_replace() {
+        for destination_name in [
+            "relational-row-pages-1.manifest.skein",
+            "relational-overflow-1.manifest.skein",
+        ] {
+            let root = unique_test_dir();
+            fs::create_dir_all(&root).unwrap();
+            let candidate = root.join(format!("{destination_name}.tmp"));
+            let destination = root.join(destination_name);
+            write_synced(&candidate, b"candidate");
+
+            #[cfg(windows)]
+            let obstruction = {
+                use std::os::windows::fs::OpenOptionsExt;
+
+                const FILE_SHARE_READ: u32 = 0x0000_0001;
+                write_synced(&destination, b"selected");
+                OpenOptions::new()
+                    .read(true)
+                    .share_mode(FILE_SHARE_READ)
+                    .open(&destination)
+                    .unwrap()
+            };
+            #[cfg(not(windows))]
+            fs::create_dir(&destination).unwrap();
+
+            let error = durable_replace_file(&candidate, &destination).unwrap_err();
+            assert!(candidate.exists());
+
+            #[cfg(windows)]
+            {
+                drop(obstruction);
+                fs::remove_file(&destination).unwrap();
+            }
+            #[cfg(not(windows))]
+            fs::remove_dir(&destination).unwrap();
+
+            assert_ne!(error.kind(), io::ErrorKind::NotFound);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     fn write_synced(path: &Path, bytes: &[u8]) {
