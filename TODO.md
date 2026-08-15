@@ -172,7 +172,13 @@ crash; read-only recovery remains fail closed.
     sensed headroom and is expected to move through the 1--2 GiB range rather
     than becoming a fixed reservation. Keep the explicit 512 MiB run as a
     supported low-memory capability profile, not as the default or a universal
-    release threshold.
+    release threshold. The typed memory-policy evaluator now rejects a mismatched
+    detected limit, derives the exact 25% capacity/headroom budget, records the
+    nominal 1--2 GiB range without turning 1 GiB into a hard floor, and proves
+    that an explicit 512 MiB Skein ceiling is effective unless a smaller
+    host/cgroup ceiling takes precedence. Retain this item until the constrained
+    capability and production-profile workload artifacts are checked in; the
+    policy report alone does not prove peak RSS.
   - Because no storage format has shipped, activation is destructive: remove
     the ordinary materialized row selector instead of retaining a compatibility
     or rollback path. Keep the differential oracle in qualification code only.

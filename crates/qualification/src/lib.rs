@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+mod content_store_memory_profile;
 mod content_store_row_pages;
 mod content_store_sql_corpus;
 mod evidence_digest;
@@ -13,6 +14,7 @@ mod production_search;
 mod production_vector;
 mod release_bundle;
 
+pub use content_store_memory_profile::*;
 pub use content_store_row_pages::*;
 pub use content_store_sql_corpus::*;
 pub use production_blocking::*;

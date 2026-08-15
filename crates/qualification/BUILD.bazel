@@ -8,8 +8,7 @@ rust_library(
     crate_name = "skein_qualification",
     crate_root = "src/lib.rs",
     srcs = [
-        "src/content_store_sql_corpus.rs",
-        "src/evidence_digest.rs",
+        "src/content_store_memory_profile.rs",
         "src/content_store_row_pages.rs",
         "src/content_store_row_pages/corruption.rs",
         "src/content_store_row_pages/evidence.rs",
@@ -28,6 +27,8 @@ rust_library(
         "src/content_store_row_pages/thread_tail_delete.rs",
         "src/content_store_row_pages/thread_upsert.rs",
         "src/content_store_row_pages/transaction.rs",
+        "src/content_store_sql_corpus.rs",
+        "src/evidence_digest.rs",
         "src/lib.rs",
         "src/production_blocking.rs",
         "src/production_graph.rs",

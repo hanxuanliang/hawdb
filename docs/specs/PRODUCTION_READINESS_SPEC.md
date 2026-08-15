@@ -170,6 +170,19 @@ Production resource evidence MUST be collected from a representative copy of
 the intended workload. Synthetic ignored tests are useful development gates
 but do not qualify a production deployment.
 
+`qualify_content_store_memory_profile` is the typed policy gate for the two
+fixed Content Store memory profiles. `DesktopBound8Gib` requires an observed
+effective host or cgroup limit of exactly 8 GiB. The default 25% policy must
+derive a 2 GiB capacity and a dynamic headroom-bound budget. With 4--8 GiB
+available, the report records the nominal 1--2 GiB range. Lower headroom may
+legitimately lower the budget below 1 GiB and MUST NOT invalidate the policy;
+the budget is not a fixed reservation.
+`Capability512Mib` sets an explicit 512 MiB Skein capacity ceiling while still
+honoring a smaller host or cgroup policy ceiling and dynamic available
+headroom. The policy report MUST be paired with a constrained workload run
+whose peak RSS stays within its declared 512 MiB envelope. This is a supported
+capability profile, not the default profile or a universal release cutoff.
+
 The canonical artifact MUST exceed the configured segment-cache budget. Search
 qualification MUST also exercise a document corpus larger than the admitted
 search memory budget. The report MUST record steady RSS, peak RSS, page faults,

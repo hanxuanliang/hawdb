@@ -650,6 +650,14 @@ the uncommitted budget reports `AdmissionNeverCreatesCapacityOvercommit` or
 `CapacityOvercommitNeverGrows`. Scheduler liveness remains implementation
 evidence in the runtime-tokio timing tests.
 
+`qualify_content_store_memory_profile` is a refinement check at one resource
+snapshot. It requires the detected effective limit for the desktop 8 GiB
+profile, applies the explicit 512 MiB ceiling for the low-memory capability
+profile, recomputes the limit- and headroom-derived capacity/budget, and rejects
+any report where the budget exceeds capacity. The TLA+ model proves that this
+capacity/budget ordering remains safe across later resource refreshes, waits,
+admissions, releases, and capacity shrink.
+
 ## Columnar Shadow Checkpoint Integration
 
 `SkeinColumnarShadowIntegration.tla` models the shadow adoption phase of
