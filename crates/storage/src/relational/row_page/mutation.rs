@@ -293,6 +293,7 @@ impl<'a> RelationalRowPageMutationPlanner<'a> {
         Ok(RelationalRowPageMutationPlan {
             delta: RelationalRowPageTableDelta {
                 table: table.to_string(),
+                schema: None,
                 schema_digest,
                 column_count: NonZeroU32::new(u32::try_from(column_count).map_err(|_| {
                     RelationalRowPageMutationError::Admission(format!(

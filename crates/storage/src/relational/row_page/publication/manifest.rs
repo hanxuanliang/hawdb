@@ -338,6 +338,28 @@ fn validate_manifest(
                 table.table, table.column_count, config.page_limits.max_columns
             )));
         }
+        if table.schema.name != table.table
+            || table.schema.columns.len() != table.column_count.get() as usize
+        {
+            return Err(fail(format!(
+                "table {} has a mismatched row-page schema",
+                table.table
+            )));
+        }
+        crate::relational::codec::validate_relational_table_schema_codec_shape(
+            &table.schema,
+            config.page_limits.max_columns.get(),
+        )
+        .map_err(|error| fail(error.to_string()))?;
+        let schema_digest =
+            crate::relational::index_shadow::relational_schema_digest(&table.schema)
+                .map_err(|error| fail(error.to_string()))?;
+        if schema_digest != table.schema_digest {
+            return Err(fail(format!(
+                "table {} row-page schema digest mismatch",
+                table.table
+            )));
+        }
         if table.first_descriptor != expected_descriptor {
             return Err(fail(format!(
                 "table {} starts at descriptor {}, expected {expected_descriptor}",
@@ -348,22 +370,37 @@ fn validate_manifest(
             .checked_add(table.page_count)
             .ok_or_else(|| fail("row-page table descriptor count overflow".to_string()))?;
         if table.page_count == 0 {
-            if !table.lower_bound.is_empty() || !table.upper_bound.is_empty() {
+            if table.row_count != 0
+                || !table.lower_bound.is_empty()
+                || !table.upper_bound.is_empty()
+            {
                 return Err(fail(format!(
-                    "empty table {} has non-empty key bounds",
+                    "empty table {} has rows or non-empty key bounds",
                     table.table
                 )));
             }
-        } else if table.lower_bound.is_empty()
-            || table.upper_bound.is_empty()
-            || table.lower_bound > table.upper_bound
-            || table.lower_bound.len() > config.page_limits.max_key_bytes.get()
-            || table.upper_bound.len() > config.page_limits.max_key_bytes.get()
-        {
-            return Err(fail(format!(
-                "table {} has invalid row-page key bounds",
-                table.table
-            )));
+        } else {
+            let max_rows = table
+                .page_count
+                .checked_mul(config.page_limits.max_rows.get() as u64)
+                .ok_or_else(|| fail("row-page table row limit overflow".to_string()))?;
+            if table.row_count < table.page_count || table.row_count > max_rows {
+                return Err(fail(format!(
+                    "table {} declares {} rows across {} pages",
+                    table.table, table.row_count, table.page_count
+                )));
+            }
+            if table.lower_bound.is_empty()
+                || table.upper_bound.is_empty()
+                || table.lower_bound > table.upper_bound
+                || table.lower_bound.len() > config.page_limits.max_key_bytes.get()
+                || table.upper_bound.len() > config.page_limits.max_key_bytes.get()
+            {
+                return Err(fail(format!(
+                    "table {} has invalid row-page key bounds",
+                    table.table
+                )));
+            }
         }
         previous_table = Some(&table.table);
     }
@@ -388,8 +425,12 @@ fn encode_tables(
     let mut encoded = Vec::new();
     for table in tables {
         encode_bytes(&table.table, &mut encoded)?;
+        let schema = crate::relational::codec::encode_relational_table_schema(&table.schema)
+            .map_err(map_schema_encode_error)?;
+        encode_raw_bytes(&schema, &mut encoded)?;
         encoded.extend_from_slice(table.schema_digest.as_bytes());
         encoded.extend_from_slice(&table.column_count.get().to_le_bytes());
+        encoded.extend_from_slice(&table.row_count.to_le_bytes());
         encoded.extend_from_slice(&table.next_page_id.get().to_le_bytes());
         encoded.extend_from_slice(&table.first_descriptor.to_le_bytes());
         encoded.extend_from_slice(&table.page_count.to_le_bytes());
@@ -413,6 +454,18 @@ fn decode_tables(
             config.max_table_name_bytes.get(),
             "table name",
         )?;
+        let schema_bytes = decode_raw_bytes(
+            payload,
+            &mut offset,
+            config.max_manifest_bytes.get(),
+            "table schema",
+        )?;
+        let schema = crate::relational::codec::decode_relational_table_schema(
+            &schema_bytes,
+            config.max_manifest_bytes.get(),
+            config.page_limits.max_columns.get(),
+        )
+        .map_err(map_schema_decode_error)?;
         let schema_digest = Sha256Digest::from_bytes(
             take(payload, &mut offset, SHA256_BYTES, "table schema digest")?
                 .try_into()
@@ -429,6 +482,7 @@ fn decode_tables(
                 "row-page table column count contains zero".to_string(),
             )
         })?;
+        let row_count = read_u64(take(payload, &mut offset, 8, "table row count")?);
         let next_page_id = NonZeroU64::new(read_u64(take(
             payload,
             &mut offset,
@@ -456,8 +510,10 @@ fn decode_tables(
         )?;
         tables.push(RelationalRowPageTableRoot {
             table,
+            schema,
             schema_digest,
             column_count,
+            row_count,
             next_page_id,
             first_descriptor,
             page_count,
@@ -471,6 +527,42 @@ fn decode_tables(
         ));
     }
     Ok(tables)
+}
+
+fn map_schema_encode_error(
+    error: crate::relational::RelationalError,
+) -> RelationalRowPagePublicationError {
+    match error {
+        crate::relational::RelationalError::Admission(message)
+        | crate::relational::RelationalError::Schema(message)
+        | crate::relational::RelationalError::Constraint(message) => {
+            RelationalRowPagePublicationError::Admission(message)
+        }
+        crate::relational::RelationalError::Durability(message) => {
+            RelationalRowPagePublicationError::Durability(message)
+        }
+        crate::relational::RelationalError::Corruption(message) => {
+            RelationalRowPagePublicationError::Corrupt(message)
+        }
+    }
+}
+
+fn map_schema_decode_error(
+    error: crate::relational::RelationalError,
+) -> RelationalRowPagePublicationError {
+    match error {
+        crate::relational::RelationalError::Admission(message) => {
+            RelationalRowPagePublicationError::Admission(message)
+        }
+        crate::relational::RelationalError::Durability(message) => {
+            RelationalRowPagePublicationError::Durability(message)
+        }
+        crate::relational::RelationalError::Schema(message)
+        | crate::relational::RelationalError::Constraint(message)
+        | crate::relational::RelationalError::Corruption(message) => {
+            RelationalRowPagePublicationError::Corrupt(message)
+        }
+    }
 }
 
 fn encode_artifact(metadata: RelationalRowPageArtifactMetadata, encoded: &mut Vec<u8>) {

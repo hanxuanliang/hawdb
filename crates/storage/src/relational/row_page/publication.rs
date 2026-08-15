@@ -2,7 +2,7 @@ use super::{
     ImmutableRelationalRowPage, RelationalRowPageError, RelationalRowPageId,
     RelationalRowPageLimits,
 };
-use crate::relational::RelationalOverflowRootBinding;
+use crate::relational::{RelationalOverflowRootBinding, RelationalTableSchema};
 use skein_integrity::Sha256Digest;
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
@@ -81,6 +81,10 @@ impl Default for RelationalRowPagePublicationConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationalRowPageTableDelta {
     pub table: String,
+    /// Required when the table has no selected base root. Incremental deltas
+    /// may omit it because the immutable base manifest already owns the exact
+    /// schema bytes.
+    pub schema: Option<RelationalTableSchema>,
     pub schema_digest: Sha256Digest,
     pub column_count: NonZeroU32,
     pub next_page_id: NonZeroU64,
@@ -117,8 +121,10 @@ pub struct RelationalRowPageRootDescriptor {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationalRowPageTableRoot {
     pub table: String,
+    pub schema: RelationalTableSchema,
     pub schema_digest: Sha256Digest,
     pub column_count: NonZeroU32,
+    pub row_count: u64,
     pub next_page_id: NonZeroU64,
     pub first_descriptor: u64,
     pub page_count: u64,

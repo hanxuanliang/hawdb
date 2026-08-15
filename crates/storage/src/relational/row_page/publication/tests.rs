@@ -48,7 +48,12 @@ fn publish_last_root_round_trips_with_a_concrete_refinement_trace() {
     assert_eq!(reader.manifest().source_commit_epoch, 10);
     assert_eq!(reader.manifest().previous_generation, None);
     assert_eq!(reader.manifest().tables.len(), 1);
+    assert_eq!(
+        reader.manifest().tables[0].schema,
+        crate::relational::row_page::test_row_page_schema("documents", 2)
+    );
     assert_eq!(reader.manifest().tables[0].column_count.get(), 2);
+    assert_eq!(reader.manifest().tables[0].row_count, 4);
     assert_eq!(reader.manifest().tables[0].next_page_id.get(), 3);
     let descriptors = collect_descriptors(&reader, "documents");
     assert_eq!(page_id_values(&descriptors), vec![1, 2]);
@@ -234,6 +239,11 @@ fn incremental_publication_reuses_clean_pages_and_keeps_pinned_roots() {
         .unwrap();
     assert_eq!(current.manifest().generation, 2);
     assert_eq!(current.manifest().previous_generation, Some(1));
+    assert_eq!(
+        current.manifest().tables[0].schema,
+        pinned.manifest().tables[0].schema
+    );
+    assert_eq!(current.manifest().tables[0].row_count, 6);
     assert_eq!(current.manifest().tables[0].next_page_id.get(), 4);
     let current_descriptors = collect_descriptors(&current, "documents");
     assert_eq!(page_id_values(&current_descriptors), vec![1, 2, 3]);
@@ -650,6 +660,7 @@ fn deletion_requires_a_page_in_the_selected_base() {
             Some(1),
             vec![RelationalRowPageTableDelta {
                 table: "documents".to_string(),
+                schema: None,
                 schema_digest: schema_digest(),
                 column_count: NonZeroU32::new(2).unwrap(),
                 next_page_id: NonZeroU64::new(10).unwrap(),
@@ -714,6 +725,11 @@ fn deleting_every_page_publishes_an_empty_table_without_breaking_pinned_roots() 
     assert_eq!(current.manifest().tables.len(), 1);
     assert_eq!(current.manifest().tables[0].table, "documents");
     assert_eq!(current.manifest().tables[0].page_count, 0);
+    assert_eq!(current.manifest().tables[0].row_count, 0);
+    assert_eq!(
+        current.manifest().tables[0].schema,
+        pinned.manifest().tables[0].schema
+    );
     assert!(collect_descriptors(&current, "documents").is_empty());
     assert_eq!(
         page_id_values(&collect_descriptors(&pinned, "documents")),
@@ -721,6 +737,67 @@ fn deleting_every_page_publishes_an_empty_table_without_breaking_pinned_roots() 
     );
 
     fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn new_table_requires_a_digest_bound_schema_before_artifact_creation() {
+    let directory = unique_test_dir("missing-schema");
+    let config = RelationalRowPagePublicationConfig::default();
+    let mut delta = table_delta("documents", vec![page(1, 1, 10, 1, 2)]);
+    delta.schema = None;
+    let error = RelationalRowPagePublisher::new(config)
+        .publish(&directory, 1, 10, None, vec![delta])
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RelationalRowPagePublicationError::Admission(message)
+            if message.contains("missing its schema")
+    ));
+    assert!(!directory
+        .join(relational_row_page_manifest_generation_file(1))
+        .exists());
+    assert!(!directory.exists());
+}
+
+#[test]
+fn schema_collection_limits_are_enforced_before_artifact_creation() {
+    let directory = unique_test_dir("schema-collection-limit");
+    let mut config = RelationalRowPagePublicationConfig::default();
+    config.page_limits.max_columns = NonZeroUsize::new(2).unwrap();
+    let mut delta = table_delta("documents", vec![page(1, 1, 10, 1, 2)]);
+    let schema = delta.schema.as_mut().expect("new table has a schema");
+    schema.indexes = vec![
+        crate::relational::RelationalIndexSchema {
+            name: "documents_value_1_idx".to_string(),
+            columns: vec!["value_1".to_string()],
+            unique: false,
+        },
+        crate::relational::RelationalIndexSchema {
+            name: "documents_id_idx".to_string(),
+            columns: vec!["id".to_string()],
+            unique: false,
+        },
+        crate::relational::RelationalIndexSchema {
+            name: "documents_value_1_id_idx".to_string(),
+            columns: vec!["value_1".to_string(), "id".to_string()],
+            unique: false,
+        },
+    ];
+    delta.schema_digest =
+        crate::relational::index_shadow::relational_schema_digest(schema).unwrap();
+    for page in &mut delta.dirty_pages {
+        page.schema_digest = delta.schema_digest;
+    }
+
+    let error = RelationalRowPagePublisher::new(config)
+        .publish(&directory, 1, 10, None, vec![delta])
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RelationalRowPagePublicationError::Admission(message)
+            if message.contains("indexes") && message.contains("exceeding limit 2")
+    ));
+    assert!(!directory.exists());
 }
 
 #[test]
@@ -852,6 +929,7 @@ fn table_delta(
         .expect("test row-page allocator must remain representable");
     RelationalRowPageTableDelta {
         table: table.to_string(),
+        schema: Some(crate::relational::row_page::test_row_page_schema(table, 2)),
         schema_digest: schema_digest(),
         column_count: NonZeroU32::new(2).unwrap(),
         next_page_id,
@@ -890,7 +968,7 @@ fn page_id(value: u64) -> RelationalRowPageId {
 }
 
 fn schema_digest() -> Sha256Digest {
-    integrity_digest(b"documents-schema-v1").sha256
+    crate::relational::row_page::test_row_page_schema_digest("documents", 2)
 }
 
 fn unique_test_dir(label: &str) -> PathBuf {

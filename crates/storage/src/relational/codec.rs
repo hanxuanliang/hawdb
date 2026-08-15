@@ -26,6 +26,64 @@ const CODEC_VERSION: u16 = 1;
 const HEADER_BYTES: usize = 64;
 const RELATIONAL_CHECKPOINT_ARTIFACT_ID: u64 = 1;
 
+pub(super) fn encode_relational_table_schema(
+    schema: &RelationalTableSchema,
+) -> Result<Vec<u8>, RelationalError> {
+    validate_table_schema(schema)?;
+    let mut encoder = Encoder::default();
+    encoder.table_schema(schema)?;
+    Ok(encoder.finish())
+}
+
+pub(super) fn decode_relational_table_schema(
+    encoded: &[u8],
+    max_encoded_bytes: usize,
+    max_schema_items: usize,
+) -> Result<RelationalTableSchema, RelationalError> {
+    if encoded.len() > max_encoded_bytes {
+        return Err(RelationalError::Admission(format!(
+            "relational table schema contains {} bytes, exceeding limit {max_encoded_bytes}",
+            encoded.len()
+        )));
+    }
+    let limits = RelationalDecodeLimits {
+        max_record_bytes: max_encoded_bytes,
+        max_tables: 1,
+        max_writes: 0,
+        max_rows: 0,
+        max_values: max_schema_items,
+        max_value_bytes: max_encoded_bytes,
+        max_overflow_segments: 0,
+        max_overflow_bytes: 0,
+    };
+    let mut decoder = Decoder::from_slice(encoded, limits, true);
+    let schema = decoder.table_schema()?;
+    decoder.finish()?;
+    validate_table_schema(&schema)?;
+    Ok(schema)
+}
+
+pub(super) fn validate_relational_table_schema_codec_shape(
+    schema: &RelationalTableSchema,
+    max_schema_items: usize,
+) -> Result<(), RelationalError> {
+    validate_table_schema(schema)?;
+    for (context, count) in [
+        ("columns", schema.columns.len()),
+        ("primary-key columns", schema.primary_key.len()),
+        ("unique constraints", schema.unique_constraints.len()),
+        ("foreign keys", schema.foreign_keys.len()),
+        ("indexes", schema.indexes.len()),
+    ] {
+        if count > max_schema_items {
+            return Err(RelationalError::Admission(format!(
+                "relational table schema contains {count} {context}, exceeding limit {max_schema_items}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelationalDecodeLimits {
     pub max_record_bytes: usize,

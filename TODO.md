@@ -135,6 +135,12 @@ crash; read-only recovery remains fail closed.
     reader, rejects an unavailable reader, and uses canonical memory only before
     the first checkpoint or inside a transaction-private workspace. Keep this
     engine contract while qualifying the product cutover.
+  - The selected row-page generation is now self-describing: each checksummed
+    table root carries the complete digest-bound schema, non-zero column count,
+    and exact descriptor-derived row count. New tables without schema bytes and
+    incremental schema drift fail before artifact creation. This is the durable
+    prerequisite for removing full materialized-row checkpoint residency on
+    open; the removal itself remains pending.
   - The typed runner now qualifies `content_documents`, `thread_messages`,
     `content_chunks`, and `content_anchors` using the frozen PostgreSQL statement
     corpus and graph-plus-relational commits that publish one shared epoch.

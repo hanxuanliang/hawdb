@@ -1337,6 +1337,7 @@ impl RelationalState {
                 let report = bootstrap.finish(&mut emit)?;
                 Ok(RelationalRowPageTableDelta {
                     table: schema.name.clone(),
+                    schema: Some(schema.clone()),
                     schema_digest,
                     column_count: NonZeroU32::new(
                         u32::try_from(schema.columns.len()).map_err(|_| {

@@ -1,6 +1,5 @@
 use super::*;
 use crate::relational::{RelationalRow, RelationalRowPagePublisher, RelationalValue};
-use skein_integrity::integrity_digest;
 use std::fs;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
@@ -309,6 +308,10 @@ fn publish_base(directory: &Path, config: RelationalRowPagePublicationConfig) {
             None,
             vec![RelationalRowPageTableDelta {
                 table: "documents".to_string(),
+                schema: Some(crate::relational::row_page::test_row_page_schema(
+                    "documents",
+                    2,
+                )),
                 schema_digest: schema_digest(),
                 column_count: NonZeroU32::new(2).unwrap(),
                 next_page_id: NonZeroU64::new(3).unwrap(),
@@ -362,7 +365,7 @@ fn key(value: i64) -> RelationalKey {
 }
 
 fn schema_digest() -> Sha256Digest {
-    integrity_digest(b"documents-schema-v1").sha256
+    crate::relational::row_page::test_row_page_schema_digest("documents", 2)
 }
 
 fn row_keys(page: &ImmutableRelationalRowPage) -> Vec<i64> {

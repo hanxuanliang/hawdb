@@ -151,6 +151,7 @@ impl RelationalRowPagePublisher {
             overflow_root,
             self.config,
         )?;
+        require_schema_source(base, &deltas)?;
         fs::create_dir_all(directory).map_err(durability("create row-page directory"))?;
         let _lock = acquire_publication_lock(directory)?;
         let paths = PublicationPaths::new(directory, generation);
@@ -320,6 +321,38 @@ impl RelationalRowPagePublisher {
     }
 }
 
+fn require_schema_source(
+    base: Option<&RelationalRowPageRootReader>,
+    deltas: &BTreeMap<String, PreparedTableDelta>,
+) -> Result<(), RelationalRowPagePublicationError> {
+    for delta in deltas.values() {
+        let base_schema = base.and_then(|reader| {
+            reader
+                .manifest()
+                .tables
+                .binary_search_by(|table| table.table.cmp(&delta.table))
+                .ok()
+                .map(|index| &reader.manifest().tables[index].schema)
+        });
+        match (base_schema, delta.schema.as_ref()) {
+            (None, None) => {
+                return Err(RelationalRowPagePublicationError::Admission(format!(
+                    "new row-page table {} is missing its schema",
+                    delta.table
+                )));
+            }
+            (Some(base_schema), Some(schema)) if base_schema != schema => {
+                return Err(RelationalRowPagePublicationError::Admission(format!(
+                    "table {} schema changed during incremental row-page publication",
+                    delta.table
+                )));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 struct GenerationPublication<'a> {
     directory: &'a Path,
     generation: u64,
@@ -357,6 +390,7 @@ pub(super) struct PreparedDirtyPage {
 #[derive(Debug)]
 pub(super) struct PreparedTableDelta {
     pub table: String,
+    pub schema: Option<crate::relational::RelationalTableSchema>,
     pub schema_digest: Sha256Digest,
     pub column_count: std::num::NonZeroU32,
     pub next_page_id: std::num::NonZeroU64,
@@ -412,6 +446,35 @@ fn preflight_deltas(
                 "publication contains duplicate table delta {}",
                 delta.table
             )));
+        }
+        if let Some(schema) = &delta.schema {
+            crate::relational::codec::validate_relational_table_schema_codec_shape(
+                schema,
+                config.page_limits.max_columns.get(),
+            )
+            .map_err(|error| RelationalRowPagePublicationError::Admission(error.to_string()))?;
+            if schema.name != delta.table {
+                return Err(RelationalRowPagePublicationError::Admission(format!(
+                    "row-page schema name {} differs from table {}",
+                    schema.name, delta.table
+                )));
+            }
+            if schema.columns.len() != delta.column_count.get() as usize {
+                return Err(RelationalRowPagePublicationError::Admission(format!(
+                    "row-page schema for table {} contains {} columns, expected {}",
+                    delta.table,
+                    schema.columns.len(),
+                    delta.column_count
+                )));
+            }
+            let digest = crate::relational::index_shadow::relational_schema_digest(schema)
+                .map_err(|error| RelationalRowPagePublicationError::Admission(error.to_string()))?;
+            if digest != delta.schema_digest {
+                return Err(RelationalRowPagePublicationError::Admission(format!(
+                    "row-page schema digest differs from table {}",
+                    delta.table
+                )));
+            }
         }
         let deleted_count = delta.deleted_page_ids.len();
         let deleted_page_ids = delta.deleted_page_ids.into_iter().collect::<BTreeSet<_>>();
@@ -509,6 +572,7 @@ fn preflight_deltas(
             delta.table.clone(),
             PreparedTableDelta {
                 table: delta.table,
+                schema: delta.schema,
                 schema_digest: delta.schema_digest,
                 column_count: delta.column_count,
                 next_page_id: delta.next_page_id,

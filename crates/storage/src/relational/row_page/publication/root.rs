@@ -200,6 +200,23 @@ pub(super) fn write_root_artifacts(
                 .map(|index| &reader.manifest.tables[index])
         });
         let delta = deltas.remove(&table_name);
+        let schema = match (
+            base_table,
+            delta.as_ref().and_then(|delta| delta.schema.as_ref()),
+        ) {
+            (Some(base_table), Some(schema)) if base_table.schema != *schema => {
+                return Err(RelationalRowPagePublicationError::Admission(format!(
+                    "table {table_name} schema changed during incremental row-page publication"
+                )));
+            }
+            (Some(base_table), _) => base_table.schema.clone(),
+            (None, Some(schema)) => schema.clone(),
+            (None, None) => {
+                return Err(RelationalRowPagePublicationError::Admission(format!(
+                    "new row-page table {table_name} is missing its schema"
+                )));
+            }
+        };
         let schema_digest = match (base_table, delta.as_ref()) {
             (Some(base_table), Some(delta)) if base_table.schema_digest != delta.schema_digest => {
                 return Err(RelationalRowPagePublicationError::Admission(format!(
@@ -279,8 +296,10 @@ pub(super) fn write_root_artifacts(
         let page_count = writer.descriptor_count - first_descriptor;
         tables.push(RelationalRowPageTableRoot {
             table: table_name,
+            schema,
             schema_digest,
             column_count,
+            row_count: bounds.row_count,
             next_page_id,
             first_descriptor,
             page_count,
@@ -356,6 +375,7 @@ fn write_merged_table(
 struct TableBounds {
     lower: Option<Vec<u8>>,
     upper: Option<Vec<u8>>,
+    row_count: u64,
 }
 
 struct RootWriter {
@@ -452,6 +472,14 @@ impl RootWriter {
             .map_err(durability("write row-page root descriptor"))?;
         self.descriptor_hasher.update(&encoded);
         self.descriptor_count += 1;
+        table_bounds.row_count = table_bounds
+            .row_count
+            .checked_add(u64::from(descriptor.row_count))
+            .ok_or_else(|| {
+                RelationalRowPagePublicationError::Admission(
+                    "row-page table row count overflow".to_string(),
+                )
+            })?;
         table_bounds
             .lower
             .get_or_insert_with(|| descriptor.lower_bound.clone());

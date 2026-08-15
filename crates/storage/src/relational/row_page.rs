@@ -1,6 +1,8 @@
 use super::ordered_key::{
     decode_ordered_relational_key, encode_ordered_relational_key, validate_ordered_relational_key,
 };
+#[cfg(test)]
+use super::{RelationalColumnSchema, RelationalTableSchema};
 use super::{
     RelationalKey, RelationalOverflowRef, RelationalRow, RelationalScalarType, RelationalValue,
 };
@@ -62,6 +64,40 @@ pub use snapshot::{
     RelationalRowPageSnapshotReader, RelationalRowPageSnapshotRowSource,
     DEFAULT_RELATIONAL_ROW_SNAPSHOT_OVERLAY_BYTES, DEFAULT_RELATIONAL_ROW_SNAPSHOT_OVERLAY_ENTRIES,
 };
+
+#[cfg(test)]
+pub(crate) fn test_row_page_schema(table: &str, column_count: usize) -> RelationalTableSchema {
+    let columns = (0..column_count)
+        .map(|ordinal| RelationalColumnSchema {
+            name: if ordinal == 0 {
+                "id".to_string()
+            } else {
+                format!("value_{ordinal}")
+            },
+            scalar_type: if ordinal == 0 {
+                RelationalScalarType::BigInt
+            } else {
+                RelationalScalarType::Text
+            },
+            nullable: ordinal != 0,
+            default: None,
+        })
+        .collect();
+    RelationalTableSchema {
+        name: table.to_string(),
+        columns,
+        primary_key: vec!["id".to_string()],
+        unique_constraints: Vec::new(),
+        foreign_keys: Vec::new(),
+        indexes: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_row_page_schema_digest(table: &str, column_count: usize) -> Sha256Digest {
+    super::index_shadow::relational_schema_digest(&test_row_page_schema(table, column_count))
+        .expect("test row-page schema must encode")
+}
 use value::{decode_row_fields, encode_row, validate_requested_fields};
 
 const ROW_PAGE_MAGIC: &[u8; 8] = b"SKINROW1";

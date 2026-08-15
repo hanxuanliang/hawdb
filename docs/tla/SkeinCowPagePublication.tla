@@ -58,6 +58,7 @@ VARIABLES
     rootByGeneration,
     generationEpoch,
     durableOverflowRoots,
+    durableSchemaCatalogs,
     overflowEpoch,
     canonicalOverflowGeneration,
     durablePages,
@@ -87,6 +88,7 @@ vars == <<
     rootByGeneration,
     generationEpoch,
     durableOverflowRoots,
+    durableSchemaCatalogs,
     overflowEpoch,
     canonicalOverflowGeneration,
     durablePages,
@@ -147,6 +149,7 @@ Init ==
         [generation \in Generations |->
             IF generation = 0 THEN 0 ELSE -1]
     /\ durableOverflowRoots = {0}
+    /\ durableSchemaCatalogs = {0}
     /\ overflowEpoch =
         [generation \in Generations |->
             IF generation = 0 THEN 0 ELSE -1]
@@ -182,6 +185,7 @@ BeginCommit ==
         rootByGeneration,
         generationEpoch,
         durableOverflowRoots,
+        durableSchemaCatalogs,
         overflowEpoch,
         canonicalOverflowGeneration,
         durablePages,
@@ -217,6 +221,7 @@ SyncWal ==
         rootByGeneration,
         generationEpoch,
         durableOverflowRoots,
+        durableSchemaCatalogs,
         overflowEpoch,
         canonicalOverflowGeneration,
         durablePages,
@@ -252,6 +257,7 @@ PublishCommit ==
         rootByGeneration,
         generationEpoch,
         durableOverflowRoots,
+        durableSchemaCatalogs,
         overflowEpoch,
         canonicalOverflowGeneration,
         durablePages,
@@ -298,6 +304,7 @@ BeginCheckpoint ==
         rootByGeneration,
         generationEpoch,
         durableOverflowRoots,
+        durableSchemaCatalogs,
         overflowEpoch,
         canonicalOverflowGeneration,
         durablePages,
@@ -333,6 +340,7 @@ PersistCandidatePages ==
         rootByGeneration,
         generationEpoch,
         durableOverflowRoots,
+        durableSchemaCatalogs,
         overflowEpoch,
         canonicalOverflowGeneration,
         candidateGeneration,
@@ -367,6 +375,7 @@ PersistCandidateOverflow ==
         publishedRoots,
         rootByGeneration,
         generationEpoch,
+        durableSchemaCatalogs,
         canonicalOverflowGeneration,
         durablePages,
         pageEpoch,
@@ -398,6 +407,7 @@ PersistCandidateRoot ==
         rootByGeneration,
         generationEpoch,
         durableOverflowRoots,
+        durableSchemaCatalogs,
         overflowEpoch,
         canonicalOverflowGeneration,
         durablePages,
@@ -414,6 +424,8 @@ PersistCandidateRoot ==
 PersistCandidateManifest ==
     /\ candidatePhase = "rootDurable"
     /\ candidatePhase' = "manifestDurable"
+    /\ durableSchemaCatalogs' =
+        durableSchemaCatalogs \cup {candidateGeneration}
     /\ UNCHANGED <<
         walDurableEpoch,
         walDirtyByEpoch,
@@ -447,6 +459,7 @@ PublishCheckpoint ==
     /\ candidatePhase = "manifestDurable"
     /\ candidateBaseGeneration = activeGeneration
     /\ candidateGeneration \in durableOverflowRoots
+    /\ candidateGeneration \in durableSchemaCatalogs
     /\ overflowEpoch[candidateGeneration] = candidateEpoch
     /\ \A page \in candidateDirtyPages:
         PageRef(candidateGeneration, page) \in durablePages
@@ -474,6 +487,7 @@ PublishCheckpoint ==
         pendingPage,
         nextGeneration,
         durableOverflowRoots,
+        durableSchemaCatalogs,
         overflowEpoch,
         durablePages,
         pageEpoch,
@@ -503,6 +517,7 @@ PublishCompetingCheckpoint ==
           /\ generationEpoch' =
               [generationEpoch EXCEPT ![generation] = visibleEpoch]
           /\ durableOverflowRoots' = durableOverflowRoots \cup {generation}
+          /\ durableSchemaCatalogs' = durableSchemaCatalogs \cup {generation}
           /\ overflowEpoch' =
               [overflowEpoch EXCEPT ![generation] = visibleEpoch]
           /\ canonicalOverflowGeneration' = generation
@@ -554,6 +569,7 @@ RejectStaleCandidate ==
         rootByGeneration,
         generationEpoch,
         durableOverflowRoots,
+        durableSchemaCatalogs,
         overflowEpoch,
         canonicalOverflowGeneration,
         durablePages,
@@ -582,6 +598,7 @@ BeginRead(reader) ==
         rootByGeneration,
         generationEpoch,
         durableOverflowRoots,
+        durableSchemaCatalogs,
         overflowEpoch,
         canonicalOverflowGeneration,
         durablePages,
@@ -614,6 +631,7 @@ EndRead(reader) ==
         rootByGeneration,
         generationEpoch,
         durableOverflowRoots,
+        durableSchemaCatalogs,
         overflowEpoch,
         canonicalOverflowGeneration,
         durablePages,
@@ -635,6 +653,8 @@ Reclaim ==
     /\ durablePages' = durablePages \cap RequiredPageRefs
     /\ durableOverflowRoots' =
         durableOverflowRoots \cap RequiredRootGenerations
+    /\ durableSchemaCatalogs' =
+        durableSchemaCatalogs \cap RequiredRootGenerations
     /\ UNCHANGED <<
         walDurableEpoch,
         walDirtyByEpoch,
@@ -689,6 +709,7 @@ CrashAndRecover ==
         rootByGeneration,
         generationEpoch,
         durableOverflowRoots,
+        durableSchemaCatalogs,
         overflowEpoch,
         canonicalOverflowGeneration,
         durablePages,
@@ -730,6 +751,7 @@ TypeOK ==
     /\ rootByGeneration \in [Generations -> RootType]
     /\ generationEpoch \in [Generations -> (-1)..MaxEpoch]
     /\ durableOverflowRoots \subseteq Generations
+    /\ durableSchemaCatalogs \subseteq Generations
     /\ overflowEpoch \in [Generations -> (-1)..MaxEpoch]
     /\ canonicalOverflowGeneration \in Generations
     /\ durablePages \subseteq PageRefs
@@ -778,6 +800,9 @@ PublishedRootsReferenceDurableOverflow ==
     \A generation \in publishedRoots:
         /\ generation \in durableOverflowRoots
         /\ overflowEpoch[generation] = generationEpoch[generation]
+
+PublishedRootsReferenceDurableSchemas ==
+    publishedRoots \subseteq durableSchemaCatalogs
 
 CanonicalRowOverflowGenerationAgreement ==
     /\ activeGeneration = canonicalOverflowGeneration
@@ -829,6 +854,7 @@ ReclamationPreservesRequiredClosure ==
     /\ RequiredRootGenerations \subseteq publishedRoots
     /\ RequiredPageRefs \subseteq durablePages
     /\ RequiredRootGenerations \subseteq durableOverflowRoots
+    /\ RequiredRootGenerations \subseteq durableSchemaCatalogs
 
 StaleCandidateRejectionIsTerminal ==
     staleCandidateRejected => candidatePhase = "idle"

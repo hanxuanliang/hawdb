@@ -376,6 +376,10 @@ impl SnapshotFixture {
                 None,
                 vec![RelationalRowPageTableDelta {
                     table: "documents".to_string(),
+                    schema: Some(crate::relational::row_page::test_row_page_schema(
+                        "documents",
+                        2,
+                    )),
                     schema_digest: schema_digest(),
                     column_count: NonZeroU32::new(2).unwrap(),
                     next_page_id: NonZeroU64::new(2).unwrap(),
@@ -542,7 +546,7 @@ fn projected_body(row: Option<&RelationalProjectedRow>) -> Option<&str> {
 }
 
 fn schema_digest() -> Sha256Digest {
-    integrity_digest(b"snapshot-documents-schema").sha256
+    crate::relational::row_page::test_row_page_schema_digest("documents", 2)
 }
 
 fn flip_byte(path: &std::path::Path, offset: u64) {

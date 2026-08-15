@@ -8,7 +8,6 @@ use crate::relational::{
     RelationalRowPageRecoveredValue, RelationalRowPageTableDelta, RelationalScalarType,
     RelationalValue,
 };
-use skein_integrity::integrity_digest;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
@@ -404,6 +403,7 @@ fn builder_cannot_publish_after_its_row_root_becomes_stale() {
             Some(1),
             vec![RelationalRowPageTableDelta {
                 table: "documents".to_string(),
+                schema: None,
                 schema_digest: schema_digest(),
                 column_count: NonZeroU32::new(2).unwrap(),
                 next_page_id: NonZeroU64::new(2).unwrap(),
@@ -689,6 +689,10 @@ fn publish_and_open_base(directory: &Path) -> RelationalRowPageRootReader {
             None,
             vec![RelationalRowPageTableDelta {
                 table: "documents".to_string(),
+                schema: Some(crate::relational::row_page::test_row_page_schema(
+                    "documents",
+                    2,
+                )),
                 schema_digest: schema_digest(),
                 column_count: NonZeroU32::new(2).unwrap(),
                 next_page_id: NonZeroU64::new(2).unwrap(),
@@ -747,7 +751,7 @@ fn key(id: i64) -> RelationalKey {
 }
 
 fn schema_digest() -> skein_integrity::Sha256Digest {
-    integrity_digest(b"documents-schema-v1").sha256
+    crate::relational::row_page::test_row_page_schema_digest("documents", 2)
 }
 
 fn present_text(value: &RelationalRowPageRecoveredValue) -> Option<&str> {

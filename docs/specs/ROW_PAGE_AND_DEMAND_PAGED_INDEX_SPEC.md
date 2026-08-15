@@ -447,10 +447,12 @@ remove materialized postings or make row pages demand-resident.
    later pages.
 6. A mutation creates new immutable page images or bounded dirty pages; it
    MUST NOT mutate a page visible to a pinned reader.
-7. Every table root MUST bind a non-zero column count together with its schema
-   digest. Publication rejects a dirty or reused page whose column count
-   differs, recovery-delta schemas must match both fields, and demand read
-   treats any later page/root mismatch as corruption.
+7. Every table root MUST carry the complete validated table schema, its digest,
+   a non-zero column count, and the exact row count derived from published page
+   descriptors. Publication rejects missing or mismatched schema bytes and a
+   dirty or reused page whose column count differs. Recovery-delta schemas must
+   match the digest and column count, and demand read treats any later
+   page/root mismatch as corruption.
 
 ### Relational row-page v1 codec
 
@@ -501,8 +503,12 @@ prior durable format, so readers MUST NOT recognize or migrate a legacy
 string-digest encoding.
 
 The row-root table payload likewise has one version-1 shape: table name,
-schema digest, non-zero column count, allocator state, descriptor range, and
-key bounds. No reader for a root payload without the column count exists.
+complete encoded table schema, schema digest, non-zero column count, exact row
+count, allocator state, descriptor range, and key bounds. The complete schema
+and count live inside the checksummed generation manifest, so a future cold
+open can reconstruct the relational catalog without decoding canonical row
+pages or retaining the legacy materialized-row checkpoint. No reader for an
+older root payload exists.
 
 The shared `SKOVFL01` envelope begins with a fixed 32-byte header containing the
 codec, scalar type, zero flags, both lengths, and the decoded CRC32C. Its
@@ -629,10 +635,11 @@ offsets and prevents complete valid descriptors from being moved between root
 generations or ordinals without detection when that descriptor is selected.
 The slot digest covers the complete fixed page slot, including the required
 zero tail. Table descriptors are contiguous and ordered by disjoint primary-key
-bounds. A table root in the compact manifest stores its schema digest, the next
-never-issued table-scoped `PageId`, descriptor range, and outer bounds. The
-allocator value is non-zero, never decreases, and is strictly greater than
-every active, dirty, or deleted page id admitted by that publication.
+bounds. A table root in the compact manifest stores its complete digest-bound
+schema, exact descriptor-derived row count, the next never-issued table-scoped
+`PageId`, descriptor range, and outer bounds. The allocator value is non-zero,
+never decreases, and is strictly greater than every active, dirty, or deleted
+page id admitted by that publication.
 
 The `SKRPGM01` version-1 manifest has a fixed 316-byte header followed by a
 bounded table-root payload. Its header binds generation, source commit epoch,

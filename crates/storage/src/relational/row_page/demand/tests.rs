@@ -375,8 +375,10 @@ fn table_root_column_count_must_match_every_demand_loaded_page() {
         .expect("open encoded page");
     let table = super::super::RelationalRowPageTableRoot {
         table: "documents".to_string(),
+        schema: crate::relational::row_page::test_row_page_schema("documents", 3),
         schema_digest: schema_digest(),
         column_count: NonZeroU32::new(3).unwrap(),
+        row_count: 1,
         next_page_id: NonZeroU64::new(2).unwrap(),
         first_descriptor: 0,
         page_count: 1,
@@ -479,6 +481,10 @@ fn row_publication_config() -> RelationalRowPagePublicationConfig {
 fn table_delta(dirty_pages: Vec<ImmutableRelationalRowPage>) -> RelationalRowPageTableDelta {
     RelationalRowPageTableDelta {
         table: "documents".to_string(),
+        schema: Some(crate::relational::row_page::test_row_page_schema(
+            "documents",
+            4,
+        )),
         schema_digest: schema_digest(),
         column_count: NonZeroU32::new(4).unwrap(),
         next_page_id: NonZeroU64::new(3).unwrap(),
@@ -532,7 +538,7 @@ fn projected_range<'a>(
 }
 
 fn schema_digest() -> Sha256Digest {
-    integrity_digest(b"demand-read-documents-schema").sha256
+    crate::relational::row_page::test_row_page_schema_digest("documents", 4)
 }
 
 fn flip_byte(path: &std::path::Path, offset: u64) {
