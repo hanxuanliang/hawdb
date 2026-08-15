@@ -2,6 +2,7 @@ mod evidence;
 mod fixture;
 #[cfg(test)]
 mod tests;
+mod transaction;
 
 use crate::{
     nowledge_content_store_schema_identity, nowledge_content_store_sql_corpus,
@@ -15,6 +16,7 @@ use fixture::{
 use serde::Serialize;
 use skein::{Database, DurabilityPolicy, RelationalIndexMode, Result, SkeinError};
 use std::path::PathBuf;
+use transaction::qualify_multi_statement_transaction;
 
 pub const CONTENT_STORE_INITIAL_ROW_PAGE_QUALIFICATION_PROTOCOL: &str =
     "skein-content-store-initial-row-page-qualification-v1";
@@ -66,7 +68,7 @@ impl ContentStoreInitialRowPageQualificationConfig {
             ));
         }
         let page = corpus_statement(corpus, "thread_messages_page")?;
-        let final_message_count = self.base_message_count.saturating_add(2);
+        let final_message_count = self.base_message_count.saturating_add(3);
         if final_message_count > page.max_rows {
             return Err(SkeinError::Semantic(format!(
                 "content-store row-page qualification needs {final_message_count} rows but thread_messages_page admits {}",
@@ -164,7 +166,23 @@ pub struct ContentStoreInitialRowPageQualificationReport {
     pub wal_replayed_bytes: u64,
     pub wal_recovery_read: ContentStoreRowPageReadReport,
     pub live_overlay_read: ContentStoreRowPageReadReport,
+    pub multi_statement_transaction: ContentStoreTransactionQualificationReport,
     pub ready: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContentStoreTransactionQualificationReport {
+    pub inserted_content_message_id: String,
+    pub page_output_rows: usize,
+    pub page_output_sha256: String,
+    pub summary_item_count: i64,
+    pub summary_size_bytes: i64,
+    pub index_runtime_path: String,
+    pub row_runtime_path: String,
+    pub transaction_workspace_lookups: u64,
+    pub canonical_fallback_lookups: u64,
+    pub rejected_statement_atomic: bool,
+    pub committed_epoch: u64,
 }
 
 impl ContentStoreInitialRowPageQualificationReport {
@@ -260,6 +278,13 @@ pub fn run_content_store_initial_row_page_qualification(
         ));
     }
 
+    let multi_statement_transaction = qualify_multi_statement_transaction(
+        &mut database,
+        &corpus,
+        config.base_message_count + 2,
+        config.message_payload_bytes,
+    )?;
+
     Ok(ContentStoreInitialRowPageQualificationReport {
         protocol: CONTENT_STORE_INITIAL_ROW_PAGE_QUALIFICATION_PROTOCOL.to_string(),
         source_revision: config.source_revision,
@@ -270,7 +295,7 @@ pub fn run_content_store_initial_row_page_qualification(
             .map(|table| (*table).to_string())
             .collect(),
         base_message_count: config.base_message_count,
-        final_message_count: config.base_message_count + 2,
+        final_message_count: config.base_message_count + 3,
         message_payload_bytes: config.message_payload_bytes,
         segment_cache_capacity_bytes: config.segment_cache_capacity_bytes,
         checkpoint_generation: checkpoint.generation,
@@ -281,6 +306,7 @@ pub fn run_content_store_initial_row_page_qualification(
         wal_replayed_bytes: recovery.replayed_wal_bytes,
         wal_recovery_read,
         live_overlay_read,
+        multi_statement_transaction,
         ready: true,
     })
 }

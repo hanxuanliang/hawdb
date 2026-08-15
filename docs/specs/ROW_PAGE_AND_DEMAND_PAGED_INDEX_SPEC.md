@@ -1305,6 +1305,12 @@ checkpoint binding, demand-read, lifecycle, or serving obligations.
   bounded dirty overlays, immutable candidate generations, crash recovery,
   schema invalidation, no partial replay visibility, and sound exact-key
   constraint qualification only from a current pinned view.
+- `SkeinTransactionIndexOverlay.tla`: one pinned committed index base, bounded
+  transaction-private row/index changes, rejected-statement atomicity,
+  read-your-own-writes, rollback, and durable-before-visible publication. The
+  concrete Content Store qualification composes multiple SQL statements and
+  verifies ordered merge, transaction-workspace routing, and failure atomicity;
+  entry/byte exhaustion remains a focused Rust refinement obligation.
 - `SkeinRowRecovery.tla`: checkpoint-correlated row-root mount, exact ordered
   primary-key WAL overlay, graph-only epoch advancement, whole-fragment
   admission, fail-closed invalidation, complete-prefix view publication, cold
@@ -1350,6 +1356,13 @@ Performance and resource evidence records separately:
 - warmed point/range query latency;
 - page reads, bytes, cache hits, evictions, resident bytes, and pinned bytes;
 - dirty and WAL bytes, spill bytes, page faults, and write amplification.
+
+The 512 MiB profile is a supported low-memory capability profile, not a
+universal process limit or a production activation cutoff. Its evidence names
+the bounded workload and proves admission and eviction keep that workload
+within the configured budget. Production-copy latency, RSS, page-fault, and
+write-amplification gates use the replica's actual configured resource profile
+and retain that profile in the evidence identity.
 
 With fixed schema and WAL input, manifest/root-open work and mandatory index
 residency MUST remain independent of row, index-entry, and leaf-page counts.

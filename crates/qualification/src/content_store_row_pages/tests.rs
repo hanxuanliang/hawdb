@@ -20,7 +20,7 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
 
     assert!(report.ready);
     assert_eq!(report.qualified_tables, QUALIFIED_TABLES);
-    assert_eq!(report.final_message_count, 6);
+    assert_eq!(report.final_message_count, 7);
     assert_eq!(report.cold_checkpoint_reads.len(), 3);
     assert_eq!(report.warm_checkpoint_reads.len(), 3);
     assert!(report.wal_replayed_entries > 0);
@@ -30,6 +30,37 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
         .delta_generation
         .is_some());
     assert!(report.live_overlay_read.execution.overlay_entries > 0);
+    assert_eq!(
+        report.multi_statement_transaction.index_runtime_path,
+        "transaction_workspace"
+    );
+    assert_eq!(
+        report.multi_statement_transaction.row_runtime_path,
+        "canonical_memory"
+    );
+    assert!(report.multi_statement_transaction.rejected_statement_atomic);
+    assert_eq!(
+        report
+            .multi_statement_transaction
+            .canonical_fallback_lookups,
+        0
+    );
+    assert!(
+        report
+            .multi_statement_transaction
+            .transaction_workspace_lookups
+            > 0
+    );
+    assert_eq!(
+        report.multi_statement_transaction.page_output_rows,
+        report.final_message_count
+    );
+    assert_eq!(report.multi_statement_transaction.summary_item_count, 7);
+    assert!(report.multi_statement_transaction.summary_size_bytes > 0);
+    assert!(
+        report.multi_statement_transaction.committed_epoch
+            > report.live_overlay_read.execution.visible_commit_epoch
+    );
     assert!(report
         .cold_checkpoint_reads
         .iter()

@@ -14,6 +14,7 @@ rust_library(
         "src/content_store_row_pages/evidence.rs",
         "src/content_store_row_pages/fixture.rs",
         "src/content_store_row_pages/tests.rs",
+        "src/content_store_row_pages/transaction.rs",
         "src/lib.rs",
         "src/production_blocking.rs",
         "src/production_graph.rs",

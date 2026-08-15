@@ -219,7 +219,7 @@ pub(super) fn require_matching_results(
     Ok(())
 }
 
-fn info_field<'a>(info: &'a str, name: &str) -> Option<&'a str> {
+pub(super) fn info_field<'a>(info: &'a str, name: &str) -> Option<&'a str> {
     info.split(", ").find_map(|field| {
         let (key, value) = field.split_once('=')?;
         (key == name).then_some(value)

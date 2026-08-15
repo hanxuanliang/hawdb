@@ -8,7 +8,7 @@ use skein::{
 };
 
 pub(super) const QUALIFIED_TABLES: [&str; 2] = ["content_documents", "thread_messages"];
-const THREAD_DOCUMENT_ID: &str = "content-doc-thread-1";
+pub(super) const THREAD_DOCUMENT_ID: &str = "content-doc-thread-1";
 const THREAD_OWNER_ID: &str = "thread-1";
 const THREAD_STORAGE_ID: &str = "thread-storage-1";
 
@@ -133,7 +133,11 @@ fn thread_document_parameters() -> Vec<Value> {
     ]
 }
 
-fn thread_message_parameters(position: usize, payload_bytes: usize, phase: &str) -> Vec<Value> {
+pub(super) fn thread_message_parameters(
+    position: usize,
+    payload_bytes: usize,
+    phase: &str,
+) -> Vec<Value> {
     let content_message_id = format!("content-message-{position:08}");
     vec![
         Value::String(content_message_id.clone()),
