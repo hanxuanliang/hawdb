@@ -175,6 +175,10 @@ crash; read-only recovery remains fail closed.
     detected memory profile, all relevant query/cache budgets, warm-read
     percentiles, steady/peak RSS, page faults, WAL bytes, new immutable
     generation bytes, and a clearly labelled durable-write lower bound. A
+    unified storage residency snapshot now reports the current relational row,
+    overflow, index, recovery-delta, and live-overlay layers without scanning
+    candidate files, so the future production-copy runner can prove that the
+    selected relational artifacts exceed cache and remain epoch-aligned. A
     regular in-process run does not certify an OS-enforced 512 MiB limit: retain
     the isolated constrained-profile run and production-copy measurements as
     separate evidence gates.

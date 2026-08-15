@@ -979,6 +979,65 @@ pub struct StorageResidencyReport {
     pub segment_cache_admission_rejection_count: u64,
     pub segment_cache_digest_mismatch_count: u64,
     pub graph_index_reads: GraphIndexReadMetricsSnapshot,
+    pub relational_rows: RelationalRowStorageResidencyReport,
+    pub relational_indexes: RelationalIndexStorageResidencyReport,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RelationalRowStorageResidencyReport {
+    pub serving: bool,
+    pub base_generation: Option<u64>,
+    pub recovery_delta_generation: Option<u64>,
+    pub base_commit_epoch: Option<u64>,
+    pub visible_commit_epoch: Option<u64>,
+    pub root_page_count: u64,
+    pub page_artifact_bytes: u64,
+    pub root_descriptor_artifact_bytes: u64,
+    pub root_key_artifact_bytes: u64,
+    pub overflow_extent_count: u64,
+    pub overflow_extent_artifact_bytes: u64,
+    pub overflow_descriptor_artifact_bytes: u64,
+    pub recovery_delta_runs: usize,
+    pub recovery_delta_entries: u64,
+    pub recovery_delta_artifact_bytes: u64,
+    pub live_batches: usize,
+    pub live_entries: usize,
+    pub live_encoded_bytes: usize,
+    pub live_resident_bytes: usize,
+}
+
+impl RelationalRowStorageResidencyReport {
+    pub fn canonical_artifact_bytes(&self) -> u64 {
+        self.page_artifact_bytes
+            .saturating_add(self.root_descriptor_artifact_bytes)
+            .saturating_add(self.root_key_artifact_bytes)
+            .saturating_add(self.overflow_extent_artifact_bytes)
+            .saturating_add(self.overflow_descriptor_artifact_bytes)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RelationalIndexStorageResidencyReport {
+    pub serving: bool,
+    pub base_generation: Option<u64>,
+    pub recovery_delta_generation: Option<u64>,
+    pub base_commit_epoch: Option<u64>,
+    pub visible_commit_epoch: Option<u64>,
+    pub root_count: usize,
+    pub base_page_count: u64,
+    pub base_artifact_bytes: u64,
+    pub recovery_delta_pages: usize,
+    pub recovery_delta_entries: usize,
+    pub recovery_delta_artifact_bytes: u64,
+    pub live_batches: usize,
+    pub live_entries: usize,
+    pub live_encoded_bytes: usize,
+}
+
+impl RelationalIndexStorageResidencyReport {
+    pub fn canonical_artifact_bytes(&self) -> u64 {
+        self.base_artifact_bytes
+    }
 }
 
 pub struct GraphNodeIterator {

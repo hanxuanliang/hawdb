@@ -19,7 +19,7 @@ pub use constraint_qualification::{
 };
 pub(crate) use transaction::RelationalTransactionIndexView;
 
-use super::{GraphStore, SkeinError};
+use super::{GraphStore, RelationalIndexStorageResidencyReport, SkeinError};
 use skein_integrity::{integrity_digest, IntegrityHasher, Sha256Digest};
 use skein_storage::{
     relational_index_shadow_artifact_file, relational_index_shadow_manifest_generation_file,
@@ -371,6 +371,32 @@ impl RelationalIndexReadView {
 
     fn live_encoded_bytes(&self) -> usize {
         self.live.encoded_bytes
+    }
+
+    fn residency_report(&self) -> RelationalIndexStorageResidencyReport {
+        let identity = self.identity();
+        let (base, recovery) = match &self.backend {
+            RelationalIndexReadBackend::Base(reader) => (reader.manifest(), None),
+            RelationalIndexReadBackend::Recovered(reader) => {
+                (reader.base_manifest(), Some(reader.manifest()))
+            }
+        };
+        RelationalIndexStorageResidencyReport {
+            serving: true,
+            base_generation: Some(identity.base_generation),
+            recovery_delta_generation: identity.delta_generation,
+            base_commit_epoch: Some(identity.base_commit_epoch),
+            visible_commit_epoch: Some(identity.visible_commit_epoch),
+            root_count: base.roots.len(),
+            base_page_count: base.page_count,
+            base_artifact_bytes: base.page_bytes.saturating_mul(base.page_count),
+            recovery_delta_pages: recovery.map_or(0, |manifest| manifest.delta_pages()),
+            recovery_delta_entries: recovery.map_or(0, |manifest| manifest.delta_entries()),
+            recovery_delta_artifact_bytes: recovery.map_or(0, |manifest| manifest.artifact_bytes()),
+            live_batches: self.live_batch_count(),
+            live_entries: self.live_entry_count(),
+            live_encoded_bytes: self.live_encoded_bytes(),
+        }
     }
 
     fn visit_exact_postings(
@@ -903,6 +929,16 @@ impl RelationalIndexShadowState {
         self.read_view
             .as_ref()
             .filter(|view| view.identity().visible_commit_epoch == commit_epoch)
+    }
+
+    pub(super) fn residency_report(
+        &self,
+        commit_epoch: u64,
+    ) -> RelationalIndexStorageResidencyReport {
+        self.current_read_view(commit_epoch)
+            .map_or_else(RelationalIndexStorageResidencyReport::default, |view| {
+                view.residency_report()
+            })
     }
 
     fn selected_read_failure(&self) -> Option<RelationalIndexShadowError> {

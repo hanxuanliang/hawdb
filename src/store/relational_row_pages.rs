@@ -1,6 +1,6 @@
 //! Shadow recovery state for canonical relational row-page roots.
 
-use super::GraphStore;
+use super::{GraphStore, RelationalRowStorageResidencyReport};
 use skein_storage::{
     RelationalOverflowRootReader, RelationalRowChangeCapture, RelationalRowChangeCaptureLimits,
     RelationalRowDeltaBuilder, RelationalRowDeltaConfig, RelationalRowDeltaError,
@@ -92,6 +92,43 @@ impl RelationalRowPageState {
         self.read_view
             .as_ref()
             .filter(|view| view.identity().visible_commit_epoch == commit_epoch)
+    }
+
+    pub(super) fn residency_report(
+        &self,
+        commit_epoch: u64,
+    ) -> RelationalRowStorageResidencyReport {
+        let Some(view) = self.current_read_view(commit_epoch) else {
+            return RelationalRowStorageResidencyReport::default();
+        };
+        let Some(resources) = self.serving_resources.as_ref() else {
+            return RelationalRowStorageResidencyReport::default();
+        };
+        let identity = view.identity();
+        let base = view.base().manifest();
+        let overflow = resources.base_overflow.manifest();
+        let recovery = view.recovery_delta().map(|delta| delta.manifest());
+        RelationalRowStorageResidencyReport {
+            serving: true,
+            base_generation: Some(identity.base_generation),
+            recovery_delta_generation: identity.delta_generation,
+            base_commit_epoch: Some(identity.base_commit_epoch),
+            visible_commit_epoch: Some(identity.visible_commit_epoch),
+            root_page_count: base.root_page_count,
+            page_artifact_bytes: base.page_artifact.encoded_len,
+            root_descriptor_artifact_bytes: base.root_descriptor_artifact.encoded_len,
+            root_key_artifact_bytes: base.root_key_artifact.encoded_len,
+            overflow_extent_count: overflow.extent_count,
+            overflow_extent_artifact_bytes: overflow.extent_artifact.encoded_len,
+            overflow_descriptor_artifact_bytes: overflow.descriptor_artifact.encoded_len,
+            recovery_delta_runs: recovery.map_or(0, |manifest| manifest.run_count()),
+            recovery_delta_entries: recovery.map_or(0, |manifest| manifest.total_entries()),
+            recovery_delta_artifact_bytes: recovery.map_or(0, |manifest| manifest.artifact_bytes()),
+            live_batches: view.live_batch_count(),
+            live_entries: view.live_entry_count(),
+            live_encoded_bytes: view.live_encoded_bytes(),
+            live_resident_bytes: view.live_resident_bytes(),
+        }
     }
 
     pub(super) fn snapshot_at_epoch(&self, commit_epoch: u64) -> Self {

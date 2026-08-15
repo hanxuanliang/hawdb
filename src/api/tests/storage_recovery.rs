@@ -1594,6 +1594,139 @@ fn canonical_row_overflow_backup_reopen_and_reclaim_follow_physical_closure() {
 }
 
 #[test]
+fn relational_storage_residency_tracks_checkpoint_live_and_recovery_views() {
+    let path = unique_test_dir("relational_storage_residency");
+    let bootstrap_config = DatabaseConfig {
+        relational_index_mode: skein_storage::RelationalIndexMode::Shadow,
+        storage_residency_mode: StorageResidencyMode::OutOfCore,
+        segment_cache_capacity_bytes: 64 * 1024,
+        ..DatabaseConfig::default()
+    };
+    let body = "x".repeat(8 * 1024);
+    let mut db = Database::open_with_config(&path, bootstrap_config.clone()).unwrap();
+    db.query_sql("CREATE TABLE public.documents (id BIGINT PRIMARY KEY, body TEXT NOT NULL)")
+        .unwrap();
+    db.query_sql_with_params(
+        "INSERT INTO public.documents (id, body) VALUES ($1, $2)",
+        &[Value::Int(1), Value::String(body)],
+    )
+    .unwrap();
+    db.query("CREATE (:Memory {id: 'residency-probe'})")
+        .unwrap();
+    db.checkpoint().unwrap();
+    drop(db);
+
+    let config = DatabaseConfig {
+        relational_index_mode: skein_storage::RelationalIndexMode::Authoritative,
+        ..bootstrap_config
+    };
+    let mut db = Database::open_with_config(&path, config.clone()).unwrap();
+
+    let checkpoint = db.storage_residency_report();
+    assert!(checkpoint.relational_rows.serving);
+    assert!(checkpoint.relational_rows.base_generation.is_some());
+    assert_eq!(
+        checkpoint.relational_rows.base_generation,
+        checkpoint.relational_indexes.base_generation
+    );
+    assert_eq!(
+        checkpoint.relational_rows.visible_commit_epoch,
+        checkpoint.relational_indexes.visible_commit_epoch
+    );
+    assert!(checkpoint.relational_rows.root_page_count > 0);
+    assert!(checkpoint.relational_rows.canonical_artifact_bytes() > 0);
+    assert!(checkpoint.relational_rows.overflow_extent_count > 0);
+    assert!(checkpoint.relational_rows.overflow_extent_artifact_bytes > 0);
+    assert!(checkpoint.relational_indexes.serving);
+    assert!(checkpoint.relational_indexes.root_count > 0);
+    assert!(checkpoint.relational_indexes.base_artifact_bytes > 0);
+    assert_eq!(checkpoint.relational_rows.live_entries, 0);
+    assert_eq!(checkpoint.relational_indexes.live_entries, 0);
+    let profile = db
+        .storage_resource_profile(
+            "MATCH (m:Memory) RETURN m.id AS memory_id LIMIT 1",
+            &BTreeMap::new(),
+            crate::StorageResourceProfileLimits {
+                min_canonical_artifact_bytes: 1,
+                max_steady_resident_bytes: u64::MAX,
+                max_peak_resident_bytes: u64::MAX,
+                max_total_page_faults: None,
+                max_minor_page_faults: None,
+                max_major_page_faults: None,
+                max_intermediate_rows: 16,
+                max_intermediate_payload_bytes: 1024,
+                max_output_rows: 1,
+                max_output_payload_bytes: 1024,
+                require_fully_streamed: true,
+            },
+        )
+        .unwrap();
+    let profile = profile.json();
+    assert_eq!(profile["storage"]["relational_rows"]["serving"], true);
+    assert_eq!(
+        profile["storage"]["relational_rows"]["canonical_artifact_bytes"],
+        checkpoint.relational_rows.canonical_artifact_bytes()
+    );
+    assert_eq!(profile["storage"]["relational_indexes"]["serving"], true);
+    assert_eq!(
+        profile["storage"]["relational_indexes"]["canonical_artifact_bytes"],
+        checkpoint.relational_indexes.canonical_artifact_bytes()
+    );
+
+    db.query_sql("INSERT INTO public.documents (id, body) VALUES (2, 'live')")
+        .unwrap();
+    let live = db.storage_residency_report();
+    assert_eq!(
+        live.relational_rows.visible_commit_epoch,
+        Some(db.commit_epoch())
+    );
+    assert_eq!(
+        live.relational_indexes.visible_commit_epoch,
+        Some(db.commit_epoch())
+    );
+    assert!(live.relational_rows.live_batches > 0);
+    assert!(live.relational_rows.live_entries > 0);
+    assert!(live.relational_rows.live_encoded_bytes > 0);
+    assert!(live.relational_rows.live_resident_bytes > 0);
+    assert!(live.relational_indexes.live_batches > 0);
+    assert!(live.relational_indexes.live_entries > 0);
+    assert!(live.relational_indexes.live_encoded_bytes > 0);
+    drop(db);
+
+    let reopened = Database::open_with_config(&path, config).unwrap();
+    let recovered = reopened.storage_residency_report();
+    assert!(recovered.relational_rows.serving);
+    assert!(recovered
+        .relational_rows
+        .recovery_delta_generation
+        .is_some());
+    assert!(recovered.relational_rows.recovery_delta_runs > 0);
+    assert!(recovered.relational_rows.recovery_delta_entries > 0);
+    assert!(recovered.relational_rows.recovery_delta_artifact_bytes > 0);
+    assert_eq!(recovered.relational_rows.live_entries, 0);
+    assert!(recovered.relational_indexes.serving);
+    assert!(recovered
+        .relational_indexes
+        .recovery_delta_generation
+        .is_some());
+    assert!(recovered.relational_indexes.recovery_delta_pages > 0);
+    assert!(recovered.relational_indexes.recovery_delta_entries > 0);
+    assert!(recovered.relational_indexes.recovery_delta_artifact_bytes > 0);
+    assert_eq!(
+        recovered.relational_indexes.canonical_artifact_bytes(),
+        recovered.relational_indexes.base_artifact_bytes
+    );
+    assert_eq!(recovered.relational_indexes.live_entries, 0);
+    assert_eq!(
+        recovered.relational_rows.visible_commit_epoch,
+        recovered.relational_indexes.visible_commit_epoch
+    );
+    drop(reopened);
+
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn mem_shaped_graph_mutations_recover_across_checkpoint_and_wal() {
     let path = unique_test_dir("mem_shaped_recovery");
     let live_snapshot = {

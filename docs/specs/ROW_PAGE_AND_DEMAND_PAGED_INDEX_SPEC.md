@@ -1572,6 +1572,19 @@ Performance and resource evidence records separately:
 - page reads, bytes, cache hits, evictions, resident bytes, and pinned bytes;
 - dirty and WAL bytes, spill bytes, page faults, and write amplification.
 
+`StorageResidencyReport` MUST expose relational rows and indexes independently
+from graph residency. Each relational report is derived from the currently
+pinned serving view rather than a directory scan: it records the base and
+recovery generations, base and visible epochs, immutable artifact bytes, and
+bounded live-overlay counts and bytes. Row residency additionally records root
+descriptors, root keys, overflow extents, and conservative live resident bytes;
+index residency records roots, base pages, and immutable recovery-delta pages.
+If no read view is current at the database epoch, `serving` MUST be false and
+the report MUST NOT manufacture a generation from stale files. Production-copy
+qualification uses these fields to prove that the selected relational
+artifacts exceed the shared cache while recovery and live overlays remain
+bounded.
+
 The 512 MiB profile is a supported low-memory capability profile, not a
 universal process limit or a production activation cutoff. Its evidence names
 the bounded workload and proves admission and eviction keep that workload

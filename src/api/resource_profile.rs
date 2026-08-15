@@ -161,6 +161,10 @@ impl StorageResourceProfileReport {
                     .segment_cache_digest_mismatch_count
                     .saturating_sub(self.before.segment_cache_digest_mismatch_count),
                 "persistent_graph_index_reads": graph_index_reads_json,
+                "relational_rows": relational_row_residency_json(&self.after.relational_rows),
+                "relational_indexes": relational_index_residency_json(
+                    &self.after.relational_indexes,
+                ),
                 "estimated_delta_resident_bytes": self.after.estimated_delta_resident_bytes,
                 "max_out_of_core_delta_bytes": self.after.max_out_of_core_delta_bytes,
                 "delta_within_budget": self.after.delta_within_budget,
@@ -223,6 +227,55 @@ impl StorageResourceProfileReport {
         blockers.dedup();
         blockers
     }
+}
+
+fn relational_row_residency_json(
+    report: &crate::store::RelationalRowStorageResidencyReport,
+) -> serde_json::Value {
+    serde_json::json!({
+        "serving": report.serving,
+        "base_generation": report.base_generation,
+        "recovery_delta_generation": report.recovery_delta_generation,
+        "base_commit_epoch": report.base_commit_epoch,
+        "visible_commit_epoch": report.visible_commit_epoch,
+        "root_page_count": report.root_page_count,
+        "page_artifact_bytes": report.page_artifact_bytes,
+        "root_descriptor_artifact_bytes": report.root_descriptor_artifact_bytes,
+        "root_key_artifact_bytes": report.root_key_artifact_bytes,
+        "overflow_extent_count": report.overflow_extent_count,
+        "overflow_extent_artifact_bytes": report.overflow_extent_artifact_bytes,
+        "overflow_descriptor_artifact_bytes": report.overflow_descriptor_artifact_bytes,
+        "canonical_artifact_bytes": report.canonical_artifact_bytes(),
+        "recovery_delta_runs": report.recovery_delta_runs,
+        "recovery_delta_entries": report.recovery_delta_entries,
+        "recovery_delta_artifact_bytes": report.recovery_delta_artifact_bytes,
+        "live_batches": report.live_batches,
+        "live_entries": report.live_entries,
+        "live_encoded_bytes": report.live_encoded_bytes,
+        "live_resident_bytes": report.live_resident_bytes,
+    })
+}
+
+fn relational_index_residency_json(
+    report: &crate::store::RelationalIndexStorageResidencyReport,
+) -> serde_json::Value {
+    serde_json::json!({
+        "serving": report.serving,
+        "base_generation": report.base_generation,
+        "recovery_delta_generation": report.recovery_delta_generation,
+        "base_commit_epoch": report.base_commit_epoch,
+        "visible_commit_epoch": report.visible_commit_epoch,
+        "root_count": report.root_count,
+        "base_page_count": report.base_page_count,
+        "base_artifact_bytes": report.base_artifact_bytes,
+        "recovery_delta_pages": report.recovery_delta_pages,
+        "recovery_delta_entries": report.recovery_delta_entries,
+        "recovery_delta_artifact_bytes": report.recovery_delta_artifact_bytes,
+        "canonical_artifact_bytes": report.canonical_artifact_bytes(),
+        "live_batches": report.live_batches,
+        "live_entries": report.live_entries,
+        "live_encoded_bytes": report.live_encoded_bytes,
+    })
 }
 
 fn graph_index_reads_json(reads: crate::store::GraphIndexReadMetricsSnapshot) -> serde_json::Value {

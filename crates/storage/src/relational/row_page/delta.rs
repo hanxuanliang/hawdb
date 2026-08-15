@@ -140,6 +140,12 @@ impl RelationalRowDeltaManifest {
     pub const fn total_entries(&self) -> u64 {
         self.total_entries
     }
+
+    pub fn artifact_bytes(&self) -> u64 {
+        self.runs
+            .iter()
+            .fold(0u64, |bytes, run| bytes.saturating_add(run.encoded_len))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

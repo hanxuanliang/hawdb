@@ -113,6 +113,12 @@ impl RelationalIndexRecoveryManifest {
             .sum()
     }
 
+    pub fn artifact_bytes(&self) -> u64 {
+        self.pages
+            .iter()
+            .fold(0u64, |bytes, page| bytes.saturating_add(page.encoded_len))
+    }
+
     fn encode(
         &self,
         config: RelationalIndexRecoveryConfig,

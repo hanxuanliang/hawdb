@@ -211,6 +211,13 @@ search memory budget. The report MUST record steady RSS, peak RSS, page faults,
 intermediate rows, payload bytes, cache residency, spill bytes, spill runs, and
 operator-specific peak tracked memory.
 
+Relational production evidence MUST read canonical row and index residency from
+the exact pinned serving view. It MUST bind row and index base generations and
+visible epochs, record row, overflow, index, recovery-delta, and live-overlay
+bytes independently, and reject a non-serving view. Directory size and the
+presence of candidate files are not proof that a current relational generation
+is selectable.
+
 Every query result path MUST have explicit row and payload limits. Every
 blocking operator MUST do one of the following before exceeding its admitted
 memory:

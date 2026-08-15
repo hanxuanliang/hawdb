@@ -719,6 +719,12 @@ impl GraphStore {
             segment_cache_admission_rejection_count: cache.admission_rejection_count,
             segment_cache_digest_mismatch_count: cache.digest_mismatch_count,
             graph_index_reads: self.graph_index_read_metrics.snapshot(),
+            relational_rows: self
+                .relational_row_pages
+                .residency_report(self.commit_epoch),
+            relational_indexes: self
+                .relational_index_shadow
+                .residency_report(self.commit_epoch),
         }
     }
 
