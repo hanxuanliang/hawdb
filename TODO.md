@@ -132,6 +132,11 @@ crash; read-only recovery remains fail closed.
     in one epoch, matching previews move, a stale preview remains unchanged,
     and non-ownership payloads survive live reads and checkpoint/reopen. Other
     `partial` callers remain blocked on independent evidence.
+    The `patch_moved_space_ownership` caller now composes selected Threads and
+    Sources in one guarded mixed transaction, reports exact document/message
+    changes, proves stale selection remains unchanged, and retains payload and
+    ordered-read identity through checkpoint/reopen. The remaining
+    write/reconcile/delete callers stay blocked on their own gates.
   - Require checkpoint/reopen, WAL replay, corruption, cancellation, and
     locking evidence before enabling the path by default. Prove that a declared
     bounded workload runs within the supported 512 MiB low-memory profile, but

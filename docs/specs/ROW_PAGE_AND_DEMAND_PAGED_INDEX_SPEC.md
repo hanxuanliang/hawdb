@@ -1372,6 +1372,12 @@ checkpoint binding, demand-read, lifecycle, or serving obligations.
   read-your-own-writes, two successful moves out of three requested moves,
   payload preservation, live overlay visibility, and checkpoint/reopen
   identity. `SkeinContentThreadOwnershipMove.tla` models the guarded batch.
+  Space-merge ownership qualification then selects those Threads together with
+  a Source under one source-space guard. Eligible graph owners, relational
+  documents, messages, and Source chunk views publish at one epoch; the stale
+  Thread remains unchanged. Non-ownership payloads and ordered output remain
+  identical after checkpoint/reopen.
+  `SkeinContentSpaceMergeOwnership.tla` models this cross-kind batch.
 - `SkeinRowRecovery.tla`: checkpoint-correlated row-root mount, exact ordered
   primary-key WAL overlay, graph-only epoch advancement, whole-fragment
   admission, fail-closed invalidation, complete-prefix view publication, cold

@@ -6,6 +6,7 @@ mod isolation;
 mod resource;
 mod source_ownership;
 mod source_replacement;
+mod space_merge_ownership;
 #[cfg(test)]
 mod tests;
 mod thread_ownership;
@@ -31,6 +32,7 @@ use serde::Serialize;
 use skein::{Database, DurabilityPolicy, RelationalIndexMode, Result, SkeinError};
 use source_ownership::qualify_source_ownership_move;
 use source_replacement::qualify_source_chunk_replacement;
+use space_merge_ownership::qualify_space_merge_ownership;
 use std::path::PathBuf;
 use thread_ownership::qualify_thread_ownership_moves;
 use transaction::qualify_multi_statement_transaction;
@@ -266,6 +268,7 @@ pub struct ContentStoreInitialRowPageQualificationReport {
     pub source_chunk_replacement: ContentStoreSourceReplacementQualificationReport,
     pub source_ownership_move: ContentStoreSourceOwnershipMoveQualificationReport,
     pub thread_ownership_move: ContentStoreThreadOwnershipMoveQualificationReport,
+    pub space_merge_ownership: ContentStoreSpaceMergeOwnershipQualificationReport,
     pub multi_statement_transaction: ContentStoreTransactionQualificationReport,
     pub resources: ContentStoreResourceEvidence,
     pub corruption: ContentStoreCorruptionQualificationReport,
@@ -349,6 +352,32 @@ pub struct ContentStoreThreadOwnershipMoveQualificationReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ContentStoreThreadOwnershipReadReport {
+    pub case_name: String,
+    pub expected_space_id: String,
+    pub read: ContentStoreRowPageReadReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContentStoreSpaceMergeOwnershipQualificationReport {
+    pub requested_threads: usize,
+    pub requested_sources: usize,
+    pub documents_updated: usize,
+    pub messages_updated: usize,
+    pub stale_guard_preserved: bool,
+    pub graph_relational_agreement: bool,
+    pub payload_fields_preserved: bool,
+    pub base_epoch: u64,
+    pub committed_epoch: u64,
+    pub payload_sha256_before: String,
+    pub payload_sha256_after_live: String,
+    pub payload_sha256_after_reopen: String,
+    pub live_reads: Vec<ContentStoreSpaceMergeReadReport>,
+    pub checkpoint_generation: u64,
+    pub reopened_reads: Vec<ContentStoreSpaceMergeReadReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContentStoreSpaceMergeReadReport {
     pub case_name: String,
     pub expected_space_id: String,
     pub read: ContentStoreRowPageReadReport,
@@ -672,6 +701,13 @@ pub fn run_content_store_initial_row_page_qualification(
         &corpus,
     )?;
     database = ownership_database;
+    let (space_merge_database, space_merge_ownership) = qualify_space_merge_ownership(
+        database,
+        &config.database_path,
+        &authoritative_config,
+        &corpus,
+    )?;
+    database = space_merge_database;
     let isolation = qualify_content_store_isolation(
         database,
         &corpus,
@@ -712,6 +748,7 @@ pub fn run_content_store_initial_row_page_qualification(
         source_chunk_replacement,
         source_ownership_move,
         thread_ownership_move,
+        space_merge_ownership,
         multi_statement_transaction,
         resources,
         corruption,

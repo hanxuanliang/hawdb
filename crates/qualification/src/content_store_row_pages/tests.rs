@@ -22,7 +22,7 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
 
     assert!(report.ready);
     assert_eq!(report.qualified_tables, QUALIFIED_TABLES);
-    assert_eq!(report.corpus.partial_caller_count, 5);
+    assert_eq!(report.corpus.partial_caller_count, 4);
     assert_eq!(report.final_message_count, 7);
     assert_eq!(report.base_chunk_count, 5);
     assert_eq!(report.final_chunk_count, 2);
@@ -265,6 +265,57 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
     assert_eq!(
         report.thread_ownership_move.payload_sha256_before,
         report.thread_ownership_move.payload_sha256_after_reopen
+    );
+    assert_eq!(report.space_merge_ownership.requested_threads, 3);
+    assert_eq!(report.space_merge_ownership.requested_sources, 1);
+    assert_eq!(report.space_merge_ownership.documents_updated, 3);
+    assert_eq!(report.space_merge_ownership.messages_updated, 2);
+    assert!(report.space_merge_ownership.stale_guard_preserved);
+    assert!(report.space_merge_ownership.graph_relational_agreement);
+    assert!(report.space_merge_ownership.payload_fields_preserved);
+    assert_eq!(report.space_merge_ownership.live_reads.len(), 4);
+    assert_eq!(report.space_merge_ownership.reopened_reads.len(), 4);
+    assert!(report
+        .space_merge_ownership
+        .live_reads
+        .iter()
+        .all(|case| case.read.execution.visible_commit_epoch
+            == report.space_merge_ownership.committed_epoch));
+    assert!(report
+        .space_merge_ownership
+        .live_reads
+        .iter()
+        .filter(|case| case.case_name != "thread_stale_preview")
+        .all(|case| case.read.execution.overlay_entries > 0));
+    assert!(report
+        .space_merge_ownership
+        .live_reads
+        .iter()
+        .zip(&report.space_merge_ownership.reopened_reads)
+        .all(|(live, reopened)| live.case_name == reopened.case_name
+            && live.expected_space_id == reopened.expected_space_id
+            && live.read.output_sha256 == reopened.read.output_sha256));
+    assert_eq!(
+        report.space_merge_ownership.payload_sha256_before,
+        report.space_merge_ownership.payload_sha256_after_live
+    );
+    assert_eq!(
+        report.space_merge_ownership.payload_sha256_before,
+        report.space_merge_ownership.payload_sha256_after_reopen
+    );
+    assert_eq!(
+        report
+            .space_merge_ownership
+            .live_reads
+            .iter()
+            .map(|case| (case.case_name.as_str(), case.expected_space_id.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("thread_matched_default", "merged"),
+            ("thread_matched_archive", "merged"),
+            ("thread_stale_preview", "stale-current"),
+            ("source", "merged"),
+        ]
     );
     assert_eq!(
         report.multi_statement_transaction.index_runtime_path,

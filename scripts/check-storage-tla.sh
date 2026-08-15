@@ -15,6 +15,7 @@ readonly specifications=(
   SkeinConcurrentSnapshots
   SkeinTransactionConcurrency
   SkeinCowPagePublication
+  SkeinContentSpaceMergeOwnership
   SkeinContentSourceOwnershipMove
   SkeinContentSourceReplacement
   SkeinContentThreadOwnershipMove

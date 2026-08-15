@@ -236,6 +236,22 @@ and three commit epochs, TLC explores 31 distinct states while checking guarded
 workspace derivation, graph/document/message agreement, stale-preview
 preservation, payload preservation, and durable-before-visible publication.
 
+## Content Space Merge Ownership
+
+`SkeinContentSpaceMergeOwnership.tla` models the cross-kind ownership batch
+used by a Space merge. The selected set contains a Thread, a Source, and a
+stale Thread selection. Graph ownership, relational document ownership, and
+the dependent message or chunk read lane are staged per owner under one shared
+source-space guard. The canonical state changes only after the complete mixed
+batch is durable.
+
+The eligible Thread and Source move from `source` to `target`; the stale owner
+remains in `stale-current`. Payload identity is invariant through arbitrary
+owner staging order, rollback, durable publication, and crash recovery. With
+three owners and three commit epochs, TLC explores 31 distinct states while
+checking cross-kind ownership agreement, guard behavior, stale-selection
+preservation, payload preservation, and durable-before-visible publication.
+
 ## Relational Overflow Publication
 
 `SkeinOverflowPublication.tla` models the generation-bound overflow root used
@@ -643,6 +659,7 @@ They are implementation evidence, not a machine-checked refinement proof.
 | A Source chunk write deletes the previous set, inserts exactly the requested ordered set, updates graph and document counts in the same mixed transaction, preserves the accepted workspace after duplicate-order rejection, supports an empty replacement, and survives checkpoint/reopen without a stale suffix | frozen `upsert_source_chunks` statement group, `GraphMutationTransaction`, `DatabaseTransactionState`, `qualify_source_chunk_replacement` | `initial_content_store_tables_are_qualified_through_canonical_row_pages`, `source_chunk_replacement_is_bound_to_mixed_transaction_evidence`, `SkeinContentSourceReplacement.tla` |
 | A Source ownership move publishes graph and relational workspace identity at one epoch, preserves chunk count and payload identity, exposes read-your-own-writes, survives checkpoint/reopen, and leaves a missing owner and commit epoch unchanged | frozen `update_source_document_space` and `source_chunk_count_by_source` statements, `GraphMutationTransaction`, `DatabaseTransactionState`, `qualify_source_ownership_move` | `initial_content_store_tables_are_qualified_through_canonical_row_pages`, `source_ownership_move_is_bound_to_mixed_transaction_evidence`, `SkeinContentSourceOwnershipMove.tla` |
 | A guarded Thread ownership batch can move entries from different source spaces while publishing each graph Thread, relational document, and message set together, preserving a stale preview and every non-ownership payload field across restart | frozen `update_owned_document_space_guarded` and `update_thread_messages_space_guarded` statements, `GraphMutationTransaction`, `DatabaseTransactionState`, `qualify_thread_ownership_moves` | `initial_content_store_tables_are_qualified_through_canonical_row_pages`, `thread_ownership_move_is_bound_to_guarded_batch_evidence`, `SkeinContentThreadOwnershipMove.tla` |
+| A Space merge publishes eligible graph Thread and Source owners, relational documents, messages, and Source chunk views through one guarded durable batch while a stale selected owner remains unchanged | frozen `update_owned_document_space_guarded` and `update_thread_messages_space_guarded` statements, `GraphMutationTransaction`, `DatabaseTransactionState`, `qualify_space_merge_ownership` | `initial_content_store_tables_are_qualified_through_canonical_row_pages`, `space_merge_ownership_is_bound_to_cross_owner_evidence`, `SkeinContentSpaceMergeOwnership.tla` |
 | A column-group catalog publishes artifacts and changed table directories before one generation-CAS manifest; reopen ignores orphan candidates and fails closed on referenced corruption | `ColumnGroupTableDirectory::write_immutable`, `ColumnGroupManifest::{publish,open}`, `PublishedColumnGroupCatalog::scrub_artifacts` | `publishes_reopens_and_reuses_untouched_table_directory`, `stale_publishers_are_serialized_and_one_fails_closed`, `orphan_candidate_is_ignored_and_corrupt_published_metadata_fails_closed`, `deep_scrub_detects_payload_corruption_not_read_by_reopen` |
 | The columnar shadow never influences canonical recovery or checkpoint success; recovery discards a corrupt shadow and rebuilds all-dirty after an epoch gap; a shadow failure preserves dirty state and later converges. Codec body-size symmetry and pre-allocation metadata accounting are finite byte contracts outside the publication model and are checked directly at the Rust refinement boundary. | `GraphStore::{mount_columnar_shadow_for_recovery, record_columnar_shadow_checkpoint}`, `column_group::encoding::{finish_chunk,decompress_body}`, `ShadowMetadataBudget` | `restart_validates_the_shadow_and_replayed_mutations_mark_dirty_tables`, `shadow_publish_failure_never_fails_the_canonical_checkpoint_and_retries`, `shadow_reconstruction_matches_canonical_scan_and_reuses_untouched_tables`, `writer_and_reader_enforce_the_same_chunk_body_limit`, `metadata_budget_rejects_new_schema_before_allocating_or_publishing`, `metadata_budget_is_charged_before_dictionary_serialization` |
 | System schema objects and migration identities publish atomically; invalid, future, read-only, failed-DDL, and crash-recovered states never return a usable partially upgraded handle | `Database::apply_system_schema_registry`, `execute_database_transaction_sql`, `GraphStore::commit_mutation_transaction_and_relational` | `application_system_schema_upgrades_and_reopens_idempotently`, `application_system_schema_upgrade_crash_recovers_a_consistent_registry_and_schema`, `application_system_schema_rejects_changed_applied_migration`, `application_system_schema_rejects_a_database_from_a_newer_binary`, `failed_application_system_schema_upgrade_does_not_publish_version`, `read_only_database_rejects_pending_application_system_schema_upgrade` |

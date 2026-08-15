@@ -75,6 +75,26 @@ const THREAD_MOVES: [ThreadMoveFixture; 3] = [
     },
 ];
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct QualifiedThreadOwnershipIdentity {
+    pub(super) case_name: &'static str,
+    pub(super) thread_id: &'static str,
+    pub(super) storage_id: &'static str,
+    pub(super) current_space_id: &'static str,
+    pub(super) current_updated_at: &'static str,
+}
+
+pub(super) fn qualified_thread_ownership_identities(
+) -> [QualifiedThreadOwnershipIdentity; THREAD_MOVES.len()] {
+    THREAD_MOVES.map(|fixture| QualifiedThreadOwnershipIdentity {
+        case_name: fixture.case_name,
+        thread_id: fixture.thread_id,
+        storage_id: fixture.storage_id,
+        current_space_id: fixture.expected_final_space_id,
+        current_updated_at: fixture.expected_updated_at,
+    })
+}
+
 pub(super) fn qualify_thread_ownership_moves(
     mut database: Database,
     database_path: &Path,

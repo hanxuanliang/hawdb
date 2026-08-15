@@ -6,6 +6,7 @@ _STORAGE_MODELS = [
     "SkeinColumnGroupManifest",
     "SkeinColumnarShadowIntegration",
     "SkeinCompactionVisibility",
+    "SkeinContentSpaceMergeOwnership",
     "SkeinContentSourceOwnershipMove",
     "SkeinContentSourceReplacement",
     "SkeinContentThreadOwnershipMove",

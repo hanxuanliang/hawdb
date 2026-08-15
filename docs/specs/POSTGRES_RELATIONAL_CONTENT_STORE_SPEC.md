@@ -332,6 +332,16 @@ MUST retain the same digest through live visibility and checkpoint/reopen.
 `SkeinContentThreadOwnershipMove.tla` models guarded per-owner staging and the
 single durable batch publication.
 
+`patch_moved_space_ownership` extends the same guard to one Space merge that
+selects both Thread and Source owners. Every eligible graph owner, relational
+document, thread-message set, and Source chunk view MUST publish at one commit
+epoch. A selected Thread that no longer belongs to the previewed source space
+remains unchanged while the eligible Threads and Source publish through the
+live overlay. The typed evidence records expected space per case,
+the exact document/message update counts, payload digests, and identical
+checkpoint/reopen reads. `SkeinContentSpaceMergeOwnership.tla` proves the
+cross-kind durable batch rather than inferring it from two independent moves.
+
 This gate deliberately covers the selected storage lifecycle, transaction,
 locking, cancellation, injected corruption, and synthetic resource evidence;
 it does not claim complete Content Store cutover. Callers still marked
