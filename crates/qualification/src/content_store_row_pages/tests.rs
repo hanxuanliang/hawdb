@@ -61,6 +61,21 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
         report.multi_statement_transaction.committed_epoch
             > report.live_overlay_read.execution.visible_commit_epoch
     );
+    assert!(report.isolation.cancellation_non_poisoning);
+    assert_eq!(report.isolation.cancellation_pinned_bytes_after, 0);
+    assert!(report.isolation.waiter_timed_out);
+    assert!(report.isolation.waiter_aborted);
+    assert!(report.isolation.owner_rollback_preserved_row);
+    assert_eq!(
+        report.isolation.commit_epoch_before,
+        report.isolation.commit_epoch_after
+    );
+    assert_eq!(
+        report.isolation.content_message_id,
+        report
+            .multi_statement_transaction
+            .inserted_content_message_id
+    );
     assert!(report
         .cold_checkpoint_reads
         .iter()

@@ -1315,7 +1315,11 @@ checkpoint binding, demand-read, lifecycle, or serving obligations.
   read-your-own-writes, rollback, and durable-before-visible publication. The
   concrete Content Store qualification composes multiple SQL statements and
   verifies ordered merge, transaction-workspace routing, and failure atomicity;
-  entry/byte exhaustion remains a focused Rust refinement obligation.
+  entry/byte exhaustion remains a focused Rust refinement obligation. The same
+  qualification propagates cancellation through a pinned Content Store point
+  read, proves zero leaked page pins and later-reader usability, and exercises a
+  `FOR UPDATE` point lock against a same-key UPSERT with bounded timeout,
+  aborted-waiter, rollback, unchanged-row, and unchanged-epoch evidence.
 - `SkeinRowRecovery.tla`: checkpoint-correlated row-root mount, exact ordered
   primary-key WAL overlay, graph-only epoch advancement, whole-fragment
   admission, fail-closed invalidation, complete-prefix view publication, cold

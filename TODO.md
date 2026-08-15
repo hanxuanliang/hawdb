@@ -128,9 +128,12 @@ crash; read-only recovery remains fail closed.
     executes a Content Store-shaped message UPSERT, page read, rejected foreign
     key statement, payload aggregate, and document-summary update as one group,
     and proves transaction-workspace routing plus atomic publication. Remaining
-    first-table evidence is injected corruption, cancellation, pessimistic
-    locking, plus measured latency, RSS, page faults, and write amplification.
-    Then extend the same contract to `content_chunks` and `content_anchors`.
+    The same runner now proves a cancelled Content Store point read is
+    non-poisoning and pin-clean, and that `FOR UPDATE` makes a same-key UPSERT
+    time out and abort without changing the row or commit epoch. Remaining
+    first-table evidence is injected corruption plus measured latency, RSS,
+    page faults, and write amplification. Then extend the same contract to
+    `content_chunks` and `content_anchors`.
   - Because no storage format has shipped, activation is destructive: remove
     the ordinary materialized row selector instead of retaining a compatibility
     or rollback path. Keep the differential oracle in qualification code only.

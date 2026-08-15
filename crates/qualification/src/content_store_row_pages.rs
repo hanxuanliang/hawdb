@@ -1,5 +1,6 @@
 mod evidence;
 mod fixture;
+mod isolation;
 #[cfg(test)]
 mod tests;
 mod transaction;
@@ -13,6 +14,7 @@ use fixture::{
     bootstrap_checkpoint, corpus_statement, database_config, initial_read_specs,
     thread_page_parameters, upsert_thread_message, QUALIFIED_TABLES,
 };
+use isolation::qualify_content_store_isolation;
 use serde::Serialize;
 use skein::{Database, DurabilityPolicy, RelationalIndexMode, Result, SkeinError};
 use std::path::PathBuf;
@@ -167,6 +169,7 @@ pub struct ContentStoreInitialRowPageQualificationReport {
     pub wal_recovery_read: ContentStoreRowPageReadReport,
     pub live_overlay_read: ContentStoreRowPageReadReport,
     pub multi_statement_transaction: ContentStoreTransactionQualificationReport,
+    pub isolation: ContentStoreIsolationQualificationReport,
     pub ready: bool,
 }
 
@@ -183,6 +186,22 @@ pub struct ContentStoreTransactionQualificationReport {
     pub canonical_fallback_lookups: u64,
     pub rejected_statement_atomic: bool,
     pub committed_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContentStoreIsolationQualificationReport {
+    pub content_message_id: String,
+    pub point_max_rows: usize,
+    pub point_max_payload_bytes: usize,
+    pub row_sha256: String,
+    pub cancellation_non_poisoning: bool,
+    pub cancellation_pinned_bytes_after: u64,
+    pub waiter_lock_timeout_micros: u64,
+    pub waiter_timed_out: bool,
+    pub waiter_aborted: bool,
+    pub owner_rollback_preserved_row: bool,
+    pub commit_epoch_before: u64,
+    pub commit_epoch_after: u64,
 }
 
 impl ContentStoreInitialRowPageQualificationReport {
@@ -284,6 +303,12 @@ pub fn run_content_store_initial_row_page_qualification(
         config.base_message_count + 2,
         config.message_payload_bytes,
     )?;
+    let isolation = qualify_content_store_isolation(
+        database,
+        &corpus,
+        config.base_message_count + 2,
+        config.message_payload_bytes,
+    )?;
 
     Ok(ContentStoreInitialRowPageQualificationReport {
         protocol: CONTENT_STORE_INITIAL_ROW_PAGE_QUALIFICATION_PROTOCOL.to_string(),
@@ -307,6 +332,7 @@ pub fn run_content_store_initial_row_page_qualification(
         wal_recovery_read,
         live_overlay_read,
         multi_statement_transaction,
+        isolation,
         ready: true,
     })
 }
