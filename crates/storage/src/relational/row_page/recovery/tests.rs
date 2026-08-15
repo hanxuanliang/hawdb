@@ -261,7 +261,7 @@ fn schema_change_and_overflow_reference_invalidate_row_recovery() {
     .unwrap();
     let overflow = crate::relational::RelationalOverflowRef {
         scalar_type: RelationalScalarType::Text,
-        digest: integrity_digest(b"overflow").sha256.to_string(),
+        digest: integrity_digest(b"overflow").sha256,
         compressed_bytes: 8,
         uncompressed_bytes: 8,
     };

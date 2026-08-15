@@ -723,8 +723,8 @@ fn hash_relational_value(hasher: &mut IntegrityHasher, value: &RelationalValue) 
         RelationalValue::Overflow(reference) => {
             hasher.update(&[6, relational_scalar_type_tag(reference.scalar_type)]);
             hash_bounded_bytes(hasher, reference.digest.as_bytes());
-            hasher.update(&(reference.compressed_bytes as u64).to_le_bytes());
-            hasher.update(&(reference.uncompressed_bytes as u64).to_le_bytes());
+            hasher.update(&reference.compressed_bytes.to_le_bytes());
+            hasher.update(&reference.uncompressed_bytes.to_le_bytes());
         }
     }
 }

@@ -373,14 +373,26 @@ It does not decode any other row in the page. Full decode is the symmetric
 validation path used by tests, scrub, and tooling.
 
 Inline values use fixed tags plus bounded length prefixes. An overflow value
-stores the existing logical descriptor as `(scalar type, compressed length,
-uncompressed length, SHA-256 digest)`. The digest is the immutable location
-identity; a publication-generation overflow manifest resolves it to a physical
-extent, so page bytes do not embed a stale file offset. Overflow descriptors
-are valid only for `TEXT` and `BYTEA`. Unknown tags, invalid UTF-8, invalid
-ordered keys, impossible lengths, non-canonical digests supplied to the
-encoder, checksum mismatches, non-zero fixed-slot tails, and trailing bytes
-fail closed.
+stores the logical descriptor as `(scalar type, u64 compressed length, u64
+uncompressed length, 32-byte SHA-256 digest)`. Runtime state uses the same
+fixed-width digest and lengths; it does not allocate a hexadecimal digest
+string per row reference. The digest is the immutable location identity; a
+publication-generation overflow manifest resolves it to a physical extent, so
+page bytes do not embed a stale file offset.
+
+This is the only version-1 overflow representation. Skein has not shipped a
+prior durable format, so readers MUST NOT recognize or migrate a legacy
+string-digest encoding.
+
+The shared `SKOVFL01` envelope begins with a fixed 32-byte header containing the
+codec, scalar type, zero flags, both lengths, and the decoded CRC32C. Its
+content SHA-256 is carried by the logical descriptor. Encoding admits the
+uncompressed value before compression. Decoding verifies the exact header,
+zero flags, descriptor binding, physical length, output length, CRC32C, and
+hydration budget before publishing either the value or charged counters.
+Overflow descriptors are valid only for `TEXT` and `BYTEA`. Unknown tags,
+invalid UTF-8, invalid ordered keys, impossible lengths, descriptor or checksum
+mismatches, non-zero fixed-slot tails, and trailing bytes fail closed.
 
 The default codec envelope is one MiB and 256 rows, matching the current COW
 row-page split target. It separately limits columns, key bytes, row bytes,

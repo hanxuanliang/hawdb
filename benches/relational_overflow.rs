@@ -92,7 +92,11 @@ fn measure(payload_bytes: usize, shape: PayloadShape, mode: StorageMode) -> serd
         "storage_mode": mode.name(),
         "compressed_bytes": compressed_bytes,
         "overflow_codec": compressed_bytes.map(|bytes| {
-            if bytes == payload_bytes { "raw" } else { "zstd" }
+            if bytes == u64::try_from(payload_bytes).expect("payload length fits u64") {
+                "raw"
+            } else {
+                "zstd"
+            }
         }),
         "compression_ratio": compressed_bytes.map(|bytes| bytes as f64 / payload_bytes as f64),
         "write_ns_p50": percentile(&write_samples, 50),

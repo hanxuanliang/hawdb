@@ -7,7 +7,7 @@ fn page_id(value: u64) -> RelationalRowPageId {
 
 fn overflow_reference() -> RelationalOverflowRef {
     RelationalOverflowRef {
-        digest: integrity_digest(b"overflow payload").sha256.to_string(),
+        digest: integrity_digest(b"overflow payload").sha256,
         scalar_type: RelationalScalarType::Text,
         compressed_bytes: 120,
         uncompressed_bytes: 4096,
@@ -270,8 +270,8 @@ fn requested_field_contract_is_bounded_and_unambiguous() {
 #[test]
 fn overflow_descriptor_validation_is_symmetric() {
     let limits = RelationalRowPageLimits::default();
-    let mut invalid_digest = page();
-    invalid_digest.rows[0].row = RelationalRow::new(vec![
+    let mut invalid_length = page();
+    invalid_length.rows[0].row = RelationalRow::new(vec![
         RelationalValue::BigInt(1),
         RelationalValue::Text("first".to_string()),
         RelationalValue::Boolean(true),
@@ -279,14 +279,14 @@ fn overflow_descriptor_validation_is_symmetric() {
         RelationalValue::Bytea(vec![]),
         RelationalValue::Null,
         RelationalValue::Overflow(RelationalOverflowRef {
-            digest: "not-a-digest".to_string(),
+            compressed_bytes: 0,
             ..overflow_reference()
         }),
     ]);
     assert!(matches!(
-        invalid_digest.encode(limits),
+        invalid_length.encode(limits),
         Err(RelationalRowPageError::Admission(message))
-            if message.contains("canonical SHA-256")
+            if message.contains("compressed")
     ));
 
     let mut invalid_type = page();

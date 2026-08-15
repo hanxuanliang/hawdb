@@ -2016,7 +2016,7 @@ fn encode_locator_value(value: &RelationalValue) -> Value {
             Value::Map(BTreeMap::from([
                 (
                     "digest".to_string(),
-                    Value::String(reference.digest.clone()),
+                    Value::String(reference.digest.to_string()),
                 ),
                 (
                     "scalar_type".to_string(),
@@ -2033,11 +2033,11 @@ fn encode_locator_value(value: &RelationalValue) -> Value {
                 ),
                 (
                     "compressed_bytes".to_string(),
-                    Value::Int(reference.compressed_bytes as i64),
+                    Value::Int(i64::try_from(reference.compressed_bytes).unwrap_or(i64::MAX)),
                 ),
                 (
                     "uncompressed_bytes".to_string(),
-                    Value::Int(reference.uncompressed_bytes as i64),
+                    Value::Int(i64::try_from(reference.uncompressed_bytes).unwrap_or(i64::MAX)),
                 ),
             ])),
         ),

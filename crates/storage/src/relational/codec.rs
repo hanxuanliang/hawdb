@@ -12,7 +12,7 @@ use crate::{
     ContentDigest, FileSegmentRangeReader, SegmentReadRange, DEFAULT_MAX_CHECKPOINT_ENCODED_BYTES,
     DEFAULT_MAX_WAL_RECORD_BYTES,
 };
-use skein_integrity::{integrity_digest, IntegrityHasher, SHA256_BYTES};
+use skein_integrity::{integrity_digest, IntegrityHasher, Sha256Digest, SHA256_BYTES};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
@@ -178,13 +178,13 @@ pub fn encode_relational_checkpoint_to_writer<W: Write + Seek>(
     payload.write_all(&overflow_count.finish())?;
     for (digest, envelope) in &state.overflow_segments {
         let envelope = envelope.read()?;
-        if integrity_digest(envelope.as_ref()).sha256.to_string() != *digest {
+        if integrity_digest(envelope.as_ref()).sha256 != *digest {
             return Err(RelationalError::Corruption(format!(
                 "relational checkpoint overflow segment {digest} has an invalid digest"
             )));
         }
         let mut metadata = Encoder::default();
-        metadata.string(digest)?;
+        metadata.sha256(*digest);
         metadata.u64(u64::try_from(envelope.len()).map_err(|_| {
             RelationalError::Admission("overflow envelope length does not fit u64".to_string())
         })?);
@@ -352,9 +352,9 @@ fn decode_relational_checkpoint_from_decoder<I: DecodeInput>(
     let overflow_count =
         decoder.count(limits.max_overflow_segments, "checkpoint overflow segments")?;
     for ordinal in 0..overflow_count {
-        let digest = decoder.string()?;
+        let digest = decoder.sha256()?;
         let overflow = decoder.overflow_segment()?;
-        if overflow.digest.sha256.to_string() != digest {
+        if overflow.digest.sha256 != digest {
             return Err(RelationalError::Corruption(format!(
                 "checkpoint overflow segment {digest} has an invalid digest"
             )));
@@ -398,11 +398,7 @@ fn decode_relational_checkpoint_from_decoder<I: DecodeInput>(
                 }
             }
         };
-        if state
-            .overflow_segments
-            .insert(digest.clone(), segment)
-            .is_some()
-        {
+        if state.overflow_segments.insert(digest, segment).is_some() {
             return Err(RelationalError::Corruption(format!(
                 "checkpoint contains duplicate overflow segment {digest}"
             )));
@@ -431,7 +427,7 @@ fn validate_checkpoint_overflow_reachability(
         .flat_map(|segment| segment.rows.values())
         .flat_map(|row| row.values())
         .filter_map(|value| match value {
-            RelationalValue::Overflow(reference) => Some(reference.digest.as_str()),
+            RelationalValue::Overflow(reference) => Some(&reference.digest),
             _ => None,
         })
         .collect::<BTreeSet<_>>();
@@ -607,6 +603,10 @@ impl Encoder {
         self.bytes.extend_from_slice(&value.to_le_bytes());
     }
 
+    fn sha256(&mut self, digest: Sha256Digest) {
+        self.bytes.extend_from_slice(digest.as_bytes());
+    }
+
     fn string(&mut self, value: &str) -> Result<(), RelationalError> {
         self.bytes(value.as_bytes())
     }
@@ -663,10 +663,10 @@ impl Encoder {
             }
             RelationalValue::Overflow(reference) => {
                 self.u8(6);
-                self.string(&reference.digest)?;
+                self.sha256(reference.digest);
                 self.scalar_type(reference.scalar_type);
-                self.u64(reference.compressed_bytes as u64);
-                self.u64(reference.uncompressed_bytes as u64);
+                self.u64(reference.compressed_bytes);
+                self.u64(reference.uncompressed_bytes);
             }
         }
         Ok(())
@@ -1137,6 +1137,10 @@ impl<I: DecodeInput> Decoder<I> {
         Ok(u64::from_le_bytes(self.fixed()?))
     }
 
+    fn sha256(&mut self) -> Result<Sha256Digest, RelationalError> {
+        Ok(Sha256Digest::from_bytes(self.fixed()?))
+    }
+
     fn count(&mut self, max: usize, context: &str) -> Result<usize, RelationalError> {
         let count = self.u32()? as usize;
         if count > max {
@@ -1264,19 +1268,22 @@ impl<I: DecodeInput> Decoder<I> {
                 Ok(RelationalValue::Bytea(bytes))
             }
             6 => {
-                let digest = self.string()?;
+                let digest = self.sha256()?;
                 let scalar_type = self.scalar_type()?;
-                let compressed_bytes = usize::try_from(self.u64()?).map_err(|_| {
-                    RelationalError::Corruption("overflow compressed length overflows usize".into())
-                })?;
-                let uncompressed_bytes = usize::try_from(self.u64()?).map_err(|_| {
-                    RelationalError::Corruption(
-                        "overflow uncompressed length overflows usize".into(),
+                let compressed_bytes = self.u64()?;
+                let uncompressed_bytes = self.u64()?;
+                let max_value_bytes = u64::try_from(self.limits.max_value_bytes).map_err(|_| {
+                    RelationalError::Admission(
+                        "relational value limit does not fit u64".to_string(),
                     )
                 })?;
-                if uncompressed_bytes > self.limits.max_value_bytes {
+                if uncompressed_bytes == 0
+                    || compressed_bytes == 0
+                    || uncompressed_bytes > max_value_bytes
+                    || compressed_bytes > max_value_bytes
+                {
                     return Err(RelationalError::Admission(format!(
-                        "overflow reference contains {uncompressed_bytes} decoded bytes, exceeding limit {}",
+                        "overflow reference contains {compressed_bytes} compressed and {uncompressed_bytes} decoded bytes, outside limit {}",
                         self.limits.max_value_bytes
                     )));
                 }

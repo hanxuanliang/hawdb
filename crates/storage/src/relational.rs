@@ -2,6 +2,7 @@ use crate::{
     FileSegmentRangeReader, SegmentRangeReader, SegmentReadRange, SnapshotCommitError,
     SnapshotCoordinator, SnapshotReadGuard,
 };
+use skein_integrity::Sha256Digest;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -897,7 +898,7 @@ impl<'a> RelationalIndexPosting<'a> {
 pub struct RelationalState {
     schemas: BTreeMap<String, Arc<RelationalTableSchema>>,
     segments: BTreeMap<String, Arc<RelationalTableSegment>>,
-    overflow_segments: BTreeMap<String, RelationalOverflowSegment>,
+    overflow_segments: BTreeMap<Sha256Digest, RelationalOverflowSegment>,
     materialized_index_postings_resident: bool,
 }
 

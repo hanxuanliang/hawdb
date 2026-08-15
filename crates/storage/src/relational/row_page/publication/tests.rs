@@ -294,7 +294,7 @@ fn overflow_and_overlap_are_rejected_without_selecting_a_root() {
     overflow_page.rows[0].row = RelationalRow::new(vec![
         RelationalValue::BigInt(1),
         RelationalValue::Overflow(RelationalOverflowRef {
-            digest: integrity_digest(b"overflow").sha256.to_string(),
+            digest: integrity_digest(b"overflow").sha256,
             scalar_type: RelationalScalarType::Text,
             compressed_bytes: 8,
             uncompressed_bytes: 16,

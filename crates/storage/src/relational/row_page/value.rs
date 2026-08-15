@@ -86,21 +86,11 @@ fn encode_value(
         }
         RelationalValue::Overflow(reference) => {
             validate_overflow_shape(reference, limits, ErrorClass::Admission)?;
-            let digest: Sha256Digest = reference.digest.parse().map_err(|error| {
-                RelationalRowPageError::Admission(format!(
-                    "overflow digest is not canonical SHA-256: {error}"
-                ))
-            })?;
             encoded.push(6);
             encoded.push(scalar_type_tag(reference.scalar_type));
-            encoded.extend_from_slice(
-                &u64_len(reference.compressed_bytes, "overflow compressed length")?.to_le_bytes(),
-            );
-            encoded.extend_from_slice(
-                &u64_len(reference.uncompressed_bytes, "overflow uncompressed length")?
-                    .to_le_bytes(),
-            );
-            encoded.extend_from_slice(digest.as_bytes());
+            encoded.extend_from_slice(&reference.compressed_bytes.to_le_bytes());
+            encoded.extend_from_slice(&reference.uncompressed_bytes.to_le_bytes());
+            encoded.extend_from_slice(reference.digest.as_bytes());
         }
     }
     Ok(())
@@ -224,17 +214,10 @@ fn validate_value(
                     encoded[18..50]
                         .try_into()
                         .expect("overflow digest has a fixed length"),
-                )
-                .to_string(),
+                ),
                 scalar_type,
-                compressed_bytes: usize_from_u64(
-                    read_u64(&encoded[2..10]),
-                    "overflow compressed length",
-                )?,
-                uncompressed_bytes: usize_from_u64(
-                    read_u64(&encoded[10..18]),
-                    "overflow uncompressed length",
-                )?,
+                compressed_bytes: read_u64(&encoded[2..10]),
+                uncompressed_bytes: read_u64(&encoded[10..18]),
             };
             validate_overflow_shape(&reference, limits, ErrorClass::Corrupt)
         }
@@ -274,17 +257,10 @@ fn decode_validated_value(encoded: &[u8]) -> Result<RelationalValue, RelationalR
                 encoded[18..50]
                     .try_into()
                     .expect("overflow digest has a fixed length"),
-            )
-            .to_string(),
+            ),
             scalar_type: scalar_type_from_tag(encoded[1])?,
-            compressed_bytes: usize_from_u64(
-                read_u64(&encoded[2..10]),
-                "overflow compressed length",
-            )?,
-            uncompressed_bytes: usize_from_u64(
-                read_u64(&encoded[10..18]),
-                "overflow uncompressed length",
-            )?,
+            compressed_bytes: read_u64(&encoded[2..10]),
+            uncompressed_bytes: read_u64(&encoded[10..18]),
         })),
         _ => unreachable!("validated row value tag"),
     }
@@ -339,13 +315,21 @@ fn validate_overflow_shape(
             "overflow descriptor has a non-payload scalar type".to_string(),
         ));
     }
-    if reference.compressed_bytes > limits.max_value_bytes.get()
-        || reference.uncompressed_bytes > limits.max_value_bytes.get()
+    let max_value_bytes = u64::try_from(limits.max_value_bytes.get()).map_err(|_| {
+        classify(
+            error_class,
+            "row-page value limit does not fit u64".to_string(),
+        )
+    })?;
+    if reference.compressed_bytes == 0
+        || reference.uncompressed_bytes == 0
+        || reference.compressed_bytes > max_value_bytes
+        || reference.uncompressed_bytes > max_value_bytes
     {
         return Err(classify(
             error_class,
             format!(
-                "overflow descriptor contains {} compressed and {} uncompressed bytes, exceeding value limit {}",
+                "overflow descriptor contains {} compressed and {} uncompressed bytes, outside admitted range 1..={}",
                 reference.compressed_bytes,
                 reference.uncompressed_bytes,
                 limits.max_value_bytes
