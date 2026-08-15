@@ -616,10 +616,29 @@ until `finish` succeeds and MUST discard the candidate after any callback or
 encoding error. A bootstrap instance fails closed after its first error and
 cannot be resumed.
 
-This planner remains non-serving. Checkpoint bootstrap currently publishes a
-complete bounded row snapshot rather than using this incremental mutation
-plan. Activating dirty-only COW checkpoint construction and SQL row selection
-remain separate steps.
+The canonical checkpoint path activates this planner without making it a SQL
+serving API. Before publishing a candidate it opens the exact row root selected
+by the current outer checkpoint and compares generation, source epoch, and root
+digest with the pinned read-view identity. A present but mismatched view fails
+closed; it never silently falls back to a rebuild from a different base.
+
+For an exact view, checkpoint capture traverses the immutable recovery-delta
+runs and live DML batches to collect only distinct `(table, primary key)`
+identities changed after the base epoch. Repeated keys coalesce before row
+materialization. Final rows or tombstones are then resolved once from the
+current canonical `RelationalState`, ordered by table and primary key, and fed
+to `RelationalRowPageMutationPlanner`. The transient key set, encoded capture,
+and conservative simultaneous resident peak share the existing 100,000-entry
+and 64 MiB envelope. An admission, traversal-integrity, or base-identity error
+rejects checkpoint preparation without publishing a partial candidate.
+
+Only the first row root or an explicitly unavailable view, including a schema
+replacement, uses the bounded streaming full-row bootstrap. Ordinary DML
+rewrites only affected leaves. A graph-only checkpoint produces no relational
+table deltas and copies the complete base root by descriptor, so it writes zero
+new row-page slots. Clean descriptors retain their immutable physical
+generation and slot even while the new logical root is bound to the new outer
+checkpoint and overflow root.
 `SkeinRowPageMutation.tla` covers persistent allocator
 monotonicity, split identity, deletion without reuse, one-leaf point mutation,
 pinned-base immutability, and bounded streaming bootstrap.
@@ -690,9 +709,12 @@ pinned snapshots retain their prior immutable view. Writable transaction
 workspaces continue to read the materialized staged state, so
 read-your-own-writes never consults a lagging read view.
 
-This view remains diagnostic and differential evidence only for SQL and
-constraints. Checkpoint authority, backup, restore, scrub, orphan cleanup, and
-generation reclamation now select and preserve the exact bound base roots.
+This view remains non-serving for SQL and constraints, but its exact recovery
+and live change identities now drive bounded canonical checkpoint mutation
+planning. The final row values still come from the current canonical
+`RelationalState`; the view cannot become an independent row authority.
+Checkpoint publication, backup, restore, scrub, orphan cleanup, and generation
+reclamation select and preserve the exact bound base roots.
 Reclamation computes the physical row-page and overflow-extent closure of the
 current and immediately previous roots before deleting older metadata. The
 disk-backed view is the sole unreleased v1 recovery design.

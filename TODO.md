@@ -96,16 +96,8 @@ remaining work below makes those derived foundations canonical without allowing
 a stale index or a database-sized resident set to become a correctness
 dependency.
 
-- [ ] Activate incremental COW row-root checkpoint construction and portable
-  lifecycle evidence.
-  - Canonical checkpoints now bind exact row and overflow generations; open,
-    backup, restore, scrub, orphan cleanup, and reclamation preserve their
-    cross-generation physical closure.
-  - Replace the bounded full-row bootstrap used by each checkpoint with
-    dirty-page mutation plans so unchanged row pages retain their physical
-    slots and checkpoint memory remains proportional to the admitted dirty set.
-  - Add Windows rename, reopen, backup, and reclaim fault-injection coverage for
-    the exact canonical-root path.
+- [ ] Add Windows rename, reopen, backup, and reclaim fault-injection coverage
+  for the exact canonical row/overflow-root path.
 
 - [ ] Demand-page relational rows and large values.
   - Support primary-key point reads, admitted ordered pages, and bounded range

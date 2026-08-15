@@ -14,7 +14,11 @@ use crate::relational::{
     RelationalRowChangeCapture, RelationalRowChangeCaptureLimits, RelationalValue,
 };
 use skein_integrity::Sha256Digest;
-use std::{fmt, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    sync::Arc,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelationalRowPageReadViewIdentity {
@@ -51,6 +55,36 @@ impl fmt::Display for RelationalRowPageLiveError {
 }
 
 impl std::error::Error for RelationalRowPageLiveError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelationalRowPageCheckpointError {
+    Admission(String),
+    Corrupt(String),
+    Durability(String),
+}
+
+impl fmt::Display for RelationalRowPageCheckpointError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Admission(message) => write!(
+                formatter,
+                "relational row checkpoint admission failed: {message}"
+            ),
+            Self::Corrupt(message) => {
+                write!(
+                    formatter,
+                    "corrupt relational row checkpoint view: {message}"
+                )
+            }
+            Self::Durability(message) => write!(
+                formatter,
+                "relational row checkpoint durability failed: {message}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RelationalRowPageCheckpointError {}
 
 struct RelationalRowPageLiveBatch {
     commit_epoch: u64,
@@ -336,6 +370,291 @@ impl RelationalRowPageReadView {
     pub fn latest_live_commit_epoch(&self) -> Option<u64> {
         self.live.head.as_ref().map(|batch| batch.commit_epoch)
     }
+
+    /// Coalesces the keys changed since the pinned base into one bounded,
+    /// strictly ordered capture whose row values come from the caller's
+    /// current canonical state.
+    ///
+    /// Recovery runs and live batches may contain repeated versions of one
+    /// key. Only the final key is retained, and `current_row` is invoked once
+    /// per distinct key after the complete key set has been admitted. The
+    /// transient ordered set plus the returned capture share one conservative
+    /// byte envelope so checkpoint planning cannot build an unbounded merge
+    /// structure before dirty-page admission.
+    pub fn checkpoint_capture(
+        &self,
+        mut current_row: impl FnMut(&str, &RelationalKey) -> Option<crate::relational::RelationalRow>,
+        limits: RelationalRowChangeCaptureLimits,
+    ) -> Result<RelationalRowChangeCapture, RelationalRowPageCheckpointError> {
+        let mut keys = CheckpointChangeKeys::new(limits);
+        if let Some(delta) = self.recovery_delta.as_deref() {
+            let mut collection_error = None;
+            let report = delta
+                .visit_entries(
+                    |table, primary_key, _, _| match keys.insert(table, primary_key) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            collection_error = Some(error);
+                            false
+                        }
+                    },
+                )
+                .map_err(map_delta_checkpoint_error)?;
+            if let Some(error) = collection_error {
+                return Err(error);
+            }
+            if report.stopped_early {
+                return Err(RelationalRowPageCheckpointError::Corrupt(
+                    "recovery-delta traversal stopped without an admission error".to_string(),
+                ));
+            }
+        }
+
+        let live_floor = self
+            .recovery_delta
+            .as_ref()
+            .map_or(self.identity.base_commit_epoch, |delta| {
+                delta.manifest().visible_commit_epoch
+            });
+        let mut newer_live_epoch = None;
+        let mut batch = self.live.head.as_deref();
+        while let Some(current) = batch {
+            if current.commit_epoch <= live_floor
+                || current.commit_epoch > self.identity.visible_commit_epoch
+                || newer_live_epoch.is_some_and(|newer| current.commit_epoch >= newer)
+            {
+                return Err(RelationalRowPageCheckpointError::Corrupt(format!(
+                    "live batch epoch {} is outside the ordered range ({live_floor}, {}]",
+                    current.commit_epoch, self.identity.visible_commit_epoch
+                )));
+            }
+            for change in current.changes.iter() {
+                keys.insert(&change.table, &change.primary_key)?;
+            }
+            newer_live_epoch = Some(current.commit_epoch);
+            batch = current.previous.as_deref();
+        }
+
+        keys.into_capture(&mut current_row)
+    }
+}
+
+struct CheckpointChangeKeys {
+    tables: BTreeMap<String, BTreeSet<RelationalKey>>,
+    entry_count: usize,
+    resident_bytes: usize,
+    limits: RelationalRowChangeCaptureLimits,
+}
+
+impl CheckpointChangeKeys {
+    fn new(limits: RelationalRowChangeCaptureLimits) -> Self {
+        Self {
+            tables: BTreeMap::new(),
+            entry_count: 0,
+            resident_bytes: 0,
+            limits,
+        }
+    }
+
+    fn insert(
+        &mut self,
+        table: &str,
+        primary_key: &RelationalKey,
+    ) -> Result<(), RelationalRowPageCheckpointError> {
+        if self
+            .tables
+            .get(table)
+            .is_some_and(|keys| keys.contains(primary_key))
+        {
+            return Ok(());
+        }
+        let next_entries = self.entry_count.checked_add(1).ok_or_else(|| {
+            RelationalRowPageCheckpointError::Admission(
+                "checkpoint change entry accounting overflow".to_string(),
+            )
+        })?;
+        if next_entries > self.limits.max_entries.get() {
+            return Err(RelationalRowPageCheckpointError::Admission(format!(
+                "checkpoint change set contains {next_entries} distinct keys, exceeding limit {}",
+                self.limits.max_entries
+            )));
+        }
+        let table_bytes = if self.tables.contains_key(table) {
+            0
+        } else {
+            std::mem::size_of::<String>()
+                .checked_add(4 * std::mem::size_of::<usize>())
+                .and_then(|bytes| bytes.checked_add(table.len()))
+                .ok_or_else(|| {
+                    RelationalRowPageCheckpointError::Admission(
+                        "checkpoint table allocation accounting overflow".to_string(),
+                    )
+                })?
+        };
+        let key_bytes = relational_key_resident_bytes(primary_key).ok_or_else(|| {
+            RelationalRowPageCheckpointError::Admission(
+                "checkpoint change key accounting overflow".to_string(),
+            )
+        })?;
+        let next_resident_bytes = self
+            .resident_bytes
+            .checked_add(table_bytes)
+            .and_then(|bytes| bytes.checked_add(key_bytes))
+            .ok_or_else(|| {
+                RelationalRowPageCheckpointError::Admission(
+                    "checkpoint change resident-byte accounting overflow".to_string(),
+                )
+            })?;
+        if next_resident_bytes > self.limits.max_bytes.get() {
+            return Err(RelationalRowPageCheckpointError::Admission(format!(
+                "checkpoint change key set retains {next_resident_bytes} bytes, exceeding limit {}",
+                self.limits.max_bytes
+            )));
+        }
+        self.tables
+            .entry(table.to_string())
+            .or_default()
+            .insert(primary_key.clone());
+        self.entry_count = next_entries;
+        self.resident_bytes = next_resident_bytes;
+        Ok(())
+    }
+
+    fn into_capture(
+        self,
+        current_row: &mut impl FnMut(&str, &RelationalKey) -> Option<crate::relational::RelationalRow>,
+    ) -> Result<RelationalRowChangeCapture, RelationalRowPageCheckpointError> {
+        let capture_vector_bytes = self
+            .entry_count
+            .checked_mul(std::mem::size_of::<RelationalRowChange>())
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Vec<RelationalRowChange>>()))
+            .ok_or_else(|| {
+                RelationalRowPageCheckpointError::Admission(
+                    "checkpoint capture allocation accounting overflow".to_string(),
+                )
+            })?;
+        let initial_peak = self
+            .resident_bytes
+            .checked_add(capture_vector_bytes)
+            .ok_or_else(|| {
+                RelationalRowPageCheckpointError::Admission(
+                    "checkpoint capture peak-byte accounting overflow".to_string(),
+                )
+            })?;
+        if initial_peak > self.limits.max_bytes.get() {
+            return Err(RelationalRowPageCheckpointError::Admission(format!(
+                "checkpoint capture requires {initial_peak} bytes before row resolution, exceeding limit {}",
+                self.limits.max_bytes
+            )));
+        }
+        let mut changes = Vec::with_capacity(self.entry_count);
+        let mut encoded_bytes = 0usize;
+        let mut capture_resident_bytes = capture_vector_bytes;
+        for (table, primary_keys) in self.tables {
+            for primary_key in primary_keys {
+                let change = RelationalRowChange {
+                    row: current_row(&table, &primary_key),
+                    table: table.clone(),
+                    primary_key,
+                };
+                let change_bytes =
+                    estimated_row_change_encoding_bytes(&change).ok_or_else(|| {
+                        RelationalRowPageCheckpointError::Admission(
+                            "checkpoint change encoding-byte accounting overflow".to_string(),
+                        )
+                    })?;
+                encoded_bytes = encoded_bytes.checked_add(change_bytes).ok_or_else(|| {
+                    RelationalRowPageCheckpointError::Admission(
+                        "checkpoint capture encoding-byte accounting overflow".to_string(),
+                    )
+                })?;
+                let resident_bytes = estimated_change_resident_bytes(&change)
+                    .and_then(|bytes| bytes.checked_sub(std::mem::size_of::<RelationalRowChange>()))
+                    .ok_or_else(|| {
+                        RelationalRowPageCheckpointError::Admission(
+                            "checkpoint change resident-byte accounting overflow".to_string(),
+                        )
+                    })?;
+                capture_resident_bytes = capture_resident_bytes
+                    .checked_add(resident_bytes)
+                    .ok_or_else(|| {
+                        RelationalRowPageCheckpointError::Admission(
+                            "checkpoint capture resident-byte accounting overflow".to_string(),
+                        )
+                    })?;
+                let conservative_peak = self
+                    .resident_bytes
+                    .checked_add(capture_resident_bytes)
+                    .ok_or_else(|| {
+                        RelationalRowPageCheckpointError::Admission(
+                            "checkpoint capture peak-byte accounting overflow".to_string(),
+                        )
+                    })?;
+                if encoded_bytes > self.limits.max_bytes.get()
+                    || conservative_peak > self.limits.max_bytes.get()
+                {
+                    return Err(RelationalRowPageCheckpointError::Admission(format!(
+                        "checkpoint capture uses {encoded_bytes} encoded bytes/{conservative_peak} conservative peak bytes, exceeding limit {}",
+                        self.limits.max_bytes
+                    )));
+                }
+                changes.push(change);
+            }
+        }
+        Ok(RelationalRowChangeCapture::Captured {
+            changes,
+            encoded_bytes,
+        })
+    }
+}
+
+fn relational_key_resident_bytes(primary_key: &RelationalKey) -> Option<usize> {
+    primary_key.0.iter().try_fold(
+        std::mem::size_of::<RelationalKey>()
+            .checked_add(4 * std::mem::size_of::<usize>())?
+            .checked_add(
+                primary_key
+                    .0
+                    .len()
+                    .checked_mul(std::mem::size_of::<RelationalValue>())?,
+            )?,
+        |bytes, value| bytes.checked_add(value.estimated_payload_bytes()),
+    )
+}
+
+fn estimated_change_resident_bytes(change: &RelationalRowChange) -> Option<usize> {
+    let key_bytes = change.primary_key.0.iter().try_fold(
+        change
+            .primary_key
+            .0
+            .len()
+            .checked_mul(std::mem::size_of::<RelationalValue>())?,
+        |bytes, value| bytes.checked_add(value.estimated_payload_bytes()),
+    )?;
+    let row_bytes = change.row.as_ref().map_or(Some(0), |row| {
+        row.values().iter().try_fold(
+            row.values()
+                .len()
+                .checked_mul(std::mem::size_of::<RelationalValue>())?,
+            |bytes, value| bytes.checked_add(value.estimated_payload_bytes()),
+        )
+    })?;
+    std::mem::size_of::<RelationalRowChange>()
+        .checked_add(change.table.len())?
+        .checked_add(key_bytes)?
+        .checked_add(row_bytes)
+}
+
+fn map_delta_checkpoint_error(error: RelationalRowDeltaError) -> RelationalRowPageCheckpointError {
+    match error {
+        RelationalRowDeltaError::Admission(message) => {
+            RelationalRowPageCheckpointError::Admission(message)
+        }
+        RelationalRowDeltaError::Durability(message) => {
+            RelationalRowPageCheckpointError::Durability(message)
+        }
+        error => RelationalRowPageCheckpointError::Corrupt(error.to_string()),
+    }
 }
 
 fn validate_capture_against_base(
@@ -409,53 +728,13 @@ fn validate_capture(
                 "live row capture byte accounting overflow".to_string(),
             )
         })?;
-        let key_bytes = change.primary_key.0.iter().try_fold(
-            change
-                .primary_key
-                .0
-                .len()
-                .checked_mul(std::mem::size_of::<RelationalValue>())
-                .ok_or_else(|| {
-                    RelationalRowPageLiveError::Admission(
-                        "live row key allocation accounting overflow".to_string(),
-                    )
-                })?,
-            |bytes, value| {
-                bytes
-                    .checked_add(value.estimated_payload_bytes())
-                    .ok_or_else(|| {
-                        RelationalRowPageLiveError::Admission(
-                            "live row key payload accounting overflow".to_string(),
-                        )
-                    })
-            },
-        )?;
-        let row_bytes = change.row.as_ref().map_or(Ok(0), |row| {
-            row.values().iter().try_fold(
-                row.values()
-                    .len()
-                    .checked_mul(std::mem::size_of::<RelationalValue>())
-                    .ok_or_else(|| {
-                        RelationalRowPageLiveError::Admission(
-                            "live row value allocation accounting overflow".to_string(),
-                        )
-                    })?,
-                |bytes, value| {
-                    bytes
-                        .checked_add(value.estimated_payload_bytes())
-                        .ok_or_else(|| {
-                            RelationalRowPageLiveError::Admission(
-                                "live row value payload accounting overflow".to_string(),
-                            )
-                        })
-                },
+        let change_resident_bytes = estimated_change_resident_bytes(change).ok_or_else(|| {
+            RelationalRowPageLiveError::Admission(
+                "live row resident byte accounting overflow".to_string(),
             )
         })?;
         resident_bytes = resident_bytes
-            .checked_add(std::mem::size_of::<RelationalRowChange>())
-            .and_then(|bytes| bytes.checked_add(change.table.len()))
-            .and_then(|bytes| bytes.checked_add(key_bytes))
-            .and_then(|bytes| bytes.checked_add(row_bytes))
+            .checked_add(change_resident_bytes)
             .ok_or_else(|| {
                 RelationalRowPageLiveError::Admission(
                     "live row resident byte accounting overflow".to_string(),
@@ -526,6 +805,64 @@ mod tests {
             overlay.overlay_value("documents", &key(1)),
             Some(RelationalRowPageRecoveredValue::Present(row(1, "one")))
         );
+    }
+
+    #[test]
+    fn checkpoint_key_capture_coalesces_and_orders_distinct_keys() {
+        let limits = RelationalRowChangeCaptureLimits {
+            max_entries: NonZeroUsize::new(4).unwrap(),
+            max_bytes: NonZeroUsize::new(16 * 1024).unwrap(),
+        };
+        let mut keys = CheckpointChangeKeys::new(limits);
+        keys.insert("documents", &key(2)).unwrap();
+        keys.insert("documents", &key(1)).unwrap();
+        keys.insert("documents", &key(2)).unwrap();
+
+        let mut resolutions = 0;
+        let capture = keys
+            .into_capture(&mut |_, primary_key| {
+                resolutions += 1;
+                (primary_key == &key(1)).then(|| row(1, "current"))
+            })
+            .unwrap();
+        let RelationalRowChangeCapture::Captured {
+            changes,
+            encoded_bytes,
+        } = capture
+        else {
+            panic!("checkpoint key capture must remain materialized");
+        };
+        assert_eq!(resolutions, 2);
+        assert!(encoded_bytes > 0);
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].primary_key, key(1));
+        assert_eq!(changes[0].row, Some(row(1, "current")));
+        assert_eq!(changes[1].primary_key, key(2));
+        assert_eq!(changes[1].row, None);
+    }
+
+    #[test]
+    fn checkpoint_key_capture_rejects_unbounded_transient_state() {
+        let mut entry_limited = CheckpointChangeKeys::new(RelationalRowChangeCaptureLimits {
+            max_entries: NonZeroUsize::new(1).unwrap(),
+            max_bytes: NonZeroUsize::new(16 * 1024).unwrap(),
+        });
+        entry_limited.insert("documents", &key(1)).unwrap();
+        assert!(matches!(
+            entry_limited.insert("documents", &key(2)),
+            Err(RelationalRowPageCheckpointError::Admission(reason))
+                if reason.contains("distinct keys")
+        ));
+
+        let mut byte_limited = CheckpointChangeKeys::new(RelationalRowChangeCaptureLimits {
+            max_entries: NonZeroUsize::new(1).unwrap(),
+            max_bytes: NonZeroUsize::new(1).unwrap(),
+        });
+        assert!(matches!(
+            byte_limited.insert("documents", &key(1)),
+            Err(RelationalRowPageCheckpointError::Admission(reason))
+                if reason.contains("resident-byte") || reason.contains("retains")
+        ));
     }
 
     fn capture(changes: Vec<RelationalRowChange>) -> RelationalRowChangeCapture {

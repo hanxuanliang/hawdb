@@ -168,7 +168,7 @@ BeginCommit ==
     /\ visibleEpoch < MaxEpoch
     /\ pendingPhase' = "appended"
     /\ pendingEpoch' = visibleEpoch + 1
-    /\ \E page \in Pages: pendingPage' = page
+    /\ \E page \in 0..MaxPage: pendingPage' = page
     /\ UNCHANGED <<
         walDurableEpoch,
         walDirtyByEpoch,
@@ -200,7 +200,8 @@ SyncWal ==
     /\ pendingPhase = "appended"
     /\ pendingEpoch = walDurableEpoch + 1
     /\ walDirtyByEpoch' =
-        [walDirtyByEpoch EXCEPT ![pendingEpoch] = {pendingPage}]
+        [walDirtyByEpoch EXCEPT
+            ![pendingEpoch] = IF pendingPage = 0 THEN {} ELSE {pendingPage}]
     /\ walDurableEpoch' = pendingEpoch
     /\ pendingPhase' = "durable"
     /\ UNCHANGED <<
@@ -235,7 +236,8 @@ PublishCommit ==
     /\ pendingEpoch = visibleEpoch + 1
     /\ pendingEpoch <= walDurableEpoch
     /\ visibleEpoch' = pendingEpoch
-    /\ dirtyPages' = dirtyPages \cup {pendingPage}
+    /\ dirtyPages' =
+        IF pendingPage = 0 THEN dirtyPages ELSE dirtyPages \cup {pendingPage}
     /\ pendingPhase' = "none"
     /\ pendingEpoch' = 0
     /\ pendingPage' = 0
@@ -747,10 +749,6 @@ VisibleOnlyAfterWal ==
 ManifestDoesNotLeadVisibleState ==
     manifestEpoch <= visibleEpoch
 
-WalPrefixIsComplete ==
-    \A epoch \in 1..walDurableEpoch:
-        walDirtyByEpoch[epoch] # {}
-
 DirtyOverlayMatchesVisibleWal ==
     dirtyPages = DirtyAfter(manifestEpoch, visibleEpoch)
 
@@ -804,6 +802,11 @@ CandidateRootCopiesOnlyDirtyPages ==
                 IF page \in candidateDirtyPages
                 THEN candidateGeneration
                 ELSE rootByGeneration[candidateBaseGeneration][page]
+
+EmptyDirtyCandidateReusesEntireBase ==
+    candidatePhase = "idle" \/
+        candidateDirtyPages # {} \/
+        candidateRoot = rootByGeneration[candidateBaseGeneration]
 
 DurableCandidateHasCompletePages ==
     candidatePhase \in {"pagesDurable", "rootDurable", "manifestDurable"} =>

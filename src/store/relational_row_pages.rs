@@ -4,8 +4,12 @@ use super::GraphStore;
 use skein_storage::{
     RelationalRowChangeCapture, RelationalRowChangeCaptureLimits, RelationalRowDeltaBuilder,
     RelationalRowDeltaConfig, RelationalRowDeltaError, RelationalRowDeltaReader,
-    RelationalRowDeltaReport, RelationalRowPageReadView, RelationalRowPageReadViewIdentity,
+    RelationalRowDeltaReport, RelationalRowPageMutationPlanner, RelationalRowPagePublicationConfig,
+    RelationalRowPageReadView, RelationalRowPageReadViewIdentity, RelationalRowPageRootReader,
+    RelationalRowPageTableDelta,
 };
+use std::collections::BTreeMap;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -64,6 +68,11 @@ pub(super) struct RelationalRowPageState {
     delta_config: RelationalRowDeltaConfig,
     recovery_report: Option<RelationalRowDeltaReport>,
     recovery_status: RelationalRowPageRecoveryStatus,
+}
+
+pub(super) struct RelationalRowPageCheckpointPlan {
+    pub base: Option<Arc<RelationalRowPageRootReader>>,
+    pub deltas: Vec<RelationalRowPageTableDelta>,
 }
 
 impl RelationalRowPageState {
@@ -150,6 +159,157 @@ pub(super) struct RelationalRowLiveUnavailable {
 }
 
 impl GraphStore {
+    pub(super) fn plan_relational_row_page_checkpoint(
+        &self,
+        base: Option<RelationalRowPageRootReader>,
+        generation: u64,
+        source_commit_epoch: u64,
+        config: RelationalRowPagePublicationConfig,
+    ) -> crate::error::Result<RelationalRowPageCheckpointPlan> {
+        let Some(base) = base else {
+            return self.plan_relational_row_page_rebuild(generation, source_commit_epoch, config);
+        };
+        let Some(view) = self.relational_row_pages.read_view.as_ref() else {
+            return self.plan_relational_row_page_rebuild(generation, source_commit_epoch, config);
+        };
+        let base = Arc::new(base);
+        let identity = view.identity();
+        let base_manifest = base.manifest();
+        if identity.base_generation != base_manifest.generation
+            || identity.base_commit_epoch != base_manifest.source_commit_epoch
+            || identity.root_set_digest != base_manifest.root_set_digest
+            || identity.visible_commit_epoch != source_commit_epoch
+        {
+            return Err(crate::error::SkeinError::Storage(format!(
+                "relational row checkpoint view {identity:?} does not match base {}/{}/{} at source epoch {source_commit_epoch}",
+                base_manifest.generation,
+                base_manifest.source_commit_epoch,
+                base_manifest.root_set_digest,
+            )));
+        }
+        let capture = view
+            .checkpoint_capture(
+                |table, primary_key| self.relational_state.row(table, primary_key).cloned(),
+                self.relational_row_pages.live_limits,
+            )
+            .map_err(|error| crate::error::SkeinError::Storage(error.to_string()))?;
+        let RelationalRowChangeCapture::Captured { changes, .. } = capture else {
+            return Err(crate::error::SkeinError::Storage(
+                "relational row checkpoint capture was unexpectedly invalidated".to_string(),
+            ));
+        };
+        let mut changes_by_table = BTreeMap::<String, Vec<_>>::new();
+        for change in changes {
+            changes_by_table
+                .entry(change.table.clone())
+                .or_default()
+                .push(change);
+        }
+        if changes_by_table.len() > config.max_tables.get() {
+            return Err(crate::error::SkeinError::Storage(format!(
+                "relational row checkpoint changes reference {} tables, exceeding limit {}",
+                changes_by_table.len(),
+                config.max_tables
+            )));
+        }
+        let mut deltas = Vec::with_capacity(changes_by_table.len());
+        let mut planned_dirty_pages = 0usize;
+        let mut planned_dirty_bytes = 0u64;
+        let slot_bytes = config.page_limits.max_page_bytes.get() as u64;
+        for (table, changes) in changes_by_table {
+            let remaining_pages = config
+                .max_dirty_pages
+                .get()
+                .checked_sub(planned_dirty_pages)
+                .and_then(NonZeroUsize::new)
+                .ok_or_else(|| {
+                    crate::error::SkeinError::Storage(format!(
+                        "relational row checkpoint exhausted its {} dirty-page limit before planning table {table}",
+                        config.max_dirty_pages
+                    ))
+                })?;
+            let remaining_bytes = config
+                .max_dirty_bytes
+                .get()
+                .checked_sub(planned_dirty_bytes)
+                .and_then(NonZeroU64::new)
+                .ok_or_else(|| {
+                    crate::error::SkeinError::Storage(format!(
+                        "relational row checkpoint exhausted its {} dirty-byte limit before planning table {table}",
+                        config.max_dirty_bytes
+                    ))
+                })?;
+            let planner = RelationalRowPageMutationPlanner::new(
+                Some(&base),
+                generation,
+                source_commit_epoch,
+                RelationalRowPagePublicationConfig {
+                    max_dirty_pages: remaining_pages,
+                    max_dirty_bytes: remaining_bytes,
+                    ..config
+                },
+            )
+            .map_err(|error| crate::error::SkeinError::Storage(error.to_string()))?;
+            let schema = self.relational_state.table_schema(&table).ok_or_else(|| {
+                crate::error::SkeinError::Storage(format!(
+                    "relational row checkpoint change references missing table {table}"
+                ))
+            })?;
+            let schema_digest = self
+                .relational_state
+                .table_schema_digest(&table)
+                .map_err(|error| crate::error::SkeinError::Storage(error.to_string()))?
+                .ok_or_else(|| {
+                    crate::error::SkeinError::Storage(format!(
+                        "relational row checkpoint cannot derive schema digest for {table}"
+                    ))
+                })?;
+            let plan = planner
+                .plan_table(&table, schema_digest, schema.columns.len(), changes)
+                .map_err(|error| crate::error::SkeinError::Storage(error.to_string()))?;
+            planned_dirty_pages = planned_dirty_pages
+                .checked_add(plan.dirty_pages)
+                .ok_or_else(|| {
+                    crate::error::SkeinError::Storage(
+                        "relational row checkpoint dirty-page accounting overflow".to_string(),
+                    )
+                })?;
+            let table_dirty_bytes = u64::try_from(plan.dirty_pages)
+                .ok()
+                .and_then(|pages| pages.checked_mul(slot_bytes))
+                .ok_or_else(|| {
+                    crate::error::SkeinError::Storage(
+                        "relational row checkpoint dirty-byte accounting overflow".to_string(),
+                    )
+                })?;
+            planned_dirty_bytes = planned_dirty_bytes
+                .checked_add(table_dirty_bytes)
+                .ok_or_else(|| {
+                    crate::error::SkeinError::Storage(
+                        "relational row checkpoint dirty-byte accounting overflow".to_string(),
+                    )
+                })?;
+            deltas.push(plan.delta);
+        }
+        Ok(RelationalRowPageCheckpointPlan {
+            base: Some(base),
+            deltas,
+        })
+    }
+
+    fn plan_relational_row_page_rebuild(
+        &self,
+        generation: u64,
+        source_commit_epoch: u64,
+        config: RelationalRowPagePublicationConfig,
+    ) -> crate::error::Result<RelationalRowPageCheckpointPlan> {
+        let deltas = self
+            .relational_state
+            .row_page_snapshot_deltas(generation, source_commit_epoch, config)
+            .map_err(|error| crate::error::SkeinError::Storage(error.to_string()))?;
+        Ok(RelationalRowPageCheckpointPlan { base: None, deltas })
+    }
+
     pub(super) fn mount_relational_row_pages_for_recovery(&mut self) -> crate::error::Result<()> {
         let Some(durable) = self.durable.as_ref() else {
             return Ok(());
@@ -482,9 +642,9 @@ mod tests {
         relational_overflow_extent_file, relational_overflow_manifest_generation_file,
         relational_row_page_manifest_generation_file, DurabilityPolicy, RelationalColumnSchema,
         RelationalHydrationBudget, RelationalInsertMode, RelationalKey, RelationalRow,
-        RelationalRowPagePublicationConfig, RelationalRowPagePublisher, RelationalScalarType,
-        RelationalTableSchema, RelationalTransaction, RelationalValue, RelationalWrite,
-        WalReplayConfig,
+        RelationalRowPagePublicationConfig, RelationalRowPagePublisher,
+        RelationalRowPageRootReader, RelationalScalarType, RelationalTableSchema,
+        RelationalTransaction, RelationalValue, RelationalWrite, WalReplayConfig,
     };
     use std::collections::BTreeMap;
 
@@ -684,6 +844,292 @@ mod tests {
             Some(skein_storage::RelationalRowPageRecoveredValue::Present(value))
                 if value == row(2, "two")
         ));
+
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn canonical_checkpoint_rewrites_only_dirty_relational_pages() {
+        let path = unique_test_dir("canonical-dirty-pages");
+        let replay = WalReplayConfig::default();
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::open_with_durability_and_replay_config(
+            &path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            replay,
+        )
+        .unwrap();
+        store
+            .commit_relational_transaction(
+                &mut catalog,
+                RelationalTransaction {
+                    writes: vec![
+                        RelationalWrite::CreateTable(schema()),
+                        RelationalWrite::Insert {
+                            table: "documents".to_string(),
+                            rows: (0..300).map(|id| row(id, &format!("body-{id}"))).collect(),
+                            mode: RelationalInsertMode::Error,
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        store.checkpoint(&catalog).unwrap();
+        let first = RelationalRowPageRootReader::open_generation(
+            &path,
+            1,
+            RelationalRowPagePublicationConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(first.manifest().dirty_page_count, 2);
+        assert_eq!(first.manifest().root_page_count, 2);
+
+        store
+            .commit_relational_transaction(
+                &mut catalog,
+                RelationalTransaction {
+                    writes: vec![RelationalWrite::Insert {
+                        table: "documents".to_string(),
+                        rows: vec![row(1, "replacement")],
+                        mode: RelationalInsertMode::Replace,
+                    }],
+                },
+            )
+            .unwrap();
+        store.checkpoint(&catalog).unwrap();
+        let second = RelationalRowPageRootReader::open_generation(
+            &path,
+            2,
+            RelationalRowPagePublicationConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(second.manifest().dirty_page_count, 1);
+        assert_eq!(second.manifest().root_page_count, 2);
+        assert_eq!(physical_generations(&second), vec![2, 1]);
+        let descriptor = second
+            .find_table_page_descriptor("documents", &key(1))
+            .unwrap()
+            .unwrap();
+        let page = second.read_page(&descriptor).unwrap();
+        assert_eq!(
+            page.rows
+                .iter()
+                .find(|entry| entry.primary_key == key(1))
+                .map(|entry| &entry.row),
+            Some(&row(1, "replacement"))
+        );
+        let mismatch = store
+            .plan_relational_row_page_checkpoint(
+                Some(first),
+                3,
+                2,
+                RelationalRowPagePublicationConfig::default(),
+            )
+            .err()
+            .expect("a stale row root must not trigger a silent rebuild");
+        assert!(mismatch.to_string().contains("does not match base"));
+
+        store
+            .create_node(&mut catalog, "CheckpointMarker", BTreeMap::new())
+            .unwrap();
+        store.checkpoint(&catalog).unwrap();
+        let third = RelationalRowPageRootReader::open_generation(
+            &path,
+            3,
+            RelationalRowPagePublicationConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(third.manifest().dirty_page_count, 0);
+        assert_eq!(third.manifest().root_page_count, 2);
+        assert_eq!(physical_generations(&third), vec![2, 1]);
+
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn recovered_wal_rows_checkpoint_as_incremental_cow_pages() {
+        let replay = WalReplayConfig::default();
+        let path = seed_row_root_with_wal_insert("recovered-dirty-pages", replay);
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::open_with_durability_and_replay_config(
+            &path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            replay,
+        )
+        .unwrap();
+        assert!(matches!(
+            store.relational_row_page_recovery_status(),
+            RelationalRowPageRecoveryStatus::WalRecovered {
+                base_generation: 1,
+                recovered_commit_epoch: 2,
+                ..
+            }
+        ));
+
+        store.checkpoint(&catalog).unwrap();
+        let root = RelationalRowPageRootReader::open_generation(
+            &path,
+            2,
+            RelationalRowPagePublicationConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(root.manifest().dirty_page_count, 1);
+        assert_eq!(root.manifest().root_page_count, 1);
+        assert_eq!(physical_generations(&root), vec![2]);
+        assert_eq!(
+            store.relational_state.row("documents", &key(2)),
+            Some(&row(2, "two"))
+        );
+
+        drop(store);
+        let mut reopened_catalog = Catalog::default();
+        let reopened = GraphStore::open_with_durability_and_replay_config(
+            &path,
+            &mut reopened_catalog,
+            DurabilityPolicy::default(),
+            replay,
+        )
+        .unwrap();
+        assert_eq!(
+            reopened.relational_state.row("documents", &key(2)),
+            Some(&row(2, "two"))
+        );
+
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn schema_change_rebuilds_the_complete_relational_row_root() {
+        let path = unique_test_dir("schema-rebuild");
+        let replay = WalReplayConfig::default();
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::open_with_durability_and_replay_config(
+            &path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            replay,
+        )
+        .unwrap();
+        store
+            .commit_relational_transaction(
+                &mut catalog,
+                RelationalTransaction {
+                    writes: vec![
+                        RelationalWrite::CreateTable(schema()),
+                        RelationalWrite::Insert {
+                            table: "documents".to_string(),
+                            rows: (0..300).map(|id| row(id, &format!("body-{id}"))).collect(),
+                            mode: RelationalInsertMode::Error,
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        store.checkpoint(&catalog).unwrap();
+        store
+            .commit_relational_transaction(
+                &mut catalog,
+                RelationalTransaction {
+                    writes: vec![RelationalWrite::AddColumn {
+                        table: "documents".to_string(),
+                        column: RelationalColumnSchema {
+                            name: "archived".to_string(),
+                            scalar_type: RelationalScalarType::Boolean,
+                            nullable: false,
+                            default: Some(RelationalValue::Boolean(false)),
+                        },
+                    }],
+                },
+            )
+            .unwrap();
+        assert!(store.relational_row_pages.read_view.is_none());
+
+        store.checkpoint(&catalog).unwrap();
+        let rebuilt = RelationalRowPageRootReader::open_generation(
+            &path,
+            2,
+            RelationalRowPagePublicationConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(rebuilt.manifest().dirty_page_count, 2);
+        assert_eq!(rebuilt.manifest().root_page_count, 2);
+        assert_eq!(physical_generations(&rebuilt), vec![2, 2]);
+
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_planning_enforces_one_global_dirty_page_budget() {
+        let path = unique_test_dir("global-dirty-budget");
+        let replay = WalReplayConfig::default();
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::open_with_durability_and_replay_config(
+            &path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            replay,
+        )
+        .unwrap();
+        store
+            .commit_relational_transaction(
+                &mut catalog,
+                RelationalTransaction {
+                    writes: vec![
+                        RelationalWrite::CreateTable(named_schema("documents")),
+                        RelationalWrite::CreateTable(named_schema("messages")),
+                        RelationalWrite::Insert {
+                            table: "documents".to_string(),
+                            rows: vec![row(1, "document")],
+                            mode: RelationalInsertMode::Error,
+                        },
+                        RelationalWrite::Insert {
+                            table: "messages".to_string(),
+                            rows: vec![row(1, "message")],
+                            mode: RelationalInsertMode::Error,
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        store.checkpoint(&catalog).unwrap();
+        let base = RelationalRowPageRootReader::open_generation(
+            &path,
+            1,
+            RelationalRowPagePublicationConfig::default(),
+        )
+        .unwrap();
+        store
+            .commit_relational_transaction(
+                &mut catalog,
+                RelationalTransaction {
+                    writes: vec![
+                        RelationalWrite::Insert {
+                            table: "documents".to_string(),
+                            rows: vec![row(1, "new-document")],
+                            mode: RelationalInsertMode::Replace,
+                        },
+                        RelationalWrite::Insert {
+                            table: "messages".to_string(),
+                            rows: vec![row(1, "new-message")],
+                            mode: RelationalInsertMode::Replace,
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        let mut config = RelationalRowPagePublicationConfig::default();
+        config.max_dirty_pages = NonZeroUsize::new(1).unwrap();
+        config.max_dirty_bytes =
+            NonZeroU64::new(config.page_limits.max_page_bytes.get() as u64).unwrap();
+        let error = store
+            .plan_relational_row_page_checkpoint(Some(base), 2, 2, config)
+            .err()
+            .expect("two changed tables must exceed one global dirty page");
+        assert!(error
+            .to_string()
+            .contains("exhausted its 1 dirty-page limit"));
 
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -947,9 +1393,24 @@ mod tests {
         path
     }
 
+    fn physical_generations(reader: &RelationalRowPageRootReader) -> Vec<u64> {
+        let mut generations = Vec::new();
+        reader
+            .visit_table_pages("documents", |descriptor| {
+                generations.push(descriptor.physical_generation);
+                Ok(())
+            })
+            .unwrap();
+        generations
+    }
+
     fn schema() -> RelationalTableSchema {
+        named_schema("documents")
+    }
+
+    fn named_schema(name: &str) -> RelationalTableSchema {
         RelationalTableSchema {
-            name: "documents".to_string(),
+            name: name.to_string(),
             columns: vec![
                 RelationalColumnSchema {
                     name: "id".to_string(),

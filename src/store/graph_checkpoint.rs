@@ -236,6 +236,10 @@ impl GraphStore {
                 .relational_overflow_generation_artifacts
                 .map(|_| durable.open_bound_relational_overflow())
                 .transpose()?;
+            let previous_row = previous_overflow
+                .as_ref()
+                .map(|overflow| durable.open_bound_relational_row_pages(overflow))
+                .transpose()?;
             let max_materialized_overflow_bytes =
                 usize::try_from(overflow_publication_config.max_new_extent_bytes.get())
                     .unwrap_or(usize::MAX);
@@ -268,23 +272,25 @@ impl GraphStore {
                 .map_err(|error| SkeinError::Storage(error.to_string()))?;
 
             let row_publication_config = RelationalRowPagePublicationConfig::default();
-            let row_deltas = self
-                .relational_state
-                .row_page_snapshot_deltas(generation, commit_epoch, row_publication_config)
-                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            let row_plan = self.plan_relational_row_page_checkpoint(
+                previous_row,
+                generation,
+                commit_epoch,
+                row_publication_config,
+            )?;
             let relational_row_report = RelationalRowPagePublisher::new(row_publication_config)
                 .persist_generation(
                     RelationalRowPageGenerationRequest {
                         directory: durable.root_path(),
                         generation,
                         source_commit_epoch: commit_epoch,
-                        base: None,
+                        base: row_plan.base.as_deref(),
                         expected_previous_generation: durable
                             .relational_row_generation_artifacts
                             .map(|binding| binding.generation),
                         overflow_root: Some(&relational_overflow_root),
                     },
-                    row_deltas,
+                    row_plan.deltas,
                 )
                 .map_err(|error| SkeinError::Storage(error.to_string()))?;
             let relational_index_candidate =

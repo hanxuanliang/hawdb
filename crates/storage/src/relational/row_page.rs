@@ -25,7 +25,8 @@ pub use delta::{
     DEFAULT_RELATIONAL_ROW_DELTA_RUN_BYTES, RELATIONAL_ROW_DELTA_MANIFEST_FILE,
 };
 pub use live::{
-    RelationalRowPageLiveError, RelationalRowPageReadView, RelationalRowPageReadViewIdentity,
+    RelationalRowPageCheckpointError, RelationalRowPageLiveError, RelationalRowPageReadView,
+    RelationalRowPageReadViewIdentity,
 };
 pub use mutation::{
     RelationalRowPageBootstrap, RelationalRowPageBootstrapReport, RelationalRowPageIdAllocator,
