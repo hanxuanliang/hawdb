@@ -12,7 +12,7 @@ use crate::relational::{
 use skein_integrity::Sha256Digest;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 
 #[derive(Debug)]
 pub enum RelationalRowPageMutationError {
@@ -294,6 +294,16 @@ impl<'a> RelationalRowPageMutationPlanner<'a> {
             delta: RelationalRowPageTableDelta {
                 table: table.to_string(),
                 schema_digest,
+                column_count: NonZeroU32::new(u32::try_from(column_count).map_err(|_| {
+                    RelationalRowPageMutationError::Admission(format!(
+                        "table {table} column count does not fit u32"
+                    ))
+                })?)
+                .ok_or_else(|| {
+                    RelationalRowPageMutationError::Admission(format!(
+                        "table {table} has no columns"
+                    ))
+                })?,
                 next_page_id: allocator.next_page_id(),
                 dirty_pages,
                 deleted_page_ids: deleted_page_ids.into_iter().collect(),

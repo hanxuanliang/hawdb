@@ -224,6 +224,7 @@ impl RelationalRowPageDemandReader {
         let view =
             RelationalRowPageView::open_slot(&bytes, self.root.publication_config().page_limits)
                 .map_err(|error| context.map_page_error(error))?;
+        context.validate_column_count(&table_root, &view)?;
         let Some(mut row) = view
             .find_projected_row(primary_key, requested_fields)
             .map_err(|error| context.map_page_error(error))?
@@ -318,6 +319,7 @@ impl RelationalRowPageDemandReader {
                 self.root.publication_config().page_limits,
             )
             .map_err(|error| context.map_page_error(error))?;
+            context.validate_column_count(&table_root, &view)?;
             let row_start = if apply_lower_bound {
                 apply_lower_bound = false;
                 match lower {
@@ -425,6 +427,14 @@ impl<'a> DemandReadContext<'a> {
         self.task
             .checkpoint()
             .map_err(RelationalRowPageDemandReadError::Stopped)
+    }
+
+    fn validate_column_count(
+        &self,
+        table: &super::RelationalRowPageTableRoot,
+        page: &RelationalRowPageView<'_>,
+    ) -> Result<(), RelationalRowPageDemandReadError> {
+        validate_table_column_count(table, page)
     }
 
     fn admit_descriptor_search(
@@ -640,6 +650,22 @@ impl<'a> DemandReadContext<'a> {
             self.reader.poison();
         }
     }
+}
+
+fn validate_table_column_count(
+    table: &super::RelationalRowPageTableRoot,
+    page: &RelationalRowPageView<'_>,
+) -> Result<(), RelationalRowPageDemandReadError> {
+    if page.column_count() != table.column_count.get() as usize {
+        return Err(RelationalRowPageDemandReadError::Corrupt(format!(
+            "table {} binds {} columns but page {} contains {}",
+            table.table,
+            table.column_count,
+            page.page_id().get(),
+            page.column_count()
+        )));
+    }
+    Ok(())
 }
 
 struct EncodedRange {

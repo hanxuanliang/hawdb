@@ -310,6 +310,7 @@ fn publish_base(directory: &Path, config: RelationalRowPagePublicationConfig) {
             vec![RelationalRowPageTableDelta {
                 table: "documents".to_string(),
                 schema_digest: schema_digest(),
+                column_count: NonZeroU32::new(2).unwrap(),
                 next_page_id: NonZeroU64::new(3).unwrap(),
                 dirty_pages: vec![page(1, 1, 1, &[1, 3]), page(2, 1, 1, &[10, 11])],
                 deleted_page_ids: Vec::new(),

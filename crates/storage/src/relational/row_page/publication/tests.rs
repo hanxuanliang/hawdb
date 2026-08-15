@@ -8,7 +8,7 @@ use crate::relational::{
 use skein_integrity::integrity_digest;
 use std::fs::{self, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -47,6 +47,7 @@ fn publish_last_root_round_trips_with_a_concrete_refinement_trace() {
     assert_eq!(reader.manifest().source_commit_epoch, 10);
     assert_eq!(reader.manifest().previous_generation, None);
     assert_eq!(reader.manifest().tables.len(), 1);
+    assert_eq!(reader.manifest().tables[0].column_count.get(), 2);
     assert_eq!(reader.manifest().tables[0].next_page_id.get(), 3);
     let descriptors = collect_descriptors(&reader, "documents");
     assert_eq!(page_id_values(&descriptors), vec![1, 2]);
@@ -59,6 +60,26 @@ fn publish_last_root_round_trips_with_a_concrete_refinement_trace() {
     );
 
     fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn publication_rejects_page_and_table_column_count_drift() {
+    let directory = unique_test_dir("column-count-drift");
+    let config = RelationalRowPagePublicationConfig::default();
+    let mut delta = table_delta("documents", vec![page(1, 1, 10, 1, 2)]);
+    delta.column_count = NonZeroU32::new(3).unwrap();
+    assert!(matches!(
+        RelationalRowPagePublisher::new(config).publish(
+            &directory,
+            1,
+            10,
+            None,
+            vec![delta],
+        ),
+        Err(RelationalRowPagePublicationError::Admission(message))
+            if message.contains("contains 2 columns, expected 3")
+    ));
+    assert!(!directory.exists());
 }
 
 #[test]
@@ -577,6 +598,7 @@ fn deletion_requires_a_page_in_the_selected_base() {
             vec![RelationalRowPageTableDelta {
                 table: "documents".to_string(),
                 schema_digest: schema_digest(),
+                column_count: NonZeroU32::new(2).unwrap(),
                 next_page_id: NonZeroU64::new(10).unwrap(),
                 dirty_pages: Vec::new(),
                 deleted_page_ids: vec![page_id(9)],
@@ -778,6 +800,7 @@ fn table_delta(
     RelationalRowPageTableDelta {
         table: table.to_string(),
         schema_digest: schema_digest(),
+        column_count: NonZeroU32::new(2).unwrap(),
         next_page_id,
         dirty_pages,
         deleted_page_ids: Vec::new(),

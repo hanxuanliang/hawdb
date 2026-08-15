@@ -5,7 +5,7 @@ use super::{
 use skein_integrity::{IntegrityHasher, Sha256Digest, SHA256_BYTES};
 use std::fs::{self, File};
 use std::io::Read;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::path::Path;
 
 const MANIFEST_MAGIC: &[u8; 8] = b"SKRPGM01";
@@ -332,6 +332,12 @@ fn validate_manifest(
                 "row-page table roots are not strictly ordered".to_string(),
             ));
         }
+        if table.column_count.get() as usize > config.page_limits.max_columns.get() {
+            return Err(fail(format!(
+                "table {} declares {} columns, exceeding limit {}",
+                table.table, table.column_count, config.page_limits.max_columns
+            )));
+        }
         if table.first_descriptor != expected_descriptor {
             return Err(fail(format!(
                 "table {} starts at descriptor {}, expected {expected_descriptor}",
@@ -383,6 +389,7 @@ fn encode_tables(
     for table in tables {
         encode_bytes(&table.table, &mut encoded)?;
         encoded.extend_from_slice(table.schema_digest.as_bytes());
+        encoded.extend_from_slice(&table.column_count.get().to_le_bytes());
         encoded.extend_from_slice(&table.next_page_id.get().to_le_bytes());
         encoded.extend_from_slice(&table.first_descriptor.to_le_bytes());
         encoded.extend_from_slice(&table.page_count.to_le_bytes());
@@ -411,6 +418,17 @@ fn decode_tables(
                 .try_into()
                 .expect("schema digest length was checked"),
         );
+        let column_count = NonZeroU32::new(read_u32(take(
+            payload,
+            &mut offset,
+            4,
+            "table column count",
+        )?))
+        .ok_or_else(|| {
+            RelationalRowPagePublicationError::Corrupt(
+                "row-page table column count contains zero".to_string(),
+            )
+        })?;
         let next_page_id = NonZeroU64::new(read_u64(take(
             payload,
             &mut offset,
@@ -439,6 +457,7 @@ fn decode_tables(
         tables.push(RelationalRowPageTableRoot {
             table,
             schema_digest,
+            column_count,
             next_page_id,
             first_descriptor,
             page_count,

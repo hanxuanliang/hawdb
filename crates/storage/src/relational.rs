@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
 mod codec;
@@ -1331,6 +1331,20 @@ impl RelationalState {
                 Ok(RelationalRowPageTableDelta {
                     table: schema.name.clone(),
                     schema_digest,
+                    column_count: NonZeroU32::new(
+                        u32::try_from(schema.columns.len()).map_err(|_| {
+                            RelationalRowPageMutationError::Admission(format!(
+                                "table {} column count does not fit u32",
+                                schema.name
+                            ))
+                        })?,
+                    )
+                    .ok_or_else(|| {
+                        RelationalRowPageMutationError::Admission(format!(
+                            "table {} has no columns",
+                            schema.name
+                        ))
+                    })?,
                     next_page_id: report.next_page_id,
                     dirty_pages: pages,
                     deleted_page_ids: Vec::new(),

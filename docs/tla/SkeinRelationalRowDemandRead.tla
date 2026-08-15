@@ -5,8 +5,10 @@ EXTENDS Naturals, Sequences, FiniteSets
 (* A relational row demand reader pins one exact row/overflow root pair.   *)
 (* It opens with every row page cold, loads at most one page at a time,     *)
 (* decodes an ordered row prefix, and hydrates only requested overflow      *)
-(* fields. Admission, cancellation, and callback panic release the current  *)
-(* page without poisoning; page or overflow corruption poisons the reader.  *)
+(* fields. The corrupt-page set also abstracts a page whose encoded column   *)
+(* count differs from the count bound by its table root. Admission,          *)
+(* cancellation, and callback panic release the current page without        *)
+(* poisoning; page, root-shape, or overflow corruption poisons the reader.   *)
 (***************************************************************************)
 
 Pages == 1..2

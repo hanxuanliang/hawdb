@@ -94,6 +94,27 @@ fn dirty_run_coalesces_repeated_keys_to_the_latest_epoch() {
 }
 
 #[test]
+fn delta_schema_must_match_the_base_root_column_count() {
+    let directory = unique_test_dir("column-count-fence");
+    let base = publish_and_open_base(&directory);
+    let mut schemas = table_schemas();
+    schemas[0].column_count = NonZeroU32::new(3).unwrap();
+    assert!(matches!(
+        RelationalRowDeltaBuilder::new(
+            &directory,
+            &base,
+            1,
+            None,
+            schemas,
+            RelationalRowDeltaConfig::default(),
+        ),
+        Err(RelationalRowDeltaError::Admission(message))
+            if message.contains("does not match the selected row root")
+    ));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn point_lookup_selects_the_newest_value_across_immutable_runs() {
     let directory = unique_test_dir("point-lookup");
     let base = publish_and_open_base(&directory);
@@ -309,6 +330,7 @@ fn builder_cannot_publish_after_its_row_root_becomes_stale() {
             vec![RelationalRowPageTableDelta {
                 table: "documents".to_string(),
                 schema_digest: schema_digest(),
+                column_count: NonZeroU32::new(2).unwrap(),
                 next_page_id: NonZeroU64::new(2).unwrap(),
                 dirty_pages: vec![ImmutableRelationalRowPage {
                     generation: 2,
@@ -559,6 +581,7 @@ fn publish_and_open_base(directory: &Path) -> RelationalRowPageRootReader {
             vec![RelationalRowPageTableDelta {
                 table: "documents".to_string(),
                 schema_digest: schema_digest(),
+                column_count: NonZeroU32::new(2).unwrap(),
                 next_page_id: NonZeroU64::new(2).unwrap(),
                 dirty_pages: vec![ImmutableRelationalRowPage {
                     generation: 1,

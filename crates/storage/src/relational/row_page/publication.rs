@@ -5,7 +5,7 @@ use super::{
 use crate::relational::RelationalOverflowRootBinding;
 use skein_integrity::Sha256Digest;
 use std::fmt;
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::Path;
 
 mod manifest;
@@ -82,6 +82,7 @@ impl Default for RelationalRowPagePublicationConfig {
 pub struct RelationalRowPageTableDelta {
     pub table: String,
     pub schema_digest: Sha256Digest,
+    pub column_count: NonZeroU32,
     pub next_page_id: NonZeroU64,
     pub dirty_pages: Vec<ImmutableRelationalRowPage>,
     pub deleted_page_ids: Vec<RelationalRowPageId>,
@@ -117,6 +118,7 @@ pub struct RelationalRowPageRootDescriptor {
 pub struct RelationalRowPageTableRoot {
     pub table: String,
     pub schema_digest: Sha256Digest,
+    pub column_count: NonZeroU32,
     pub next_page_id: NonZeroU64,
     pub first_descriptor: u64,
     pub page_count: u64,

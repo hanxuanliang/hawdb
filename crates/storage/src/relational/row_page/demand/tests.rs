@@ -352,6 +352,42 @@ fn corrupted_page_poison_is_sticky_but_admission_is_not() {
     fixture.remove();
 }
 
+#[test]
+fn table_root_column_count_must_match_every_demand_loaded_page() {
+    let alpha = RelationalOverflowRef {
+        digest: integrity_digest(b"unused-alpha").sha256,
+        scalar_type: RelationalScalarType::Text,
+        compressed_bytes: 1,
+        uncompressed_bytes: 1,
+    };
+    let beta = RelationalOverflowRef {
+        digest: integrity_digest(b"unused-beta").sha256,
+        scalar_type: RelationalScalarType::Bytea,
+        compressed_bytes: 1,
+        uncompressed_bytes: 1,
+    };
+    let encoded = page(1, 1, 1, alpha, beta)
+        .encode(row_publication_config().page_limits)
+        .expect("encode page with four columns");
+    let page = RelationalRowPageView::open(&encoded, row_publication_config().page_limits)
+        .expect("open encoded page");
+    let table = super::super::RelationalRowPageTableRoot {
+        table: "documents".to_string(),
+        schema_digest: schema_digest(),
+        column_count: NonZeroU32::new(3).unwrap(),
+        next_page_id: NonZeroU64::new(2).unwrap(),
+        first_descriptor: 0,
+        page_count: 1,
+        lower_bound: vec![1],
+        upper_bound: vec![2],
+    };
+    assert!(matches!(
+        validate_table_column_count(&table, &page),
+        Err(RelationalRowPageDemandReadError::Corrupt(message))
+            if message.contains("binds 3 columns")
+    ));
+}
+
 struct DemandFixture {
     directory: PathBuf,
     row_root: Arc<RelationalRowPageRootReader>,
@@ -442,6 +478,7 @@ fn table_delta(dirty_pages: Vec<ImmutableRelationalRowPage>) -> RelationalRowPag
     RelationalRowPageTableDelta {
         table: "documents".to_string(),
         schema_digest: schema_digest(),
+        column_count: NonZeroU32::new(4).unwrap(),
         next_page_id: NonZeroU64::new(3).unwrap(),
         dirty_pages,
         deleted_page_ids: Vec::new(),

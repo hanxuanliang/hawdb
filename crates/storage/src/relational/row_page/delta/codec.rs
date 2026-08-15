@@ -70,7 +70,10 @@ fn validate_table_against_base(
     table: &RelationalRowDeltaTableSchema,
     base: &RelationalRowPageTableRoot,
 ) -> Result<(), RelationalRowDeltaError> {
-    if table.table != base.table || table.schema_digest != base.schema_digest {
+    if table.table != base.table
+        || table.schema_digest != base.schema_digest
+        || table.column_count != base.column_count
+    {
         return Err(RelationalRowDeltaError::Admission(format!(
             "row delta schema for table {} does not match the selected row root",
             table.table

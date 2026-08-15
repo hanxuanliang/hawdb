@@ -5,8 +5,10 @@ EXTENDS Naturals, Sequences, FiniteSets
 (* A relational row root is extended by immutable, bounded delta runs.     *)
 (* Replay coalesces primary-key changes in a finite dirty map and flushes  *)
 (* complete ordered run sets before publishing an immutable generation     *)
-(* manifest. The latest manifest is replaced only after the row-root and   *)
-(* previous-delta fences are revalidated. Failed or poisoned candidates    *)
+(* manifest. The abstract row-root fence includes generation, epoch, schema *)
+(* digest, and column count. The latest manifest is replaced only after     *)
+(* that fence and the previous-delta fence are revalidated. Failed or       *)
+(* poisoned candidates                                                     *)
 (* remain unreachable, while readers retain their selected generation.     *)
 (***************************************************************************)
 

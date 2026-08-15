@@ -358,6 +358,7 @@ pub(super) struct PreparedDirtyPage {
 pub(super) struct PreparedTableDelta {
     pub table: String,
     pub schema_digest: Sha256Digest,
+    pub column_count: std::num::NonZeroU32,
     pub next_page_id: std::num::NonZeroU64,
     pub dirty_pages: Vec<PreparedDirtyPage>,
     pub deleted_page_ids: BTreeSet<super::RelationalRowPageId>,
@@ -455,6 +456,15 @@ fn preflight_deltas(
                     delta.table
                 )));
             }
+            if page.column_count != delta.column_count.get() as usize {
+                return Err(RelationalRowPagePublicationError::Admission(format!(
+                    "dirty page {} contains {} columns, expected {} for table {}",
+                    page.page_id.get(),
+                    page.column_count,
+                    delta.column_count,
+                    delta.table
+                )));
+            }
             if !seen_page_ids.insert(page.page_id) {
                 return Err(RelationalRowPagePublicationError::Admission(format!(
                     "table {} contains duplicate dirty page id {}",
@@ -500,6 +510,7 @@ fn preflight_deltas(
             PreparedTableDelta {
                 table: delta.table,
                 schema_digest: delta.schema_digest,
+                column_count: delta.column_count,
                 next_page_id: delta.next_page_id,
                 dirty_pages,
                 deleted_page_ids,

@@ -210,6 +210,16 @@ pub(super) fn write_root_artifacts(
             (None, Some(delta)) => delta.schema_digest,
             (None, None) => unreachable!("table name originated from base or delta"),
         };
+        let column_count = match (base_table, delta.as_ref()) {
+            (Some(base_table), Some(delta)) if base_table.column_count != delta.column_count => {
+                return Err(RelationalRowPagePublicationError::Admission(format!(
+                    "table {table_name} column count changed during incremental row-page publication"
+                )));
+            }
+            (Some(base_table), _) => base_table.column_count,
+            (None, Some(delta)) => delta.column_count,
+            (None, None) => unreachable!("table name originated from base or delta"),
+        };
         let next_page_id = match (base_table, delta.as_ref()) {
             (Some(base_table), Some(delta)) => {
                 if delta.next_page_id < base_table.next_page_id {
@@ -270,6 +280,7 @@ pub(super) fn write_root_artifacts(
         tables.push(RelationalRowPageTableRoot {
             table: table_name,
             schema_digest,
+            column_count,
             next_page_id,
             first_descriptor,
             page_count,

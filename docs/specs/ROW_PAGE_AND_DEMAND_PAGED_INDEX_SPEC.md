@@ -340,6 +340,10 @@ remove materialized postings or make row pages demand-resident.
    later pages.
 6. A mutation creates new immutable page images or bounded dirty pages; it
    MUST NOT mutate a page visible to a pinned reader.
+7. Every table root MUST bind a non-zero column count together with its schema
+   digest. Publication rejects a dirty or reused page whose column count
+   differs, recovery-delta schemas must match both fields, and demand read
+   treats any later page/root mismatch as corruption.
 
 ### Relational row-page v1 codec
 
@@ -388,6 +392,10 @@ page bytes do not embed a stale file offset.
 This is the only version-1 overflow representation. Skein has not shipped a
 prior durable format, so readers MUST NOT recognize or migrate a legacy
 string-digest encoding.
+
+The row-root table payload likewise has one version-1 shape: table name,
+schema digest, non-zero column count, allocator state, descriptor range, and
+key bounds. No reader for a root payload without the column count exists.
 
 The shared `SKOVFL01` envelope begins with a fixed 32-byte header containing the
 codec, scalar type, zero flags, both lengths, and the decoded CRC32C. Its
