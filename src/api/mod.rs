@@ -19553,7 +19553,26 @@ impl DatabaseReadTransaction {
         parameters: &[Value],
         options: QueryStreamOptions,
     ) -> Result<QueryOutput> {
+        self.query_sql_with_params_options_context(
+            sql_text,
+            parameters,
+            options,
+            &skein_core::RuntimeTaskContext::default(),
+        )
+    }
+
+    /// Executes bounded PostgreSQL-dialect SQL against this pinned read
+    /// transaction while propagating host cancellation and deadlines through
+    /// planning, index traversal, row hydration, and result construction.
+    pub fn query_sql_with_params_options_context(
+        &self,
+        sql_text: &str,
+        parameters: &[Value],
+        options: QueryStreamOptions,
+        task_context: &skein_core::RuntimeTaskContext,
+    ) -> Result<QueryOutput> {
         self.store.ensure_usable()?;
+        query_runtime::query_runtime_checkpoint(Some(task_context))?;
         let max_rows = restrictive_query_limit(self.config.max_read_result_rows, options.max_rows);
         let max_payload_bytes = restrictive_query_limit(
             self.config.max_read_result_payload_bytes,
@@ -19566,7 +19585,7 @@ impl DatabaseReadTransaction {
             crate::sql::SqlStatement::Select(select)
                 if system_sql::is_virtual_catalog_select(select)
         ) {
-            return system_sql::query_sql_with_params(
+            let output = system_sql::query_sql_with_params(
                 sql_text,
                 parameters,
                 max_rows,
@@ -19580,7 +19599,9 @@ impl DatabaseReadTransaction {
                     slow_queries: &self.slow_query_snapshot,
                     statement_summaries: &self.statement_summary_snapshot,
                 },
-            );
+            )?;
+            query_runtime::query_runtime_checkpoint(Some(task_context))?;
+            return Ok(output);
         }
 
         let query_result = crate::relational_sql::execute_relational_query_sql_with_runtime(
@@ -19593,10 +19614,11 @@ impl DatabaseReadTransaction {
             ),
             relational_query_limits_with_payload(&self.config, max_rows, max_payload_bytes),
             &self.config.execution_memory,
-            None,
+            Some(task_context),
         );
         self.store.poison_on_storage_error(&query_result);
         let output = query_result?;
+        query_runtime::query_runtime_checkpoint(Some(task_context))?;
         Ok(QueryOutput { rows: output.rows })
     }
 

@@ -1122,6 +1122,11 @@ reader invokes that fallible resolver before the row callback. Callback effects
 remain provisional until both snapshot reading and pinned-state resolution
 return `Ok`.
 
+The public bounded PostgreSQL read entrypoint for a pinned transaction MUST
+accept a `RuntimeTaskContext` and propagate it through planning, index
+traversal, row hydration, and result construction. A cancelled or expired
+statement MUST leave that pinned transaction usable by a later statement.
+
 This is the only v1 snapshot-composition contract. Skein is not released, so
 there is no legacy row-root reader, manifest migration, compatibility fallback,
 or base-only serving mode to preserve. Production SQL now selects the exact

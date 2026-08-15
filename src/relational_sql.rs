@@ -1219,6 +1219,47 @@ mod tests {
         std::fs::remove_dir_all(path).expect("remove authoritative transaction fixture");
     }
 
+    #[test]
+    fn pinned_read_transaction_sql_propagates_cancellation_without_poisoning_service() {
+        let mut database = Database::new();
+        database
+            .query_sql("CREATE TABLE messages (id BIGINT PRIMARY KEY, body TEXT NOT NULL)")
+            .expect("create cancellation table");
+        database
+            .query_sql("INSERT INTO messages (id, body) VALUES (1, 'ready')")
+            .expect("insert cancellation row");
+
+        let read = database.begin_read_transaction();
+        let cancellation = skein_core::RuntimeCancellationToken::new();
+        cancellation.cancel();
+        let context = skein_core::RuntimeTaskContext::without_deadline(cancellation);
+        let error = read
+            .query_sql_with_params_options_context(
+                "SELECT body FROM messages WHERE id = $1",
+                &[Value::Int(1)],
+                crate::QueryStreamOptions {
+                    max_rows: Some(1),
+                    max_payload_bytes: Some(4096),
+                },
+                &context,
+            )
+            .expect_err("cancelled SQL read must stop");
+        assert!(error.to_string().contains("cancelled"));
+
+        let output = read
+            .query_sql_with_params_options(
+                "SELECT body FROM messages WHERE id = $1",
+                &[Value::Int(1)],
+                crate::QueryStreamOptions {
+                    max_rows: Some(1),
+                    max_payload_bytes: Some(4096),
+                },
+            )
+            .expect("cancellation must not poison the pinned reader");
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.rows[0]["body"], Value::String("ready".to_string()));
+    }
+
     fn relational_explain_operator_info<'a>(
         output: &'a crate::QueryOutput,
         operator: &str,
