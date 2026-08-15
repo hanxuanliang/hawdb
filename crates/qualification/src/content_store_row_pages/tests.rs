@@ -84,11 +84,11 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
     assert!(report.corruption.bit_flip_offset < report.corruption.artifact_bytes);
     assert_eq!(
         report.resources.profile_kind,
-        ContentStoreResourceProfileKind::SupportedLowMemory
+        ContentStoreResourceProfileKind::Capability512Mib
     );
     assert_eq!(
         report.resources.configured_available_memory_bytes,
-        CONTENT_STORE_SUPPORTED_LOW_MEMORY_PROFILE_BYTES
+        CONTENT_STORE_512_MIB_CAPABILITY_BYTES
     );
     assert_eq!(report.resources.read_samples, 16);
     assert_eq!(
@@ -149,7 +149,7 @@ fn qualification_rejects_an_existing_database_path() {
 }
 
 #[test]
-fn low_memory_profile_identity_is_exact_without_becoming_a_universal_limit() {
+fn capability_512_mib_is_evidence_identity_not_a_universal_limit() {
     let id = TEST_ID.fetch_add(1, Ordering::SeqCst);
     let path = std::env::temp_dir().join(format!(
         "skein-content-store-row-page-memory-profile-{}-{id}",
@@ -159,10 +159,10 @@ fn low_memory_profile_identity_is_exact_without_becoming_a_universal_limit() {
         ContentStoreInitialRowPageQualificationConfig::synthetic(&path, "test-revision");
     low_memory.configured_available_memory_bytes = 256 * 1024 * 1024;
     let low_memory_error = run_content_store_initial_row_page_qualification(low_memory)
-        .expect_err("the named low-memory profile must retain its exact identity");
+        .expect_err("the 512 MiB capability profile must retain its exact identity");
     assert!(low_memory_error
         .to_string()
-        .contains("supported low-memory profile must declare"));
+        .contains("512 MiB capability profile must declare"));
 
     let mut configured =
         ContentStoreInitialRowPageQualificationConfig::synthetic(&path, "test-revision");

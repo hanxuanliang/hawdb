@@ -1330,9 +1330,11 @@ checkpoint binding, demand-read, lifecycle, or serving obligations.
   append bytes, and bytes in newly named immutable generation artifacts. Its
   write-amplification value is explicitly a lower bound over WAL append plus
   those new artifacts; it MUST NOT be presented as block-device bytes written.
-  `SupportedLowMemory` records whether the observed process peak fits the
-  declared 512 MiB profile, but an ordinary in-process run is not proof of an
-  OS-enforced limit. Activation still requires an isolated constrained run.
+  `Capability512Mib` records whether the observed process peak fits the named
+  512 MiB capability profile, but an ordinary in-process run is not proof of an
+  OS-enforced limit. The exact value identifies qualification evidence; it is
+  not an engine limit or activation threshold. Activation still requires an
+  isolated constrained run.
   `ConfiguredWorkload` accepts a different caller-declared budget without
   substituting 512 MiB as a universal cutoff. Production-copy evidence remains
   a separate runner over the imported replica and its actual resource profile;

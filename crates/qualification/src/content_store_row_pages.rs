@@ -26,12 +26,12 @@ use transaction::qualify_multi_statement_transaction;
 
 pub const CONTENT_STORE_INITIAL_ROW_PAGE_QUALIFICATION_PROTOCOL: &str =
     "skein-content-store-initial-row-page-qualification-v1";
-pub const CONTENT_STORE_SUPPORTED_LOW_MEMORY_PROFILE_BYTES: u64 = 512 * 1024 * 1024;
+pub const CONTENT_STORE_512_MIB_CAPABILITY_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContentStoreResourceProfileKind {
-    SupportedLowMemory,
+    Capability512Mib,
     ConfiguredWorkload,
 }
 
@@ -58,8 +58,8 @@ impl ContentStoreInitialRowPageQualificationConfig {
             base_message_count: 8,
             message_payload_bytes: 8 * 1024,
             segment_cache_capacity_bytes: 512 * 1024,
-            resource_profile_kind: ContentStoreResourceProfileKind::SupportedLowMemory,
-            configured_available_memory_bytes: CONTENT_STORE_SUPPORTED_LOW_MEMORY_PROFILE_BYTES,
+            resource_profile_kind: ContentStoreResourceProfileKind::Capability512Mib,
+            configured_available_memory_bytes: CONTENT_STORE_512_MIB_CAPABILITY_BYTES,
             resource_read_samples: 16,
         }
     }
@@ -93,12 +93,11 @@ impl ContentStoreInitialRowPageQualificationConfig {
                     .to_string(),
             ));
         }
-        if self.resource_profile_kind == ContentStoreResourceProfileKind::SupportedLowMemory
-            && self.configured_available_memory_bytes
-                != CONTENT_STORE_SUPPORTED_LOW_MEMORY_PROFILE_BYTES
+        if self.resource_profile_kind == ContentStoreResourceProfileKind::Capability512Mib
+            && self.configured_available_memory_bytes != CONTENT_STORE_512_MIB_CAPABILITY_BYTES
         {
             return Err(SkeinError::Semantic(format!(
-                "content-store supported low-memory profile must declare {CONTENT_STORE_SUPPORTED_LOW_MEMORY_PROFILE_BYTES} available bytes"
+                "content-store 512 MiB capability profile must declare {CONTENT_STORE_512_MIB_CAPABILITY_BYTES} available bytes"
             )));
         }
         if self.segment_cache_capacity_bytes > self.configured_available_memory_bytes {
