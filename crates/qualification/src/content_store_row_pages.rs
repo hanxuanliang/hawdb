@@ -2,6 +2,7 @@ mod corruption;
 mod evidence;
 mod fixture;
 mod isolation;
+mod resource;
 #[cfg(test)]
 mod tests;
 mod transaction;
@@ -17,6 +18,7 @@ use fixture::{
     thread_page_parameters, upsert_thread_message, QUALIFIED_TABLES,
 };
 use isolation::qualify_content_store_isolation;
+use resource::{qualify_content_store_resources, ContentStoreResourceProbeConfig};
 use serde::Serialize;
 use skein::{Database, DurabilityPolicy, RelationalIndexMode, Result, SkeinError};
 use std::path::PathBuf;
@@ -24,6 +26,14 @@ use transaction::qualify_multi_statement_transaction;
 
 pub const CONTENT_STORE_INITIAL_ROW_PAGE_QUALIFICATION_PROTOCOL: &str =
     "skein-content-store-initial-row-page-qualification-v1";
+pub const CONTENT_STORE_SUPPORTED_LOW_MEMORY_PROFILE_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentStoreResourceProfileKind {
+    SupportedLowMemory,
+    ConfiguredWorkload,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentStoreInitialRowPageQualificationConfig {
@@ -32,6 +42,9 @@ pub struct ContentStoreInitialRowPageQualificationConfig {
     pub base_message_count: usize,
     pub message_payload_bytes: usize,
     pub segment_cache_capacity_bytes: u64,
+    pub resource_profile_kind: ContentStoreResourceProfileKind,
+    pub configured_available_memory_bytes: u64,
+    pub resource_read_samples: usize,
 }
 
 impl ContentStoreInitialRowPageQualificationConfig {
@@ -45,6 +58,9 @@ impl ContentStoreInitialRowPageQualificationConfig {
             base_message_count: 8,
             message_payload_bytes: 8 * 1024,
             segment_cache_capacity_bytes: 512 * 1024,
+            resource_profile_kind: ContentStoreResourceProfileKind::SupportedLowMemory,
+            configured_available_memory_bytes: CONTENT_STORE_SUPPORTED_LOW_MEMORY_PROFILE_BYTES,
+            resource_read_samples: 16,
         }
     }
 
@@ -69,6 +85,32 @@ impl ContentStoreInitialRowPageQualificationConfig {
         if self.segment_cache_capacity_bytes == 0 {
             return Err(SkeinError::Semantic(
                 "content-store row-page qualification cache capacity must be non-zero".to_string(),
+            ));
+        }
+        if self.configured_available_memory_bytes == 0 {
+            return Err(SkeinError::Semantic(
+                "content-store row-page qualification configured memory must be non-zero"
+                    .to_string(),
+            ));
+        }
+        if self.resource_profile_kind == ContentStoreResourceProfileKind::SupportedLowMemory
+            && self.configured_available_memory_bytes
+                != CONTENT_STORE_SUPPORTED_LOW_MEMORY_PROFILE_BYTES
+        {
+            return Err(SkeinError::Semantic(format!(
+                "content-store supported low-memory profile must declare {CONTENT_STORE_SUPPORTED_LOW_MEMORY_PROFILE_BYTES} available bytes"
+            )));
+        }
+        if self.segment_cache_capacity_bytes > self.configured_available_memory_bytes {
+            return Err(SkeinError::Semantic(format!(
+                "content-store row-page qualification cache capacity {} exceeds configured available memory {}",
+                self.segment_cache_capacity_bytes, self.configured_available_memory_bytes
+            )));
+        }
+        if self.resource_read_samples == 0 || self.resource_read_samples > 1024 {
+            return Err(SkeinError::Semantic(
+                "content-store row-page qualification resource read samples must be between 1 and 1024"
+                    .to_string(),
             ));
         }
         let page = corpus_statement(corpus, "thread_messages_page")?;
@@ -171,6 +213,7 @@ pub struct ContentStoreInitialRowPageQualificationReport {
     pub wal_recovery_read: ContentStoreRowPageReadReport,
     pub live_overlay_read: ContentStoreRowPageReadReport,
     pub multi_statement_transaction: ContentStoreTransactionQualificationReport,
+    pub resources: ContentStoreResourceEvidence,
     pub corruption: ContentStoreCorruptionQualificationReport,
     pub isolation: ContentStoreIsolationQualificationReport,
     pub ready: bool,
@@ -218,6 +261,64 @@ pub struct ContentStoreCorruptionQualificationReport {
     pub post_failure_sql_rejected: bool,
     pub source_preserved: bool,
     pub source_row_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContentStoreResourceEvidence {
+    pub profile_kind: ContentStoreResourceProfileKind,
+    pub configured_available_memory_bytes: u64,
+    pub segment_cache_capacity_bytes: u64,
+    pub max_read_result_rows: Option<usize>,
+    pub max_read_result_payload_bytes: Option<usize>,
+    pub execution_batch_rows: usize,
+    pub execution_batch_payload_bytes: usize,
+    pub blocking_operator_bytes: usize,
+    pub max_wal_replay_bytes: Option<u64>,
+    pub max_out_of_core_delta_bytes: Option<u64>,
+    pub read_samples: usize,
+    pub read_latency: crate::LatencyPercentiles,
+    pub output_rows: usize,
+    pub output_payload_bytes: usize,
+    pub output_sha256: String,
+    pub mutation_latency_micros: u64,
+    pub checkpoint_latency_micros: u64,
+    pub probe_latency_micros: u64,
+    pub logical_mutation_bytes: u64,
+    pub wal_append_bytes: u64,
+    pub new_generation_artifact_bytes: u64,
+    pub durable_write_bytes_lower_bound: u64,
+    pub durable_write_amplification_lower_bound_per_million: u64,
+    pub write_measurement_scope: String,
+    pub process: ContentStoreProcessResourceEvidence,
+    pub runtime_memory: ContentStoreRuntimeMemoryEvidence,
+    pub observed_peak_within_configured_profile: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContentStoreProcessResourceEvidence {
+    pub resident_memory_supported: bool,
+    pub total_page_faults_supported: bool,
+    pub split_page_faults_supported: bool,
+    pub start_resident_bytes: u64,
+    pub steady_resident_bytes: u64,
+    pub peak_resident_bytes: u64,
+    pub steady_resident_growth_bytes: u64,
+    pub lifetime_peak_resident_growth_bytes: u64,
+    pub total_page_faults: Option<u64>,
+    pub minor_page_faults: Option<u64>,
+    pub major_page_faults: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContentStoreRuntimeMemoryEvidence {
+    pub host_total_bytes: Option<u64>,
+    pub host_available_bytes: Option<u64>,
+    pub cgroup_limit_bytes: Option<u64>,
+    pub cgroup_high_bytes: Option<u64>,
+    pub cgroup_current_bytes: Option<u64>,
+    pub effective_limit_bytes: Option<u64>,
+    pub effective_available_bytes: Option<u64>,
+    pub pressure: String,
 }
 
 impl ContentStoreInitialRowPageQualificationReport {
@@ -319,6 +420,19 @@ pub fn run_content_store_initial_row_page_qualification(
         config.base_message_count + 2,
         config.message_payload_bytes,
     )?;
+    let resources = qualify_content_store_resources(
+        &mut database,
+        &corpus,
+        ContentStoreResourceProbeConfig {
+            profile_kind: config.resource_profile_kind,
+            configured_available_memory_bytes: config.configured_available_memory_bytes,
+            read_samples: config.resource_read_samples,
+            database_path: &config.database_path,
+            database_config: &authoritative_config,
+            message_position: config.base_message_count + 2,
+            message_payload_bytes: config.message_payload_bytes,
+        },
+    )?;
     let corruption = qualify_content_store_corruption(
         &mut database,
         &config.database_path,
@@ -354,6 +468,7 @@ pub fn run_content_store_initial_row_page_qualification(
         wal_recovery_read,
         live_overlay_read,
         multi_statement_transaction,
+        resources,
         corruption,
         isolation,
         ready: true,

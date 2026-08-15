@@ -82,6 +82,36 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
     assert!(report.corruption.source_preserved);
     assert!(report.corruption.artifact_bytes > 0);
     assert!(report.corruption.bit_flip_offset < report.corruption.artifact_bytes);
+    assert_eq!(
+        report.resources.profile_kind,
+        ContentStoreResourceProfileKind::SupportedLowMemory
+    );
+    assert_eq!(
+        report.resources.configured_available_memory_bytes,
+        CONTENT_STORE_SUPPORTED_LOW_MEMORY_PROFILE_BYTES
+    );
+    assert_eq!(report.resources.read_samples, 16);
+    assert_eq!(
+        report.resources.segment_cache_capacity_bytes,
+        report.segment_cache_capacity_bytes
+    );
+    assert_eq!(report.resources.max_read_result_rows, Some(100_000));
+    assert_eq!(
+        report.resources.max_read_result_payload_bytes,
+        Some(128 * 1024 * 1024)
+    );
+    assert!(report.resources.execution_batch_rows > 0);
+    assert!(report.resources.execution_batch_payload_bytes > 0);
+    assert!(report.resources.blocking_operator_bytes > 0);
+    assert_eq!(report.resources.read_latency.sample_count, 16);
+    assert_eq!(report.resources.output_rows, report.final_message_count);
+    assert!(report.resources.logical_mutation_bytes > 0);
+    assert!(report.resources.wal_append_bytes > 0);
+    assert!(report.resources.new_generation_artifact_bytes > 0);
+    assert!(report.resources.durable_write_bytes_lower_bound > 0);
+    assert!(report.resources.process.resident_memory_supported);
+    assert!(report.resources.process.total_page_faults_supported);
+    assert!(report.resources.observed_peak_within_configured_profile);
     assert!(report
         .cold_checkpoint_reads
         .iter()
@@ -116,4 +146,29 @@ fn qualification_rejects_an_existing_database_path() {
 
     assert!(error.to_string().contains("requires a new database path"));
     std::fs::remove_dir_all(path).expect("remove qualification path");
+}
+
+#[test]
+fn low_memory_profile_identity_is_exact_without_becoming_a_universal_limit() {
+    let id = TEST_ID.fetch_add(1, Ordering::SeqCst);
+    let path = std::env::temp_dir().join(format!(
+        "skein-content-store-row-page-memory-profile-{}-{id}",
+        std::process::id()
+    ));
+    let mut low_memory =
+        ContentStoreInitialRowPageQualificationConfig::synthetic(&path, "test-revision");
+    low_memory.configured_available_memory_bytes = 256 * 1024 * 1024;
+    let low_memory_error = run_content_store_initial_row_page_qualification(low_memory)
+        .expect_err("the named low-memory profile must retain its exact identity");
+    assert!(low_memory_error
+        .to_string()
+        .contains("supported low-memory profile must declare"));
+
+    let mut configured =
+        ContentStoreInitialRowPageQualificationConfig::synthetic(&path, "test-revision");
+    configured.resource_profile_kind = ContentStoreResourceProfileKind::ConfiguredWorkload;
+    configured.configured_available_memory_bytes = 2 * 1024 * 1024 * 1024;
+    assert!(configured
+        .validate(&nowledge_content_store_sql_corpus().unwrap())
+        .is_ok());
 }

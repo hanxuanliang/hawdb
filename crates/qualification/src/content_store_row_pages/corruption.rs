@@ -38,14 +38,8 @@ pub(super) fn qualify_content_store_corruption(
         )));
     }
 
-    let artifact_name = format!("relational-row-pages-{}.pages.skein", restored.generation);
-    let artifact_path = restored_path.join(&artifact_name);
-    let artifact_len = std::fs::metadata(&artifact_path)?.len();
-    if artifact_len == 0 {
-        return Err(SkeinError::Execution(format!(
-            "content-store corruption probe artifact {artifact_name} is empty"
-        )));
-    }
+    let (artifact_generation, artifact_name, artifact_path, artifact_len) =
+        latest_non_empty_row_page_artifact(&restored_path)?;
     let bit_flip_offset = artifact_len - 1;
     bit_flip(&artifact_path, bit_flip_offset)?;
 
@@ -110,7 +104,7 @@ pub(super) fn qualify_content_store_corruption(
 
     Ok(ContentStoreCorruptionQualificationReport {
         artifact_name,
-        artifact_generation: restored.generation,
+        artifact_generation,
         artifact_bytes: artifact_len,
         bit_flip_offset,
         scrub_rejected: true,
@@ -131,6 +125,39 @@ fn bit_flip(path: &Path, offset: u64) -> Result<()> {
     file.write_all(&byte)?;
     file.sync_all()?;
     Ok(())
+}
+
+fn latest_non_empty_row_page_artifact(path: &Path) -> Result<(u64, String, PathBuf, u64)> {
+    let mut selected = None;
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Some(generation) = name
+            .strip_prefix("relational-row-pages-")
+            .and_then(|name| name.strip_suffix(".pages.skein"))
+            .and_then(|generation| generation.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        let artifact_len = entry.metadata()?.len();
+        if artifact_len == 0 {
+            continue;
+        }
+        if selected
+            .as_ref()
+            .is_none_or(|(selected_generation, _, _, _)| generation > *selected_generation)
+        {
+            selected = Some((generation, name, entry.path(), artifact_len));
+        }
+    }
+    selected.ok_or_else(|| {
+        SkeinError::Execution(
+            "content-store corruption probe found no non-empty row-page artifact in the restored canonical closure"
+                .to_string(),
+        )
+    })
 }
 
 fn probe_paths(database_path: &Path) -> Result<(PathBuf, PathBuf)> {

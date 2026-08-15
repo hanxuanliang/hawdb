@@ -1324,6 +1324,19 @@ checkpoint binding, demand-read, lifecycle, or serving obligations.
   directory, bit-flips the current v1 row-page artifact, requires full scrub to
   poison that handle and reject later SQL, and rechecks that the retained source
   database is unchanged.
+  The resource probe records the declared profile kind and available bytes,
+  detected host/cgroup memory, concrete query/cache/executor/WAL/delta budgets,
+  warm-read percentiles, steady and lifetime-peak RSS, page faults, exact WAL
+  append bytes, and bytes in newly named immutable generation artifacts. Its
+  write-amplification value is explicitly a lower bound over WAL append plus
+  those new artifacts; it MUST NOT be presented as block-device bytes written.
+  `SupportedLowMemory` records whether the observed process peak fits the
+  declared 512 MiB profile, but an ordinary in-process run is not proof of an
+  OS-enforced limit. Activation still requires an isolated constrained run.
+  `ConfiguredWorkload` accepts a different caller-declared budget without
+  substituting 512 MiB as a universal cutoff. Production-copy evidence remains
+  a separate runner over the imported replica and its actual resource profile;
+  this synthetic fixture MUST NOT claim that qualification.
 - `SkeinRowRecovery.tla`: checkpoint-correlated row-root mount, exact ordered
   primary-key WAL overlay, graph-only epoch advancement, whole-fragment
   admission, fail-closed invalidation, complete-prefix view publication, cold

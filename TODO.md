@@ -133,9 +133,14 @@ crash; read-only recovery remains fail closed.
     time out and abort without changing the row or commit epoch. A disposable
     backup/restore probe now bit-flips the current row-page artifact, requires
     scrub to poison the damaged handle, rejects later SQL, and proves the source
-    database remains unchanged. Remaining first-table evidence is measured
-    latency, RSS, page faults, and write amplification. Then extend the same
-    contract to `content_chunks` and `content_anchors`.
+    database remains unchanged. The resource probe now records its declared and
+    detected memory profile, all relevant query/cache budgets, warm-read
+    percentiles, steady/peak RSS, page faults, WAL bytes, new immutable
+    generation bytes, and a clearly labelled durable-write lower bound. A
+    regular in-process run does not certify an OS-enforced 512 MiB limit: retain
+    the isolated constrained-profile run and production-copy measurements as
+    separate evidence gates. Then extend the same contract to `content_chunks`
+    and `content_anchors`.
   - Because no storage format has shipped, activation is destructive: remove
     the ordinary materialized row selector instead of retaining a compatibility
     or rollback path. Keep the differential oracle in qualification code only.
