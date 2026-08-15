@@ -346,6 +346,20 @@ the exact document/message update counts, payload digests, and identical
 checkpoint/reopen reads. `SkeinContentSpaceMergeOwnership.tla` proves the
 cross-kind durable batch rather than inferring it from two independent moves.
 
+`upsert_thread_messages` is qualified as one mixed transaction over the graph
+Thread, relational content document, message occurrences, and document
+summary. The graph Thread uses its public Thread id; document `owner_id` and
+message lookup use the distinct thread storage id, while each message retains
+both identities. Replaying document and message UPSERT statements MUST preserve
+their original `created_at` fields while updating the mutable payload selected
+by the conflict clause. A rejected missing-document message MUST leave every
+previously accepted statement in the transaction workspace unchanged. The
+summary count and payload bytes MUST match the final occurrence set before the
+single commit becomes visible. Live row-overlay and checkpoint/reopen reads
+MUST retain identical ordered output. `SkeinContentThreadUpsert.tla` models
+complete durable publication, conflict-time creation identity, and rejected
+statement atomicity.
+
 This gate deliberately covers the selected storage lifecycle, transaction,
 locking, cancellation, injected corruption, and synthetic resource evidence;
 it does not claim complete Content Store cutover. Callers still marked

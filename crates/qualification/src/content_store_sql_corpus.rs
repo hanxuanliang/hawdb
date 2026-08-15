@@ -587,6 +587,19 @@ mod tests {
     }
 
     #[test]
+    fn thread_message_upsert_is_bound_to_mixed_transaction_evidence() {
+        let corpus = nowledge_content_store_sql_corpus().unwrap();
+        let caller = corpus
+            .source_inventory
+            .iter()
+            .find(|caller| caller.symbol == "upsert_thread_messages")
+            .expect("thread message upsert caller must be inventoried");
+        assert_eq!(caller.coverage, ContentStoreSqlCallerCoverage::Covered);
+        assert!(caller.note.contains("identity separation"));
+        assert!(caller.note.contains("checkpoint/reopen identity"));
+    }
+
+    #[test]
     fn source_ownership_move_is_bound_to_mixed_transaction_evidence() {
         let corpus = nowledge_content_store_sql_corpus().unwrap();
         let caller = corpus

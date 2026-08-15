@@ -22,6 +22,7 @@ rust_library(
         "src/content_store_row_pages/source_replacement.rs",
         "src/content_store_row_pages/tests.rs",
         "src/content_store_row_pages/thread_ownership.rs",
+        "src/content_store_row_pages/thread_upsert.rs",
         "src/content_store_row_pages/transaction.rs",
         "src/lib.rs",
         "src/production_blocking.rs",

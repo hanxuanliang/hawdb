@@ -10,6 +10,7 @@ mod space_merge_ownership;
 #[cfg(test)]
 mod tests;
 mod thread_ownership;
+mod thread_upsert;
 mod transaction;
 
 use crate::{
@@ -35,6 +36,7 @@ use source_replacement::qualify_source_chunk_replacement;
 use space_merge_ownership::qualify_space_merge_ownership;
 use std::path::PathBuf;
 use thread_ownership::qualify_thread_ownership_moves;
+use thread_upsert::qualify_thread_message_upsert;
 use transaction::qualify_multi_statement_transaction;
 
 pub const CONTENT_STORE_INITIAL_ROW_PAGE_QUALIFICATION_PROTOCOL: &str =
@@ -269,6 +271,7 @@ pub struct ContentStoreInitialRowPageQualificationReport {
     pub source_ownership_move: ContentStoreSourceOwnershipMoveQualificationReport,
     pub thread_ownership_move: ContentStoreThreadOwnershipMoveQualificationReport,
     pub space_merge_ownership: ContentStoreSpaceMergeOwnershipQualificationReport,
+    pub thread_message_upsert: ContentStoreThreadUpsertQualificationReport,
     pub multi_statement_transaction: ContentStoreTransactionQualificationReport,
     pub resources: ContentStoreResourceEvidence,
     pub corruption: ContentStoreCorruptionQualificationReport,
@@ -383,6 +386,26 @@ pub struct ContentStoreSpaceMergeReadReport {
     pub case_name: String,
     pub expected_space_id: String,
     pub read: ContentStoreRowPageReadReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContentStoreThreadUpsertQualificationReport {
+    pub thread_id: String,
+    pub thread_storage_id: String,
+    pub content_document_id: String,
+    pub message_count: usize,
+    pub summary_size_bytes: i64,
+    pub document_owner_uses_storage_id: bool,
+    pub message_public_id_preserved: bool,
+    pub document_created_at_preserved_on_conflict: bool,
+    pub message_created_at_preserved_on_conflict: bool,
+    pub rejected_statement_atomic: bool,
+    pub graph_relational_agreement: bool,
+    pub base_epoch: u64,
+    pub committed_epoch: u64,
+    pub live_read: ContentStoreRowPageReadReport,
+    pub checkpoint_generation: u64,
+    pub reopened_read: ContentStoreRowPageReadReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -710,6 +733,13 @@ pub fn run_content_store_initial_row_page_qualification(
         &corpus,
     )?;
     database = space_merge_database;
+    let (thread_upsert_database, thread_message_upsert) = qualify_thread_message_upsert(
+        database,
+        &config.database_path,
+        &authoritative_config,
+        &corpus,
+    )?;
+    database = thread_upsert_database;
     let isolation = qualify_content_store_isolation(
         database,
         &corpus,
@@ -751,6 +781,7 @@ pub fn run_content_store_initial_row_page_qualification(
         source_ownership_move,
         thread_ownership_move,
         space_merge_ownership,
+        thread_message_upsert,
         multi_statement_transaction,
         resources,
         corruption,

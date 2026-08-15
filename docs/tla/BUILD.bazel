@@ -10,6 +10,7 @@ _STORAGE_MODELS = [
     "SkeinContentSourceOwnershipMove",
     "SkeinContentSourceReplacement",
     "SkeinContentThreadOwnershipMove",
+    "SkeinContentThreadUpsert",
     "SkeinConcurrentSnapshots",
     "SkeinCowPagePublication",
     "SkeinCrdtReplication",

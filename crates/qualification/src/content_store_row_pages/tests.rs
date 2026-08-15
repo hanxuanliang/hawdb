@@ -22,7 +22,7 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
 
     assert!(report.ready);
     assert_eq!(report.qualified_tables, QUALIFIED_TABLES);
-    assert_eq!(report.corpus.partial_caller_count, 4);
+    assert_eq!(report.corpus.partial_caller_count, 3);
     assert_eq!(report.final_message_count, 7);
     assert_eq!(report.base_chunk_count, 5);
     assert_eq!(report.final_chunk_count, 2);
@@ -318,6 +318,45 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
             ("thread_stale_preview", "stale-current"),
             ("source", "merged"),
         ]
+    );
+    assert_eq!(report.thread_message_upsert.message_count, 2);
+    assert_ne!(
+        report.thread_message_upsert.thread_id,
+        report.thread_message_upsert.thread_storage_id
+    );
+    assert!(report.thread_message_upsert.document_owner_uses_storage_id);
+    assert!(report.thread_message_upsert.message_public_id_preserved);
+    assert!(
+        report
+            .thread_message_upsert
+            .document_created_at_preserved_on_conflict
+    );
+    assert!(
+        report
+            .thread_message_upsert
+            .message_created_at_preserved_on_conflict
+    );
+    assert!(report.thread_message_upsert.rejected_statement_atomic);
+    assert!(report.thread_message_upsert.graph_relational_agreement);
+    assert_eq!(
+        report
+            .thread_message_upsert
+            .live_read
+            .execution
+            .visible_commit_epoch,
+        report.thread_message_upsert.committed_epoch
+    );
+    assert!(
+        report
+            .thread_message_upsert
+            .live_read
+            .execution
+            .overlay_entries
+            > 0
+    );
+    assert_eq!(
+        report.thread_message_upsert.live_read.output_sha256,
+        report.thread_message_upsert.reopened_read.output_sha256
     );
     assert_eq!(
         report.multi_statement_transaction.index_runtime_path,
