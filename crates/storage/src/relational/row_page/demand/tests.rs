@@ -50,6 +50,7 @@ fn point_projection_hydrates_only_selected_overflow_and_reuses_cache() {
     assert_eq!(cold_report.cache_hits, 0);
     assert_eq!(cold_report.file_pages_read, 1);
     assert_eq!(cold_report.hydrated_values, 0);
+    assert_eq!(inline_budget.hydrated_rows, 0);
     assert_eq!(inline_budget.compressed_bytes, 0);
     assert_eq!(fixture.cache.snapshot().pinned_bytes, 0);
 
@@ -77,6 +78,7 @@ fn point_projection_hydrates_only_selected_overflow_and_reuses_cache() {
     assert_eq!(warm_report.file_pages_read, 0);
     assert_eq!(warm_report.hydrated_values, 1);
     assert!(warm_report.compressed_hydration_bytes > 0);
+    assert_eq!(overflow_budget.hydrated_rows, 1);
     assert_eq!(fixture.cache.snapshot().pinned_bytes, 0);
 
     let initial = RelationalHydrationBudget {

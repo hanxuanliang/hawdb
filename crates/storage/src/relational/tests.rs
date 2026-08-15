@@ -800,6 +800,52 @@ fn large_payload_is_externalized_and_hydrated_with_explicit_budgets() {
     assert_eq!(budget.hydrated_rows, 1);
     assert_eq!(budget.decompressed_bytes, payload.len());
 
+    let reference = match stored.values()[1] {
+        RelationalValue::Overflow(reference) => reference,
+        _ => panic!("stored payload must remain an overflow reference"),
+    };
+    let mut projected = RelationalProjectedRow {
+        primary_key: key.clone(),
+        fields: vec![RelationalProjectedField {
+            ordinal: 1,
+            value: RelationalValue::Overflow(reference),
+        }],
+    };
+    let mut projected_budget = RelationalHydrationBudget::default();
+    snapshot
+        .value()
+        .hydrate_projected_row_with_context("messages", &mut projected, &mut projected_budget, None)
+        .expect("hydrate selected overflow only");
+    assert_eq!(
+        projected.fields[0].value,
+        RelationalValue::Text(payload.clone())
+    );
+    assert_eq!(projected_budget.hydrated_rows, 1);
+    assert_eq!(projected_budget.decompressed_bytes, payload.len());
+
+    let mut mismatched = RelationalProjectedRow {
+        primary_key: key.clone(),
+        fields: vec![RelationalProjectedField {
+            ordinal: 1,
+            value: RelationalValue::Overflow(RelationalOverflowRef {
+                uncompressed_bytes: reference.uncompressed_bytes + 1,
+                ..reference
+            }),
+        }],
+    };
+    let initial_mismatch_budget = RelationalHydrationBudget::default();
+    let mut mismatch_budget = initial_mismatch_budget;
+    assert!(matches!(
+        snapshot.value().hydrate_projected_row_with_context(
+            "messages",
+            &mut mismatched,
+            &mut mismatch_budget,
+            None,
+        ),
+        Err(RelationalError::Corruption(_))
+    ));
+    assert_eq!(mismatch_budget, initial_mismatch_budget);
+
     let mut rejected_budget = RelationalHydrationBudget {
         max_decompressed_bytes: payload.len() - 1,
         ..RelationalHydrationBudget::default()

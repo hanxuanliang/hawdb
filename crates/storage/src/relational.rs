@@ -1500,6 +1500,21 @@ impl RelationalState {
         overflow::hydrate_row(self, row, budget, task_context).map(Some)
     }
 
+    /// Resolves only overflow references retained by one projected row.
+    ///
+    /// Every reference must still match the row pinned in this state. Budget
+    /// publication is atomic, so admission or corruption leaves the caller's
+    /// counters unchanged.
+    pub fn hydrate_projected_row_with_context(
+        &self,
+        table: &str,
+        row: &mut RelationalProjectedRow,
+        budget: &mut RelationalHydrationBudget,
+        task_context: Option<&skein_core::RuntimeTaskContext>,
+    ) -> Result<(), RelationalError> {
+        overflow::hydrate_projected_row(self, table, row, budget, task_context)
+    }
+
     pub fn overflow_segment_count(&self) -> usize {
         self.overflow_segments.len()
     }

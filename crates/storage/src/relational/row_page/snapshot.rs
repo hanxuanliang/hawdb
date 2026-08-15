@@ -1,7 +1,7 @@
 //! Snapshot-correct relational reads over checkpoint, recovery, and live rows.
 
 use super::demand::{
-    RelationalRowPageOverlayPoint, RelationalRowPageOverlayRange,
+    RelationalRowPageOverlayPoint, RelationalRowPageOverlayRange, RelationalRowPageOverlayRead,
     RelationalRowPageProjectedOverlayValue,
 };
 use super::{
@@ -295,20 +295,48 @@ impl RelationalRowPageSnapshotReader {
         task: &RuntimeTaskContext,
         visit: impl FnMut(RelationalProjectedRow) -> bool,
     ) -> Result<RelationalRowPageSnapshotRangeReport, RelationalRowPageSnapshotReadError> {
+        self.visit_projected_range_resolving(
+            range,
+            limits,
+            hydration,
+            task,
+            |_, _, _| Ok(()),
+            visit,
+        )
+    }
+
+    /// Visits a projected range and resolves any unbound overlay values before
+    /// they become visible to the row callback.
+    pub fn visit_projected_range_resolving(
+        &self,
+        range: RelationalRowPageProjectedRange<'_>,
+        limits: RelationalRowPageSnapshotReadLimits,
+        hydration: &mut RelationalHydrationBudget,
+        task: &RuntimeTaskContext,
+        mut resolve: impl FnMut(
+            &mut RelationalProjectedRow,
+            &mut RelationalHydrationBudget,
+            &RuntimeTaskContext,
+        ) -> Result<(), RelationalRowPageDemandReadError>,
+        visit: impl FnMut(RelationalProjectedRow) -> bool,
+    ) -> Result<RelationalRowPageSnapshotRangeReport, RelationalRowPageSnapshotReadError> {
         self.checkpoint(task)?;
         let (overlay, overlay_report) = self.collect_overlay(range, limits, task)?;
         self.checkpoint(task)?;
         let demand = self
             .demand
             .visit_projected_range_with_overlay(
-                range,
-                limits.demand,
+                RelationalRowPageOverlayRead {
+                    range,
+                    limits: limits.demand,
+                    overlay: RelationalRowPageOverlayRange {
+                        rows: overlay,
+                        overflow_root: self.overlay_overflow.as_deref(),
+                    },
+                },
                 hydration,
                 task,
-                RelationalRowPageOverlayRange {
-                    rows: overlay,
-                    overflow_root: self.overlay_overflow.as_deref(),
-                },
+                &mut resolve,
                 visit,
             )
             .map_err(|error| self.map_demand_error(error))?;

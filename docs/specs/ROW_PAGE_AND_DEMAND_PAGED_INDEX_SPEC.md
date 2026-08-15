@@ -1064,8 +1064,8 @@ opening its row page. Range lookup reads only intersecting recovery runs,
 visits only in-range live entries, and coalesces them into a primary-key-ordered
 map where a higher commit epoch replaces a lower one. Equal-epoch duplicate
 versions are corruption. The collector validates the complete row shape and
-retains only requested fields; an unselected large value
-is dropped after its one bounded decode/callback wave. Distinct projected
+retains only requested fields; an unselected large value is dropped after its
+one bounded decode/callback wave. Distinct projected
 overlay entries and conservative resident bytes are admitted from borrowed
 values before cloning or checkpoint streaming begins. The range then performs
 an ordered merge with the checkpoint cursor and moves projected values into the
@@ -1077,6 +1077,9 @@ the shared descriptor-height, page, slot-byte, decoded-row, pin, hydration,
 cancellation, and deadline limits of the demand reader. Large inline values are
 conservatively charged when selected even if their source row is `Arc`-shared.
 Point overlay projection is admitted by the same byte envelope before cloning.
+Every projected row that resolves one or more overflow values consumes exactly
+one hydration-row unit. Resolution stages all counters and values, so admission
+or reference mismatch publishes neither a partial row nor partial budget.
 The reported identity, selected point source, recovery runs and bytes, live
 entries,
 distinct overlay entries, replacements, overlay resident bytes, page reads,
@@ -1086,9 +1089,10 @@ Admission, cancellation, deadline, callback stop, and callback unwind do not
 poison the pinned reader. Checksum, binding, epoch, schema-shape, immutable
 identity, bound overflow-closure, or durability failures poison it and make
 later operations fail closed. A missing or mismatched reference in the pinned
-state resolver is also corruption at the SQL composition boundary. Callback
-effects remain provisional until both snapshot reading and pinned-state
-resolution return `Ok`.
+state resolver is also corruption at the SQL composition boundary. The storage
+reader invokes that fallible resolver before the row callback. Callback effects
+remain provisional until both snapshot reading and pinned-state resolution
+return `Ok`.
 
 This is the only v1 snapshot-composition contract. Skein is not released, so
 there is no legacy row-root reader, manifest migration, compatibility fallback,

@@ -1,6 +1,6 @@
 use super::{
-    RelationalError, RelationalOverflowSegment, RelationalRow, RelationalScalarType,
-    RelationalState, RelationalTableSchema, RelationalValue,
+    RelationalError, RelationalOverflowSegment, RelationalProjectedRow, RelationalRow,
+    RelationalScalarType, RelationalState, RelationalTableSchema, RelationalValue,
 };
 use skein_integrity::Sha256Digest;
 use std::collections::BTreeSet;
@@ -147,6 +147,68 @@ pub(super) fn hydrate_row(
     }
     *budget = staged_budget;
     Ok(RelationalRow::new(values))
+}
+
+pub(super) fn hydrate_projected_row(
+    state: &RelationalState,
+    table: &str,
+    row: &mut RelationalProjectedRow,
+    budget: &mut RelationalHydrationBudget,
+    task_context: Option<&skein_core::RuntimeTaskContext>,
+) -> Result<(), RelationalError> {
+    if !row
+        .fields
+        .iter()
+        .any(|field| matches!(field.value, RelationalValue::Overflow(_)))
+    {
+        return Ok(());
+    }
+    runtime_checkpoint(task_context)?;
+    let canonical = state.row(table, &row.primary_key).ok_or_else(|| {
+        RelationalError::Corruption(format!(
+            "projected overflow resolver cannot find row in table {table}"
+        ))
+    })?;
+    let mut staged_budget = *budget;
+    if staged_budget.hydrated_rows >= staged_budget.max_rows {
+        return Err(RelationalError::Admission(format!(
+            "relational hydration exceeds max_rows {}",
+            staged_budget.max_rows
+        )));
+    }
+    staged_budget.hydrated_rows += 1;
+    for field in &mut row.fields {
+        let RelationalValue::Overflow(reference) = &field.value else {
+            continue;
+        };
+        let canonical_value = canonical.values().get(field.ordinal).ok_or_else(|| {
+            RelationalError::Corruption(format!(
+                "projected field {} is outside the canonical row shape for table {table}",
+                field.ordinal
+            ))
+        })?;
+        if canonical_value != &RelationalValue::Overflow(*reference) {
+            return Err(RelationalError::Corruption(format!(
+                "projected overflow reference at field {} differs from the canonical row in table {table}",
+                field.ordinal
+            )));
+        }
+        let segment = state
+            .overflow_segments
+            .get(&reference.digest)
+            .ok_or_else(|| {
+                RelationalError::Corruption(format!(
+                    "missing overflow segment {}",
+                    reference.digest
+                ))
+            })?;
+        runtime_checkpoint(task_context)?;
+        let envelope = segment.read()?;
+        field.value =
+            decode_overflow_envelope(reference, &envelope, &mut staged_budget, task_context)?;
+    }
+    *budget = staged_budget;
+    Ok(())
 }
 
 fn runtime_checkpoint(
