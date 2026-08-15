@@ -708,11 +708,12 @@ fn explain_access_path(
             .join("|")
     };
     format!(
-        "{planned}, runtime_path={}, lookups={}, demand_paged={}, authoritative={}, canonical_fallback={}, fallback_reasons={}, base_generation={}, delta_generation={}, base_epoch={}, visible_epoch={}, root_set_digest={}, logical_pages={}, logical_bytes={}, physical_pages={}, physical_bytes={}, cache_hits={}, cache_misses={}, cache_admission_rejections={}, delta_entries={}, live_batches={}, live_entries={}, live_matches={}, live_bytes={}, index_rows={}, {row}",
+        "{planned}, runtime_path={}, lookups={}, demand_paged={}, authoritative={}, transaction_workspace={}, canonical_fallback={}, fallback_reasons={}, base_generation={}, delta_generation={}, base_epoch={}, visible_epoch={}, root_set_digest={}, logical_pages={}, logical_bytes={}, physical_pages={}, physical_bytes={}, cache_hits={}, cache_misses={}, cache_admission_rejections={}, delta_entries={}, live_batches={}, live_entries={}, live_matches={}, live_bytes={}, index_rows={}, {row}",
         evidence.runtime_path(),
         evidence.lookups,
         evidence.demand_paged_lookups,
         evidence.authoritative_lookups,
+        evidence.transaction_workspace_lookups,
         evidence.canonical_fallback_lookups,
         fallback_reasons,
         optional_u64_text(evidence.base_generation),

@@ -286,10 +286,19 @@ across every probe, including repeated inner-side join probes. A missing view,
 missing optional query index, or admission rejection before provisional output
 uses the observable canonical materialized fallback. Corruption, durability or
 generation mismatch, view-identity drift within a statement, and a locator
-whose canonical row is missing fail closed. A writable transaction uses the
-canonical transaction workspace so read-your-own-writes cannot consult a
-pre-transaction index view; this transaction-workspace path is also observable
-and is not a fallback to stale persistent state.
+whose canonical row is missing fail closed. A writable authoritative
+transaction pins the committed index view at begin and appends every successful
+statement's index changes to a private overlay. Queries and constraint checks
+merge that pinned base with all prior statement batches, so
+read-your-own-writes never consults the pre-transaction view alone and never
+reconstructs database-sized posting maps. The private overlay has cumulative
+entry and encoded-byte limits, and all index reads share a transaction-wide
+page/row/byte ledger. If staging, constraint validation, or overlay admission
+fails, the statement leaves the row workspace, accumulated WAL writes, and
+private index overlay unchanged. The observable runtime path is
+`transaction_workspace`, not a fallback to stale or materialized state. Commit
+revalidates the complete write group against the then-current authoritative
+view before WAL append.
 
 In `Authoritative` mode one transaction-scoped ledger bounds the aggregate
 logical pages, bytes, and row locators consumed by all primary, unique, UPSERT,

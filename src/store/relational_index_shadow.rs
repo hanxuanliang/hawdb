@@ -10,11 +10,14 @@
 mod authoritative;
 #[path = "relational_index_shadow/constraint_qualification.rs"]
 mod constraint_qualification;
+#[path = "relational_index_shadow/transaction.rs"]
+mod transaction;
 
 pub use constraint_qualification::{
     RelationalConstraintQualificationProbeReport, RelationalConstraintQualificationReport,
     RelationalConstraintQualificationUse, RELATIONAL_CONSTRAINT_QUALIFICATION_PROTOCOL,
 };
+pub(crate) use transaction::RelationalTransactionIndexView;
 
 use super::{GraphStore, SkeinError};
 use skein_integrity::{integrity_digest, IntegrityHasher, Sha256Digest};
@@ -239,6 +242,7 @@ struct RelationalIndexQualificationProbe {
     key: RelationalKey,
 }
 
+#[derive(Clone, Copy)]
 enum RelationalIndexReadSelector<'a> {
     Exact(&'a RelationalKey),
     Prefix(&'a RelationalKey),

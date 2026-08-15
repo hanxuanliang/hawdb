@@ -120,10 +120,12 @@ crash; read-only recovery remains fail closed.
   - Require checkpoint/reopen, WAL replay, corruption, cancellation, locking,
     cold/warm latency, RSS, page-fault, and write-amplification evidence under
     the 512 MiB desktop profile before enabling the path by default.
-  - Remaining first-table evidence is injected corruption, cancellation,
-    pessimistic locking and multi-statement transaction groups, plus measured
-    latency, RSS, page faults, and write amplification. Then extend the same
-    contract to `content_chunks` and `content_anchors`.
+  - The authoritative transaction core now pins one persistent base and merges
+    a bounded private index overlay across SQL statements. Remaining
+    first-table evidence is injected corruption, cancellation, pessimistic
+    locking, a Content Store-shaped multi-statement transaction group, plus
+    measured latency, RSS, page faults, and write amplification. Then extend
+    the same contract to `content_chunks` and `content_anchors`.
   - Because no storage format has shipped, activation is destructive: remove
     the ordinary materialized row selector instead of retaining a compatibility
     or rollback path. Keep the differential oracle in qualification code only.

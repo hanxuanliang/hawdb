@@ -98,6 +98,7 @@ pub use graph_columnar_shadow::{
 };
 pub use read_view::PublishedReadView;
 use relational_index_shadow::RelationalIndexShadowState;
+pub(crate) use relational_index_shadow::RelationalTransactionIndexView;
 pub use relational_index_shadow::{
     RelationalConstraintQualificationProbeReport, RelationalConstraintQualificationReport,
     RelationalConstraintQualificationUse, RelationalIndexQualificationProbeKind,

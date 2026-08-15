@@ -9,27 +9,21 @@ struct AuthoritativeReadUsage {
     rows: usize,
 }
 
-/// Transaction-scoped persistent constraint reader.
-///
-/// The owned `Arc` pins one immutable visibility epoch. A single ledger spans
-/// every primary, unique, UPSERT, and foreign-key probe in the transaction so
-/// a sequence of individually small lookups cannot bypass admission.
-pub(in crate::store) struct AuthoritativeRelationalConstraintIndex {
-    view: Arc<RelationalIndexReadView>,
+#[derive(Debug)]
+pub(super) struct AuthoritativeReadLedger {
     limits: RelationalIndexReadLimits,
     usage: RefCell<AuthoritativeReadUsage>,
 }
 
-impl AuthoritativeRelationalConstraintIndex {
-    fn new(view: Arc<RelationalIndexReadView>, limits: RelationalIndexReadLimits) -> Self {
+impl AuthoritativeReadLedger {
+    pub(super) fn new(limits: RelationalIndexReadLimits) -> Self {
         Self {
-            view,
             limits,
             usage: RefCell::new(AuthoritativeReadUsage::default()),
         }
     }
 
-    fn remaining_limits(&self) -> Result<RelationalIndexReadLimits, RelationalError> {
+    pub(super) fn remaining_limits(&self) -> Result<RelationalIndexReadLimits, RelationalError> {
         let usage = self.usage.borrow();
         let max_pages = self
             .limits
@@ -39,7 +33,7 @@ impl AuthoritativeRelationalConstraintIndex {
             .and_then(NonZeroUsize::new)
             .ok_or_else(|| {
                 RelationalError::Admission(
-                    "authoritative relational constraint page budget is exhausted".to_string(),
+                    "authoritative relational index page budget is exhausted".to_string(),
                 )
             })?;
         let max_rows = self
@@ -50,7 +44,7 @@ impl AuthoritativeRelationalConstraintIndex {
             .and_then(NonZeroUsize::new)
             .ok_or_else(|| {
                 RelationalError::Admission(
-                    "authoritative relational constraint row budget is exhausted".to_string(),
+                    "authoritative relational index row budget is exhausted".to_string(),
                 )
             })?;
         let max_bytes = self
@@ -61,7 +55,7 @@ impl AuthoritativeRelationalConstraintIndex {
             .and_then(NonZeroUsize::new)
             .ok_or_else(|| {
                 RelationalError::Admission(
-                    "authoritative relational constraint byte budget is exhausted".to_string(),
+                    "authoritative relational index byte budget is exhausted".to_string(),
                 )
             })?;
         Ok(RelationalIndexReadLimits {
@@ -72,7 +66,10 @@ impl AuthoritativeRelationalConstraintIndex {
         })
     }
 
-    fn record(&self, report: &RelationalIndexReadViewReport) -> Result<(), RelationalError> {
+    pub(super) fn record(
+        &self,
+        report: &RelationalIndexReadViewReport,
+    ) -> Result<(), RelationalError> {
         let (backend_pages, backend_bytes) = match &report.backend {
             RelationalIndexReadViewBackendReport::Base(report) => {
                 (report.pages_read, report.bytes_read)
@@ -84,7 +81,7 @@ impl AuthoritativeRelationalConstraintIndex {
                     .checked_add(report.delta_pages_read)
                     .ok_or_else(|| {
                         RelationalError::Admission(
-                            "authoritative constraint page accounting overflow".to_string(),
+                            "authoritative index page accounting overflow".to_string(),
                         )
                     })?,
                 report
@@ -93,7 +90,7 @@ impl AuthoritativeRelationalConstraintIndex {
                     .checked_add(report.delta_bytes_read)
                     .ok_or_else(|| {
                         RelationalError::Admission(
-                            "authoritative constraint byte accounting overflow".to_string(),
+                            "authoritative index byte accounting overflow".to_string(),
                         )
                     })?,
             ),
@@ -102,7 +99,7 @@ impl AuthoritativeRelationalConstraintIndex {
             .checked_add(report.live_bytes_visited)
             .ok_or_else(|| {
                 RelationalError::Admission(
-                    "authoritative constraint live-byte accounting overflow".to_string(),
+                    "authoritative index live-byte accounting overflow".to_string(),
                 )
             })?;
         let mut usage = self.usage.borrow_mut();
@@ -111,7 +108,7 @@ impl AuthoritativeRelationalConstraintIndex {
             .checked_add(backend_pages)
             .ok_or_else(|| {
                 RelationalError::Admission(
-                    "authoritative constraint page accounting overflow".to_string(),
+                    "authoritative index page accounting overflow".to_string(),
                 )
             })?;
         usage.logical_bytes = usage
@@ -119,24 +116,40 @@ impl AuthoritativeRelationalConstraintIndex {
             .checked_add(logical_bytes)
             .ok_or_else(|| {
                 RelationalError::Admission(
-                    "authoritative constraint byte accounting overflow".to_string(),
+                    "authoritative index byte accounting overflow".to_string(),
                 )
             })?;
         usage.rows = usage.rows.checked_add(report.rows_visited).ok_or_else(|| {
-            RelationalError::Admission(
-                "authoritative constraint row accounting overflow".to_string(),
-            )
+            RelationalError::Admission("authoritative index row accounting overflow".to_string())
         })?;
         if usage.logical_pages > self.limits.max_pages.get()
             || usage.logical_bytes > self.limits.max_bytes.get()
             || usage.rows > self.limits.max_rows.get()
         {
             return Err(RelationalError::Admission(
-                "authoritative relational constraint reader exceeded its transaction budget"
-                    .to_string(),
+                "authoritative relational index reader exceeded its transaction budget".to_string(),
             ));
         }
         Ok(())
+    }
+}
+
+/// Transaction-scoped persistent constraint reader.
+///
+/// The owned `Arc` pins one immutable visibility epoch. A single ledger spans
+/// every primary, unique, UPSERT, and foreign-key probe in the transaction so
+/// a sequence of individually small lookups cannot bypass admission.
+pub(in crate::store) struct AuthoritativeRelationalConstraintIndex {
+    view: Arc<RelationalIndexReadView>,
+    ledger: AuthoritativeReadLedger,
+}
+
+impl AuthoritativeRelationalConstraintIndex {
+    fn new(view: Arc<RelationalIndexReadView>, limits: RelationalIndexReadLimits) -> Self {
+        Self {
+            view,
+            ledger: AuthoritativeReadLedger::new(limits),
+        }
     }
 }
 
@@ -150,13 +163,13 @@ impl RelationalConstraintIndex for AuthoritativeRelationalConstraintIndex {
     ) -> Result<(), RelationalError> {
         let report = self
             .view
-            .visit_exact_postings(table, index, key, self.remaining_limits()?, visit)
+            .visit_exact_postings(table, index, key, self.ledger.remaining_limits()?, visit)
             .map_err(map_constraint_read_error)?;
-        self.record(&report)
+        self.ledger.record(&report)
     }
 }
 
-fn map_constraint_read_error(error: RelationalIndexShadowError) -> RelationalError {
+pub(super) fn map_constraint_read_error(error: RelationalIndexShadowError) -> RelationalError {
     match error {
         RelationalIndexShadowError::Admission(message) => RelationalError::Admission(message),
         RelationalIndexShadowError::Durability(message) => RelationalError::Durability(message),

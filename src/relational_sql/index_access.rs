@@ -1,7 +1,7 @@
 use crate::error::{Result, SkeinError};
 use crate::store::{
     GraphStore, RelationalIndexReadLimits, RelationalIndexReadViewBackendReport,
-    RelationalIndexReadViewReport,
+    RelationalIndexReadViewReport, RelationalTransactionIndexView,
 };
 use skein_storage::{RelationalIndexShadowError, RelationalKey, RelationalState};
 use std::cell::RefCell;
@@ -14,6 +14,7 @@ pub(crate) enum RelationalIndexReadMode<'a> {
     DemandPaged(&'a GraphStore),
     Authoritative(&'a GraphStore),
     TransactionWorkspace,
+    AuthoritativeTransaction(&'a RelationalTransactionIndexView),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -23,6 +24,7 @@ pub(crate) struct RelationalIndexExecutionEvidence {
     pub lookups: usize,
     pub demand_paged_lookups: usize,
     pub authoritative_lookups: usize,
+    pub transaction_workspace_lookups: usize,
     pub canonical_fallback_lookups: usize,
     pub fallback_reasons: BTreeSet<&'static str>,
     pub base_generation: Option<u64>,
@@ -50,12 +52,14 @@ impl RelationalIndexExecutionEvidence {
         match (
             self.demand_paged_lookups != 0,
             self.authoritative_lookups != 0,
+            self.transaction_workspace_lookups != 0,
             self.canonical_fallback_lookups != 0,
         ) {
-            (true, false, false) => "demand_paged",
-            (false, true, false) => "authoritative",
-            (false, false, true) => "canonical_fallback",
-            (false, false, false) => "not_executed",
+            (true, false, false, false) => "demand_paged",
+            (false, true, false, false) => "authoritative",
+            (false, false, true, false) => "transaction_workspace",
+            (false, false, false, true) => "canonical_fallback",
+            (false, false, false, false) => "not_executed",
             _ => "mixed",
         }
     }
@@ -133,14 +137,22 @@ impl<'a> RelationalIndexRuntime<'a> {
             index,
             prefix,
         } = probe;
-        let (store, authoritative) = match self.mode {
+        enum PersistentTarget<'a> {
+            Store(&'a GraphStore),
+            Transaction(&'a RelationalTransactionIndexView),
+        }
+
+        let (target, authoritative) = match self.mode {
             RelationalIndexReadMode::Materialized => unreachable!("handled by the caller"),
             RelationalIndexReadMode::TransactionWorkspace => {
                 self.record_fallback(table, index, "transaction_workspace")?;
                 return fallback(visit);
             }
-            RelationalIndexReadMode::DemandPaged(store) => (store, false),
-            RelationalIndexReadMode::Authoritative(store) => (store, true),
+            RelationalIndexReadMode::DemandPaged(store) => (PersistentTarget::Store(store), false),
+            RelationalIndexReadMode::Authoritative(store) => (PersistentTarget::Store(store), true),
+            RelationalIndexReadMode::AuthoritativeTransaction(view) => {
+                (PersistentTarget::Transaction(view), true)
+            }
         };
         let Some(remaining) = self.remaining_limits() else {
             if authoritative {
@@ -154,25 +166,31 @@ impl<'a> RelationalIndexRuntime<'a> {
         let mut callback_error = None;
         let mut keep_going = true;
         let mut produced_provisional_rows = false;
-        let attempt = store.visit_relational_index_read_view_prefix(
-            table,
-            index,
-            prefix,
-            remaining,
-            |locator| {
-                produced_provisional_rows = true;
-                match visit(locator) {
-                    Ok(continue_scan) => {
-                        keep_going = continue_scan;
-                        continue_scan
-                    }
-                    Err(error) => {
-                        callback_error = Some(error);
-                        false
-                    }
+        let mut visit_locator = |locator: &RelationalKey| {
+            produced_provisional_rows = true;
+            match visit(locator) {
+                Ok(continue_scan) => {
+                    keep_going = continue_scan;
+                    continue_scan
                 }
-            },
-        );
+                Err(error) => {
+                    callback_error = Some(error);
+                    false
+                }
+            }
+        };
+        let attempt = match target {
+            PersistentTarget::Store(store) => store.visit_relational_index_read_view_prefix(
+                table,
+                index,
+                prefix,
+                remaining,
+                &mut visit_locator,
+            ),
+            PersistentTarget::Transaction(view) => {
+                Some(view.visit_prefix(table, index, prefix, remaining, &mut visit_locator))
+            }
+        };
         if let Some(error) = callback_error {
             return Err(error);
         }
@@ -340,6 +358,13 @@ impl<'a> RelationalIndexRuntime<'a> {
                     "authoritative lookup count",
                 )?;
             }
+            RelationalIndexReadMode::AuthoritativeTransaction(_) => {
+                evidence.transaction_workspace_lookups = checked_add(
+                    evidence.transaction_workspace_lookups,
+                    1,
+                    "transaction workspace lookup count",
+                )?;
+            }
             RelationalIndexReadMode::Materialized
             | RelationalIndexReadMode::TransactionWorkspace => {
                 unreachable!("materialized paths cannot record a persistent-index success")
@@ -424,7 +449,9 @@ fn ensure_identity(
         evidence.visible_commit_epoch,
         evidence.root_set_digest.as_deref(),
     );
-    if (evidence.demand_paged_lookups != 0 || evidence.authoritative_lookups != 0)
+    if (evidence.demand_paged_lookups != 0
+        || evidence.authoritative_lookups != 0
+        || evidence.transaction_workspace_lookups != 0)
         && expected != observed
     {
         return Err(SkeinError::StorageIntegrity(

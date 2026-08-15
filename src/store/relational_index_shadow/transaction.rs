@@ -1,0 +1,537 @@
+use super::authoritative::{map_constraint_read_error, AuthoritativeReadLedger};
+use super::{
+    GraphStore, RelationalIndexReadSelector, RelationalIndexReadView, RelationalIndexReadViewReport,
+};
+use skein_storage::{
+    RelationalConstraintIndex, RelationalError, RelationalIndexChange,
+    RelationalIndexChangeCapture, RelationalIndexChangeCaptureLimits, RelationalIndexChangeKind,
+    RelationalIndexReadLimits, RelationalIndexShadowError, RelationalKey,
+};
+use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
+use std::sync::Arc;
+
+#[derive(Debug)]
+struct RelationalTransactionIndexBatch {
+    changes: Box<[RelationalIndexChange]>,
+    encoded_bytes: usize,
+}
+
+#[derive(Debug)]
+struct RelationalTransactionIndexOverlay {
+    batches: Vec<RelationalTransactionIndexBatch>,
+    entry_count: usize,
+    encoded_bytes: usize,
+    limits: RelationalIndexChangeCaptureLimits,
+}
+
+impl RelationalTransactionIndexOverlay {
+    fn new(limits: RelationalIndexChangeCaptureLimits) -> Self {
+        Self {
+            batches: Vec::new(),
+            entry_count: 0,
+            encoded_bytes: 0,
+            limits,
+        }
+    }
+
+    fn append(&mut self, capture: RelationalIndexChangeCapture) -> Result<(), RelationalError> {
+        let (changes, encoded_bytes) = match capture {
+            RelationalIndexChangeCapture::Captured {
+                changes,
+                encoded_bytes,
+            } => (changes, encoded_bytes),
+            RelationalIndexChangeCapture::Invalidated { reason } => {
+                return Err(RelationalError::Admission(format!(
+                    "authoritative transaction index overlay is unavailable: {reason}"
+                )));
+            }
+        };
+        if changes.is_empty() && encoded_bytes != 0 {
+            return Err(RelationalError::Corruption(
+                "empty authoritative transaction index capture reports resident bytes".to_string(),
+            ));
+        }
+        let next_entries = self.entry_count.checked_add(changes.len()).ok_or_else(|| {
+            RelationalError::Admission(
+                "authoritative transaction index entry accounting overflow".to_string(),
+            )
+        })?;
+        let next_bytes = self
+            .encoded_bytes
+            .checked_add(encoded_bytes)
+            .ok_or_else(|| {
+                RelationalError::Admission(
+                    "authoritative transaction index byte accounting overflow".to_string(),
+                )
+            })?;
+        if next_entries > self.limits.max_entries.get() || next_bytes > self.limits.max_bytes.get()
+        {
+            return Err(RelationalError::Admission(format!(
+                "authoritative transaction index overlay exceeds max_entries={} or max_bytes={}",
+                self.limits.max_entries, self.limits.max_bytes
+            )));
+        }
+        if !changes.is_empty() {
+            self.batches.push(RelationalTransactionIndexBatch {
+                changes: changes.into_boxed_slice(),
+                encoded_bytes,
+            });
+        }
+        self.entry_count = next_entries;
+        self.encoded_bytes = next_bytes;
+        Ok(())
+    }
+}
+
+struct TransactionOverlayMerge<'a, F> {
+    overlay: BTreeMap<RelationalKey, RelationalIndexChangeKind>,
+    visit: &'a mut F,
+    overlay_rows_emitted: usize,
+    stopped_early: bool,
+}
+
+#[derive(Clone, Copy)]
+struct TransactionPostingState {
+    base_present: bool,
+    current_present: bool,
+}
+
+impl TransactionPostingState {
+    fn first(kind: RelationalIndexChangeKind) -> Self {
+        match kind {
+            RelationalIndexChangeKind::Delete => Self {
+                base_present: true,
+                current_present: false,
+            },
+            RelationalIndexChangeKind::Insert => Self {
+                base_present: false,
+                current_present: true,
+            },
+        }
+    }
+
+    fn apply(&mut self, kind: RelationalIndexChangeKind) -> Result<(), RelationalIndexShadowError> {
+        match (self.current_present, kind) {
+            (true, RelationalIndexChangeKind::Delete) => self.current_present = false,
+            (false, RelationalIndexChangeKind::Insert) => self.current_present = true,
+            (true, RelationalIndexChangeKind::Insert) => {
+                return Err(RelationalIndexShadowError::Corrupt(
+                    "transaction index overlay inserts an already-present posting".to_string(),
+                ));
+            }
+            (false, RelationalIndexChangeKind::Delete) => {
+                return Err(RelationalIndexShadowError::Corrupt(
+                    "transaction index overlay deletes an absent posting".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn effect(self) -> Option<RelationalIndexChangeKind> {
+        match (self.base_present, self.current_present) {
+            (true, false) => Some(RelationalIndexChangeKind::Delete),
+            (false, true) => Some(RelationalIndexChangeKind::Insert),
+            (true, true) | (false, false) => None,
+        }
+    }
+}
+
+impl<F> TransactionOverlayMerge<'_, F>
+where
+    F: FnMut(&RelationalKey) -> bool,
+{
+    fn emit_overlay(&mut self, primary_key: &RelationalKey) -> bool {
+        self.overlay_rows_emitted = self
+            .overlay_rows_emitted
+            .checked_add(1)
+            .expect("reserved transaction overlay row count cannot overflow");
+        if !(self.visit)(primary_key) {
+            self.stopped_early = true;
+            return false;
+        }
+        true
+    }
+
+    fn visit_base(&mut self, primary_key: &RelationalKey) -> bool {
+        while let Some((overlay_key, kind)) = self.overlay.first_key_value() {
+            if overlay_key >= primary_key {
+                break;
+            }
+            let overlay_key = overlay_key.clone();
+            let kind = *kind;
+            self.overlay.pop_first();
+            if kind == RelationalIndexChangeKind::Insert && !self.emit_overlay(&overlay_key) {
+                return false;
+            }
+        }
+        match self.overlay.remove(primary_key) {
+            Some(RelationalIndexChangeKind::Delete) => true,
+            Some(RelationalIndexChangeKind::Insert) | None => {
+                if !(self.visit)(primary_key) {
+                    self.stopped_early = true;
+                    return false;
+                }
+                true
+            }
+        }
+    }
+
+    fn finish(&mut self) {
+        while !self.stopped_early {
+            let Some((primary_key, kind)) = self.overlay.pop_first() else {
+                break;
+            };
+            if kind == RelationalIndexChangeKind::Insert && !self.emit_overlay(&primary_key) {
+                break;
+            }
+        }
+    }
+}
+
+/// A transaction-private authoritative index view.
+///
+/// The committed base is pinned when the transaction begins. Successful SQL
+/// statements append bounded index-change batches; failed statements do not
+/// mutate this view. Reads merge the pinned base and every prior statement so
+/// read-your-own-writes never requires database-sized materialized postings.
+#[derive(Debug)]
+pub(crate) struct RelationalTransactionIndexView {
+    base: Arc<RelationalIndexReadView>,
+    overlay: RelationalTransactionIndexOverlay,
+    read_ledger: AuthoritativeReadLedger,
+}
+
+impl RelationalTransactionIndexView {
+    fn new(
+        base: Arc<RelationalIndexReadView>,
+        capture_limits: RelationalIndexChangeCaptureLimits,
+        read_limits: RelationalIndexReadLimits,
+    ) -> Self {
+        Self {
+            base,
+            overlay: RelationalTransactionIndexOverlay::new(capture_limits),
+            read_ledger: AuthoritativeReadLedger::new(read_limits),
+        }
+    }
+
+    pub(crate) fn capture_limits(&self) -> RelationalIndexChangeCaptureLimits {
+        self.overlay.limits
+    }
+
+    pub(crate) fn append(
+        &mut self,
+        capture: RelationalIndexChangeCapture,
+    ) -> Result<(), RelationalError> {
+        self.overlay.append(capture)
+    }
+
+    pub(crate) fn visit_prefix(
+        &self,
+        table: &str,
+        index: &str,
+        prefix: &RelationalKey,
+        limits: RelationalIndexReadLimits,
+        visit: impl FnMut(&RelationalKey) -> bool,
+    ) -> Result<RelationalIndexReadViewReport, RelationalIndexShadowError> {
+        self.visit_accounted(
+            table,
+            index,
+            RelationalIndexReadSelector::Prefix(prefix),
+            limits,
+            visit,
+        )
+    }
+
+    fn visit_accounted(
+        &self,
+        table: &str,
+        index: &str,
+        selector: RelationalIndexReadSelector<'_>,
+        requested: RelationalIndexReadLimits,
+        visit: impl FnMut(&RelationalKey) -> bool,
+    ) -> Result<RelationalIndexReadViewReport, RelationalIndexShadowError> {
+        let transaction_remaining = self
+            .read_ledger
+            .remaining_limits()
+            .map_err(relational_read_error)?;
+        let limits = intersect_read_limits(requested, transaction_remaining);
+        let report = self.visit_with_overlay(table, index, selector, limits, visit)?;
+        self.read_ledger
+            .record(&report)
+            .map_err(relational_read_error)?;
+        Ok(report)
+    }
+
+    fn visit_with_overlay(
+        &self,
+        table: &str,
+        index: &str,
+        selector: RelationalIndexReadSelector<'_>,
+        limits: RelationalIndexReadLimits,
+        mut visit: impl FnMut(&RelationalKey) -> bool,
+    ) -> Result<RelationalIndexReadViewReport, RelationalIndexShadowError> {
+        let mut posting_states = BTreeMap::<RelationalKey, TransactionPostingState>::new();
+        let mut entries_visited = 0usize;
+        let mut entries_matched = 0usize;
+        let mut bytes_visited = 0usize;
+        for batch in &self.overlay.batches {
+            bytes_visited = bytes_visited
+                .checked_add(batch.encoded_bytes)
+                .ok_or_else(|| admission("transaction index byte accounting overflow"))?;
+            for change in batch.changes.iter() {
+                entries_visited = entries_visited
+                    .checked_add(1)
+                    .ok_or_else(|| admission("transaction index entry accounting overflow"))?;
+                if change.table != table
+                    || change.index != index
+                    || !selector.matches(&change.index_key)
+                {
+                    continue;
+                }
+                entries_matched = entries_matched.checked_add(1).ok_or_else(|| {
+                    admission("transaction index matched-entry accounting overflow")
+                })?;
+                match posting_states.entry(change.primary_key.clone()) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(TransactionPostingState::first(change.kind));
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        entry.get_mut().apply(change.kind)?;
+                    }
+                }
+            }
+        }
+        let overlay = posting_states
+            .into_iter()
+            .filter_map(|(primary_key, state)| state.effect().map(|kind| (primary_key, kind)))
+            .collect::<BTreeMap<_, _>>();
+        let reserved_inserts = overlay
+            .values()
+            .filter(|kind| **kind == RelationalIndexChangeKind::Insert)
+            .count();
+        let backend_rows = limits
+            .max_rows
+            .get()
+            .checked_sub(reserved_inserts)
+            .and_then(NonZeroUsize::new)
+            .ok_or_else(|| {
+                admission(format!(
+                    "transaction index overlay reserves {reserved_inserts} rows, exhausting row limit {}",
+                    limits.max_rows
+                ))
+            })?;
+        let backend_bytes = limits
+            .max_bytes
+            .get()
+            .checked_sub(bytes_visited)
+            .and_then(NonZeroUsize::new)
+            .ok_or_else(|| {
+                admission(format!(
+                    "transaction index overlay needs {bytes_visited} bytes, exhausting byte limit {}",
+                    limits.max_bytes
+                ))
+            })?;
+        let backend_limits = RelationalIndexReadLimits {
+            max_rows: backend_rows,
+            max_bytes: backend_bytes,
+            ..limits
+        };
+
+        let mut merge = TransactionOverlayMerge {
+            overlay,
+            visit: &mut visit,
+            overlay_rows_emitted: 0,
+            stopped_early: false,
+        };
+        let mut report = {
+            let mut emit_base = |primary_key: &RelationalKey| merge.visit_base(primary_key);
+            match selector {
+                RelationalIndexReadSelector::Exact(key) => self.base.visit_exact_postings(
+                    table,
+                    index,
+                    key,
+                    backend_limits,
+                    &mut emit_base,
+                )?,
+                RelationalIndexReadSelector::Prefix(prefix) => self.base.visit_prefix_postings(
+                    table,
+                    index,
+                    prefix,
+                    backend_limits,
+                    &mut emit_base,
+                )?,
+            }
+        };
+        merge.finish();
+        report.live_batches_visited = checked_add(
+            report.live_batches_visited,
+            self.overlay.batches.len(),
+            "transaction index batch count",
+        )?;
+        report.live_entries_visited = checked_add(
+            report.live_entries_visited,
+            entries_visited,
+            "transaction index entry count",
+        )?;
+        report.live_entries_matched = checked_add(
+            report.live_entries_matched,
+            entries_matched,
+            "transaction index matched-entry count",
+        )?;
+        report.live_bytes_visited = checked_add(
+            report.live_bytes_visited,
+            bytes_visited,
+            "transaction index byte count",
+        )?;
+        report.rows_visited = checked_add(
+            report.rows_visited,
+            merge.overlay_rows_emitted,
+            "transaction index row count",
+        )?;
+        report.stopped_early |= merge.stopped_early;
+        Ok(report)
+    }
+}
+
+impl RelationalConstraintIndex for RelationalTransactionIndexView {
+    fn visit_exact_primary_keys(
+        &self,
+        table: &str,
+        index: &str,
+        key: &RelationalKey,
+        visit: &mut dyn FnMut(&RelationalKey) -> bool,
+    ) -> Result<(), RelationalError> {
+        let limits = self.read_ledger.remaining_limits()?;
+        let report = self
+            .visit_with_overlay(
+                table,
+                index,
+                RelationalIndexReadSelector::Exact(key),
+                limits,
+                visit,
+            )
+            .map_err(map_constraint_read_error)?;
+        self.read_ledger.record(&report)
+    }
+}
+
+impl GraphStore {
+    pub(crate) fn begin_authoritative_relational_transaction_index(
+        &self,
+    ) -> crate::Result<Option<RelationalTransactionIndexView>> {
+        if !self
+            .relational_index_shadow
+            .mode
+            .requires_authoritative_indexes()
+        {
+            return Ok(None);
+        }
+        self.validate_authoritative_relational_index_open()?;
+        let view = Arc::clone(
+            self.relational_index_shadow
+                .current_read_view(self.commit_epoch)
+                .expect("validated authoritative view must remain current"),
+        );
+        Ok(Some(RelationalTransactionIndexView::new(
+            view,
+            self.relational_index_shadow.live_limits,
+            RelationalIndexReadLimits::default(),
+        )))
+    }
+}
+
+fn intersect_read_limits(
+    requested: RelationalIndexReadLimits,
+    remaining: RelationalIndexReadLimits,
+) -> RelationalIndexReadLimits {
+    RelationalIndexReadLimits {
+        max_pages: requested.max_pages.min(remaining.max_pages),
+        max_rows: requested.max_rows.min(remaining.max_rows),
+        max_bytes: requested.max_bytes.min(remaining.max_bytes),
+        max_tree_height: requested.max_tree_height.min(remaining.max_tree_height),
+    }
+}
+
+fn checked_add(
+    current: usize,
+    additional: usize,
+    label: &str,
+) -> Result<usize, RelationalIndexShadowError> {
+    current
+        .checked_add(additional)
+        .ok_or_else(|| admission(format!("{label} overflow")))
+}
+
+fn admission(message: impl Into<String>) -> RelationalIndexShadowError {
+    RelationalIndexShadowError::Admission(message.into())
+}
+
+fn relational_read_error(error: RelationalError) -> RelationalIndexShadowError {
+    match error {
+        RelationalError::Admission(message) => RelationalIndexShadowError::Admission(message),
+        RelationalError::Durability(message) => RelationalIndexShadowError::Durability(message),
+        RelationalError::Corruption(message)
+        | RelationalError::Schema(message)
+        | RelationalError::Constraint(message) => RelationalIndexShadowError::Corrupt(message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use skein_storage::RelationalValue;
+
+    #[test]
+    fn transaction_overlay_admission_is_cumulative_and_atomic() {
+        let limits = RelationalIndexChangeCaptureLimits {
+            max_entries: NonZeroUsize::new(2).unwrap(),
+            max_bytes: NonZeroUsize::new(10).unwrap(),
+        };
+        let mut overlay = RelationalTransactionIndexOverlay::new(limits);
+        overlay.append(capture(vec![change(1)], 4)).unwrap();
+
+        let entry_error = overlay
+            .append(capture(vec![change(2), change(3)], 4))
+            .expect_err("cumulative entry admission must fail");
+        assert!(entry_error.to_string().contains("max_entries=2"));
+        assert_eq!(overlay.entry_count, 1);
+        assert_eq!(overlay.encoded_bytes, 4);
+        assert_eq!(overlay.batches.len(), 1);
+
+        let byte_error = overlay
+            .append(capture(vec![change(2)], 7))
+            .expect_err("cumulative byte admission must fail");
+        assert!(byte_error.to_string().contains("max_bytes=10"));
+        assert_eq!(overlay.entry_count, 1);
+        assert_eq!(overlay.encoded_bytes, 4);
+        assert_eq!(overlay.batches.len(), 1);
+
+        overlay.append(capture(vec![change(2)], 6)).unwrap();
+        assert_eq!(overlay.entry_count, 2);
+        assert_eq!(overlay.encoded_bytes, 10);
+        assert_eq!(overlay.batches.len(), 2);
+    }
+
+    fn capture(
+        changes: Vec<RelationalIndexChange>,
+        encoded_bytes: usize,
+    ) -> RelationalIndexChangeCapture {
+        RelationalIndexChangeCapture::Captured {
+            changes,
+            encoded_bytes,
+        }
+    }
+
+    fn change(ordinal: i64) -> RelationalIndexChange {
+        let primary_key = RelationalKey(vec![RelationalValue::BigInt(ordinal)]);
+        RelationalIndexChange {
+            table: "documents".to_string(),
+            index: "documents_owner_idx".to_string(),
+            index_key: RelationalKey(vec![RelationalValue::Text("owner".to_string())]),
+            primary_key,
+            kind: RelationalIndexChangeKind::Insert,
+        }
+    }
+}

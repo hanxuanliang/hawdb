@@ -594,6 +594,8 @@ pub(super) struct DatabaseTransactionState {
     graph_transaction: Option<GraphMutationTransaction>,
     relational_transaction: skein_storage::RelationalTransaction,
     relational_state: skein_storage::RelationalState,
+    relational_index:
+        std::result::Result<Option<crate::store::RelationalTransactionIndexView>, String>,
 }
 
 pub(super) struct GraphTransactionStatementOutcome {
@@ -18285,12 +18287,17 @@ impl DatabaseTransactionState {
             graph_transaction: Some(db.store.begin_mutation_transaction(&db.catalog)),
             relational_transaction: skein_storage::RelationalTransaction::default(),
             relational_state: db.store.relational_state().clone(),
+            relational_index: db
+                .store
+                .begin_authoritative_relational_transaction_index()
+                .map_err(|error| error.to_string()),
         }
     }
 
     fn rollback(&mut self) {
         self.graph_transaction.take();
         self.relational_transaction.writes.clear();
+        self.relational_index = Ok(None);
     }
 
     pub(crate) fn restore_graph_statement(&mut self, savepoint: GraphMutationSavepoint) {
@@ -18305,6 +18312,21 @@ impl DatabaseTransactionState {
             graph_transaction: self.graph_transaction.take(),
             relational_transaction: std::mem::take(&mut self.relational_transaction),
             relational_state: std::mem::take(&mut self.relational_state),
+            relational_index: std::mem::replace(&mut self.relational_index, Ok(None)),
+        }
+    }
+
+    fn authoritative_relational_index(
+        &self,
+    ) -> Result<&crate::store::RelationalTransactionIndexView> {
+        match &self.relational_index {
+            Ok(Some(index)) => Ok(index),
+            Ok(None) => Err(SkeinError::StorageIntegrity(
+                "authoritative transaction index view is unavailable".to_string(),
+            )),
+            Err(error) => Err(SkeinError::StorageIntegrity(format!(
+                "authoritative transaction index view could not be pinned: {error}"
+            ))),
         }
     }
 }
@@ -18534,20 +18556,29 @@ fn execute_database_transaction_sql(
         prepared.statement,
         crate::sql::SqlStatement::Select(_) | crate::sql::SqlStatement::Explain(_)
     ) {
+        let index_read_mode = if runtime
+            .config
+            .relational_index_mode
+            .requires_authoritative_indexes()
+        {
+            crate::relational_sql::RelationalIndexReadMode::AuthoritativeTransaction(
+                state.authoritative_relational_index()?,
+            )
+        } else if runtime
+            .config
+            .relational_index_mode
+            .serves_demand_paged_reads()
+        {
+            crate::relational_sql::RelationalIndexReadMode::TransactionWorkspace
+        } else {
+            crate::relational_sql::RelationalIndexReadMode::Materialized
+        };
         let output = crate::relational_sql::execute_relational_query_sql_with_runtime(
             sql_text,
             parameters,
             &state.relational_state,
             crate::relational_sql::RelationalQueryReadModes::new(
-                if runtime
-                    .config
-                    .relational_index_mode
-                    .serves_demand_paged_reads()
-                {
-                    crate::relational_sql::RelationalIndexReadMode::TransactionWorkspace
-                } else {
-                    crate::relational_sql::RelationalIndexReadMode::Materialized
-                },
+                index_read_mode,
                 crate::relational_sql::RelationalRowReadMode::CanonicalMemory,
             ),
             relational_query_limits(&runtime.config, runtime.config.max_read_result_rows),
@@ -18569,19 +18600,68 @@ fn execute_database_transaction_sql(
         parameters,
         &state.relational_state,
     )?;
-    state.relational_state = state
-        .relational_state
-        .stage_transaction(
-            transaction.clone(),
-            skein_storage::RelationalMutationLimits::default(),
-            skein_storage::RelationalOverflowConfig::default(),
-        )
-        .map_err(|error| SkeinError::Execution(error.to_string()))?;
+    let next_relational_state = if runtime
+        .config
+        .relational_index_mode
+        .requires_authoritative_indexes()
+    {
+        let index = match &mut state.relational_index {
+            Ok(Some(index)) => index,
+            Ok(None) => {
+                return Err(SkeinError::StorageIntegrity(
+                    "authoritative transaction index view is unavailable".to_string(),
+                ));
+            }
+            Err(error) => {
+                return Err(SkeinError::StorageIntegrity(format!(
+                    "authoritative transaction index view could not be pinned: {error}"
+                )));
+            }
+        };
+        let (next, capture) = state
+            .relational_state
+            .stage_transaction_with_authoritative_index(
+                transaction.clone(),
+                skein_storage::RelationalMutationLimits::default(),
+                skein_storage::RelationalOverflowConfig::default(),
+                index.capture_limits(),
+                index,
+            )
+            .map_err(map_transaction_relational_error)?;
+        index
+            .append(capture)
+            .map_err(map_transaction_relational_error)?;
+        next
+    } else {
+        state
+            .relational_state
+            .stage_transaction(
+                transaction.clone(),
+                skein_storage::RelationalMutationLimits::default(),
+                skein_storage::RelationalOverflowConfig::default(),
+            )
+            .map_err(map_transaction_relational_error)?
+    };
+    state.relational_state = next_relational_state;
     state
         .relational_transaction
         .writes
         .extend(transaction.writes);
     Ok(QueryOutput { rows: Vec::new() })
+}
+
+fn map_transaction_relational_error(error: skein_storage::RelationalError) -> SkeinError {
+    match error {
+        skein_storage::RelationalError::Corruption(message)
+        | skein_storage::RelationalError::Durability(message) => {
+            SkeinError::StorageIntegrity(message)
+        }
+        error @ (skein_storage::RelationalError::Admission(_)
+        | skein_storage::RelationalError::Schema(_)
+        | skein_storage::RelationalError::Constraint(_)) => {
+            SkeinError::Execution(error.to_string())
+        }
+    }
 }
 
 fn reject_locking_select_without_manager(

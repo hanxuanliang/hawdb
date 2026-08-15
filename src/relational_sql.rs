@@ -1076,6 +1076,149 @@ mod tests {
         std::fs::remove_dir_all(path).expect("remove authoritative SQL fixture");
     }
 
+    #[test]
+    fn authoritative_transaction_index_overlay_preserves_multi_statement_ryw() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "skein-authoritative-transaction-index-{}-{nonce}",
+            std::process::id()
+        ));
+        {
+            let mut database = Database::open_with_durability_and_config(
+                &path,
+                DurabilityPolicy::default(),
+                DatabaseConfig {
+                    relational_index_mode: skein_storage::RelationalIndexMode::Shadow,
+                    ..DatabaseConfig::default()
+                },
+            )
+            .expect("open authoritative transaction bootstrap");
+            database
+                .query_sql(
+                    "CREATE TABLE parents (id TEXT PRIMARY KEY, code TEXT UNIQUE NOT NULL, body TEXT NOT NULL)",
+                )
+                .expect("create parent table");
+            database
+                .query_sql(
+                    "CREATE TABLE children (id TEXT PRIMARY KEY, parent_code TEXT NOT NULL REFERENCES parents(code))",
+                )
+                .expect("create child table");
+            database
+                .query_sql(
+                    "INSERT INTO parents (id, code, body) VALUES ('base', 'base-code', 'base-body')",
+                )
+                .expect("insert base parent");
+            database
+                .checkpoint()
+                .expect("publish authoritative transaction generation");
+        }
+        {
+            let mut database = Database::open_with_durability_and_config(
+                &path,
+                DurabilityPolicy::default(),
+                DatabaseConfig {
+                    relational_index_mode: skein_storage::RelationalIndexMode::Authoritative,
+                    ..DatabaseConfig::default()
+                },
+            )
+            .expect("open authoritative transaction database");
+            let mut transaction = database.begin_transaction();
+            transaction
+                .query_sql(
+                    "INSERT INTO parents (id, code, body) VALUES ('parent-1', 'code-1', 'body-1')",
+                )
+                .expect("insert a transaction-local unique key");
+
+            let explain = transaction
+                .query_sql("EXPLAIN ANALYZE SELECT id FROM parents WHERE code = 'code-1'")
+                .expect("read the transaction-local unique key");
+            let info = relational_explain_operator_info(&explain, "IndexRangeScanExec");
+            assert!(info.contains("runtime_path=transaction_workspace"));
+            assert!(info.contains("transaction_workspace=1"));
+            assert!(info.contains("canonical_fallback=0"));
+
+            transaction
+                .query_sql("UPDATE parents SET code = 'base-code-2' WHERE id = 'base'")
+                .expect("move a base posting into the transaction overlay");
+            assert!(transaction
+                .query_sql("SELECT id FROM parents WHERE code = 'base-code'")
+                .expect("suppress a deleted base posting")
+                .rows
+                .is_empty());
+            transaction
+                .query_sql("UPDATE parents SET code = 'base-code' WHERE id = 'base'")
+                .expect("restore the base posting through a later statement");
+            assert_eq!(
+                transaction
+                    .query_sql("SELECT id FROM parents WHERE code = 'base-code'")
+                    .expect("deduplicate a restored base posting")
+                    .rows
+                    .len(),
+                1
+            );
+
+            transaction
+                .query_sql("INSERT INTO children (id, parent_code) VALUES ('child-1', 'code-1')")
+                .expect("reference a parent inserted by an earlier statement");
+            let duplicate = transaction
+                .query_sql(
+                    "INSERT INTO parents (id, code, body) VALUES ('parent-2', 'code-1', 'duplicate')",
+                )
+                .expect_err("reject a duplicate transaction-local unique key");
+            assert!(duplicate.to_string().contains("duplicate key"));
+
+            transaction
+                .query_sql(
+                    "INSERT INTO parents (id, code, body) VALUES ('unused', 'code-1', 'updated') ON CONFLICT (code) DO UPDATE SET body = EXCLUDED.body",
+                )
+                .expect("upsert through a transaction-local conflict target");
+            let updated = transaction
+                .query_sql("SELECT body FROM parents WHERE code = 'code-1'")
+                .expect("read the transaction-local upsert");
+            assert_eq!(updated.rows.len(), 1);
+            assert_eq!(
+                updated.rows[0]["body"],
+                Value::String("updated".to_string())
+            );
+
+            let referenced = transaction
+                .query_sql("DELETE FROM parents WHERE id = 'parent-1'")
+                .expect_err("retain a parent referenced by a transaction-local child");
+            assert!(referenced.to_string().contains("prevents removing"));
+            assert_eq!(
+                transaction
+                    .query_sql("SELECT id FROM parents WHERE code = 'code-1'")
+                    .expect("failed statement leaves prior workspace intact")
+                    .rows
+                    .len(),
+                1
+            );
+            transaction
+                .commit()
+                .expect("commit the multi-statement group");
+
+            assert_eq!(
+                database
+                    .query_sql("SELECT id FROM children WHERE parent_code = 'code-1'")
+                    .expect("read the committed child")
+                    .rows
+                    .len(),
+                1
+            );
+            assert_eq!(
+                database
+                    .query_sql("SELECT body FROM parents WHERE code = 'code-1'")
+                    .expect("read the committed parent")
+                    .rows[0]["body"],
+                Value::String("updated".to_string())
+            );
+        }
+        std::fs::remove_dir_all(path).expect("remove authoritative transaction fixture");
+    }
+
     fn relational_explain_operator_info<'a>(
         output: &'a crate::QueryOutput,
         operator: &str,
