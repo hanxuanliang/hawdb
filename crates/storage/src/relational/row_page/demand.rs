@@ -1,15 +1,18 @@
 //! Bounded demand reads over one immutable relational row-root generation.
 
 use super::{
-    RelationalProjectedRow, RelationalRowPageError, RelationalRowPagePublicationError,
-    RelationalRowPageRootDescriptor, RelationalRowPageRootReader, RelationalRowPageView,
+    validate_requested_fields, RelationalProjectedField, RelationalProjectedRow,
+    RelationalRowPageError, RelationalRowPagePublicationError, RelationalRowPageRootDescriptor,
+    RelationalRowPageRootReader, RelationalRowPageView,
 };
 use crate::relational::{
-    ordered_key::encode_ordered_relational_key, RelationalHydrationBudget, RelationalKey,
-    RelationalOverflowPublicationError, RelationalOverflowRootReader, RelationalValue,
+    ordered_key::{decode_ordered_relational_key, encode_ordered_relational_key},
+    RelationalHydrationBudget, RelationalKey, RelationalOverflowPublicationError,
+    RelationalOverflowRootReader, RelationalValue,
 };
 use crate::{SegmentCache, StoreId};
 use skein_core::{RuntimeCancellationReason, RuntimeTaskContext};
+use std::collections::{btree_map, BTreeMap};
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::Bound;
@@ -37,6 +40,24 @@ pub struct RelationalRowPageProjectedRange<'a> {
     pub lower: Bound<&'a RelationalKey>,
     pub upper: Bound<&'a RelationalKey>,
     pub requested_fields: &'a [usize],
+}
+
+pub(super) struct RelationalRowPageOverlayPoint<'a> {
+    pub table: &'a str,
+    pub primary_key: RelationalKey,
+    pub value: RelationalRowPageProjectedOverlayValue,
+    pub overflow_root: Option<&'a RelationalOverflowRootReader>,
+}
+
+pub(super) struct RelationalRowPageOverlayRange<'a> {
+    pub rows: BTreeMap<RelationalKey, RelationalRowPageProjectedOverlayValue>,
+    pub overflow_root: Option<&'a RelationalOverflowRootReader>,
+}
+
+#[derive(Debug)]
+pub(super) enum RelationalRowPageProjectedOverlayValue {
+    Present(Box<[RelationalProjectedField]>),
+    Deleted,
 }
 
 impl Default for RelationalRowPageDemandReadLimits {
@@ -204,6 +225,8 @@ impl RelationalRowPageDemandReader {
     > {
         let mut context = DemandReadContext::new(self, limits, hydration, task)?;
         let table_root = context.table_root(table)?;
+        context
+            .validate_requested_fields(requested_fields, table_root.column_count.get() as usize)?;
         context.admit_descriptor_search(table_root.page_count)?;
         let (descriptor, descriptor_reads) = self
             .root
@@ -240,6 +263,41 @@ impl RelationalRowPageDemandReader {
         Ok((Some(row), context.finish()))
     }
 
+    pub(super) fn point_projected_overlay(
+        &self,
+        point: RelationalRowPageOverlayPoint<'_>,
+        limits: RelationalRowPageDemandReadLimits,
+        hydration: &mut RelationalHydrationBudget,
+        task: &RuntimeTaskContext,
+    ) -> Result<
+        (
+            Option<RelationalProjectedRow>,
+            RelationalRowPageDemandReadReport,
+        ),
+        RelationalRowPageDemandReadError,
+    > {
+        let RelationalRowPageOverlayPoint {
+            table,
+            primary_key,
+            value,
+            overflow_root,
+        } = point;
+        let mut context = DemandReadContext::new(self, limits, hydration, task)?;
+        context.table_root(table)?;
+        let mut output = None;
+        emit_overlay_row(
+            &mut context,
+            primary_key,
+            value,
+            overflow_root,
+            &mut |row| {
+                output = Some(row);
+                true
+            },
+        )?;
+        Ok((output, context.finish()))
+    }
+
     /// Visits an ordered primary-key range without collecting its rows.
     ///
     /// Rows observed by `visit` are provisional until this method returns
@@ -251,6 +309,28 @@ impl RelationalRowPageDemandReader {
         limits: RelationalRowPageDemandReadLimits,
         hydration: &mut RelationalHydrationBudget,
         task: &RuntimeTaskContext,
+        visit: impl FnMut(RelationalProjectedRow) -> bool,
+    ) -> Result<RelationalRowPageDemandReadReport, RelationalRowPageDemandReadError> {
+        self.visit_projected_range_with_overlay(
+            range,
+            limits,
+            hydration,
+            task,
+            RelationalRowPageOverlayRange {
+                rows: BTreeMap::new(),
+                overflow_root: None,
+            },
+            visit,
+        )
+    }
+
+    pub(super) fn visit_projected_range_with_overlay(
+        &self,
+        range: RelationalRowPageProjectedRange<'_>,
+        limits: RelationalRowPageDemandReadLimits,
+        hydration: &mut RelationalHydrationBudget,
+        task: &RuntimeTaskContext,
+        overlay: RelationalRowPageOverlayRange<'_>,
         mut visit: impl FnMut(RelationalProjectedRow) -> bool,
     ) -> Result<RelationalRowPageDemandReadReport, RelationalRowPageDemandReadError> {
         let RelationalRowPageProjectedRange {
@@ -265,7 +345,13 @@ impl RelationalRowPageDemandReader {
             return Ok(context.finish());
         }
         let table_root = context.table_root(table)?;
+        let column_count = table_root.column_count.get() as usize;
+        context.validate_requested_fields(requested_fields, column_count)?;
+        let has_overlay = !overlay.rows.is_empty();
+        let overlay_overflow = overlay.overflow_root;
+        let mut overlay = overlay.rows.into_iter().peekable();
         if table_root.page_count == 0 {
+            emit_remaining_overlay(&mut context, &mut overlay, overlay_overflow, &mut visit)?;
             return Ok(context.finish());
         }
 
@@ -279,6 +365,14 @@ impl RelationalRowPageDemandReader {
                     .map_err(|error| context.map_row_publication_error(error))?;
                 context.add_descriptor_reads(descriptor_reads)?;
                 let Some((ordinal, descriptor)) = descriptor else {
+                    if !emit_remaining_overlay(
+                        &mut context,
+                        &mut overlay,
+                        overlay_overflow,
+                        &mut visit,
+                    )? {
+                        context.report.stopped_early = true;
+                    }
                     return Ok(context.finish());
                 };
                 (ordinal, Some(descriptor))
@@ -340,7 +434,62 @@ impl RelationalRowPageDemandReader {
                     .key(row_ordinal)
                     .map_err(|error| context.map_page_error(error))?;
                 if range.key_is_past_upper(encoded_key) {
+                    if !emit_remaining_overlay(
+                        &mut context,
+                        &mut overlay,
+                        overlay_overflow,
+                        &mut visit,
+                    )? {
+                        context.report.stopped_early = true;
+                    }
                     return Ok(context.finish());
+                }
+                if !has_overlay {
+                    context.admit_row()?;
+                    let mut row = view
+                        .decode_projected_row(row_ordinal, requested_fields)
+                        .map_err(|error| context.map_page_error(error))?;
+                    context.hydrate_projected_row(&mut row)?;
+                    context.report.rows_decoded += 1;
+                    context.report.rows_emitted += 1;
+                    if !visit(row) {
+                        context.report.stopped_early = true;
+                        return Ok(context.finish());
+                    }
+                    continue;
+                }
+                let primary_key = decode_ordered_relational_key(encoded_key).map_err(|error| {
+                    context.corrupt(format!(
+                        "row {row_ordinal} primary key cannot be decoded: {error}"
+                    ))
+                })?;
+                if !emit_overlay_before(
+                    &mut context,
+                    &mut overlay,
+                    &primary_key,
+                    overlay_overflow,
+                    &mut visit,
+                )? {
+                    context.report.stopped_early = true;
+                    return Ok(context.finish());
+                }
+                if overlay
+                    .peek()
+                    .is_some_and(|(overlay_key, _)| overlay_key == &primary_key)
+                {
+                    let (overlay_key, overlay_value) =
+                        overlay.next().expect("peeked overlay entry exists");
+                    if !emit_overlay_row(
+                        &mut context,
+                        overlay_key,
+                        overlay_value,
+                        overlay_overflow,
+                        &mut visit,
+                    )? {
+                        context.report.stopped_early = true;
+                        return Ok(context.finish());
+                    }
+                    continue;
                 }
                 context.admit_row()?;
                 let mut row = view
@@ -359,6 +508,9 @@ impl RelationalRowPageDemandReader {
                     "relational row range page ordinal overflow".to_string(),
                 )
             })?;
+        }
+        if !emit_remaining_overlay(&mut context, &mut overlay, overlay_overflow, &mut visit)? {
+            context.report.stopped_early = true;
         }
         Ok(context.finish())
     }
@@ -427,6 +579,24 @@ impl<'a> DemandReadContext<'a> {
         self.task
             .checkpoint()
             .map_err(RelationalRowPageDemandReadError::Stopped)
+    }
+
+    fn validate_requested_fields(
+        &self,
+        requested_fields: &[usize],
+        column_count: usize,
+    ) -> Result<(), RelationalRowPageDemandReadError> {
+        validate_requested_fields(
+            requested_fields,
+            column_count,
+            self.reader.root.publication_config().page_limits,
+        )
+        .map_err(|error| self.map_page_error(error))
+    }
+
+    fn corrupt(&self, message: String) -> RelationalRowPageDemandReadError {
+        self.reader.poison();
+        RelationalRowPageDemandReadError::Corrupt(message)
     }
 
     fn validate_column_count(
@@ -540,6 +710,15 @@ impl<'a> DemandReadContext<'a> {
         &mut self,
         row: &mut RelationalProjectedRow,
     ) -> Result<(), RelationalRowPageDemandReadError> {
+        let overflow = Arc::clone(&self.reader.overflow);
+        self.hydrate_projected_row_from(row, &overflow)
+    }
+
+    fn hydrate_projected_row_from(
+        &mut self,
+        row: &mut RelationalProjectedRow,
+        overflow: &RelationalOverflowRootReader,
+    ) -> Result<(), RelationalRowPageDemandReadError> {
         let hydration_count = row
             .fields
             .iter()
@@ -560,18 +739,13 @@ impl<'a> DemandReadContext<'a> {
                 continue;
             };
             self.checkpoint()?;
-            let hydrated =
-                match self
-                    .reader
-                    .overflow
-                    .hydrate(reference, &mut staged_budget, Some(self.task))
-                {
-                    Ok(value) => value,
-                    Err(error) => {
-                        self.checkpoint()?;
-                        return Err(self.map_overflow_error(error));
-                    }
-                };
+            let hydrated = match overflow.hydrate(reference, &mut staged_budget, Some(self.task)) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.checkpoint()?;
+                    return Err(self.map_overflow_error(error));
+                }
+            };
             self.checkpoint()?;
             field.value = hydrated;
         }
@@ -666,6 +840,76 @@ fn validate_table_column_count(
         )));
     }
     Ok(())
+}
+
+type OverlayIterator =
+    std::iter::Peekable<btree_map::IntoIter<RelationalKey, RelationalRowPageProjectedOverlayValue>>;
+
+fn emit_overlay_before(
+    context: &mut DemandReadContext<'_>,
+    overlay: &mut OverlayIterator,
+    base_key: &RelationalKey,
+    overflow_root: Option<&RelationalOverflowRootReader>,
+    visit: &mut impl FnMut(RelationalProjectedRow) -> bool,
+) -> Result<bool, RelationalRowPageDemandReadError> {
+    while overlay
+        .peek()
+        .is_some_and(|(overlay_key, _)| overlay_key < base_key)
+    {
+        let (key, value) = overlay.next().expect("peeked overlay entry exists");
+        if !emit_overlay_row(context, key, value, overflow_root, visit)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn emit_remaining_overlay(
+    context: &mut DemandReadContext<'_>,
+    overlay: &mut OverlayIterator,
+    overflow_root: Option<&RelationalOverflowRootReader>,
+    visit: &mut impl FnMut(RelationalProjectedRow) -> bool,
+) -> Result<bool, RelationalRowPageDemandReadError> {
+    for (key, value) in overlay.by_ref() {
+        if !emit_overlay_row(context, key, value, overflow_root, visit)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn emit_overlay_row(
+    context: &mut DemandReadContext<'_>,
+    primary_key: RelationalKey,
+    value: RelationalRowPageProjectedOverlayValue,
+    overflow_root: Option<&RelationalOverflowRootReader>,
+    visit: &mut impl FnMut(RelationalProjectedRow) -> bool,
+) -> Result<bool, RelationalRowPageDemandReadError> {
+    let RelationalRowPageProjectedOverlayValue::Present(fields) = value else {
+        return Ok(true);
+    };
+    context.checkpoint()?;
+    let has_overflow = fields
+        .iter()
+        .any(|field| matches!(field.value, RelationalValue::Overflow(_)));
+    if has_overflow && overflow_root.is_none() {
+        return Err(context.corrupt(
+            "overlay row contains an overflow reference without a visible overlay root".to_string(),
+        ));
+    }
+    context.admit_row()?;
+    let mut row = RelationalProjectedRow {
+        primary_key,
+        fields: fields.into_vec(),
+    };
+    if let Some(overflow_root) = overflow_root {
+        context.hydrate_projected_row_from(&mut row, overflow_root)?;
+    } else {
+        context.hydrate_projected_row(&mut row)?;
+    }
+    context.report.rows_decoded += 1;
+    context.report.rows_emitted += 1;
+    Ok(visit(row))
 }
 
 struct EncodedRange {

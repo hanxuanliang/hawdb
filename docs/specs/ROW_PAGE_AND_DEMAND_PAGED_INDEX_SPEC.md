@@ -1025,11 +1025,64 @@ descriptor reads, logical page and slot bytes, physical file reads, cache
 hits/misses/rejections, decoded and emitted rows, hydration bytes, peak pins,
 and early stop.
 
-This typed reader currently covers one immutable checkpoint base. It MUST NOT be
-selected by SQL until the activation layer binds the same canonical checkpoint
-and merges its exact recovery and live row changes under the statement budget.
-Serving a base-only reader at a later visible epoch would be stale and is
-forbidden.
+`RelationalRowPageDemandReader` remains the immutable checkpoint primitive. It
+MUST NOT be selected by SQL at an epoch newer than that checkpoint. Serving a
+base-only reader at a later visible epoch would be stale and is forbidden.
+
+### Relational row snapshot composition
+
+`RelationalRowPageSnapshotReader` pins one exact
+`RelationalRowPageReadView` and composes three storage-owned sources in the
+following precedence order:
+
+1. the newest immutable live batch at or below the pinned visible epoch;
+2. the newest disk-backed recovery-delta version after the pinned checkpoint;
+3. the immutable checkpoint row page.
+
+The reader validates the read-view identity against the pinned row root before
+serving. Recovery runs MUST bind the same base generation, source commit epoch,
+root-set digest, table schema digest, and column count. The checkpoint overflow
+root and the optional recovery overflow root are separately generation-bound;
+an overlay overflow reference without its exact root is corruption. Live
+captures currently reject overflow references, so they cannot create an
+unbound large-value dependency.
+
+Point lookup retains at most one selected overlay row and otherwise delegates
+to one checkpoint point read. A tombstone suppresses the checkpoint without
+opening its row page. Range lookup reads only intersecting recovery runs,
+visits only in-range live entries, and coalesces them into a primary-key-ordered
+map where a higher commit epoch replaces a lower one. Equal-epoch duplicate
+versions are corruption. The collector validates the complete row shape and
+overflow closure but retains only requested fields; an unselected large value
+is dropped after its one bounded decode/callback wave. Distinct projected
+overlay entries and conservative resident bytes are admitted from borrowed
+values before cloning or checkpoint streaming begins. The range then performs
+an ordered merge with the checkpoint cursor and moves projected values into the
+callback; it never materializes checkpoint rows or clones a selected overlay
+value twice, and an insertion after the final checkpoint page remains visible.
+
+Overlay collection has explicit entry and resident-byte limits in addition to
+the shared descriptor-height, page, slot-byte, decoded-row, pin, hydration,
+cancellation, and deadline limits of the demand reader. Large inline values are
+conservatively charged when selected even if their source row is `Arc`-shared.
+Point overlay projection is admitted by the same byte envelope before cloning.
+The reported identity, selected point source, recovery runs and bytes, live
+entries,
+distinct overlay entries, replacements, overlay resident bytes, page reads,
+cache behavior, emitted rows, and hydration bytes make each read explainable.
+
+Admission, cancellation, deadline, callback stop, and callback unwind do not
+poison the pinned reader. Checksum, binding, epoch, schema-shape, immutable
+identity, overflow-closure, or durability failures poison it and make later
+operations fail closed. Callback effects remain provisional until the complete
+method returns `Ok`.
+
+This is the only v1 snapshot-composition contract. Skein is not released, so
+there is no legacy row-root reader, manifest migration, compatibility fallback,
+or base-only serving mode to preserve. Production SQL selection remains a
+separate differential activation step: until that step succeeds, SQL continues
+to use the materialized canonical path rather than silently falling back from a
+partially constructed snapshot reader.
 
 The current relational shadow reader uses the existing shared `SegmentCache`
 for immutable base-page slots and WAL recovery-delta pages. Cache entries retain

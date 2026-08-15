@@ -17,6 +17,7 @@ use skein_integrity::Sha256Digest;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    ops::Bound,
     sync::Arc,
 };
 
@@ -115,6 +116,44 @@ impl RelationalRowPageLiveBatch {
                         RelationalRowPageRecoveredValue::Present(row)
                     })
             })
+    }
+
+    fn visit_range_entries(
+        &self,
+        table: &str,
+        lower: Bound<&RelationalKey>,
+        upper: Bound<&RelationalKey>,
+        mut visit: impl FnMut(&RelationalKey, &RelationalRowPageRecoveredValue) -> bool,
+    ) -> (usize, bool) {
+        let start = self
+            .changes
+            .partition_point(|change| match change.table.as_str().cmp(table) {
+                std::cmp::Ordering::Less => true,
+                std::cmp::Ordering::Greater => false,
+                std::cmp::Ordering::Equal => key_precedes_lower(&change.primary_key, lower),
+            });
+        let mut visited = 0usize;
+        for change in &self.changes[start..] {
+            match change.table.as_str().cmp(table) {
+                std::cmp::Ordering::Less => continue,
+                std::cmp::Ordering::Greater => break,
+                std::cmp::Ordering::Equal => {}
+            }
+            if key_exceeds_upper(&change.primary_key, upper) {
+                break;
+            }
+            visited = visited.saturating_add(1);
+            let value = change
+                .row
+                .clone()
+                .map_or(RelationalRowPageRecoveredValue::Deleted, |row| {
+                    RelationalRowPageRecoveredValue::Present(row)
+                });
+            if !visit(&change.primary_key, &value) {
+                return (visited, false);
+            }
+        }
+        (visited, true)
     }
 }
 
@@ -224,6 +263,30 @@ impl RelationalRowPageLiveOverlay {
         }
         None
     }
+
+    fn overlay_value_accounted(
+        &self,
+        table: &str,
+        primary_key: &RelationalKey,
+    ) -> (Option<RelationalRowPageRecoveredValue>, usize) {
+        let mut current = self.head.as_deref();
+        let mut batches_examined = 0usize;
+        while let Some(batch) = current {
+            batches_examined = batches_examined.saturating_add(1);
+            if let Some(value) = batch.overlay_value(table, primary_key) {
+                return (Some(value), batches_examined);
+            }
+            current = batch.previous.as_deref();
+        }
+        (None, batches_examined)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct RelationalRowPageOverlayRangeReport {
+    pub recovery: super::RelationalRowDeltaReadReport,
+    pub live_entries_visited: usize,
+    pub stopped_early: bool,
 }
 
 /// One immutable row view pinned to an exact base generation and visible epoch.
@@ -299,6 +362,46 @@ impl RelationalRowPageReadView {
         self.recovery_delta.as_deref()
     }
 
+    pub(super) fn validate_serving_fence(&self) -> Result<(), RelationalRowDeltaError> {
+        let base = self.base.manifest();
+        if self.identity.base_generation != base.generation
+            || self.identity.base_commit_epoch != base.source_commit_epoch
+            || self.identity.root_set_digest != base.root_set_digest
+            || self.identity.visible_commit_epoch < self.identity.base_commit_epoch
+        {
+            return Err(RelationalRowDeltaError::Corrupt(
+                "relational row read-view identity differs from its pinned base".to_string(),
+            ));
+        }
+        let live_floor = self
+            .recovery_delta
+            .as_ref()
+            .map_or(self.identity.base_commit_epoch, |delta| {
+                delta.manifest().visible_commit_epoch
+            });
+        if live_floor > self.identity.visible_commit_epoch {
+            return Err(RelationalRowDeltaError::Corrupt(
+                "relational row recovery epoch exceeds the read-view epoch".to_string(),
+            ));
+        }
+        let mut newer_epoch = None;
+        let mut current = self.live.head.as_deref();
+        while let Some(batch) = current {
+            if batch.commit_epoch <= live_floor
+                || batch.commit_epoch > self.identity.visible_commit_epoch
+                || newer_epoch.is_some_and(|newer| batch.commit_epoch >= newer)
+            {
+                return Err(RelationalRowDeltaError::Corrupt(format!(
+                    "live row batch epoch {} is outside the ordered serving range ({live_floor}, {}]",
+                    batch.commit_epoch, self.identity.visible_commit_epoch
+                )));
+            }
+            newer_epoch = Some(batch.commit_epoch);
+            current = batch.previous.as_deref();
+        }
+        Ok(())
+    }
+
     pub fn advance(
         &self,
         next_commit_epoch: u64,
@@ -365,6 +468,87 @@ impl RelationalRowPageReadView {
                 .lookup(table, primary_key)
                 .map(|(value, _report)| value)
         })
+    }
+
+    pub(super) fn overlay_value_accounted(
+        &self,
+        table: &str,
+        primary_key: &RelationalKey,
+    ) -> Result<
+        (
+            Option<RelationalRowPageRecoveredValue>,
+            super::RelationalRowDeltaReadReport,
+            usize,
+            bool,
+        ),
+        RelationalRowDeltaError,
+    > {
+        let (live, batches_examined) = self.live.overlay_value_accounted(table, primary_key);
+        if live.is_some() {
+            return Ok((
+                live,
+                super::RelationalRowDeltaReadReport::default(),
+                batches_examined,
+                true,
+            ));
+        }
+        self.recovery_delta.as_ref().map_or_else(
+            || {
+                Ok((
+                    None,
+                    super::RelationalRowDeltaReadReport::default(),
+                    batches_examined,
+                    false,
+                ))
+            },
+            |delta| {
+                delta
+                    .lookup(table, primary_key)
+                    .map(|(value, report)| (value, report, batches_examined, false))
+            },
+        )
+    }
+
+    pub(super) fn visit_overlay_range_entries(
+        &self,
+        table: &str,
+        lower: Bound<&RelationalKey>,
+        upper: Bound<&RelationalKey>,
+        mut visit: impl FnMut(&RelationalKey, &RelationalRowPageRecoveredValue, u64) -> bool,
+    ) -> Result<RelationalRowPageOverlayRangeReport, RelationalRowDeltaError> {
+        let mut report = RelationalRowPageOverlayRangeReport::default();
+        if let Some(delta) = self.recovery_delta.as_ref() {
+            report.recovery =
+                delta.visit_range_entries(table, lower, upper, |key, value, epoch| {
+                    visit(key, value, epoch)
+                })?;
+            if report.recovery.stopped_early {
+                report.stopped_early = true;
+                return Ok(report);
+            }
+        }
+
+        let mut current = self.live.head.as_deref();
+        while let Some(batch) = current {
+            let (visited, completed) =
+                batch.visit_range_entries(table, lower, upper, |key, value| {
+                    visit(key, value, batch.commit_epoch)
+                });
+            report.live_entries_visited = report
+                .live_entries_visited
+                .checked_add(visited)
+                .ok_or_else(|| {
+                    RelationalRowDeltaError::Admission(
+                        "live row range entry counter overflow".to_string(),
+                    )
+                })?;
+            if !completed {
+                report.stopped_early = true;
+                break;
+            }
+            current = batch.previous.as_deref();
+        }
+        Ok(report)
     }
 
     pub fn latest_live_commit_epoch(&self) -> Option<u64> {
@@ -436,6 +620,22 @@ impl RelationalRowPageReadView {
         }
 
         keys.into_capture(&mut current_row)
+    }
+}
+
+fn key_precedes_lower(key: &RelationalKey, lower: Bound<&RelationalKey>) -> bool {
+    match lower {
+        Bound::Unbounded => false,
+        Bound::Included(lower) => key < lower,
+        Bound::Excluded(lower) => key <= lower,
+    }
+}
+
+fn key_exceeds_upper(key: &RelationalKey, upper: Bound<&RelationalKey>) -> bool {
+    match upper {
+        Bound::Unbounded => false,
+        Bound::Included(upper) => key > upper,
+        Bound::Excluded(upper) => key >= upper,
     }
 }
 

@@ -21,6 +21,7 @@ _STORAGE_MODELS = [
     "SkeinRelationalIndexDemandRead",
     "SkeinRelationalIndexShadowPublication",
     "SkeinRelationalRowDemandRead",
+    "SkeinRelationalRowSnapshotRead",
     "SkeinRowPageMutation",
     "SkeinRowDeltaRuns",
     "SkeinRowLiveView",

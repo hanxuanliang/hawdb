@@ -13,6 +13,7 @@ mod demand;
 mod live;
 mod mutation;
 mod publication;
+mod snapshot;
 mod value;
 
 pub use delta::{
@@ -54,6 +55,12 @@ pub use publication::{
     DEFAULT_RELATIONAL_ROW_PAGE_MANIFEST_BYTES, DEFAULT_RELATIONAL_ROW_PAGE_ROOT_KEY_BYTES,
     DEFAULT_RELATIONAL_ROW_PAGE_ROOT_PAGES, DEFAULT_RELATIONAL_ROW_PAGE_TABLES,
     RELATIONAL_ROW_PAGE_MANIFEST_FILE,
+};
+pub use snapshot::{
+    RelationalRowPageSnapshotPointReport, RelationalRowPageSnapshotRangeReport,
+    RelationalRowPageSnapshotReadError, RelationalRowPageSnapshotReadLimits,
+    RelationalRowPageSnapshotReader, RelationalRowPageSnapshotRowSource,
+    DEFAULT_RELATIONAL_ROW_SNAPSHOT_OVERLAY_BYTES, DEFAULT_RELATIONAL_ROW_SNAPSHOT_OVERLAY_ENTRIES,
 };
 use value::{decode_row_fields, encode_row, validate_requested_fields};
 

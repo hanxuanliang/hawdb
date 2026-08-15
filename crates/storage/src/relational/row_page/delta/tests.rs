@@ -12,6 +12,7 @@ use skein_integrity::integrity_digest;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -148,6 +149,80 @@ fn point_lookup_selects_the_newest_value_across_immutable_runs() {
     let (missing, missing_report) = reader.lookup("documents", &key(9)).unwrap();
     assert!(missing.is_none());
     assert_eq!(missing_report.runs_read, 0);
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn range_lookup_prunes_runs_and_honors_exclusive_bounds() {
+    let directory = unique_test_dir("range-lookup");
+    let base = publish_and_open_base(&directory);
+    let config = RelationalRowDeltaConfig {
+        max_dirty_entries: NonZeroUsize::new(1).unwrap(),
+        ..RelationalRowDeltaConfig::default()
+    };
+    let mut builder = builder(&directory, &base, 1, None, config);
+    builder.record(2, capture(2, Some("two"))).unwrap();
+    builder.record(3, capture(4, Some("four"))).unwrap();
+    builder.record(4, capture(6, Some("six"))).unwrap();
+    builder.finish(4, None).unwrap();
+
+    let reader = RelationalRowDeltaReader::open_latest(&directory, &base, 4, config)
+        .unwrap()
+        .unwrap();
+    let mut rows = Vec::new();
+    let report = reader
+        .visit_range_entries(
+            "documents",
+            Bound::Excluded(&key(2)),
+            Bound::Included(&key(4)),
+            |key, value, epoch| {
+                rows.push((key.clone(), present_text(value).unwrap().to_string(), epoch));
+                true
+            },
+        )
+        .unwrap();
+    assert_eq!(rows, vec![(key(4), "four".to_string(), 3)]);
+    assert_eq!(report.runs_read, 1);
+    assert_eq!(report.entries_visited, 1);
+    assert!(!report.stopped_early);
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn range_lookup_stops_without_reading_irrelevant_suffix_runs() {
+    let directory = unique_test_dir("range-early-stop");
+    let base = publish_and_open_base(&directory);
+    let config = RelationalRowDeltaConfig {
+        max_dirty_entries: NonZeroUsize::new(1).unwrap(),
+        ..RelationalRowDeltaConfig::default()
+    };
+    let mut builder = builder(&directory, &base, 1, None, config);
+    builder.record(2, capture(2, Some("two"))).unwrap();
+    builder.record(3, capture(4, Some("four"))).unwrap();
+    builder.record(4, capture(6, Some("six"))).unwrap();
+    builder.finish(4, None).unwrap();
+
+    let reader = RelationalRowDeltaReader::open_latest(&directory, &base, 4, config)
+        .unwrap()
+        .unwrap();
+    let mut rows = Vec::new();
+    let report = reader
+        .visit_range_entries(
+            "documents",
+            Bound::Unbounded,
+            Bound::Unbounded,
+            |key, _, _| {
+                rows.push(key.clone());
+                false
+            },
+        )
+        .unwrap();
+    assert_eq!(rows, vec![key(2)]);
+    assert_eq!(report.runs_read, 1);
+    assert_eq!(report.entries_visited, 1);
+    assert!(report.stopped_early);
 
     fs::remove_dir_all(directory).unwrap();
 }

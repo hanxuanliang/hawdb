@@ -80,7 +80,10 @@ pub use row_page::{
     RelationalRowPagePublicationReport, RelationalRowPagePublisher, RelationalRowPageReadView,
     RelationalRowPageReadViewIdentity, RelationalRowPageRecoveredValue,
     RelationalRowPageRootDescriptor, RelationalRowPageRootManifest, RelationalRowPageRootReader,
-    RelationalRowPageSlotIntegrity, RelationalRowPageTableDelta, RelationalRowPageTableRoot,
+    RelationalRowPageSlotIntegrity, RelationalRowPageSnapshotPointReport,
+    RelationalRowPageSnapshotRangeReport, RelationalRowPageSnapshotReadError,
+    RelationalRowPageSnapshotReadLimits, RelationalRowPageSnapshotReader,
+    RelationalRowPageSnapshotRowSource, RelationalRowPageTableDelta, RelationalRowPageTableRoot,
     RelationalRowPageView, DEFAULT_RELATIONAL_ROW_DELTA_DIRTY_BYTES,
     DEFAULT_RELATIONAL_ROW_DELTA_DIRTY_ENTRIES, DEFAULT_RELATIONAL_ROW_DELTA_MANIFEST_BYTES,
     DEFAULT_RELATIONAL_ROW_DELTA_RUNS, DEFAULT_RELATIONAL_ROW_DELTA_RUN_BYTES,
@@ -93,6 +96,7 @@ pub use row_page::{
     DEFAULT_RELATIONAL_ROW_PAGE_ROOT_KEY_BYTES, DEFAULT_RELATIONAL_ROW_PAGE_ROOT_PAGES,
     DEFAULT_RELATIONAL_ROW_PAGE_ROWS, DEFAULT_RELATIONAL_ROW_PAGE_ROW_BYTES,
     DEFAULT_RELATIONAL_ROW_PAGE_TABLES, DEFAULT_RELATIONAL_ROW_PAGE_VALUE_BYTES,
+    DEFAULT_RELATIONAL_ROW_SNAPSHOT_OVERLAY_BYTES, DEFAULT_RELATIONAL_ROW_SNAPSHOT_OVERLAY_ENTRIES,
     RELATIONAL_ROW_DELTA_MANIFEST_FILE, RELATIONAL_ROW_PAGE_MANIFEST_FILE,
 };
 

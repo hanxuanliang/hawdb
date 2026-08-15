@@ -299,6 +299,24 @@ and corruption rejection outside the abstract model. `SkeinRowRecovery.tla`
 separately proves how complete WAL replay selects that artifact before the live
 view may advance.
 
+## Relational Row Snapshot Composition
+
+`SkeinRelationalRowSnapshotRead.tla` models one generation-pinned reader that
+collects only the requested recovery/live range before streaming its immutable
+checkpoint. Recovery versions enter first, live versions replace them, and a
+tombstone suppresses the checkpoint row. The model charges distinct requested
+overlay projections and conservative resident bytes before admitting each
+version, keeps emitted keys as a prefix of the exact ordered oracle, and
+permits the current database view to advance without changing the pinned
+reader's base or visible epoch.
+
+TLC covers bounded and rejected overlay collections, live-over-recovery
+precedence, recovery/live insertions, replacement accounting, tombstones,
+ordered completion, callback stop, cancellation, callback panic, corruption
+poisoning, and a later current view. Admission, cancellation, and panic remain
+non-poisoning. The configured instance explores three keys, two immutable
+overlay layers, three entry slots, and eight conservative byte units.
+
 ## Durable Projection Cursor and Catch-up
 
 `SkeinProjectionDurability.tla` models the durable projection framework of
@@ -506,6 +524,7 @@ They are implementation evidence, not a machine-checked refinement proof.
 | A live row view stages DML before WAL, publishes only after durability, stages already-durable graph-only identity advances without empty batches, retains bounded immutable DML batches, fails closed on DDL or admission errors, preserves materialized read-your-own-writes, and never drifts pinned snapshots | `RelationalRowPageReadView::advance`, `GraphStore::{stage_relational_row_live_publication,publish_relational_row_live_view,finish_non_relational_commit}` | `capture_validation_rejects_undercharged_and_unordered_changes`, `overlay_admission_is_cumulative_and_atomic`, `durable_open_replays_wal_into_a_generation_pinned_row_delta`, `SkeinRowLiveView.tla` |
 | Immutable relational row-delta runs stay within dirty/run/manifest limits, bind the exact base/schema-digest/column-count/overflow closure, publish generation metadata before the latest selector, reject stale row-root or delta publishers, poison partial batches, demand-check run integrity, and preserve pinned readers | `RelationalRowDeltaBuilder`, `RelationalRowDeltaReader`, `RelationalRowPageRootReader`, `RelationalOverflowRootReader` | `immutable_runs_round_trip_across_bounded_flushes`, `delta_schema_must_match_the_base_root_column_count`, `builder_is_poisoned_after_a_partial_epoch_error`, `every_pre_latest_stop_keeps_the_previous_delta_selected`, `stale_builder_cannot_replace_a_newer_delta_root`, `builder_cannot_publish_after_its_row_root_becomes_stale`, `overflow_references_require_an_exact_visible_epoch_root`, `corruption_poisoning_is_demand_driven`, `pinned_generation_remains_readable_after_new_publication`, `SkeinRowDeltaRuns.tla` |
 | A relational row demand reader pins one exact row/overflow root, binds each table schema digest and non-zero column count, keeps pages cold until use, rejects page/root shape drift as corruption, streams ordered point/range projections through one page pin, hydrates only selected overflow fields, applies page/byte/row/tree-height/hydration/cancellation limits, and makes corruption poison sticky without poisoning admission or cancellation | `RelationalRowPageDemandReader`, `RelationalRowPageRootReader::read_page_slot_accounted`, `RelationalRowPageView::{find_projected_row,decode_projected_row}` | `point_projection_hydrates_only_selected_overflow_and_reuses_cache`, `range_cursor_is_ordered_bounded_and_applies_lower_bound_once`, `admission_rejects_before_unbounded_io_without_poisoning`, `cancellation_and_callback_panic_release_page_pins`, `corrupted_page_poison_is_sticky_but_admission_is_not`, `table_root_column_count_must_match_every_demand_loaded_page`, `SkeinRelationalRowDemandRead.tla` |
+| A pinned relational snapshot selects live over recovery over checkpoint, treats tombstones as authoritative, admits only the requested distinct overlay entries and conservative resident bytes, streams the checkpoint without materializing it, preserves ordered range results and post-base insertions, keeps later views isolated, and poisons only corruption or durability failures | `RelationalRowPageSnapshotReader`, `RelationalRowPageReadView::{overlay_value_accounted,visit_overlay_range_entries}`, `RelationalRowDeltaReader::visit_range_entries`, `RelationalRowPageDemandReader::visit_projected_range_with_overlay` | `point_reads_select_live_recovery_checkpoint_and_tombstones`, `range_reads_merge_ordered_rows_and_keep_overlay_after_the_base_tail`, `overlay_admission_and_cancellation_do_not_poison_the_reader`, `pinned_reader_does_not_observe_a_later_live_view`, `checkpoint_corruption_poison_is_sticky_at_the_composite_reader`, `range_lookup_prunes_runs_and_honors_exclusive_bounds`, `SkeinRelationalRowSnapshotRead.tla` |
 | A torn WAL batch has no partial recovered visibility | `replay_wal` record decode and batch apply | `default_recovery_rejects_torn_wal_tail_until_explicit_doctor_repair`, `doctor_discards_torn_batch_wal_without_partial_path_recovery` |
 | Doctor repair binds destructive truncation to an exact acknowledged plan and resumes a durable pending audit | `DatabaseDoctor::{plan_wal_tail_repair,apply_wal_tail_repair}` | `apply_rejects_toctou_change_without_preparing_repair`, `prepared_repair_blocks_open_and_can_continue`, `truncated_pending_repair_is_resumable_and_blocks_open_until_finalized` |
 | Complete-record corruption and LSN gaps fail closed | `replay_wal` framing, checksum, and expected-LSN checks | `rejects_and_quarantines_checksum_corruption_at_wal_tail`, `rejects_and_quarantines_checksum_corruption_before_valid_wal_suffix`, `rejects_and_quarantines_non_contiguous_wal_lsn` |

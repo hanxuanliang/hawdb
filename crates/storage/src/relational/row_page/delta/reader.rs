@@ -13,6 +13,7 @@ use crate::relational::{
 use skein_integrity::IntegrityHasher;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -180,6 +181,118 @@ impl RelationalRowDeltaReader {
         result
     }
 
+    /// Visits only entries in one ordered table/key range.
+    ///
+    /// Runs whose key bounds cannot intersect the requested range remain
+    /// unopened. Within an intersecting run, keys before the lower bound are
+    /// skipped and traversal stops once the upper bound is crossed. Each
+    /// emitted entry is independently binding- and checksum-verified; bytes
+    /// outside the requested suffix are deliberately not demand-verified.
+    pub fn visit_range_entries(
+        &self,
+        table: &str,
+        lower: Bound<&RelationalKey>,
+        upper: Bound<&RelationalKey>,
+        mut visit: impl FnMut(&RelationalKey, &RelationalRowPageRecoveredValue, u64) -> bool,
+    ) -> Result<RelationalRowDeltaReadReport, RelationalRowDeltaError> {
+        if self.is_poisoned() {
+            return Err(RelationalRowDeltaError::Corrupt(
+                "row delta reader is poisoned".to_string(),
+            ));
+        }
+        let result = self.visit_range_entries_inner(table, lower, upper, &mut visit);
+        if result.as_ref().is_err_and(should_poison) {
+            self.poisoned.store(true, Ordering::Release);
+        }
+        result
+    }
+
+    fn visit_range_entries_inner(
+        &self,
+        table: &str,
+        lower: Bound<&RelationalKey>,
+        upper: Bound<&RelationalKey>,
+        visit: &mut impl FnMut(&RelationalKey, &RelationalRowPageRecoveredValue, u64) -> bool,
+    ) -> Result<RelationalRowDeltaReadReport, RelationalRowDeltaError> {
+        let Ok(table_ordinal) = self
+            .manifest
+            .tables
+            .binary_search_by(|candidate| candidate.table.as_str().cmp(table))
+        else {
+            return Ok(RelationalRowDeltaReadReport::default());
+        };
+        let table_ordinal = u32::try_from(table_ordinal).map_err(|_| {
+            RelationalRowDeltaError::Corrupt("row delta table ordinal does not fit u32".to_string())
+        })?;
+        let encoded_lower = encode_range_bound(lower, self.config)?;
+        let encoded_upper = encode_range_bound(upper, self.config)?;
+        if encoded_bounds_are_empty(encoded_lower.as_ref(), encoded_upper.as_ref()) {
+            return Ok(RelationalRowDeltaReadReport::default());
+        }
+
+        let mut report = RelationalRowDeltaReadReport::default();
+        for run in &self.manifest.runs {
+            if !run_intersects_range(
+                run,
+                table_ordinal,
+                encoded_lower.as_ref(),
+                encoded_upper.as_ref(),
+            ) {
+                continue;
+            }
+            let mut callback_stopped = false;
+            let _completed = visit_run(
+                &self.directory,
+                &self.manifest,
+                run,
+                self.config,
+                |candidate_table, candidate_key, value, epoch| {
+                    match candidate_table.cmp(table) {
+                        std::cmp::Ordering::Less => return Ok(true),
+                        std::cmp::Ordering::Greater => return Ok(false),
+                        std::cmp::Ordering::Equal => {}
+                    }
+                    if key_precedes_lower(candidate_key, lower) {
+                        return Ok(true);
+                    }
+                    if key_exceeds_upper(candidate_key, upper) {
+                        return Ok(false);
+                    }
+                    report.entries_visited =
+                        report.entries_visited.checked_add(1).ok_or_else(|| {
+                            RelationalRowDeltaError::Admission(
+                                "row delta range entry counter overflow".to_string(),
+                            )
+                        })?;
+                    if !visit(candidate_key, value, epoch) {
+                        callback_stopped = true;
+                        return Ok(false);
+                    }
+                    Ok(true)
+                },
+            )?;
+            report.runs_read = report.runs_read.checked_add(1).ok_or_else(|| {
+                RelationalRowDeltaError::Admission(
+                    "row delta range run counter overflow".to_string(),
+                )
+            })?;
+            report.bytes_read =
+                report
+                    .bytes_read
+                    .checked_add(run.encoded_len)
+                    .ok_or_else(|| {
+                        RelationalRowDeltaError::Admission(
+                            "row delta range byte counter overflow".to_string(),
+                        )
+                    })?;
+            if callback_stopped {
+                report.stopped_early = true;
+                break;
+            }
+        }
+        Ok(report)
+    }
+
     /// Looks up the newest immutable recovery-delta value without materializing
     /// the complete delta generation. Runs are inspected newest first because
     /// a later run supersedes the same key in an earlier run.
@@ -301,6 +414,88 @@ impl RelationalRowDeltaReader {
             }
         }
         Ok((None, report))
+    }
+}
+
+fn encode_range_bound(
+    bound: Bound<&RelationalKey>,
+    config: RelationalRowDeltaConfig,
+) -> Result<Option<(Vec<u8>, bool)>, RelationalRowDeltaError> {
+    let (key, inclusive) = match bound {
+        Bound::Unbounded => return Ok(None),
+        Bound::Included(key) => (key, true),
+        Bound::Excluded(key) => (key, false),
+    };
+    let encoded = encode_ordered_relational_key(key).map_err(|error| {
+        RelationalRowDeltaError::Admission(format!(
+            "row delta range key cannot be encoded: {error}"
+        ))
+    })?;
+    if encoded.len() > config.row_limits.max_key_bytes.get() {
+        return Err(RelationalRowDeltaError::Admission(format!(
+            "row delta range key contains {} bytes, exceeding limit {}",
+            encoded.len(),
+            config.row_limits.max_key_bytes
+        )));
+    }
+    Ok(Some((encoded, inclusive)))
+}
+
+fn encoded_bounds_are_empty(
+    lower: Option<&(Vec<u8>, bool)>,
+    upper: Option<&(Vec<u8>, bool)>,
+) -> bool {
+    match (lower, upper) {
+        (Some((lower, lower_inclusive)), Some((upper, upper_inclusive))) => {
+            lower > upper || (lower == upper && !(*lower_inclusive && *upper_inclusive))
+        }
+        _ => false,
+    }
+}
+
+fn run_intersects_range(
+    run: &RowDeltaRunDescriptor,
+    table_ordinal: u32,
+    lower: Option<&(Vec<u8>, bool)>,
+    upper: Option<&(Vec<u8>, bool)>,
+) -> bool {
+    if run.upper_bound.table_ordinal < table_ordinal
+        || run.lower_bound.table_ordinal > table_ordinal
+    {
+        return false;
+    }
+    if run.upper_bound.table_ordinal == table_ordinal
+        && lower.is_some_and(|(key, inclusive)| {
+            run.upper_bound.encoded_primary_key < *key
+                || (run.upper_bound.encoded_primary_key == *key && !inclusive)
+        })
+    {
+        return false;
+    }
+    if run.lower_bound.table_ordinal == table_ordinal
+        && upper.is_some_and(|(key, inclusive)| {
+            run.lower_bound.encoded_primary_key > *key
+                || (run.lower_bound.encoded_primary_key == *key && !inclusive)
+        })
+    {
+        return false;
+    }
+    true
+}
+
+fn key_precedes_lower(key: &RelationalKey, lower: Bound<&RelationalKey>) -> bool {
+    match lower {
+        Bound::Unbounded => false,
+        Bound::Included(lower) => key < lower,
+        Bound::Excluded(lower) => key <= lower,
+    }
+}
+
+fn key_exceeds_upper(key: &RelationalKey, upper: Bound<&RelationalKey>) -> bool {
+    match upper {
+        Bound::Unbounded => false,
+        Bound::Included(upper) => key > upper,
+        Bound::Excluded(upper) => key >= upper,
     }
 }
 
