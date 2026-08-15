@@ -22,9 +22,10 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
 
     assert!(report.ready);
     assert_eq!(report.qualified_tables, QUALIFIED_TABLES);
+    assert_eq!(report.corpus.partial_caller_count, 7);
     assert_eq!(report.final_message_count, 7);
     assert_eq!(report.base_chunk_count, 5);
-    assert_eq!(report.final_chunk_count, 7);
+    assert_eq!(report.final_chunk_count, 0);
     assert_eq!(report.cold_checkpoint_reads.len(), 9);
     assert_eq!(report.warm_checkpoint_reads.len(), 9);
     assert!(report.wal_replayed_entries > 0);
@@ -82,6 +83,100 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
             .visible_commit_epoch,
         report.live_content_commit_epoch
     );
+    assert_eq!(report.source_chunk_replacement.initial_chunk_count, 7);
+    assert!(report.source_chunk_replacement.stale_suffix_removed);
+    assert!(report.source_chunk_replacement.chunk_fields_preserved);
+    assert!(report.source_chunk_replacement.duplicate_order_rejected);
+    assert!(report.source_chunk_replacement.rejected_statement_atomic);
+    assert_eq!(
+        report
+            .source_chunk_replacement
+            .shorter_replacement
+            .replacement_chunk_count,
+        2
+    );
+    assert_eq!(
+        report
+            .source_chunk_replacement
+            .shorter_replacement
+            .summary_item_count,
+        2
+    );
+    assert!(
+        report
+            .source_chunk_replacement
+            .shorter_replacement
+            .summary_size_bytes
+            > 0
+    );
+    assert_eq!(
+        report
+            .source_chunk_replacement
+            .shorter_replacement
+            .live_read
+            .execution
+            .visible_commit_epoch,
+        report
+            .source_chunk_replacement
+            .shorter_replacement
+            .committed_epoch
+    );
+    assert_eq!(
+        report
+            .source_chunk_replacement
+            .shorter_replacement
+            .live_read
+            .output_sha256,
+        report
+            .source_chunk_replacement
+            .shorter_replacement
+            .reopened_read
+            .output_sha256
+    );
+    assert_eq!(
+        report
+            .source_chunk_replacement
+            .empty_replacement
+            .replacement_chunk_count,
+        0
+    );
+    assert_eq!(
+        report
+            .source_chunk_replacement
+            .empty_replacement
+            .summary_item_count,
+        0
+    );
+    assert_eq!(
+        report
+            .source_chunk_replacement
+            .empty_replacement
+            .summary_size_bytes,
+        0
+    );
+    assert_eq!(
+        report
+            .source_chunk_replacement
+            .empty_replacement
+            .live_read
+            .output_sha256,
+        report
+            .source_chunk_replacement
+            .empty_replacement
+            .reopened_read
+            .output_sha256
+    );
+    assert!(
+        report
+            .source_chunk_replacement
+            .empty_replacement
+            .checkpoint_generation
+            > report
+                .source_chunk_replacement
+                .shorter_replacement
+                .checkpoint_generation
+    );
+    assert_eq!(report.source_chunk_replacement.final_chunk_count, 0);
     assert_eq!(
         report.multi_statement_transaction.index_runtime_path,
         "transaction_workspace"

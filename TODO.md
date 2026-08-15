@@ -118,6 +118,10 @@ crash; read-only recovery remains fail closed.
     recovery delta, live row overlay, cache accounting, and zero leaked page
     pins. Source chunks retain stable source/chunk ordering, and anchors retain
     occurrence identity even when two messages share one legacy `message_id`.
+    The `upsert_source_chunks` caller now has complete mixed-transaction
+    evidence for shorter and empty whole-document replacement, duplicate-order
+    statement rollback, graph/document count agreement, live visibility, and
+    checkpoint/reopen identity. Remaining `partial` callers stay blocked.
   - Require checkpoint/reopen, WAL replay, corruption, cancellation, and
     locking evidence before enabling the path by default. Prove that a declared
     bounded workload runs within the supported 512 MiB low-memory profile, but
@@ -171,7 +175,9 @@ qualification justifies moving them.
     `docs/specs/POSTGRES_RELATIONAL_CONTENT_STORE_SPEC.md`.
   - Complete the remaining graph-plus-relational write ownership for every
     caller currently classified as `partial`; do not infer readiness from
-    parser feature counts.
+    parser feature counts. `upsert_source_chunks` is now `covered`; ownership
+    moves, thread reconciliation, tail deletion, and whole-thread deletion
+    remain incomplete.
   - Acceptance: every active Mem caller is `covered`, and cutover fails closed
     when the corpus protocol, revision, or digest differs from the qualified
     Skein artifact.

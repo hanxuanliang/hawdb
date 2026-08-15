@@ -4,6 +4,7 @@ mod extended_tables;
 mod fixture;
 mod isolation;
 mod resource;
+mod source_replacement;
 #[cfg(test)]
 mod tests;
 mod transaction;
@@ -26,6 +27,7 @@ use isolation::qualify_content_store_isolation;
 use resource::{qualify_content_store_resources, ContentStoreResourceProbeConfig};
 use serde::Serialize;
 use skein::{Database, DurabilityPolicy, RelationalIndexMode, Result, SkeinError};
+use source_replacement::qualify_source_chunk_replacement;
 use std::path::PathBuf;
 use transaction::qualify_multi_statement_transaction;
 
@@ -257,6 +259,7 @@ pub struct ContentStoreInitialRowPageQualificationReport {
     pub live_content_commit_epoch: u64,
     pub live_overlay_chunk_read: ContentStoreRowPageReadReport,
     pub live_overlay_anchor_read: ContentStoreRowPageReadReport,
+    pub source_chunk_replacement: ContentStoreSourceReplacementQualificationReport,
     pub multi_statement_transaction: ContentStoreTransactionQualificationReport,
     pub resources: ContentStoreResourceEvidence,
     pub corruption: ContentStoreCorruptionQualificationReport,
@@ -277,6 +280,29 @@ pub struct ContentStoreTransactionQualificationReport {
     pub canonical_fallback_lookups: u64,
     pub rejected_statement_atomic: bool,
     pub committed_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContentStoreSourceReplacementQualificationReport {
+    pub initial_chunk_count: usize,
+    pub stale_suffix_removed: bool,
+    pub chunk_fields_preserved: bool,
+    pub duplicate_order_rejected: bool,
+    pub rejected_statement_atomic: bool,
+    pub shorter_replacement: ContentStoreSourceReplacementPhaseReport,
+    pub empty_replacement: ContentStoreSourceReplacementPhaseReport,
+    pub final_chunk_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContentStoreSourceReplacementPhaseReport {
+    pub replacement_chunk_count: usize,
+    pub committed_epoch: u64,
+    pub summary_item_count: i64,
+    pub summary_size_bytes: i64,
+    pub live_read: ContentStoreRowPageReadReport,
+    pub checkpoint_generation: u64,
+    pub reopened_read: ContentStoreRowPageReadReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -546,6 +572,16 @@ pub fn run_content_store_initial_row_page_qualification(
         }
     }
 
+    let (replacement_database, source_chunk_replacement) = qualify_source_chunk_replacement(
+        database,
+        &config.database_path,
+        &authoritative_config,
+        &corpus,
+        live_chunk_count,
+        config.chunk_payload_bytes,
+    )?;
+    database = replacement_database;
+
     let multi_statement_transaction = qualify_multi_statement_transaction(
         &mut database,
         &corpus,
@@ -591,7 +627,7 @@ pub fn run_content_store_initial_row_page_qualification(
         final_message_count: config.base_message_count + 3,
         message_payload_bytes: config.message_payload_bytes,
         base_chunk_count: config.base_chunk_count,
-        final_chunk_count: config.base_chunk_count + 2,
+        final_chunk_count: source_chunk_replacement.final_chunk_count,
         chunk_payload_bytes: config.chunk_payload_bytes,
         segment_cache_capacity_bytes: config.segment_cache_capacity_bytes,
         checkpoint_generation: checkpoint.generation,
@@ -608,6 +644,7 @@ pub fn run_content_store_initial_row_page_qualification(
         live_content_commit_epoch,
         live_overlay_chunk_read,
         live_overlay_anchor_read,
+        source_chunk_replacement,
         multi_statement_transaction,
         resources,
         corruption,

@@ -1353,6 +1353,12 @@ checkpoint binding, demand-read, lifecycle, or serving obligations.
   anchors publish in one mixed transaction epoch. The occurrence fixture uses
   two distinct `content_message_id` values with one shared legacy `message_id`
   and requires both anchors to remain visible.
+  Source replacement then uses the frozen `upsert_source_chunks` statement
+  group to publish graph count, exact relational chunks, and document summary
+  in one epoch. A shorter replacement proves stale-suffix removal; a rejected
+  duplicate order proves statement rollback; an empty replacement proves zero
+  rows and counts. Both phases checkpoint, reopen, and retain identical ordered
+  output digests. `SkeinContentSourceReplacement.tla` models this operation.
 - `SkeinRowRecovery.tla`: checkpoint-correlated row-root mount, exact ordered
   primary-key WAL overlay, graph-only epoch advancement, whole-fragment
   admission, fail-closed invalidation, complete-prefix view publication, cold

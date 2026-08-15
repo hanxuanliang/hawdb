@@ -574,6 +574,19 @@ mod tests {
     }
 
     #[test]
+    fn source_chunk_replacement_is_bound_to_mixed_transaction_evidence() {
+        let corpus = nowledge_content_store_sql_corpus().unwrap();
+        let caller = corpus
+            .source_inventory
+            .iter()
+            .find(|caller| caller.symbol == "upsert_source_chunks")
+            .expect("source chunk replacement caller must be inventoried");
+        assert_eq!(caller.coverage, ContentStoreSqlCallerCoverage::Covered);
+        assert!(caller.note.contains("whole-document"));
+        assert!(caller.note.contains("mixed transaction"));
+    }
+
+    #[test]
     fn content_store_mutations_stage_through_the_public_sql_path() {
         let corpus = nowledge_content_store_sql_corpus().expect("valid content-store corpus");
         let mut database = materialized_content_store();

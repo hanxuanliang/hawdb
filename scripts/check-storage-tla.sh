@@ -15,6 +15,7 @@ readonly specifications=(
   SkeinConcurrentSnapshots
   SkeinTransactionConcurrency
   SkeinCowPagePublication
+  SkeinContentSourceReplacement
   SkeinSourceSegmentPublication
   SkeinCrdtReplication
   SkeinGossipDelivery

@@ -280,11 +280,11 @@ authorized decommissioning step.
 
 `run_content_store_initial_row_page_qualification` is the typed first-table
 storage lifecycle gate. It creates a new evidence database from the frozen DDL,
-inserts `content_documents` and `thread_messages` only through frozen
-PostgreSQL mutation statements, publishes a checkpoint, and reopens with
-authoritative persistent indexes. It then executes the frozen document lookup,
-ordered message page, and message aggregate with each statement's exact row
-and payload limits.
+inserts `content_documents`, `thread_messages`, `content_chunks`, and
+`content_anchors` only through frozen PostgreSQL mutation statements, publishes
+a checkpoint, and reopens with authoritative persistent indexes. It then
+executes the frozen document, message, chunk, aggregate, and anchor reads with
+each statement's exact row and payload limits.
 
 The report binds the source revision, corpus and schema identities, qualified
 tables, cache capacity, checkpoint generation/epoch, deterministic output
@@ -296,12 +296,24 @@ from a non-empty live row overlay without a checkpoint. Page pins must return
 to zero after every read. Cold and warm checkpoint reads must return identical
 ordered results.
 
-This gate deliberately covers storage lifecycle and per-statement admission,
-not complete Content Store cutover. Multi-statement transaction groups,
-locking, cancellation, injected corruption, resource profiling, and the
-remaining tables stay fail-closed until their separate qualification evidence
-is present. The runner never embeds its database path or payload contents in
-the serialized report.
+The same runner qualifies `upsert_source_chunks` as a whole-document mixed
+transaction rather than a host-side graph/relational dual write. It replaces a
+larger source with an exact shorter ordered set, rejects a duplicate
+`(content_doc_id, chunk_index)` statement without changing the prior workspace,
+updates the graph `Source.chunk_count` and relational document summary in the
+same commit epoch, and proves the exact result after checkpoint/reopen. A
+second empty replacement proves that clearing a failed or empty reparse leaves
+no stale chunks and publishes zero graph/document counts. Both replacements
+execute through the same frozen SQL statements used by the caller inventory;
+the evidence also checks chunk identity, order, offsets, token counts,
+non-ASCII heading metadata, and caller-supplied content hashes.
+
+This gate deliberately covers the selected storage lifecycle, transaction,
+locking, cancellation, injected corruption, and synthetic resource evidence;
+it does not claim complete Content Store cutover. Callers still marked
+`partial`, isolated resource enforcement, production-copy measurements, and
+cross-platform fault injection remain fail-closed. The runner never embeds its
+database path or payload contents in the serialized report.
 
 The focused Rust tests cover:
 

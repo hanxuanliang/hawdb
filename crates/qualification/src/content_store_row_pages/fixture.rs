@@ -62,7 +62,10 @@ pub(super) fn bootstrap_checkpoint(
         &graph_identity_parameters("memory_id", MEMORY_OWNER_ID),
     )?;
     transaction.query_sql_with_params(&document.sql, &thread_document_parameters())?;
-    transaction.query_sql_with_params(&document.sql, &source_document_parameters())?;
+    transaction.query_sql_with_params(
+        &document.sql,
+        &source_document_parameters("default", "2026-01-01T00:00:00Z"),
+    )?;
     for position in 0..config.base_message_count {
         transaction.query_sql_with_params(
             &message.sql,
@@ -206,16 +209,16 @@ fn thread_document_parameters() -> Vec<Value> {
     ]
 }
 
-fn source_document_parameters() -> Vec<Value> {
+pub(super) fn source_document_parameters(space_id: &str, updated_at: &str) -> Vec<Value> {
     vec![
         Value::String(SOURCE_DOCUMENT_ID.to_string()),
         Value::String("source".to_string()),
         Value::String(SOURCE_OWNER_ID.to_string()),
-        Value::String("default".to_string()),
+        Value::String(space_id.to_string()),
         Value::String("application/x-nowledge-source-chunks".to_string()),
         Value::Int(1),
         Value::String("2026-01-01T00:00:00Z".to_string()),
-        Value::String("2026-01-01T00:00:00Z".to_string()),
+        Value::String(updated_at.to_string()),
     ]
 }
 
@@ -266,16 +269,27 @@ pub(super) fn source_chunk_parameters(
     payload_bytes: usize,
     phase: &str,
 ) -> Vec<Value> {
+    source_chunk_parameters_with_index(position, position, payload_bytes, phase)
+}
+
+pub(super) fn source_chunk_parameters_with_index(
+    identity_position: usize,
+    chunk_index: usize,
+    payload_bytes: usize,
+    phase: &str,
+) -> Vec<Value> {
     vec![
-        Value::String(format!("chunk-{position:08}")),
+        Value::String(format!("chunk-{identity_position:08}")),
         Value::String(SOURCE_DOCUMENT_ID.to_string()),
-        Value::Int(position as i64),
+        Value::Int(chunk_index as i64),
         Value::String(format!("{phase}:{}", "c".repeat(payload_bytes))),
-        Value::Int((position * payload_bytes) as i64),
-        Value::Int(((position + 1) * payload_bytes) as i64),
-        Value::Int((position + 1) as i64),
-        Value::String(format!("{{\"phase\":\"{phase}\"}}")),
-        Value::String(format!("chunk-hash-{phase}-{position:08}")),
+        Value::Int((chunk_index * payload_bytes) as i64),
+        Value::Int(((chunk_index + 1) * payload_bytes) as i64),
+        Value::Int((chunk_index + 1) as i64),
+        Value::String(format!(
+            "{{\"heading_context\": \"§ Heading {chunk_index}\", \"phase\": \"{phase}\"}}"
+        )),
+        Value::String(format!("chunk-hash-{phase}-{identity_position:08}")),
         Value::String("2026-01-01T00:00:00Z".to_string()),
         Value::String("2026-01-01T00:00:00Z".to_string()),
     ]
