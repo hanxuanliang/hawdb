@@ -1476,10 +1476,11 @@ checkpoint binding, demand-read, lifecycle, or serving obligations.
   hydration budget. A small aggregate result may scan larger admitted inputs;
   the input hydration limit remains explicit and is enforced separately.
   `Capability512Mib` records whether the observed process peak fits the named
-  512 MiB capability profile, but an ordinary in-process run is not proof of an
-  OS-enforced limit. The exact value identifies qualification evidence; it is
-  not an engine limit or activation threshold. Activation still requires an
-  isolated constrained run.
+  512 MiB capability profile. Production evidence additionally binds the
+  explicit 512 MiB runtime-governor ceiling and its admission/completion
+  counters; it does not require an OS-level 512 MiB limit. The exact value
+  identifies qualification evidence; it is not the default engine limit or an
+  activation threshold.
   `ConfiguredWorkload` accepts a different caller-declared budget without
   substituting 512 MiB as a universal cutoff. Production-copy evidence remains
   a separate runner over the imported replica and its actual resource profile;

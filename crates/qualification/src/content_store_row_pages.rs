@@ -3,6 +3,7 @@ mod evidence;
 mod extended_tables;
 mod fixture;
 mod isolation;
+mod production;
 mod resource;
 mod source_ownership;
 mod source_replacement;
@@ -33,6 +34,7 @@ use fixture::{
     thread_page_parameters, QUALIFIED_TABLES,
 };
 use isolation::qualify_content_store_isolation;
+pub use production::*;
 use resource::{qualify_content_store_resources, ContentStoreResourceProbeConfig};
 use serde::Serialize;
 use skein::{Database, DurabilityPolicy, RelationalIndexMode, Result, SkeinError};
@@ -208,6 +210,8 @@ pub enum ContentStoreRowPageReadPhase {
     WarmCheckpoint,
     WalRecovery,
     LiveOverlay,
+    ProductionCold,
+    ProductionWarm,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -237,9 +241,20 @@ pub struct ContentStoreRowPageExecutionEvidence {
     pub cache_hits: u64,
     pub cache_misses: u64,
     pub cache_admission_rejections: u64,
+    pub index_logical_pages: u64,
+    pub index_logical_bytes: u64,
+    pub index_physical_pages: u64,
+    pub index_physical_bytes: u64,
+    pub index_cache_hits: u64,
+    pub index_cache_misses: u64,
+    pub index_cache_admission_rejections: u64,
     pub overlay_entries: u64,
     pub overlay_bytes: u64,
     pub rows_visited: u64,
+    pub intermediate_rows: u64,
+    pub hydrated_rows: u64,
+    pub hydrated_compressed_bytes: u64,
+    pub hydrated_decompressed_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -36,7 +36,8 @@ impl ContentStoreMemoryProfileQualificationReport {
 
 /// Evaluates the detected host or cgroup snapshot against one fixed Content
 /// Store memory profile. This qualifies the governor policy only; the 512 MiB
-/// workload capability additionally requires an OS-constrained workload run.
+/// workload capability additionally requires a run with the explicit governor
+/// ceiling and measured peak RSS inside that envelope.
 pub fn qualify_content_store_memory_profile(
     profile_kind: ContentStoreResourceProfileKind,
     resources: RuntimeResourceSnapshot,

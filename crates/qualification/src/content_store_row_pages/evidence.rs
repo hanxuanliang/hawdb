@@ -7,10 +7,8 @@ use crate::{
     ContentStoreSqlStatementClassification, ContentStoreSqlStatementKind,
     ContentStoreSqlStatementSpec,
 };
-use skein::{Database, QueryStreamOptions, Result, SkeinError, Value};
+use skein::{Database, QueryStreamOptions, RelationalSqlReadProfile, Result, SkeinError, Value};
 
-const EXPLAIN_MAX_ROWS: usize = 128;
-const EXPLAIN_MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 pub(super) const MESSAGE_POINT_SQL: &str =
     "SELECT content_message_id, content FROM thread_messages WHERE content_message_id = $1";
 pub(super) const MESSAGE_POINT_MAX_ROWS: usize = 1;
@@ -93,7 +91,8 @@ pub(super) fn execute_qualified_read(
             "content-store row-page qualification requires a segment cache".to_string(),
         )
     })?;
-    let output = database.query_sql_with_params_options(
+    let transaction = database.begin_read_transaction();
+    let profiled = transaction.query_sql_with_params_options_profiled(
         &statement.sql,
         &parameters,
         QueryStreamOptions {
@@ -101,6 +100,8 @@ pub(super) fn execute_qualified_read(
             max_payload_bytes: Some(statement.max_payload_bytes),
         },
     )?;
+    let output = profiled.output;
+    let execution = execution_evidence(statement, profiled.profile)?;
     let after = database.segment_cache_snapshot().ok_or_else(|| {
         SkeinError::Execution(
             "content-store row-page qualification lost its segment cache".to_string(),
@@ -120,7 +121,6 @@ pub(super) fn execute_qualified_read(
             statement.name, statement.max_payload_bytes
         )));
     }
-    let execution = explain_execution(database, statement, &parameters)?;
     Ok(ContentStoreRowPageReadReport {
         statement_name: statement.name.clone(),
         phase,
@@ -134,58 +134,70 @@ pub(super) fn execute_qualified_read(
     })
 }
 
-fn explain_execution(
-    database: &mut Database,
+fn execution_evidence(
     statement: &ContentStoreSqlStatementSpec,
-    parameters: &[Value],
+    profile: RelationalSqlReadProfile,
 ) -> Result<ContentStoreRowPageExecutionEvidence> {
-    let explain = database.query_sql_with_params_options(
-        &format!("EXPLAIN ANALYZE {}", statement.sql),
-        parameters,
-        QueryStreamOptions {
-            max_rows: Some(EXPLAIN_MAX_ROWS),
-            max_payload_bytes: Some(EXPLAIN_MAX_PAYLOAD_BYTES),
+    let index_runtime_path = profile.index_reads.first().map_or_else(
+        || "none".to_string(),
+        |first| {
+            if profile
+                .index_reads
+                .iter()
+                .all(|read| read.runtime_path == first.runtime_path)
+            {
+                first.runtime_path.clone()
+            } else {
+                "mixed".to_string()
+            }
         },
-    )?;
-    let info = explain
-        .rows
-        .iter()
-        .find_map(|row| match row.get("operator info") {
-            Some(Value::String(info)) if info.contains("row_runtime_path=") => Some(info.as_str()),
-            _ => None,
-        })
-        .ok_or_else(|| {
-            SkeinError::Execution(format!(
-                "content-store statement {} has no row-page execution evidence",
-                statement.name
-            ))
-        })?;
+    );
+    let index_logical_pages = sum_index_read(&profile, |read| read.logical_pages);
+    let index_logical_bytes = sum_index_read(&profile, |read| read.logical_bytes);
+    let index_physical_pages = sum_index_read(&profile, |read| read.physical_pages);
+    let index_physical_bytes = sum_index_read(&profile, |read| read.physical_bytes);
+    let index_cache_hits = sum_index_read(&profile, |read| read.cache_hits);
+    let index_cache_misses = sum_index_read(&profile, |read| read.cache_misses);
+    let index_cache_admission_rejections =
+        sum_index_read(&profile, |read| read.cache_admission_rejections);
+    let row = profile.row_read;
     let evidence = ContentStoreRowPageExecutionEvidence {
-        index_runtime_path: info_field(info, "runtime_path")
-            .unwrap_or("none")
-            .to_string(),
-        row_runtime_path: required_info_field(info, "row_runtime_path", &statement.name)?
-            .to_string(),
-        base_generation: required_info_u64(info, "row_base_generation", &statement.name)?,
-        delta_generation: optional_info_u64(info, "row_delta_generation", &statement.name)?,
-        base_commit_epoch: required_info_u64(info, "row_base_epoch", &statement.name)?,
-        visible_commit_epoch: required_info_u64(info, "row_visible_epoch", &statement.name)?,
-        root_set_digest: required_info_field(info, "row_root_set_digest", &statement.name)?
-            .to_string(),
-        logical_pages: required_info_u64(info, "row_logical_pages", &statement.name)?,
-        logical_bytes: required_info_u64(info, "row_logical_bytes", &statement.name)?,
-        physical_pages: required_info_u64(info, "row_physical_pages", &statement.name)?,
-        physical_bytes: required_info_u64(info, "row_physical_bytes", &statement.name)?,
-        cache_hits: required_info_u64(info, "row_cache_hits", &statement.name)?,
-        cache_misses: required_info_u64(info, "row_cache_misses", &statement.name)?,
-        cache_admission_rejections: required_info_u64(
-            info,
-            "row_cache_admission_rejections",
-            &statement.name,
-        )?,
-        overlay_entries: required_info_u64(info, "row_overlay_entries", &statement.name)?,
-        overlay_bytes: required_info_u64(info, "row_overlay_bytes", &statement.name)?,
-        rows_visited: required_info_u64(info, "row_rows", &statement.name)?,
+        index_runtime_path,
+        row_runtime_path: row.runtime_path,
+        base_generation: row
+            .base_generation
+            .ok_or_else(|| missing_profile(statement, "base generation"))?,
+        delta_generation: row.delta_generation,
+        base_commit_epoch: row
+            .base_commit_epoch
+            .ok_or_else(|| missing_profile(statement, "base commit epoch"))?,
+        visible_commit_epoch: row
+            .visible_commit_epoch
+            .ok_or_else(|| missing_profile(statement, "visible commit epoch"))?,
+        root_set_digest: row
+            .root_set_digest
+            .ok_or_else(|| missing_profile(statement, "root-set digest"))?,
+        logical_pages: count_u64(row.logical_pages),
+        logical_bytes: count_u64(row.logical_bytes),
+        physical_pages: count_u64(row.physical_pages),
+        physical_bytes: count_u64(row.physical_bytes),
+        cache_hits: count_u64(row.cache_hits),
+        cache_misses: count_u64(row.cache_misses),
+        cache_admission_rejections: count_u64(row.cache_admission_rejections),
+        index_logical_pages,
+        index_logical_bytes,
+        index_physical_pages,
+        index_physical_bytes,
+        index_cache_hits,
+        index_cache_misses,
+        index_cache_admission_rejections,
+        overlay_entries: count_u64(row.overlay_entries),
+        overlay_bytes: count_u64(row.overlay_resident_bytes),
+        rows_visited: count_u64(row.rows_visited),
+        intermediate_rows: count_u64(profile.intermediate_rows),
+        hydrated_rows: count_u64(profile.hydrated_rows),
+        hydrated_compressed_bytes: count_u64(profile.hydrated_compressed_bytes),
+        hydrated_decompressed_bytes: count_u64(profile.hydrated_decompressed_bytes),
     };
     if !matches!(
         evidence.index_runtime_path.as_str(),
@@ -209,6 +221,26 @@ fn explain_execution(
         )));
     }
     Ok(evidence)
+}
+
+fn missing_profile(statement: &ContentStoreSqlStatementSpec, field: &str) -> SkeinError {
+    SkeinError::Execution(format!(
+        "content-store statement {} has no {field} execution evidence",
+        statement.name
+    ))
+}
+
+fn count_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn sum_index_read(
+    profile: &RelationalSqlReadProfile,
+    field: impl Fn(&skein::RelationalSqlIndexReadProfile) -> usize,
+) -> u64 {
+    profile.index_reads.iter().fold(0u64, |total, read| {
+        total.saturating_add(count_u64(field(read)))
+    })
 }
 
 fn cache_delta(
@@ -279,39 +311,5 @@ pub(super) fn info_field<'a>(info: &'a str, name: &str) -> Option<&'a str> {
     info.split(", ").find_map(|field| {
         let (key, value) = field.split_once('=')?;
         (key == name).then_some(value)
-    })
-}
-
-fn required_info_field<'a>(info: &'a str, name: &str, statement: &str) -> Result<&'a str> {
-    info_field(info, name).ok_or_else(|| {
-        SkeinError::Execution(format!(
-            "content-store statement {statement} has no {name} execution evidence"
-        ))
-    })
-}
-
-fn required_info_u64(info: &str, name: &str, statement: &str) -> Result<u64> {
-    let value = required_info_field(info, name, statement)?;
-    if value == "none" {
-        return Err(SkeinError::Execution(format!(
-            "content-store statement {statement} has no value for {name}"
-        )));
-    }
-    value.parse::<u64>().map_err(|error| {
-        SkeinError::Execution(format!(
-            "content-store statement {statement} has invalid {name} value {value}: {error}"
-        ))
-    })
-}
-
-fn optional_info_u64(info: &str, name: &str, statement: &str) -> Result<Option<u64>> {
-    let value = required_info_field(info, name, statement)?;
-    if value == "none" {
-        return Ok(None);
-    }
-    value.parse::<u64>().map(Some).map_err(|error| {
-        SkeinError::Execution(format!(
-            "content-store statement {statement} has invalid {name} value {value}: {error}"
-        ))
     })
 }

@@ -200,7 +200,9 @@ fn regular_file_bytes_by_name(path: &Path) -> Result<BTreeMap<String, u64>> {
     Ok(files)
 }
 
-fn process_evidence(profile: ProcessMemoryProfile) -> ContentStoreProcessResourceEvidence {
+pub(super) fn process_evidence(
+    profile: ProcessMemoryProfile,
+) -> ContentStoreProcessResourceEvidence {
     ContentStoreProcessResourceEvidence {
         resident_memory_supported: profile.capabilities.resident_memory,
         total_page_faults_supported: profile.capabilities.total_page_faults,
@@ -216,7 +218,9 @@ fn process_evidence(profile: ProcessMemoryProfile) -> ContentStoreProcessResourc
     }
 }
 
-fn runtime_memory_evidence(snapshot: RuntimeMemorySnapshot) -> ContentStoreRuntimeMemoryEvidence {
+pub(super) fn runtime_memory_evidence(
+    snapshot: RuntimeMemorySnapshot,
+) -> ContentStoreRuntimeMemoryEvidence {
     ContentStoreRuntimeMemoryEvidence {
         host_total_bytes: snapshot.host_total_bytes,
         host_available_bytes: snapshot.host_available_bytes,

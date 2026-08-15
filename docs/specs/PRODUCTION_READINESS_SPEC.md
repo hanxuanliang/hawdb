@@ -218,6 +218,20 @@ bytes independently, and reject a non-serving view. Directory size and the
 presence of candidate files are not proof that a current relational generation
 is selectable.
 
+The typed entry point is
+`run_production_content_store_storage_qualification`. It MUST open the imported
+Skein copy read-only with authoritative indexes, reopen once per frozen SQL
+case, retain distinct cold and warm runs, compare every output with an offline
+digest, obtain one runtime-governor permit per measured read, and redact paths,
+parameters, and rows. The report MUST retain the governor's derived capacity,
+dynamic budget, and admission/completion deltas. A case is not ready when its
+selected generation changes across opens, row and index epochs diverge, either
+canonical artifact does not exceed the cache, an access wave is rejected by
+the cache, a pin leaks, or an explicit row, payload, I/O, RSS, or page-fault
+budget is exceeded. Per-run page-fault limits MUST NOT be applied to the
+cumulative lifecycle profile. Synthetic runner tests validate this protocol
+but cannot produce representative-replica evidence.
+
 Every query result path MUST have explicit row and payload limits. Every
 blocking operator MUST do one of the following before exceeding its admitted
 memory:

@@ -455,6 +455,53 @@ remaining `partial` callers, but isolated resource enforcement, production-copy
 measurements, and cross-platform fault injection remain fail-closed. The runner
 never embeds its database path or payload contents in the serialized report.
 
+`run_production_content_store_storage_qualification` is the typed read-only
+production-copy gate. It opens an already imported Skein replica with an
+explicit `read_only`, `OutOfCore`, and `Authoritative` configuration. It never
+opens SQLite, imports source rows, writes WAL, checkpoints, or mutates the
+source replica. Every case names one frozen read statement and supplies its
+parameters only to the query runtime; retained evidence contains statement and
+parameter digests rather than SQL parameters, database paths, or result rows.
+
+Each case opens a fresh database handle, binds the expected production identity
+to the observed shared graph/relational commit epoch, and performs at least one
+cold and one warm bounded read. The report records open latency and WAL replay
+work separately from query latency, exact result digests, output and
+intermediate rows, hydration bytes, physical row/index I/O, cache deltas, RSS,
+and platform-supported page faults. Result rows, latency, physical I/O,
+hydration, and cache deltas MUST come from the same profiled SQL execution, not
+from a subsequent `EXPLAIN ANALYZE` after the cache has been warmed. Each read
+obtains one foreground query
+permit from the caller-declared runtime governor, including its bounded result,
+working-memory, blocking, and I/O demand. The report retains the derived
+capacity and current dynamic memory budget plus admission/completion deltas;
+missing admission, rejection, overcommit, or a leaked permit blocks readiness.
+The selected relational row and index
+views MUST both serve at the database epoch, share their base generation, base
+epoch, and visible epoch, and report checkpoint, recovery-delta, and live
+overlay bytes independently. Both canonical row and canonical index artifacts
+MUST exceed the configured cache while an individual admitted read wave still
+fits: cache admission rejection or a leaked pin blocks readiness.
+Per-run physical page and byte limits cover the sum of relational row and index
+reads; an index access MUST NOT disappear from the budget merely because row
+hydration is reported separately.
+
+Page-fault budgets whose names end in `per_run` apply independently to each
+read. The lifecycle profile records cumulative open/read faults for diagnosis,
+but MUST NOT compare that aggregate with a per-run limit.
+
+`DesktopBound8Gib`, `Capability512Mib`, and `ConfiguredWorkload` remain
+different evidence profiles. The desktop profile requires the observed 8 GiB
+effective limit and uses the dynamic governor budget capped at 2 GiB. The 512
+MiB profile requires an explicit 512 MiB Skein governor ceiling, honors any
+smaller detected host or cgroup ceiling and available headroom, and proves that
+peak RSS remains inside the declared 512 MiB envelope. It does not require the
+host itself to be limited to 512 MiB, and it is not the default or a universal
+activation cutoff. A configured production workload records and enforces its
+actual caller-declared envelope. Contract tests prove the runner and redaction
+rules, but only a report from the representative imported copy is production
+evidence.
+
 The focused Rust tests cover:
 
 - parser preparation and every statement in the qualification corpus;

@@ -18,6 +18,12 @@ and algorithms outside active routes are not implied backlog items.
   - Record revision, target, feature set, configuration digest, dataset
     fingerprint, steady and peak RSS, page faults, intermediate rows, payload
     bytes, cache residency, spill, and admission counters.
+  - The typed read-only Content Store runner now binds frozen SQL cases to the
+    production identity, reopens a fresh cold cache per case, retains cold and
+    warm runs, and rejects relational row/index generation drift, undersized
+    artifacts, cache rejection, leaked pins, or explicit resource-budget
+    violations. Run it against the imported representative Skein copy; its
+    synthetic contract test is not production evidence.
   - The typed graph runner now retains every ordered cold/warm resource run,
     its recomputed aggregate, and lifecycle process memory. The final bundle
     rejects missing, truncated, reordered, over-budget, or inconsistent run

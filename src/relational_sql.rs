@@ -20,7 +20,8 @@ mod row_access;
 
 pub(crate) use index_access::RelationalIndexReadMode;
 pub(crate) use query::{
-    execute_relational_query_sql_with_runtime, RelationalQueryLimits, RelationalQueryReadModes,
+    execute_relational_query_sql_with_runtime, RelationalQueryLimits, RelationalQueryOutput,
+    RelationalQueryReadModes,
 };
 pub(crate) use row_access::RelationalRowReadMode;
 
@@ -1301,6 +1302,38 @@ mod tests {
             .expect("cancellation must not poison the pinned reader");
         assert_eq!(output.rows.len(), 1);
         assert_eq!(output.rows[0]["body"], Value::String("ready".to_string()));
+    }
+
+    #[test]
+    fn profiled_relational_read_returns_rows_and_accounting_from_one_execution() {
+        let mut database = Database::new();
+        database
+            .query_sql("CREATE TABLE messages (id BIGINT PRIMARY KEY, body TEXT NOT NULL)")
+            .expect("create profiled-read table");
+        database
+            .query_sql("INSERT INTO messages (id, body) VALUES (1, 'ready')")
+            .expect("insert profiled-read row");
+
+        let read = database.begin_read_transaction();
+        let profiled = read
+            .query_sql_with_params_options_profiled(
+                "SELECT body FROM messages WHERE id = $1",
+                &[Value::Int(1)],
+                crate::QueryStreamOptions {
+                    max_rows: Some(1),
+                    max_payload_bytes: Some(4096),
+                },
+            )
+            .expect("profile one relational read");
+
+        assert_eq!(profiled.output.rows.len(), 1);
+        assert_eq!(
+            profiled.output.rows[0]["body"],
+            Value::String("ready".to_string())
+        );
+        assert!(profiled.profile.intermediate_rows > 0);
+        assert_eq!(profiled.profile.row_read.runtime_path, "canonical_memory");
+        assert_eq!(profiled.profile.row_read.rows_visited, 1);
     }
 
     fn relational_explain_operator_info<'a>(

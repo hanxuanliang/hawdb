@@ -19025,6 +19025,67 @@ fn reject_transaction_control_parameters(
     }
 }
 
+fn profiled_relational_sql_output(
+    output: crate::relational_sql::RelationalQueryOutput,
+) -> ProfiledRelationalSqlQueryOutput {
+    let crate::relational_sql::RelationalQueryOutput {
+        rows,
+        intermediate_rows,
+        hydration,
+        index_execution_evidence,
+        row_execution_evidence,
+        ..
+    } = output;
+    let profile = RelationalSqlReadProfile {
+        intermediate_rows,
+        hydrated_rows: hydration.hydrated_rows,
+        hydrated_compressed_bytes: hydration.compressed_bytes,
+        hydrated_decompressed_bytes: hydration.decompressed_bytes,
+        index_reads: index_execution_evidence
+            .into_iter()
+            .map(|evidence| {
+                let runtime_path = evidence.runtime_path().to_string();
+                RelationalSqlIndexReadProfile {
+                    table: evidence.table,
+                    index: evidence.index,
+                    runtime_path,
+                    logical_pages: evidence.logical_pages,
+                    logical_bytes: evidence.logical_bytes,
+                    physical_pages: evidence.file_pages,
+                    physical_bytes: evidence.file_bytes,
+                    cache_hits: evidence.cache_hits,
+                    cache_misses: evidence.cache_misses,
+                    cache_admission_rejections: evidence.cache_admission_rejections,
+                    rows_visited: evidence.rows_visited,
+                }
+            })
+            .collect(),
+        row_read: RelationalSqlRowReadProfile {
+            runtime_path: row_execution_evidence.runtime_path.to_string(),
+            base_generation: row_execution_evidence.base_generation,
+            delta_generation: row_execution_evidence.delta_generation,
+            base_commit_epoch: row_execution_evidence.base_commit_epoch,
+            visible_commit_epoch: row_execution_evidence.visible_commit_epoch,
+            root_set_digest: row_execution_evidence.root_set_digest,
+            descriptor_reads: row_execution_evidence.descriptor_reads,
+            logical_pages: row_execution_evidence.logical_pages,
+            logical_bytes: row_execution_evidence.logical_bytes,
+            physical_pages: row_execution_evidence.file_pages,
+            physical_bytes: row_execution_evidence.file_bytes,
+            cache_hits: row_execution_evidence.cache_hits,
+            cache_misses: row_execution_evidence.cache_misses,
+            cache_admission_rejections: row_execution_evidence.cache_admission_rejections,
+            rows_visited: row_execution_evidence.rows_visited,
+            overlay_entries: row_execution_evidence.overlay_entries,
+            overlay_resident_bytes: row_execution_evidence.overlay_resident_bytes,
+        },
+    };
+    ProfiledRelationalSqlQueryOutput {
+        output: QueryOutput { rows },
+        profile,
+    }
+}
+
 impl DatabaseReadTransaction {
     pub fn commit_epoch(&self) -> u64 {
         self.published_read_view.visible_commit_epoch()
@@ -19601,6 +19662,62 @@ impl DatabaseReadTransaction {
         )
     }
 
+    /// Executes one bounded relational `SELECT` against this pinned snapshot
+    /// and returns result rows together with the storage accounting from that
+    /// exact execution. Virtual system-catalog queries and `EXPLAIN` are kept
+    /// on their dedicated output paths.
+    pub fn query_sql_with_params_options_profiled(
+        &self,
+        sql_text: &str,
+        parameters: &[Value],
+        options: QueryStreamOptions,
+    ) -> Result<ProfiledRelationalSqlQueryOutput> {
+        self.query_sql_with_params_options_profiled_context(
+            sql_text,
+            parameters,
+            options,
+            &skein_core::RuntimeTaskContext::default(),
+        )
+    }
+
+    /// Profiled relational `SELECT` with host cancellation and deadline
+    /// propagation. The returned rows and profile always belong to one
+    /// execution of the same pinned read view.
+    pub fn query_sql_with_params_options_profiled_context(
+        &self,
+        sql_text: &str,
+        parameters: &[Value],
+        options: QueryStreamOptions,
+        task_context: &skein_core::RuntimeTaskContext,
+    ) -> Result<ProfiledRelationalSqlQueryOutput> {
+        self.store.ensure_usable()?;
+        query_runtime::query_runtime_checkpoint(Some(task_context))?;
+        let max_rows = restrictive_query_limit(self.config.max_read_result_rows, options.max_rows);
+        let max_payload_bytes = restrictive_query_limit(
+            self.config.max_read_result_payload_bytes,
+            options.max_payload_bytes,
+        );
+        let prepared = skein_sql::prepare_postgres_sql(sql_text)?;
+        reject_locking_select_without_manager(&prepared.statement, false)?;
+        let crate::sql::SqlStatement::Select(select) = &prepared.statement else {
+            return Err(SkeinError::Semantic(
+                "profiled relational SQL requires SELECT".to_string(),
+            ));
+        };
+        if system_sql::is_virtual_catalog_select(select) {
+            return Err(SkeinError::Semantic(
+                "profiled relational SQL does not support virtual system catalogs".to_string(),
+            ));
+        }
+        self.execute_profiled_relational_sql(
+            sql_text,
+            parameters,
+            max_rows,
+            max_payload_bytes,
+            task_context,
+        )
+    }
+
     /// Executes bounded PostgreSQL-dialect SQL against this pinned read
     /// transaction while propagating host cancellation and deadlines through
     /// planning, index traversal, row hydration, and result construction.
@@ -19644,6 +19761,24 @@ impl DatabaseReadTransaction {
             return Ok(output);
         }
 
+        self.execute_profiled_relational_sql(
+            sql_text,
+            parameters,
+            max_rows,
+            max_payload_bytes,
+            task_context,
+        )
+        .map(|profiled| profiled.output)
+    }
+
+    fn execute_profiled_relational_sql(
+        &self,
+        sql_text: &str,
+        parameters: &[Value],
+        max_rows: Option<usize>,
+        max_payload_bytes: Option<usize>,
+        task_context: &skein_core::RuntimeTaskContext,
+    ) -> Result<ProfiledRelationalSqlQueryOutput> {
         let query_result = crate::relational_sql::execute_relational_query_sql_with_runtime(
             sql_text,
             parameters,
@@ -19659,7 +19794,7 @@ impl DatabaseReadTransaction {
         self.store.poison_on_storage_error(&query_result);
         let output = query_result?;
         query_runtime::query_runtime_checkpoint(Some(task_context))?;
-        Ok(QueryOutput { rows: output.rows })
+        Ok(profiled_relational_sql_output(output))
     }
 
     pub fn explain_query(&self, cypher_text: &str) -> Result<ExplainOutput> {
