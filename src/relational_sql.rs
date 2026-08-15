@@ -1041,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn authoritative_sql_never_falls_back_to_materialized_postings() {
+    fn authoritative_sql_keeps_index_path_when_cache_rejects_pages() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock")
@@ -1106,12 +1106,15 @@ mod tests {
                 },
             )
             .expect("open authoritative SQL reader with an undersized cache");
-            let error = database
-                .query_sql("SELECT id FROM documents WHERE owner = 'owner-1'")
-                .expect_err("authoritative SQL must not fall back after admission rejection");
-            assert!(error
-                .to_string()
-                .contains("authoritative relational index read"));
+            let output = database
+                .query_sql("EXPLAIN ANALYZE SELECT id FROM documents WHERE owner = 'owner-1'")
+                .expect("cache admission rejection should retain bounded positioned reads");
+            let info = relational_explain_operator_info(&output, "IndexRangeScanExec");
+            assert!(info.contains("runtime_path=authoritative"));
+            assert!(info.contains("authoritative=1"));
+            assert!(info.contains("canonical_fallback=0"));
+            assert!(info.contains("cache_admission_rejections="));
+            assert!(!info.contains("cache_admission_rejections=0"));
         }
         std::fs::remove_dir_all(path).expect("remove authoritative SQL fixture");
     }
