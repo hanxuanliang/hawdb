@@ -173,8 +173,37 @@ leaves pre-manifest crash artifacts unreachable. `RelationalRowPageRootReader`
 pins one immutable manifest and resolves cross-generation descriptors after a
 new root is selected. The non-serving recovery and mutation refinements are
 specified separately below. Disk-backed deltas, physical page demand reads,
-overflow hydration, reclamation integration, and serving activation remain
+reclamation integration, and serving activation remain
 blocked on their separate implementation and regression evidence.
+
+## Relational Overflow Publication
+
+`SkeinOverflowPublication.tla` models the generation-bound overflow root used
+before a row generation may contain large-value references. A candidate writes
+only content digests absent from the selected base root, while shared digests
+retain their immutable physical generation and every base digest remains in
+the candidate root. Extent, descriptor-root, and
+generation-manifest artifacts become durable before the latest manifest is
+replaced. A competing publisher makes the candidate stale; weak fairness of
+the rejection action guarantees that the stale candidate terminates without
+changing the selected root.
+
+Readers pin complete immutable roots and their cross-generation physical
+extent closure. A row-root binding can name only a published overflow root
+whose durable closure is complete. The configured instance explores two
+digests, two readers, and three generations. TLC checks manifest-last
+visibility, content-addressed reuse, fresh placement for new content, stale
+fencing, pinned-root readability, exact row binding, and crash removal of
+volatile candidates.
+
+The runtime refinement is `RelationalOverflowPublisher` and
+`RelationalOverflowRootReader`. The publisher writes a fixed-width sorted
+descriptor root, publishes the immutable generation manifest, revalidates the
+base, and replaces the latest manifest last. `RelationalRowPagePublisher`
+accepts overflow-bearing pages only through `publish_with_overflow_root`,
+resolves every reference before candidate creation, and persists the exact
+overflow root binding in `SKRPGM01`. Physical reclamation and checkpoint-level
+authority remain later protocols.
 
 ## Relational Row-Page Mutation
 
@@ -426,6 +455,7 @@ They are implementation evidence, not a machine-checked refinement proof.
 | A grouped WAL sync acknowledges every member after one successful barrier or fails the whole group closed | `WalSyncGroupState`, `finish_wal_sync_group`, `CommitSequencer` | `wal_group_commit_shares_one_sync_without_changing_record_order`, `wal_group_sync_failure_rejects_commit_and_poisons_until_reopen`, `panicking_group_commit_task_completes_followers_and_releases_leader` |
 | Fixed and adaptive collection policies remain bounded scheduling refinements, use a bounded fallback without a recent baseline, and never delay a lone request | `effective_group_commit_delay`, `wait_for_group_commit_peers`, `WalGroupCommitConfig::adaptive_enabled_after_evidence` | `wal_group_commit_skips_the_coalescing_window_without_contention`, `adaptive_delay_is_derived_from_the_completed_baseline`, `adaptive_delay_uses_bounded_fallback_before_the_completed_sample_floor`, `adaptive_delay_falls_back_after_the_recent_window_expires`, `wal_group_commit_requires_performance_and_recovery_evidence` |
 | A table-scoped row-page allocator persists monotonically, COW point mutations read only affected leaves and preserve the old left id across splits, deleted ids are never reused, and streaming bootstrap stays within one page plus one candidate | `RelationalRowPageIdAllocator`, `RelationalRowPageMutationPlanner`, `RelationalRowPageBootstrap`, `RelationalRowPageRootReader::find_table_page_descriptor` | `mutation_planner_reads_only_affected_leaves_and_splits_deterministically`, `mutation_planner_updates_deletes_and_never_reuses_page_ids`, `streaming_bootstrap_keeps_one_page_plus_one_candidate_row`, `streaming_bootstrap_fails_closed_after_emit_error`, `allocator_exhaustion_is_atomic`, `SkeinRowPageMutation.tla` |
+| Overflow extents are content-addressed, publish manifest-last behind a stale-generation fence, preserve pinned cross-generation closure, and are required before an overflow-bearing row root can publish | `RelationalOverflowPublisher`, `RelationalOverflowRootReader`, `RelationalRowPagePublisher::publish_with_overflow_root` | `publish_last_overflow_root_round_trips`, `incremental_root_reuses_content_and_keeps_pinned_generation_readable`, `every_pre_latest_crash_keeps_the_previous_overflow_root_selected`, `row_root_binds_and_resolves_the_exact_overflow_generation`, `row_root_rejects_missing_or_mismatched_overflow_generation`, `SkeinOverflowPublication.tla` |
 | A checkpoint-correlated row root remains cold at mount, replays consecutive global epochs and same-epoch relational fragments into one atomically admitted non-serving overlay, publishes only a complete view, retains pinned generations, and invalidates the current view on live writes | `RelationalState::stage_transaction_with_row_changes`, `RelationalRowPageRecoveryBuilder`, `GraphStore::{mount_relational_row_pages_for_recovery,finish_relational_row_page_recovery,invalidate_relational_row_page_live_view}` | `relational_row_change_capture_reports_exact_net_primary_key_changes`, `multiple_relational_fragments_share_one_global_epoch`, `overlay_admission_rejects_a_whole_batch_without_partial_visibility`, `opening_recovery_does_not_read_or_hash_base_page_slots`, `durable_open_replays_wal_into_a_generation_pinned_row_overlay`, `SkeinRowRecovery.tla` |
 | A torn WAL batch has no partial recovered visibility | `replay_wal` record decode and batch apply | `default_recovery_rejects_torn_wal_tail_until_explicit_doctor_repair`, `doctor_discards_torn_batch_wal_without_partial_path_recovery` |
 | Doctor repair binds destructive truncation to an exact acknowledged plan and resumes a durable pending audit | `DatabaseDoctor::{plan_wal_tail_repair,apply_wal_tail_repair}` | `apply_rejects_toctou_change_without_preparing_repair`, `prepared_repair_blocks_open_and_can_continue`, `truncated_pending_repair_is_resumable_and_blocks_open_until_finalized` |

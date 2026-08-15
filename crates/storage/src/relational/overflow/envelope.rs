@@ -11,7 +11,7 @@ use std::sync::Arc;
 const OVERFLOW_MAGIC: &[u8; 8] = b"SKOVFL01";
 const OVERFLOW_CODEC_RAW: u8 = 0;
 const OVERFLOW_CODEC_ZSTD: u8 = 1;
-const OVERFLOW_HEADER_BYTES: usize = 32;
+pub(super) const OVERFLOW_HEADER_BYTES: usize = 32;
 pub(super) const DEFAULT_ZSTD_LEVEL: i32 = 3;
 const MIN_ZSTD_SAVINGS_BYTES: usize = 64;
 const MIN_ZSTD_SAVINGS_PERCENT: usize = 25;
@@ -266,6 +266,13 @@ fn admitted_hydration_budget(
         ));
     }
     Ok(next)
+}
+
+pub(in crate::relational) fn admit_overflow_hydration(
+    reference: &RelationalOverflowRef,
+    budget: &RelationalHydrationBudget,
+) -> Result<(), RelationalError> {
+    admitted_hydration_budget(reference, budget).map(|_| ())
 }
 
 fn encode_scalar_type(scalar_type: RelationalScalarType) -> Result<u8, RelationalError> {

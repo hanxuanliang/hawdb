@@ -1,7 +1,9 @@
 use super::*;
 use crate::relational::{
-    RelationalKey, RelationalOverflowRef, RelationalRow, RelationalRowPageEntry,
-    RelationalScalarType, RelationalValue,
+    RelationalHydrationBudget, RelationalKey, RelationalOverflowConfig,
+    RelationalOverflowExtentInput, RelationalOverflowPublicationConfig,
+    RelationalOverflowPublisher, RelationalOverflowRef, RelationalOverflowRootReader,
+    RelationalRow, RelationalRowPageEntry, RelationalScalarType, RelationalValue,
 };
 use skein_integrity::integrity_digest;
 use std::fs::{self, OpenOptions};
@@ -181,7 +183,10 @@ fn every_pre_manifest_crash_keeps_the_previous_root_selected() {
                 11,
                 Some(1),
                 vec![table_delta("documents", vec![page(1, 2, 11, 1, 3)])],
-                Some(stop_after),
+                publisher::PublicationControls {
+                    overflow_root: None,
+                    stop_after: Some(stop_after),
+                },
             )
             .unwrap_err();
         assert!(matches!(
@@ -312,7 +317,7 @@ fn overflow_and_overlap_are_rejected_without_selecting_a_root() {
     assert!(matches!(
         error,
         RelationalRowPagePublicationError::Admission(message)
-            if message.contains("overflow extent")
+            if message.contains("overflow")
     ));
     assert!(!directory.exists());
 
@@ -334,6 +339,156 @@ fn overflow_and_overlap_are_rejected_without_selecting_a_root() {
             if message.contains("overlap")
     ));
     assert!(!directory.exists());
+}
+
+#[test]
+fn row_root_binds_and_resolves_the_exact_overflow_generation() {
+    let directory = unique_test_dir("overflow-root");
+    let overflow_config = RelationalOverflowPublicationConfig::default();
+    let input = RelationalOverflowExtentInput::encode(
+        RelationalScalarType::Text,
+        b"overflow payload",
+        RelationalOverflowConfig::default(),
+    )
+    .unwrap();
+    let reference = *input.reference();
+    RelationalOverflowPublisher::new(overflow_config)
+        .publish(&directory, 1, 10, None, vec![input])
+        .unwrap();
+    let overflow_root = RelationalOverflowRootReader::open_latest(&directory, overflow_config)
+        .unwrap()
+        .unwrap();
+
+    let mut overflow_page = page(1, 1, 10, 1, 2);
+    overflow_page.rows[0].row = RelationalRow::new(vec![
+        RelationalValue::BigInt(1),
+        RelationalValue::Overflow(reference),
+    ]);
+    let row_config = RelationalRowPagePublicationConfig::default();
+    RelationalRowPagePublisher::new(row_config)
+        .publish_with_overflow_root(
+            &directory,
+            1,
+            10,
+            None,
+            vec![table_delta("documents", vec![overflow_page])],
+            &overflow_root,
+        )
+        .unwrap();
+    let row_root = RelationalRowPageRootReader::open_latest(&directory, row_config)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row_root.overflow_root_binding(),
+        Some(overflow_root.manifest().binding())
+    );
+    row_root.validate_overflow_root(&overflow_root).unwrap();
+    let mut budget = RelationalHydrationBudget::default();
+    assert_eq!(
+        overflow_root
+            .hydrate(&reference, &mut budget, None)
+            .unwrap(),
+        RelationalValue::Text("overflow payload".to_string())
+    );
+
+    let row_publisher = RelationalRowPagePublisher::new(row_config);
+    let missing_successor = row_publisher
+        .publish(
+            &directory,
+            2,
+            11,
+            Some(1),
+            vec![table_delta("documents", vec![page(2, 2, 11, 3, 4)])],
+        )
+        .unwrap_err();
+    assert!(matches!(
+        missing_successor,
+        RelationalRowPagePublicationError::Admission(message)
+            if message.contains("descended from overflow-bearing pages")
+    ));
+
+    RelationalOverflowPublisher::new(overflow_config)
+        .publish(&directory, 2, 11, Some(1), Vec::new())
+        .unwrap();
+    let next_overflow_root = RelationalOverflowRootReader::open_latest(&directory, overflow_config)
+        .unwrap()
+        .unwrap();
+    assert!(next_overflow_root.contains(&reference).unwrap());
+    row_publisher
+        .publish_with_overflow_root(
+            &directory,
+            2,
+            11,
+            Some(1),
+            vec![table_delta("documents", vec![page(2, 2, 11, 3, 4)])],
+            &next_overflow_root,
+        )
+        .unwrap();
+    let next_row_root = RelationalRowPageRootReader::open_latest(&directory, row_config)
+        .unwrap()
+        .unwrap();
+    next_row_root
+        .validate_overflow_root(&next_overflow_root)
+        .unwrap();
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn row_root_rejects_missing_or_mismatched_overflow_generation() {
+    let directory = unique_test_dir("overflow-mismatch");
+    let overflow_config = RelationalOverflowPublicationConfig::default();
+    RelationalOverflowPublisher::new(overflow_config)
+        .publish(&directory, 1, 10, None, Vec::new())
+        .unwrap();
+    let overflow_root = RelationalOverflowRootReader::open_latest(&directory, overflow_config)
+        .unwrap()
+        .unwrap();
+    let input = RelationalOverflowExtentInput::encode(
+        RelationalScalarType::Text,
+        b"missing payload",
+        RelationalOverflowConfig::default(),
+    )
+    .unwrap();
+    let reference = *input.reference();
+    let mut overflow_page = page(1, 1, 10, 1, 2);
+    overflow_page.rows[0].row = RelationalRow::new(vec![
+        RelationalValue::BigInt(1),
+        RelationalValue::Overflow(reference),
+    ]);
+    let publisher = RelationalRowPagePublisher::new(RelationalRowPagePublicationConfig::default());
+    let missing = publisher
+        .publish_with_overflow_root(
+            &directory,
+            1,
+            10,
+            None,
+            vec![table_delta("documents", vec![overflow_page.clone()])],
+            &overflow_root,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        missing,
+        RelationalRowPagePublicationError::Admission(message)
+            if message.contains("missing overflow extent")
+    ));
+    let mismatched = publisher
+        .publish_with_overflow_root(
+            &directory,
+            2,
+            11,
+            None,
+            vec![table_delta("documents", vec![overflow_page])],
+            &overflow_root,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        mismatched,
+        RelationalRowPagePublicationError::Admission(message)
+            if message.contains("generation/epoch")
+    ));
+
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]

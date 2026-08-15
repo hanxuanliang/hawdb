@@ -8,7 +8,10 @@ use super::{
     COMPLETE_PUBLICATION_TRACE, RELATIONAL_ROW_PAGE_MANIFEST_FILE,
     RELATIONAL_ROW_PAGE_PUBLICATION_LOCK_FILE,
 };
-use crate::relational::RelationalValue;
+use crate::relational::{
+    RelationalOverflowPublicationError, RelationalOverflowRef, RelationalOverflowRootReader,
+    RelationalValue,
+};
 use crate::{durable_replace_file, sync_directory};
 use fs2::FileExt;
 use skein_integrity::Sha256Digest;
@@ -40,7 +43,32 @@ impl RelationalRowPagePublisher {
             source_commit_epoch,
             expected_previous_generation,
             deltas,
-            None,
+            PublicationControls {
+                overflow_root: None,
+                stop_after: None,
+            },
+        )
+    }
+
+    pub fn publish_with_overflow_root(
+        &self,
+        directory: &Path,
+        generation: u64,
+        source_commit_epoch: u64,
+        expected_previous_generation: Option<u64>,
+        deltas: Vec<RelationalRowPageTableDelta>,
+        overflow_root: &RelationalOverflowRootReader,
+    ) -> Result<RelationalRowPagePublicationReport, RelationalRowPagePublicationError> {
+        self.publish_inner(
+            directory,
+            generation,
+            source_commit_epoch,
+            expected_previous_generation,
+            deltas,
+            PublicationControls {
+                overflow_root: Some(overflow_root),
+                stop_after: None,
+            },
         )
     }
 
@@ -51,10 +79,26 @@ impl RelationalRowPagePublisher {
         source_commit_epoch: u64,
         expected_previous_generation: Option<u64>,
         deltas: Vec<RelationalRowPageTableDelta>,
-        stop_after: Option<RelationalRowPagePublicationPhase>,
+        controls: PublicationControls<'_>,
     ) -> Result<RelationalRowPagePublicationReport, RelationalRowPagePublicationError> {
         validate_publication_identity(generation, source_commit_epoch)?;
-        let mut deltas = preflight_deltas(deltas, generation, source_commit_epoch, self.config)?;
+        let overflow_binding = controls
+            .overflow_root
+            .map(|reader| reader.manifest().binding());
+        if overflow_binding.is_some_and(|binding| {
+            binding.generation != generation || binding.source_commit_epoch != source_commit_epoch
+        }) {
+            return Err(RelationalRowPagePublicationError::Admission(format!(
+                "overflow root generation/epoch does not match row-page generation/epoch {generation}/{source_commit_epoch}"
+            )));
+        }
+        let mut deltas = preflight_deltas(
+            deltas,
+            generation,
+            source_commit_epoch,
+            controls.overflow_root,
+            self.config,
+        )?;
         fs::create_dir_all(directory).map_err(durability("create row-page directory"))?;
         let _lock = acquire_publication_lock(directory)?;
         let paths = PublicationPaths::new(directory, generation);
@@ -70,6 +114,12 @@ impl RelationalRowPagePublisher {
             });
         }
         if let Some(base) = &base {
+            if base.manifest.overflow_root.is_some() && overflow_binding.is_none() {
+                return Err(RelationalRowPagePublicationError::Admission(
+                    "a row root descended from overflow-bearing pages requires the next generation-bound overflow root"
+                        .to_string(),
+                ));
+            }
             if generation <= base.manifest.generation {
                 return Err(RelationalRowPagePublicationError::Admission(format!(
                     "new row-page generation {generation} must exceed published generation {}",
@@ -91,8 +141,9 @@ impl RelationalRowPagePublisher {
             generation,
             source_commit_epoch,
             expected_previous_generation,
+            overflow_root: overflow_binding,
             deltas: &mut deltas,
-            stop_after,
+            stop_after: controls.stop_after,
         });
         let _ = paths.remove_temps();
         result
@@ -129,6 +180,7 @@ impl RelationalRowPagePublisher {
             root_descriptor_artifact: root.descriptor_artifact,
             root_key_artifact: root.key_artifact,
             root_set_digest: manifest::root_set_digest(&root.tables)?,
+            overflow_root: build.overflow_root,
             tables: root.tables,
         };
         let encoded_manifest = manifest::encode_manifest(&manifest, self.config)?;
@@ -189,12 +241,18 @@ impl RelationalRowPagePublisher {
     }
 }
 
+pub(super) struct PublicationControls<'a> {
+    pub overflow_root: Option<&'a RelationalOverflowRootReader>,
+    pub stop_after: Option<RelationalRowPagePublicationPhase>,
+}
+
 struct PublicationBuild<'a> {
     paths: &'a PublicationPaths,
     base: Option<&'a RelationalRowPageRootReader>,
     generation: u64,
     source_commit_epoch: u64,
     expected_previous_generation: Option<u64>,
+    overflow_root: Option<crate::relational::RelationalOverflowRootBinding>,
     deltas: &'a mut BTreeMap<String, PreparedTableDelta>,
     stop_after: Option<RelationalRowPagePublicationPhase>,
 }
@@ -218,6 +276,7 @@ fn preflight_deltas(
     deltas: Vec<RelationalRowPageTableDelta>,
     generation: u64,
     source_commit_epoch: u64,
+    overflow_root: Option<&RelationalOverflowRootReader>,
     config: RelationalRowPagePublicationConfig,
 ) -> Result<BTreeMap<String, PreparedTableDelta>, RelationalRowPagePublicationError> {
     let dirty_page_count = deltas.iter().try_fold(0usize, |count, delta| {
@@ -253,6 +312,7 @@ fn preflight_deltas(
     }
 
     let mut prepared = BTreeMap::new();
+    let mut overflow_references = BTreeSet::<RelationalOverflowRef>::new();
     for delta in deltas {
         validate_table_name(&delta.table, config)?;
         if prepared.contains_key(&delta.table) {
@@ -318,18 +378,16 @@ fn preflight_deltas(
                     page.page_id.get()
                 )));
             }
-            if page.rows.iter().any(|entry| {
-                entry
-                    .row
-                    .values()
-                    .iter()
-                    .any(|value| matches!(value, RelationalValue::Overflow(_)))
-            }) {
-                return Err(RelationalRowPagePublicationError::Admission(format!(
-                    "table {} page {} references an overflow extent before overflow publication is active",
-                    delta.table,
-                    page.page_id.get()
-                )));
+            for reference in page
+                .rows
+                .iter()
+                .flat_map(|entry| entry.row.values())
+                .filter_map(|value| match value {
+                    RelationalValue::Overflow(reference) => Some(*reference),
+                    _ => None,
+                })
+            {
+                overflow_references.insert(reference);
             }
             dirty_pages.push(root::prepare_dirty_page(page, config.page_limits)?);
         }
@@ -357,7 +415,53 @@ fn preflight_deltas(
             },
         );
     }
+    if !overflow_references.is_empty() {
+        let overflow_root = overflow_root.ok_or_else(|| {
+            RelationalRowPagePublicationError::Admission(
+                "row pages contain overflow references without a generation-bound overflow root"
+                    .to_string(),
+            )
+        })?;
+        for reference in overflow_references {
+            if !overflow_root
+                .contains(&reference)
+                .map_err(overflow_dependency_error)?
+            {
+                return Err(RelationalRowPagePublicationError::Admission(format!(
+                    "row page references missing overflow extent {}",
+                    reference.digest
+                )));
+            }
+        }
+    }
     Ok(prepared)
+}
+
+fn overflow_dependency_error(
+    error: RelationalOverflowPublicationError,
+) -> RelationalRowPagePublicationError {
+    match error {
+        RelationalOverflowPublicationError::Admission(message) => {
+            RelationalRowPagePublicationError::Admission(message)
+        }
+        RelationalOverflowPublicationError::Corrupt(message) => {
+            RelationalRowPagePublicationError::Corrupt(message)
+        }
+        RelationalOverflowPublicationError::Durability(message) => {
+            RelationalRowPagePublicationError::Durability(message)
+        }
+        RelationalOverflowPublicationError::MissingExtent(digest) => {
+            RelationalRowPagePublicationError::Admission(format!(
+                "missing overflow extent {digest}"
+            ))
+        }
+        RelationalOverflowPublicationError::StaleGeneration {
+            expected_previous,
+            actual_previous,
+        } => RelationalRowPagePublicationError::Admission(format!(
+            "overflow root changed: expected {expected_previous:?}, found {actual_previous:?}"
+        )),
+    }
 }
 
 fn validate_publication_identity(

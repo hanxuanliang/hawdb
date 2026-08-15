@@ -10,8 +10,8 @@ use std::path::Path;
 
 const MANIFEST_MAGIC: &[u8; 8] = b"SKRPGM01";
 const MANIFEST_VERSION: u16 = 1;
-pub(super) const MANIFEST_HEADER_BYTES: usize = 268;
-const MANIFEST_INTEGRITY_OFFSET: usize = 232;
+pub(super) const MANIFEST_HEADER_BYTES: usize = 316;
+const MANIFEST_INTEGRITY_OFFSET: usize = 280;
 const ARTIFACT_METADATA_BYTES: usize = 44;
 
 pub(super) fn root_set_digest(
@@ -68,6 +68,14 @@ pub(super) fn encode_manifest(
     encode_artifact(manifest.root_descriptor_artifact, &mut encoded);
     encode_artifact(manifest.root_key_artifact, &mut encoded);
     encoded.extend_from_slice(manifest.root_set_digest.as_bytes());
+    match manifest.overflow_root {
+        Some(binding) => {
+            encoded.extend_from_slice(&binding.generation.to_le_bytes());
+            encoded.extend_from_slice(&binding.source_commit_epoch.to_le_bytes());
+            encoded.extend_from_slice(binding.root_set_digest.as_bytes());
+        }
+        None => encoded.extend_from_slice(&[0u8; 48]),
+    }
     debug_assert_eq!(encoded.len(), MANIFEST_INTEGRITY_OFFSET);
     encoded.extend_from_slice(&0u32.to_le_bytes());
     encoded.extend_from_slice(&[0u8; SHA256_BYTES]);
@@ -78,8 +86,8 @@ pub(super) fn encode_manifest(
     hasher.update(&encoded[..MANIFEST_INTEGRITY_OFFSET]);
     hasher.update(&payload);
     let digest = hasher.finish();
-    encoded[232..236].copy_from_slice(&digest.crc32c.get().to_le_bytes());
-    encoded[236..268].copy_from_slice(digest.sha256.as_bytes());
+    encoded[280..284].copy_from_slice(&digest.crc32c.get().to_le_bytes());
+    encoded[284..316].copy_from_slice(digest.sha256.as_bytes());
     Ok(encoded)
 }
 
@@ -171,13 +179,34 @@ fn decode_manifest(
             .try_into()
             .expect("root-set digest length was checked"),
     );
+    let overflow_generation = read_u64(&encoded[232..240]);
+    let overflow_source_commit_epoch = read_u64(&encoded[240..248]);
+    let overflow_root_set_digest = Sha256Digest::from_bytes(
+        encoded[248..280]
+            .try_into()
+            .expect("overflow root digest length was checked"),
+    );
+    let overflow_root = if overflow_generation == 0 {
+        if overflow_source_commit_epoch != 0 || overflow_root_set_digest.as_bytes() != &[0u8; 32] {
+            return Err(RelationalRowPagePublicationError::Corrupt(
+                "row-page manifest has a partial overflow binding".to_string(),
+            ));
+        }
+        None
+    } else {
+        Some(crate::relational::RelationalOverflowRootBinding {
+            generation: overflow_generation,
+            source_commit_epoch: overflow_source_commit_epoch,
+            root_set_digest: overflow_root_set_digest,
+        })
+    };
     let payload = &encoded[MANIFEST_HEADER_BYTES..];
     let mut hasher = IntegrityHasher::new();
     hasher.update(&encoded[..MANIFEST_INTEGRITY_OFFSET]);
     hasher.update(payload);
     let digest = hasher.finish();
-    if digest.crc32c.get() != read_u32(&encoded[232..236])
-        || digest.sha256.as_bytes() != &encoded[236..268]
+    if digest.crc32c.get() != read_u32(&encoded[280..284])
+        || digest.sha256.as_bytes() != &encoded[284..316]
     {
         return Err(RelationalRowPagePublicationError::Corrupt(
             "row-page manifest checksum mismatch".to_string(),
@@ -195,6 +224,7 @@ fn decode_manifest(
         root_descriptor_artifact,
         root_key_artifact,
         root_set_digest,
+        overflow_root,
         tables,
     };
     validate_manifest(&manifest, config, ErrorClass::Corrupt)?;
@@ -220,6 +250,18 @@ fn validate_manifest(
         return Err(fail(format!(
             "previous row-page generation {:?} does not precede generation {}",
             manifest.previous_generation, manifest.generation
+        )));
+    }
+    if let Some(binding) = manifest.overflow_root
+        && (binding.generation != manifest.generation
+            || binding.source_commit_epoch != manifest.source_commit_epoch)
+    {
+        return Err(fail(format!(
+            "row-page overflow root identifies generation/epoch {}/{}, expected {}/{}",
+            binding.generation,
+            binding.source_commit_epoch,
+            manifest.generation,
+            manifest.source_commit_epoch
         )));
     }
     if manifest.page_bytes != config.page_limits.max_page_bytes.get() as u64 {

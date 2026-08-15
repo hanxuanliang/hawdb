@@ -47,8 +47,17 @@ pub use index_shadow::{
     RELATIONAL_INDEX_RECOVERY_MANIFEST_FILE, RELATIONAL_INDEX_SHADOW_MANIFEST_FILE,
 };
 pub use overflow::{
-    RelationalHydrationBudget, RelationalOverflowConfig, RelationalOverflowRef,
-    DEFAULT_MAX_RELATIONAL_HYDRATION_BYTES, DEFAULT_RELATIONAL_OVERFLOW_THRESHOLD_BYTES,
+    relational_overflow_descriptor_file, relational_overflow_extent_file,
+    relational_overflow_manifest_generation_file, RelationalHydrationBudget,
+    RelationalOverflowArtifactMetadata, RelationalOverflowConfig,
+    RelationalOverflowExtentDescriptor, RelationalOverflowExtentInput,
+    RelationalOverflowPublicationConfig, RelationalOverflowPublicationError,
+    RelationalOverflowPublicationPhase, RelationalOverflowPublicationReport,
+    RelationalOverflowPublisher, RelationalOverflowRef, RelationalOverflowRootBinding,
+    RelationalOverflowRootManifest, RelationalOverflowRootReader,
+    DEFAULT_MAX_RELATIONAL_HYDRATION_BYTES, DEFAULT_RELATIONAL_OVERFLOW_EXTENTS,
+    DEFAULT_RELATIONAL_OVERFLOW_MANIFEST_BYTES, DEFAULT_RELATIONAL_OVERFLOW_NEW_EXTENT_BYTES,
+    DEFAULT_RELATIONAL_OVERFLOW_THRESHOLD_BYTES, RELATIONAL_OVERFLOW_MANIFEST_FILE,
 };
 pub use row_page::{
     relational_row_page_artifact_file, relational_row_page_manifest_generation_file,

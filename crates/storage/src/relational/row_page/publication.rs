@@ -2,6 +2,7 @@ use super::{
     ImmutableRelationalRowPage, RelationalRowPageError, RelationalRowPageId,
     RelationalRowPageLimits,
 };
+use crate::relational::RelationalOverflowRootBinding;
 use skein_integrity::Sha256Digest;
 use std::fmt;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -133,6 +134,7 @@ pub struct RelationalRowPageRootManifest {
     pub root_descriptor_artifact: RelationalRowPageArtifactMetadata,
     pub root_key_artifact: RelationalRowPageArtifactMetadata,
     pub root_set_digest: Sha256Digest,
+    pub overflow_root: Option<RelationalOverflowRootBinding>,
     pub tables: Vec<RelationalRowPageTableRoot>,
 }
 

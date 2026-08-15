@@ -400,7 +400,59 @@ inline-value bytes, logical overflow bytes, and projected-field count. The
 encoder applies the same limits as the decoder and rejects a page before
 accumulating payload beyond the page budget. The codec and shadow publication
 path are not yet a serving or recovery path; WAL overlays, cache admission, and
-large-value hydration remain separate activation stages.
+SQL late hydration remain separate activation stages.
+
+### Relational overflow-root v1 publication
+
+`RelationalOverflowPublisher` publishes one complete logical set through four
+immutable or publish-last artifacts:
+
+```text
+relational-overflow-{generation}.extents.skein
+relational-overflow-root-{generation}.descriptors.skein
+relational-overflow-{generation}.manifest.skein
+relational-overflow.manifest.skein
+```
+
+The extent artifact contains only envelopes first introduced by the new
+generation. A digest already selected by the base root reuses its immutable
+physical generation and byte range. Every new root inherits the complete base
+set; omission cannot remove a digest while a reused row page may still refer to
+it. Reachability-based removal is deferred until the row-generation lifecycle
+can prove and retain the complete closure needed by active and pinned roots.
+
+Descriptors are exactly 120 bytes, strictly ordered by binary SHA-256 digest,
+and contain the logical reference, physical generation, physical byte range,
+envelope CRC32C, and a SHA-256 binding over the owning root generation,
+descriptor ordinal, and first 88 descriptor bytes. Compressed and uncompressed
+lengths remain `u64`; reserved bytes MUST be zero. The envelope byte length MUST
+equal the compressed length plus the fixed `SKOVFL01` header. A complete valid
+descriptor moved between an ordinal or root generation is therefore rejected.
+
+The fixed 208-byte `SKOVRM01` manifest binds generation, source commit epoch,
+optional previous generation, total and newly written extent counts, exact
+length plus CRC32C/SHA-256 metadata for the extent and descriptor artifacts,
+and the exact root-set digest. The manifest carries its own CRC32C and SHA-256.
+Normal open reads only this fixed manifest and the two current-generation file
+lengths. It does not enumerate descriptors or hash extent payloads.
+
+Publication holds one directory-scoped exclusive lock and synchronizes the new
+extent artifact, descriptor root, and immutable generation manifest in order.
+It then revalidates the caller's selected base and atomically replaces the
+latest manifest last. A target generation is fresh and immutable. A crash or a
+stale publisher can leave only unreachable generation artifacts. A reader pins
+one immutable root manifest; reused descriptors retain their physical
+generation, so the pinned reader stays readable while a newer root is
+published. Reclamation remains a later lifecycle stage and MUST retain the
+physical closure of every active or pinned root.
+
+`RelationalOverflowRootReader` binary-searches descriptors without loading the
+root, validates the selected descriptor binding, and admits the declared
+compressed and decompressed bytes plus the peak input-envelope and decoded
+output memory before opening the physical extent or allocating its input
+buffer. It then reads exactly one physical range, verifies its CRC32C and
+content SHA-256, and invokes the shared envelope decoder. Admission or
+corruption does not partially charge the caller hydration budget.
 
 ### Relational row-root v1 publication
 
@@ -454,14 +506,15 @@ never-issued table-scoped `PageId`, descriptor range, and outer bounds. The
 allocator value is non-zero, never decreases, and is strictly greater than
 every active, dirty, or deleted page id admitted by that publication.
 
-The `SKRPGM01` version-1 manifest has a fixed 268-byte header followed by a
+The `SKRPGM01` version-1 manifest has a fixed 316-byte header followed by a
 bounded table-root payload. Its header binds generation, source commit epoch,
 optional previous generation, slot size, dirty and root page counts, exact
 length plus CRC32C/SHA-256 metadata for the page, descriptor, and key artifacts,
-and a table-root-set SHA-256. The manifest has its own CRC32C and SHA-256. Table
-names and key bounds are length-prefixed and bounded before allocation. Table
-descriptor ranges MUST be contiguous and cover the declared root page count
-exactly.
+the table-root-set SHA-256, and an optional exact overflow-root generation,
+source epoch, and root-set digest. The manifest has its own CRC32C and SHA-256.
+Table names and key bounds are length-prefixed and bounded before allocation.
+Table descriptor ranges MUST be contiguous and cover the declared root page
+count exactly.
 
 Publication holds one directory-scoped exclusive lock and follows this order:
 
@@ -487,9 +540,11 @@ Normal root open reads and validates only the bounded manifest and exact
 artifact file lengths. It MUST NOT hash or enumerate every descriptor or row
 page. Descriptor/key binding checks occur when a descriptor is selected; page
 slot integrity remains a demand-read obligation. Full artifact digest checking
-belongs to scrub. The current shadow publisher rejects row pages containing an
-overflow descriptor because the overflow extent manifest is a later protocol;
-it cannot publish a dangling canonical reference.
+belongs to scrub. A row generation containing overflow descriptors MUST be
+published with the overflow root having the same generation and source commit
+epoch. Every referenced digest is resolved before row candidate creation, and
+the row manifest records the exact overflow root binding. A missing, corrupt,
+or differently bound root rejects the complete row publication.
 
 `RelationalRowPagePublicationReport.events` is the fixed refinement trace:
 
@@ -605,7 +660,8 @@ do not select it.
 ### Large values
 
 Strings, JSON, binary values, and vectors above the inline threshold MUST use
-separate immutable extents. The row stores `(length, digest, location)`. A
+separate immutable extents. The row stores `(type, length, digest)` and the
+generation-bound overflow root resolves the physical location. A
 query that does not project the value MUST NOT read, decode, or clone its
 payload. A single value remains subject to an explicit maximum size even when
 it is file-backed.

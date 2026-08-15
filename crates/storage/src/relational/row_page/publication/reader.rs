@@ -7,7 +7,7 @@ use super::{
 };
 use crate::relational::{
     ordered_key::encode_ordered_relational_key, ImmutableRelationalRowPage, RelationalKey,
-    RelationalRowPageView,
+    RelationalOverflowRootBinding, RelationalOverflowRootReader, RelationalRowPageView,
 };
 use skein_integrity::integrity_digest;
 use std::fs::{self, File};
@@ -80,6 +80,26 @@ impl RelationalRowPageRootReader {
 
     pub fn manifest(&self) -> &RelationalRowPageRootManifest {
         &self.manifest
+    }
+
+    pub fn overflow_root_binding(&self) -> Option<RelationalOverflowRootBinding> {
+        self.manifest.overflow_root
+    }
+
+    pub fn validate_overflow_root(
+        &self,
+        overflow_root: &RelationalOverflowRootReader,
+    ) -> Result<(), RelationalRowPagePublicationError> {
+        let Some(expected) = self.manifest.overflow_root else {
+            return Ok(());
+        };
+        let actual = overflow_root.manifest().binding();
+        if actual != expected {
+            return Err(RelationalRowPagePublicationError::Corrupt(format!(
+                "row-page overflow binding {expected:?} differs from selected root {actual:?}"
+            )));
+        }
+        Ok(())
     }
 
     pub fn read_table_page_descriptor(

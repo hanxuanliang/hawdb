@@ -7,9 +7,23 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 mod envelope;
+mod publication;
 
 use envelope::DEFAULT_ZSTD_LEVEL;
-pub(in crate::relational) use envelope::{decode_overflow_envelope, encode_overflow_envelope};
+pub(in crate::relational) use envelope::{
+    admit_overflow_hydration, decode_overflow_envelope, encode_overflow_envelope,
+};
+pub use publication::{
+    relational_overflow_descriptor_file, relational_overflow_extent_file,
+    relational_overflow_manifest_generation_file, RelationalOverflowArtifactMetadata,
+    RelationalOverflowExtentDescriptor, RelationalOverflowExtentInput,
+    RelationalOverflowPublicationConfig, RelationalOverflowPublicationError,
+    RelationalOverflowPublicationPhase, RelationalOverflowPublicationReport,
+    RelationalOverflowPublisher, RelationalOverflowRootBinding, RelationalOverflowRootManifest,
+    RelationalOverflowRootReader, DEFAULT_RELATIONAL_OVERFLOW_EXTENTS,
+    DEFAULT_RELATIONAL_OVERFLOW_MANIFEST_BYTES, DEFAULT_RELATIONAL_OVERFLOW_NEW_EXTENT_BYTES,
+    RELATIONAL_OVERFLOW_MANIFEST_FILE,
+};
 
 pub const DEFAULT_RELATIONAL_OVERFLOW_THRESHOLD_BYTES: usize = 4 * 1024;
 pub const DEFAULT_MAX_RELATIONAL_HYDRATION_BYTES: usize = 64 * 1024 * 1024;
