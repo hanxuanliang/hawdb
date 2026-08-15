@@ -166,9 +166,12 @@ fn explain_execution(
         overlay_bytes: required_info_u64(info, "row_overlay_bytes", &statement.name)?,
         rows_visited: required_info_u64(info, "row_rows", &statement.name)?,
     };
-    if evidence.index_runtime_path != "authoritative" {
+    if !matches!(
+        evidence.index_runtime_path.as_str(),
+        "authoritative" | "none"
+    ) {
         return Err(SkeinError::Execution(format!(
-            "content-store statement {} used index runtime {}, expected authoritative",
+            "content-store statement {} used index runtime {}, expected authoritative or a direct canonical row scan",
             statement.name, evidence.index_runtime_path
         )));
     }

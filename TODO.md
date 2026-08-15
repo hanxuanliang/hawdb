@@ -110,13 +110,14 @@ crash; read-only recovery remains fail closed.
     reader, rejects an unavailable reader, and uses canonical memory only before
     the first checkpoint or inside a transaction-private workspace. Keep this
     engine contract while qualifying the product cutover.
-  - Qualify `content_documents` and `thread_messages` first, then
-    `content_chunks` and `content_anchors`, using the frozen PostgreSQL statement
-    corpus and one pinned graph-plus-relational epoch.
-  - The typed first-table runner now proves authoritative checkpoint/reopen,
+  - The typed runner now qualifies `content_documents`, `thread_messages`,
+    `content_chunks`, and `content_anchors` using the frozen PostgreSQL statement
+    corpus and graph-plus-relational commits that publish one shared epoch.
+  - The four-table runner now proves authoritative checkpoint/reopen,
     exact per-statement row/payload admission, cold/warm result identity, WAL
     recovery delta, live row overlay, cache accounting, and zero leaked page
-    pins for `content_documents` and `thread_messages`.
+    pins. Source chunks retain stable source/chunk ordering, and anchors retain
+    occurrence identity even when two messages share one legacy `message_id`.
   - Require checkpoint/reopen, WAL replay, corruption, cancellation, and
     locking evidence before enabling the path by default. Prove that a declared
     bounded workload runs within the supported 512 MiB low-memory profile, but
@@ -139,8 +140,7 @@ crash; read-only recovery remains fail closed.
     generation bytes, and a clearly labelled durable-write lower bound. A
     regular in-process run does not certify an OS-enforced 512 MiB limit: retain
     the isolated constrained-profile run and production-copy measurements as
-    separate evidence gates. Then extend the same contract to `content_chunks`
-    and `content_anchors`.
+    separate evidence gates.
   - Because no storage format has shipped, activation is destructive: remove
     the ordinary materialized row selector instead of retaining a compatibility
     or rollback path. Keep the differential oracle in qualification code only.

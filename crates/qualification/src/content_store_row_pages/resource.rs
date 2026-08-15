@@ -119,6 +119,11 @@ pub(super) fn qualify_content_store_resources(
         profile_kind: config.profile_kind,
         configured_available_memory_bytes: config.configured_available_memory_bytes,
         segment_cache_capacity_bytes: config.database_config.segment_cache_capacity_bytes,
+        max_relational_index_read_bytes: config
+            .database_config
+            .max_relational_index_read_bytes
+            .get(),
+        max_relational_hydration_bytes: config.database_config.max_relational_hydration_bytes.get(),
         max_read_result_rows: config.database_config.max_read_result_rows,
         max_read_result_payload_bytes: config.database_config.max_read_result_payload_bytes,
         execution_batch_rows: config.database_config.execution_memory.batch_rows.get(),

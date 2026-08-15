@@ -1334,6 +1334,9 @@ checkpoint binding, demand-read, lifecycle, or serving obligations.
   cache residency capacity: a bounded streaming query may read and evict more
   bytes than can be resident simultaneously. Both values remain explicit in
   resource evidence.
+  Result payload admission is likewise independent of the cumulative overflow
+  hydration budget. A small aggregate result may scan larger admitted inputs;
+  the input hydration limit remains explicit and is enforced separately.
   `Capability512Mib` records whether the observed process peak fits the named
   512 MiB capability profile, but an ordinary in-process run is not proof of an
   OS-enforced limit. The exact value identifies qualification evidence; it is
@@ -1343,6 +1346,13 @@ checkpoint binding, demand-read, lifecycle, or serving obligations.
   substituting 512 MiB as a universal cutoff. Production-copy evidence remains
   a separate runner over the imported replica and its actual resource profile;
   this synthetic fixture MUST NOT claim that qualification.
+  The same typed runner covers `content_documents`, `thread_messages`,
+  `content_chunks`, and `content_anchors`. Its base, WAL-recovered, and live
+  phases execute parameterized PostgreSQL-dialect statements through canonical
+  row pages. Graph Source identity, chunk rows, message occurrences, and typed
+  anchors publish in one mixed transaction epoch. The occurrence fixture uses
+  two distinct `content_message_id` values with one shared legacy `message_id`
+  and requires both anchors to remain visible.
 - `SkeinRowRecovery.tla`: checkpoint-correlated row-root mount, exact ordered
   primary-key WAL overlay, graph-only epoch advancement, whole-fragment
   admission, fail-closed invalidation, complete-prefix view publication, cold

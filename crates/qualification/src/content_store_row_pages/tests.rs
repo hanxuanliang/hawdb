@@ -14,6 +14,8 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
         ContentStoreInitialRowPageQualificationConfig::synthetic(&path, "test-source-revision");
     config.base_message_count = 4;
     config.message_payload_bytes = 16 * 1024;
+    config.base_chunk_count = 5;
+    config.chunk_payload_bytes = 12 * 1024;
 
     let report = run_content_store_initial_row_page_qualification(config)
         .expect("initial Content Store row pages should qualify");
@@ -21,15 +23,65 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
     assert!(report.ready);
     assert_eq!(report.qualified_tables, QUALIFIED_TABLES);
     assert_eq!(report.final_message_count, 7);
-    assert_eq!(report.cold_checkpoint_reads.len(), 3);
-    assert_eq!(report.warm_checkpoint_reads.len(), 3);
+    assert_eq!(report.base_chunk_count, 5);
+    assert_eq!(report.final_chunk_count, 7);
+    assert_eq!(report.cold_checkpoint_reads.len(), 9);
+    assert_eq!(report.warm_checkpoint_reads.len(), 9);
     assert!(report.wal_replayed_entries > 0);
     assert!(report
         .wal_recovery_read
         .execution
         .delta_generation
         .is_some());
+    assert_eq!(
+        report.wal_recovery_read.execution.visible_commit_epoch,
+        report.wal_content_commit_epoch
+    );
+    assert!(report
+        .wal_recovery_chunk_read
+        .execution
+        .delta_generation
+        .is_some());
+    assert!(report
+        .wal_recovery_anchor_read
+        .execution
+        .delta_generation
+        .is_some());
+    assert_eq!(
+        report
+            .wal_recovery_chunk_read
+            .execution
+            .visible_commit_epoch,
+        report.wal_content_commit_epoch
+    );
+    assert_eq!(
+        report
+            .wal_recovery_anchor_read
+            .execution
+            .visible_commit_epoch,
+        report.wal_content_commit_epoch
+    );
     assert!(report.live_overlay_read.execution.overlay_entries > 0);
+    assert_eq!(
+        report.live_overlay_read.execution.visible_commit_epoch,
+        report.live_content_commit_epoch
+    );
+    assert!(report.live_overlay_chunk_read.execution.overlay_entries > 0);
+    assert!(report.live_overlay_anchor_read.execution.overlay_entries > 0);
+    assert_eq!(
+        report
+            .live_overlay_chunk_read
+            .execution
+            .visible_commit_epoch,
+        report.live_content_commit_epoch
+    );
+    assert_eq!(
+        report
+            .live_overlay_anchor_read
+            .execution
+            .visible_commit_epoch,
+        report.live_content_commit_epoch
+    );
     assert_eq!(
         report.multi_statement_transaction.index_runtime_path,
         "transaction_workspace"
@@ -95,6 +147,14 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
         report.resources.segment_cache_capacity_bytes,
         report.segment_cache_capacity_bytes
     );
+    assert_eq!(
+        report.resources.max_relational_index_read_bytes,
+        16 * 1024 * 1024
+    );
+    assert_eq!(
+        report.resources.max_relational_hydration_bytes,
+        64 * 1024 * 1024
+    );
     assert_eq!(report.resources.max_read_result_rows, Some(100_000));
     assert_eq!(
         report.resources.max_read_result_payload_bytes,
@@ -120,8 +180,26 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
     assert!(report
         .cold_checkpoint_reads
         .iter()
+        .map(|read| read.statement_name.as_str())
+        .eq([
+            "thread_owned_document_ids",
+            "thread_messages_page",
+            "thread_message_summary",
+            "source_chunks_page",
+            "source_chunks_by_source",
+            "source_chunk_count_by_source",
+            "source_document_payload_summary",
+            "thread_covered_message_count",
+            "content_status_anchor_count",
+        ]));
+    assert!(report
+        .cold_checkpoint_reads
+        .iter()
         .chain(&report.warm_checkpoint_reads)
-        .all(|read| read.execution.index_runtime_path == "authoritative"));
+        .all(|read| matches!(
+            read.execution.index_runtime_path.as_str(),
+            "authoritative" | "none"
+        )));
     assert!(!report
         .json()
         .to_string()

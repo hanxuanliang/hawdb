@@ -3,14 +3,23 @@ use crate::{
     nowledge_content_store_schema_statements, ContentStoreSqlCorpus, ContentStoreSqlStatementSpec,
 };
 use skein::{
-    Database, DatabaseConfig, DurabilityPolicy, RelationalIndexMode, Result, SkeinError,
-    StorageResidencyMode, Value,
+    Database, DatabaseConfig, DurabilityPolicy, QueryOutput, RelationalIndexMode, Result,
+    SkeinError, StorageResidencyMode, Value,
 };
+use std::collections::BTreeMap;
 
-pub(super) const QUALIFIED_TABLES: [&str; 2] = ["content_documents", "thread_messages"];
+pub(super) const QUALIFIED_TABLES: [&str; 4] = [
+    "content_documents",
+    "thread_messages",
+    "content_chunks",
+    "content_anchors",
+];
 pub(super) const THREAD_DOCUMENT_ID: &str = "content-doc-thread-1";
-const THREAD_OWNER_ID: &str = "thread-1";
-const THREAD_STORAGE_ID: &str = "thread-storage-1";
+pub(super) const THREAD_OWNER_ID: &str = "thread-1";
+pub(super) const THREAD_STORAGE_ID: &str = "thread-storage-1";
+pub(super) const SOURCE_DOCUMENT_ID: &str = "content-doc-source-1";
+pub(super) const SOURCE_OWNER_ID: &str = "source-1";
+pub(super) const MEMORY_OWNER_ID: &str = "memory-1";
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CheckpointIdentity {
@@ -35,13 +44,61 @@ pub(super) fn bootstrap_checkpoint(
 
     let document = corpus_statement(corpus, "upsert_content_document")?;
     let message = corpus_statement(corpus, "upsert_thread_message")?;
-    database.query_sql_with_params(&document.sql, &thread_document_parameters())?;
+    let chunk = corpus_statement(corpus, "insert_source_chunk")?;
+    let anchor = corpus_statement(corpus, "upsert_memory_message_anchor")?;
+    let source_summary = corpus_statement(corpus, "source_document_payload_summary")?;
+    let update_summary = corpus_statement(corpus, "update_content_document_summary")?;
+    let mut transaction = database.begin_transaction();
+    transaction.query_with_params(
+        "CREATE (:Thread {id: $thread_id, space_id: $space_id})",
+        &graph_identity_parameters("thread_id", THREAD_OWNER_ID),
+    )?;
+    transaction.query_with_params(
+        "CREATE (:Source {id: $source_id, space_id: $space_id, chunk_count: $chunk_count})",
+        &source_graph_parameters(config.base_chunk_count),
+    )?;
+    transaction.query_with_params(
+        "CREATE (:Memory {id: $memory_id, space_id: $space_id})",
+        &graph_identity_parameters("memory_id", MEMORY_OWNER_ID),
+    )?;
+    transaction.query_sql_with_params(&document.sql, &thread_document_parameters())?;
+    transaction.query_sql_with_params(&document.sql, &source_document_parameters())?;
     for position in 0..config.base_message_count {
-        database.query_sql_with_params(
+        transaction.query_sql_with_params(
             &message.sql,
             &thread_message_parameters(position, config.message_payload_bytes, "base"),
         )?;
+        transaction
+            .query_sql_with_params(&anchor.sql, &memory_anchor_parameters(position, "base"))?;
     }
+    for position in 0..config.base_chunk_count {
+        transaction.query_sql_with_params(
+            &chunk.sql,
+            &source_chunk_parameters(position, config.chunk_payload_bytes, "base"),
+        )?;
+    }
+    let summary = transaction.query_sql_with_params(
+        &source_summary.sql,
+        &[Value::String(SOURCE_DOCUMENT_ID.to_string())],
+    )?;
+    let item_count = required_i64(&summary, "item_count")?;
+    let size_bytes = required_i64(&summary, "size_bytes")?;
+    if item_count != i64::try_from(config.base_chunk_count).unwrap_or(i64::MAX) {
+        return Err(SkeinError::Execution(format!(
+            "content-store base source summary counted {item_count} chunks, expected {}",
+            config.base_chunk_count
+        )));
+    }
+    transaction.query_sql_with_params(
+        &update_summary.sql,
+        &[
+            Value::Int(item_count),
+            Value::Int(size_bytes),
+            Value::String("2026-01-01T00:00:00Z".to_string()),
+            Value::String(SOURCE_DOCUMENT_ID.to_string()),
+        ],
+    )?;
+    transaction.commit()?;
     database.checkpoint()?;
     let report = database
         .relational_index_shadow_checkpoint_report()
@@ -74,6 +131,7 @@ pub(super) fn database_config(
 pub(super) fn initial_read_specs(
     corpus: &ContentStoreSqlCorpus,
     message_count: usize,
+    chunk_count: usize,
 ) -> Result<Vec<(&ContentStoreSqlStatementSpec, Vec<Value>, usize)>> {
     Ok(vec![
         (
@@ -91,22 +149,37 @@ pub(super) fn initial_read_specs(
             vec![Value::String(THREAD_STORAGE_ID.to_string())],
             1,
         ),
+        (
+            corpus_statement(corpus, "source_chunks_page")?,
+            source_chunks_page_parameters(chunk_count),
+            chunk_count,
+        ),
+        (
+            corpus_statement(corpus, "source_chunks_by_source")?,
+            source_chunks_by_source_parameters(chunk_count),
+            chunk_count,
+        ),
+        (
+            corpus_statement(corpus, "source_chunk_count_by_source")?,
+            vec![Value::String(SOURCE_OWNER_ID.to_string())],
+            1,
+        ),
+        (
+            corpus_statement(corpus, "source_document_payload_summary")?,
+            vec![Value::String(SOURCE_DOCUMENT_ID.to_string())],
+            1,
+        ),
+        (
+            corpus_statement(corpus, "thread_covered_message_count")?,
+            vec![Value::String(THREAD_STORAGE_ID.to_string())],
+            1,
+        ),
+        (
+            corpus_statement(corpus, "content_status_anchor_count")?,
+            Vec::new(),
+            1,
+        ),
     ])
-}
-
-pub(super) fn upsert_thread_message(
-    database: &mut Database,
-    corpus: &ContentStoreSqlCorpus,
-    position: usize,
-    payload_bytes: usize,
-    phase: &str,
-) -> Result<()> {
-    let message = corpus_statement(corpus, "upsert_thread_message")?;
-    database.query_sql_with_params(
-        &message.sql,
-        &thread_message_parameters(position, payload_bytes, phase),
-    )?;
-    Ok(())
 }
 
 pub(super) fn corpus_statement<'a>(
@@ -127,6 +200,19 @@ fn thread_document_parameters() -> Vec<Value> {
         Value::String(THREAD_OWNER_ID.to_string()),
         Value::String("default".to_string()),
         Value::String("application/x-nowledge-thread".to_string()),
+        Value::Int(1),
+        Value::String("2026-01-01T00:00:00Z".to_string()),
+        Value::String("2026-01-01T00:00:00Z".to_string()),
+    ]
+}
+
+fn source_document_parameters() -> Vec<Value> {
+    vec![
+        Value::String(SOURCE_DOCUMENT_ID.to_string()),
+        Value::String("source".to_string()),
+        Value::String(SOURCE_OWNER_ID.to_string()),
+        Value::String("default".to_string()),
+        Value::String("application/x-nowledge-source-chunks".to_string()),
         Value::Int(1),
         Value::String("2026-01-01T00:00:00Z".to_string()),
         Value::String("2026-01-01T00:00:00Z".to_string()),
@@ -173,4 +259,102 @@ pub(super) fn thread_page_parameters(limit: usize) -> Vec<Value> {
         Value::Int(i64::try_from(limit).unwrap_or(i64::MAX)),
         Value::Int(0),
     ]
+}
+
+pub(super) fn source_chunk_parameters(
+    position: usize,
+    payload_bytes: usize,
+    phase: &str,
+) -> Vec<Value> {
+    vec![
+        Value::String(format!("chunk-{position:08}")),
+        Value::String(SOURCE_DOCUMENT_ID.to_string()),
+        Value::Int(position as i64),
+        Value::String(format!("{phase}:{}", "c".repeat(payload_bytes))),
+        Value::Int((position * payload_bytes) as i64),
+        Value::Int(((position + 1) * payload_bytes) as i64),
+        Value::Int((position + 1) as i64),
+        Value::String(format!("{{\"phase\":\"{phase}\"}}")),
+        Value::String(format!("chunk-hash-{phase}-{position:08}")),
+        Value::String("2026-01-01T00:00:00Z".to_string()),
+        Value::String("2026-01-01T00:00:00Z".to_string()),
+    ]
+}
+
+pub(super) fn memory_anchor_parameters(position: usize, phase: &str) -> Vec<Value> {
+    memory_anchor_parameters_with_message_id(position, &format!("message-{position:08}"), phase)
+}
+
+pub(super) fn memory_anchor_parameters_with_message_id(
+    position: usize,
+    message_id: &str,
+    phase: &str,
+) -> Vec<Value> {
+    vec![
+        Value::String(format!("anchor-{position:08}")),
+        Value::String(MEMORY_OWNER_ID.to_string()),
+        Value::String(THREAD_DOCUMENT_ID.to_string()),
+        Value::String(THREAD_STORAGE_ID.to_string()),
+        Value::String(format!("content-message-{position:08}")),
+        Value::String(message_id.to_string()),
+        Value::Int(position as i64),
+        Value::String(format!("hash-{phase}-{position:08}")),
+        Value::String(format!(
+            "{{\"content_message_id\":\"content-message-{position:08}\",\"message_id\":\"{message_id}\",\"order_index\":{position},\"thread_storage_id\":\"{THREAD_STORAGE_ID}\"}}"
+        )),
+        Value::String("2026-01-01T00:00:00Z".to_string()),
+    ]
+}
+
+pub(super) fn source_chunks_page_parameters(limit: usize) -> Vec<Value> {
+    vec![
+        Value::Int(i64::try_from(limit).unwrap_or(i64::MAX)),
+        Value::Int(0),
+    ]
+}
+
+pub(super) fn source_chunks_by_source_parameters(limit: usize) -> Vec<Value> {
+    vec![
+        Value::String(SOURCE_OWNER_ID.to_string()),
+        Value::Int(i64::try_from(limit).unwrap_or(i64::MAX)),
+    ]
+}
+
+pub(super) fn source_graph_parameters(chunk_count: usize) -> BTreeMap<String, Value> {
+    let mut parameters = source_id_parameters();
+    parameters.insert("space_id".to_string(), Value::String("default".to_string()));
+    parameters.insert(
+        "chunk_count".to_string(),
+        Value::Int(i64::try_from(chunk_count).unwrap_or(i64::MAX)),
+    );
+    parameters
+}
+
+pub(super) fn source_id_parameters() -> BTreeMap<String, Value> {
+    BTreeMap::from([(
+        "source_id".to_string(),
+        Value::String(SOURCE_OWNER_ID.to_string()),
+    )])
+}
+
+fn graph_identity_parameters(id_name: &str, id: &str) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        (id_name.to_string(), Value::String(id.to_string())),
+        ("space_id".to_string(), Value::String("default".to_string())),
+    ])
+}
+
+pub(super) fn required_i64(output: &QueryOutput, field: &str) -> Result<i64> {
+    if output.rows.len() != 1 {
+        return Err(SkeinError::Execution(format!(
+            "content-store expected one row for {field}, got {}",
+            output.rows.len()
+        )));
+    }
+    match output.rows[0].get(field) {
+        Some(Value::Int(value)) => Ok(*value),
+        other => Err(SkeinError::Execution(format!(
+            "content-store expected integer field {field}, got {other:?}"
+        ))),
+    }
 }

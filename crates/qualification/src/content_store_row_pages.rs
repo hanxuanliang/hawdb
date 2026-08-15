@@ -1,5 +1,6 @@
 mod corruption;
 mod evidence;
+mod extended_tables;
 mod fixture;
 mod isolation;
 mod resource;
@@ -13,9 +14,13 @@ use crate::{
 };
 use corruption::qualify_content_store_corruption;
 use evidence::{execute_qualified_read, execute_read_set, require_matching_results};
+use extended_tables::{
+    append_runtime_content, read_pair, require_anchor_occurrence_identity, require_runtime_counts,
+    require_source_graph_chunk_count, runtime_extended_read_specs,
+};
 use fixture::{
     bootstrap_checkpoint, corpus_statement, database_config, initial_read_specs,
-    thread_page_parameters, upsert_thread_message, QUALIFIED_TABLES,
+    thread_page_parameters, QUALIFIED_TABLES,
 };
 use isolation::qualify_content_store_isolation;
 use resource::{qualify_content_store_resources, ContentStoreResourceProbeConfig};
@@ -41,6 +46,8 @@ pub struct ContentStoreInitialRowPageQualificationConfig {
     pub source_revision: String,
     pub base_message_count: usize,
     pub message_payload_bytes: usize,
+    pub base_chunk_count: usize,
+    pub chunk_payload_bytes: usize,
     pub segment_cache_capacity_bytes: u64,
     pub resource_profile_kind: ContentStoreResourceProfileKind,
     pub configured_available_memory_bytes: u64,
@@ -57,6 +64,8 @@ impl ContentStoreInitialRowPageQualificationConfig {
             source_revision: source_revision.into(),
             base_message_count: 8,
             message_payload_bytes: 8 * 1024,
+            base_chunk_count: 8,
+            chunk_payload_bytes: 8 * 1024,
             segment_cache_capacity_bytes: 512 * 1024,
             resource_profile_kind: ContentStoreResourceProfileKind::Capability512Mib,
             configured_available_memory_bytes: CONTENT_STORE_512_MIB_CAPABILITY_BYTES,
@@ -79,6 +88,12 @@ impl ContentStoreInitialRowPageQualificationConfig {
         if self.base_message_count == 0 || self.message_payload_bytes == 0 {
             return Err(SkeinError::Semantic(
                 "content-store row-page qualification message count and payload must be non-zero"
+                    .to_string(),
+            ));
+        }
+        if self.base_chunk_count == 0 || self.chunk_payload_bytes == 0 {
+            return Err(SkeinError::Semantic(
+                "content-store row-page qualification chunk count and payload must be non-zero"
                     .to_string(),
             ));
         }
@@ -132,6 +147,28 @@ impl ContentStoreInitialRowPageQualificationConfig {
             return Err(SkeinError::Semantic(format!(
                 "content-store row-page qualification message payloads need at least {minimum_payload} bytes but thread_messages_page admits {}",
                 page.max_payload_bytes
+            )));
+        }
+        let chunks = corpus_statement(corpus, "source_chunks_by_source")?;
+        let final_chunk_count = self.base_chunk_count.saturating_add(2);
+        if final_chunk_count > chunks.max_rows {
+            return Err(SkeinError::Semantic(format!(
+                "content-store row-page qualification needs {final_chunk_count} chunks but source_chunks_by_source admits {}",
+                chunks.max_rows
+            )));
+        }
+        let minimum_chunk_payload = self
+            .chunk_payload_bytes
+            .checked_mul(final_chunk_count)
+            .ok_or_else(|| {
+                SkeinError::Semantic(
+                    "content-store row-page qualification chunk payload size overflow".to_string(),
+                )
+            })?;
+        if minimum_chunk_payload > chunks.max_payload_bytes {
+            return Err(SkeinError::Semantic(format!(
+                "content-store row-page qualification chunk payloads need at least {minimum_chunk_payload} bytes but source_chunks_by_source admits {}",
+                chunks.max_payload_bytes
             )));
         }
         Ok(())
@@ -202,6 +239,9 @@ pub struct ContentStoreInitialRowPageQualificationReport {
     pub base_message_count: usize,
     pub final_message_count: usize,
     pub message_payload_bytes: usize,
+    pub base_chunk_count: usize,
+    pub final_chunk_count: usize,
+    pub chunk_payload_bytes: usize,
     pub segment_cache_capacity_bytes: u64,
     pub checkpoint_generation: u64,
     pub checkpoint_commit_epoch: u64,
@@ -209,8 +249,14 @@ pub struct ContentStoreInitialRowPageQualificationReport {
     pub warm_checkpoint_reads: Vec<ContentStoreRowPageReadReport>,
     pub wal_replayed_entries: usize,
     pub wal_replayed_bytes: u64,
+    pub wal_content_commit_epoch: u64,
     pub wal_recovery_read: ContentStoreRowPageReadReport,
+    pub wal_recovery_chunk_read: ContentStoreRowPageReadReport,
+    pub wal_recovery_anchor_read: ContentStoreRowPageReadReport,
     pub live_overlay_read: ContentStoreRowPageReadReport,
+    pub live_content_commit_epoch: u64,
+    pub live_overlay_chunk_read: ContentStoreRowPageReadReport,
+    pub live_overlay_anchor_read: ContentStoreRowPageReadReport,
     pub multi_statement_transaction: ContentStoreTransactionQualificationReport,
     pub resources: ContentStoreResourceEvidence,
     pub corruption: ContentStoreCorruptionQualificationReport,
@@ -267,6 +313,8 @@ pub struct ContentStoreResourceEvidence {
     pub profile_kind: ContentStoreResourceProfileKind,
     pub configured_available_memory_bytes: u64,
     pub segment_cache_capacity_bytes: u64,
+    pub max_relational_index_read_bytes: usize,
+    pub max_relational_hydration_bytes: usize,
     pub max_read_result_rows: Option<usize>,
     pub max_read_result_payload_bytes: Option<usize>,
     pub execution_batch_rows: usize,
@@ -343,7 +391,8 @@ pub fn run_content_store_initial_row_page_qualification(
         authoritative_config.clone(),
     )?;
 
-    let read_specs = initial_read_specs(&corpus, config.base_message_count)?;
+    let read_specs =
+        initial_read_specs(&corpus, config.base_message_count, config.base_chunk_count)?;
     let cold_checkpoint_reads = execute_read_set(
         &mut database,
         &read_specs,
@@ -355,12 +404,22 @@ pub fn run_content_store_initial_row_page_qualification(
         ContentStoreRowPageReadPhase::WarmCheckpoint,
     )?;
     require_matching_results(&cold_checkpoint_reads, &warm_checkpoint_reads)?;
+    require_source_graph_chunk_count(&mut database, config.base_chunk_count)?;
+    require_runtime_counts(
+        &mut database,
+        &corpus,
+        config.base_chunk_count,
+        config.base_message_count,
+    )?;
+    require_anchor_occurrence_identity(&mut database, config.base_message_count, 0)?;
 
-    upsert_thread_message(
+    let wal_content_commit_epoch = append_runtime_content(
         &mut database,
         &corpus,
         config.base_message_count,
         config.message_payload_bytes,
+        config.base_chunk_count,
+        config.chunk_payload_bytes,
         "wal",
     )?;
     drop(database);
@@ -391,12 +450,52 @@ pub fn run_content_store_initial_row_page_qualification(
                 .to_string(),
         ));
     }
+    if wal_recovery_read.execution.visible_commit_epoch != wal_content_commit_epoch {
+        return Err(SkeinError::Execution(format!(
+            "content-store WAL message read observed epoch {}, expected graph-plus-relational epoch {wal_content_commit_epoch}",
+            wal_recovery_read.execution.visible_commit_epoch
+        )));
+    }
+    let wal_chunk_count = config.base_chunk_count + 1;
+    require_source_graph_chunk_count(&mut database, wal_chunk_count)?;
+    require_runtime_counts(
+        &mut database,
+        &corpus,
+        wal_chunk_count,
+        config.base_message_count + 1,
+    )?;
+    require_anchor_occurrence_identity(&mut database, config.base_message_count + 1, 1)?;
+    let (wal_recovery_chunk_read, wal_recovery_anchor_read) = read_pair(
+        &mut database,
+        runtime_extended_read_specs(&corpus, wal_chunk_count)?,
+        ContentStoreRowPageReadPhase::WalRecovery,
+    )?;
+    if wal_recovery_chunk_read.execution.delta_generation.is_none()
+        || wal_recovery_anchor_read
+            .execution
+            .delta_generation
+            .is_none()
+    {
+        return Err(SkeinError::Execution(
+            "content-store extended WAL reads did not use the recovery delta".to_string(),
+        ));
+    }
+    for read in [&wal_recovery_chunk_read, &wal_recovery_anchor_read] {
+        if read.execution.visible_commit_epoch != wal_content_commit_epoch {
+            return Err(SkeinError::Execution(format!(
+                "content-store WAL statement {} observed epoch {}, expected graph-plus-relational epoch {wal_content_commit_epoch}",
+                read.statement_name, read.execution.visible_commit_epoch
+            )));
+        }
+    }
 
-    upsert_thread_message(
+    let live_content_commit_epoch = append_runtime_content(
         &mut database,
         &corpus,
         config.base_message_count + 1,
         config.message_payload_bytes,
+        config.base_chunk_count + 1,
+        config.chunk_payload_bytes,
         "live",
     )?;
     let live_overlay_read = execute_qualified_read(
@@ -411,6 +510,40 @@ pub fn run_content_store_initial_row_page_qualification(
             "content-store row-page qualification live read did not use the row overlay"
                 .to_string(),
         ));
+    }
+    if live_overlay_read.execution.visible_commit_epoch != live_content_commit_epoch {
+        return Err(SkeinError::Execution(format!(
+            "content-store live message read observed epoch {}, expected graph-plus-relational epoch {live_content_commit_epoch}",
+            live_overlay_read.execution.visible_commit_epoch
+        )));
+    }
+    let live_chunk_count = config.base_chunk_count + 2;
+    require_runtime_counts(
+        &mut database,
+        &corpus,
+        live_chunk_count,
+        config.base_message_count + 2,
+    )?;
+    require_anchor_occurrence_identity(&mut database, config.base_message_count + 2, 2)?;
+    let (live_overlay_chunk_read, live_overlay_anchor_read) = read_pair(
+        &mut database,
+        runtime_extended_read_specs(&corpus, live_chunk_count)?,
+        ContentStoreRowPageReadPhase::LiveOverlay,
+    )?;
+    if live_overlay_chunk_read.execution.overlay_entries == 0
+        || live_overlay_anchor_read.execution.overlay_entries == 0
+    {
+        return Err(SkeinError::Execution(
+            "content-store extended live reads did not use the row overlay".to_string(),
+        ));
+    }
+    for read in [&live_overlay_chunk_read, &live_overlay_anchor_read] {
+        if read.execution.visible_commit_epoch != live_content_commit_epoch {
+            return Err(SkeinError::Execution(format!(
+                "content-store live statement {} observed epoch {}, expected graph-plus-relational epoch {live_content_commit_epoch}",
+                read.statement_name, read.execution.visible_commit_epoch
+            )));
+        }
     }
 
     let multi_statement_transaction = qualify_multi_statement_transaction(
@@ -457,6 +590,9 @@ pub fn run_content_store_initial_row_page_qualification(
         base_message_count: config.base_message_count,
         final_message_count: config.base_message_count + 3,
         message_payload_bytes: config.message_payload_bytes,
+        base_chunk_count: config.base_chunk_count,
+        final_chunk_count: config.base_chunk_count + 2,
+        chunk_payload_bytes: config.chunk_payload_bytes,
         segment_cache_capacity_bytes: config.segment_cache_capacity_bytes,
         checkpoint_generation: checkpoint.generation,
         checkpoint_commit_epoch: checkpoint.commit_epoch,
@@ -464,8 +600,14 @@ pub fn run_content_store_initial_row_page_qualification(
         warm_checkpoint_reads,
         wal_replayed_entries: recovery.replayed_wal_entries,
         wal_replayed_bytes: recovery.replayed_wal_bytes,
+        wal_content_commit_epoch,
         wal_recovery_read,
+        wal_recovery_chunk_read,
+        wal_recovery_anchor_read,
         live_overlay_read,
+        live_content_commit_epoch,
+        live_overlay_chunk_read,
+        live_overlay_anchor_read,
         multi_statement_transaction,
         resources,
         corruption,
