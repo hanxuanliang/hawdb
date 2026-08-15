@@ -971,6 +971,74 @@ impl GraphStore {
         let Some((first_property, first_value)) = predicates.first() else {
             return self.visit_nodes_owned(Some(label_id), consumer);
         };
+        if let (Some(reader), Some(projection)) = (
+            self.canonical_base.as_ref(),
+            self.persistent_property_projection.as_ref(),
+        ) {
+            let properties = predicates
+                .iter()
+                .map(|(property, _)| property.clone())
+                .collect::<Vec<_>>();
+            if projection
+                .manifest()
+                .supports_composite_equality(label_id, &properties)
+            {
+                let values = predicates
+                    .iter()
+                    .map(|(_, value)| value)
+                    .collect::<Vec<_>>();
+                let mut graph_control = GraphScanControl::Continue;
+                let (_, projection_control) = projection
+                    .scan_composite_equality_candidates(
+                        label_id,
+                        &properties,
+                        &values,
+                        |node_id| {
+                            if self.node_tombstones.contains(&node_id)
+                                || self.nodes.contains_key(&node_id)
+                            {
+                                return Ok(CanonicalScanControl::Continue);
+                            }
+                            let node = reader.get_node(node_id)?.ok_or_else(|| {
+                                PersistentPropertyProjectionError::Corrupt(format!(
+                                    "composite property projection references missing canonical node {}",
+                                    node_id.0
+                                ))
+                            })?;
+                            if !node.labels.contains(&label_id)
+                                || !predicates.iter().all(|(property, value)| {
+                                    node.properties.get(property) == Some(value)
+                                })
+                            {
+                                return Err(PersistentPropertyProjectionError::Corrupt(format!(
+                                    "composite property projection candidate {} fails its canonical predicate",
+                                    node_id.0
+                                )));
+                            }
+                            if consumer(node) == GraphScanControl::Stop {
+                                graph_control = GraphScanControl::Stop;
+                                return Ok(CanonicalScanControl::Stop);
+                            }
+                            Ok(CanonicalScanControl::Continue)
+                        },
+                    )
+                    .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+                if projection_control == CanonicalScanControl::Stop {
+                    return Ok(graph_control);
+                }
+                for node in self.nodes.values() {
+                    if node.labels.contains(&label_id)
+                        && predicates
+                            .iter()
+                            .all(|(property, value)| node.properties.get(property) == Some(value))
+                        && consumer(node.clone()) == GraphScanControl::Stop
+                    {
+                        return Ok(GraphScanControl::Stop);
+                    }
+                }
+                return Ok(GraphScanControl::Continue);
+            }
+        }
         self.visit_nodes_by_property_owned(
             label_id,
             first_property,

@@ -113,13 +113,14 @@ use relational_row_pages::RelationalRowPageState;
 use skein_storage::{
     available_storage_space, decode_relational_checkpoint_file_with_index_load,
     decode_relational_checkpoint_with_index_load, decode_relational_wal_batch,
-    encode_relational_checkpoint, encode_relational_wal_batch, sync_parent_directory,
-    AdjacencyPostingList, CanonicalEndpointDirection, CanonicalNodeIterator,
-    CanonicalRelationshipIterator, CanonicalSegmentError, RelationalCheckpointIndexLoad,
-    RelationalDecodeLimits, RelationalMutationLimits, RelationalOverflowConfig,
-    RelationalOverflowPublicationConfig, RelationalOverflowPublisher,
-    RelationalRowPageGenerationRequest, RelationalRowPagePublicationConfig,
-    RelationalRowPagePublisher, RelationalState, RelationalTransaction,
+    encode_relational_checkpoint, encode_relational_wal_batch,
+    persistent_composite_property_identity, sync_parent_directory, AdjacencyPostingList,
+    CanonicalEndpointDirection, CanonicalNodeIterator, CanonicalRelationshipIterator,
+    CanonicalSegmentError, RelationalCheckpointIndexLoad, RelationalDecodeLimits,
+    RelationalMutationLimits, RelationalOverflowConfig, RelationalOverflowPublicationConfig,
+    RelationalOverflowPublisher, RelationalRowPageGenerationRequest,
+    RelationalRowPagePublicationConfig, RelationalRowPagePublisher, RelationalState,
+    RelationalTransaction,
 };
 pub use skein_storage::{
     AdjacencyDirection, AdjacencyGroupConsistencyMismatch, AdjacencyGroupKey, AdjacencyGroupStats,
@@ -6789,6 +6790,7 @@ mod tests {
         let second_id;
         let delta_id;
         let corrupt_offset;
+        let composite_properties = vec!["key".to_string(), "rank".to_string()];
         {
             let mut catalog = Catalog::default();
             let mut store = GraphStore::open_with_durability_and_replay_config(
@@ -6806,6 +6808,9 @@ mod tests {
                 .unwrap();
             store
                 .create_full_text_property_index(&mut catalog, "Memory", "content")
+                .unwrap();
+            store
+                .create_composite_property_index(&mut catalog, "Memory", &composite_properties)
                 .unwrap();
             first_id = store
                 .create_node(
@@ -6851,10 +6856,11 @@ mod tests {
                 "content",
                 PersistentPropertyProjectionKind::FullText
             ));
+            assert!(manifest.supports_composite_equality(label_id, &composite_properties));
             corrupt_offset = manifest
                 .blocks
                 .iter()
-                .find(|block| block.kind == PersistentPropertyProjectionKind::Range)
+                .find(|block| block.kind == PersistentPropertyProjectionKind::CompositeEquality)
                 .map(|block| block.offset + block.length.get() - 1)
                 .unwrap();
 
@@ -6895,6 +6901,21 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(full_text_ids, vec![first_id, second_id]);
+            let mut composite_ids = Vec::new();
+            store
+                .visit_nodes_by_composite_property_owned(
+                    label_id,
+                    &[
+                        ("key".to_string(), Value::String("second".to_string())),
+                        ("rank".to_string(), Value::Int(20)),
+                    ],
+                    |node| {
+                        composite_ids.push(node.id);
+                        GraphScanControl::Continue
+                    },
+                )
+                .unwrap();
+            assert_eq!(composite_ids, vec![second_id]);
 
             let second_filter = PropertyFilter::IdEq {
                 value: Value::Int(second_id.0 as i64),
@@ -6979,6 +7000,36 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(full_text_ids, vec![delta_id]);
+            composite_ids.clear();
+            store
+                .visit_nodes_by_composite_property_owned(
+                    label_id,
+                    &[
+                        ("key".to_string(), Value::String("second".to_string())),
+                        ("rank".to_string(), Value::Int(18)),
+                    ],
+                    |node| {
+                        composite_ids.push(node.id);
+                        GraphScanControl::Continue
+                    },
+                )
+                .unwrap();
+            assert_eq!(composite_ids, vec![delta_id]);
+            composite_ids.clear();
+            store
+                .visit_nodes_by_composite_property_owned(
+                    label_id,
+                    &[
+                        ("key".to_string(), Value::String("updated".to_string())),
+                        ("rank".to_string(), Value::Int(40)),
+                    ],
+                    |node| {
+                        composite_ids.push(node.id);
+                        GraphScanControl::Continue
+                    },
+                )
+                .unwrap();
+            assert_eq!(composite_ids, vec![second_id]);
         }
         {
             let mut catalog = Catalog::default();
@@ -7019,6 +7070,21 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(equality_ids, vec![delta_id]);
+            let mut composite_ids = Vec::new();
+            store
+                .visit_nodes_by_composite_property_owned(
+                    label_id,
+                    &[
+                        ("key".to_string(), Value::String("second".to_string())),
+                        ("rank".to_string(), Value::Int(18)),
+                    ],
+                    |node| {
+                        composite_ids.push(node.id);
+                        GraphScanControl::Continue
+                    },
+                )
+                .unwrap();
+            assert_eq!(composite_ids, vec![delta_id]);
         }
         {
             let mut file = OpenOptions::new()
@@ -7040,14 +7106,13 @@ mod tests {
             )
             .unwrap();
             let label_id = catalog.label_id("Memory").unwrap();
-            let lower = (Value::Int(0), true);
-            let upper = (Value::Int(50), true);
             let error = store
-                .visit_nodes_by_property_range_owned(
+                .visit_nodes_by_composite_property_owned(
                     label_id,
-                    "rank",
-                    Some(&lower),
-                    Some(&upper),
+                    &[
+                        ("key".to_string(), Value::String("second".to_string())),
+                        ("rank".to_string(), Value::Int(18)),
+                    ],
                     |_| GraphScanControl::Continue,
                 )
                 .unwrap_err();

@@ -107,12 +107,12 @@ pub use projection::{
     StorageReclamationWatermark, StorageRecoveryReport, StoreStableIdMapping,
 };
 pub use property_projection::{
-    PersistentPropertyProjectionBlockDescriptor, PersistentPropertyProjectionBuildReport,
-    PersistentPropertyProjectionConfig, PersistentPropertyProjectionDefinition,
-    PersistentPropertyProjectionError, PersistentPropertyProjectionKind,
-    PersistentPropertyProjectionManifest, PersistentPropertyProjectionReadReport,
-    PersistentPropertyProjectionReader, PersistentPropertyProjectionWriteOutput,
-    PersistentPropertyProjectionWriter,
+    persistent_composite_property_identity, PersistentPropertyProjectionBlockDescriptor,
+    PersistentPropertyProjectionBuildReport, PersistentPropertyProjectionConfig,
+    PersistentPropertyProjectionDefinition, PersistentPropertyProjectionError,
+    PersistentPropertyProjectionKind, PersistentPropertyProjectionManifest,
+    PersistentPropertyProjectionReadReport, PersistentPropertyProjectionReader,
+    PersistentPropertyProjectionWriteOutput, PersistentPropertyProjectionWriter,
 };
 pub use property_spill::{
     PropertySpillBlockDescriptor, PropertySpillConfig, PropertySpillError, PropertySpillManifest,

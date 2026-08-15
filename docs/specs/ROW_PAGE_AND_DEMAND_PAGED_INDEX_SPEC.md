@@ -56,12 +56,13 @@ Non-goals:
 
 The current implementation already provides immutable COW row collections,
 reader generation pins, strict WAL recovery, generation-scoped segment range
-reads, and a byte-bounded digest-verified cache. Equality, range, and full-text
-graph-property indexes have a checkpoint-generation projection whose payload
-blocks remain cold until a query needs them; post-checkpoint WAL changes stay
-in the COW overlay and are merged at read time. Relational, composite-property,
-and remaining graph index state is still materialized or rebuilt in memory and
-remains migration work. Relational constraints may opt into the generation-
+reads, and a byte-bounded digest-verified cache. Equality, range, full-text,
+and ordered composite-equality graph-property indexes have a checkpoint-
+generation projection whose payload blocks remain cold until a query needs
+them; post-checkpoint WAL changes stay in the COW overlay and are merged at
+read time. Stable-id and relationship-property graph index state remains
+materialized or rebuilt in memory and remains migration work. Relational
+constraints may opt into the generation-
 bound authoritative reader, but materialized relational postings remain a
 temporary checkpoint builder and differential oracle until the next migration
 stage removes their ordinary-open residency.
@@ -82,6 +83,15 @@ does not populate the segment cache, and a lookup reads only key-overlapping
 blocks. It is a rebuildable query index, not the uniqueness oracle. Missing or
 incomplete projection coverage uses the canonical bounded scan; corruption in
 a selected block fails closed.
+
+Composite equality indexes reuse that artifact and serving contract. The
+ordered property-name list is encoded into an unambiguous internal projection
+identity, and the ordered property values form one bounded list key. A lookup
+selects the projection only for the complete declared order, reads only tuple-
+overlapping blocks, validates every candidate against its canonical row, skips
+base rows shadowed by the COW/WAL overlay, and finally streams matching overlay
+rows. A missing or incomplete composite definition falls back to the canonical
+path; corruption after selection fails closed and poisons the handle.
 
 The immutable index-page codec is the first format-only slice of step 1. It
 defines generation-tagged root, interior, leaf, and posting pages. Every page

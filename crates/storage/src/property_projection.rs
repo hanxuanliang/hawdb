@@ -24,12 +24,30 @@ const RUN_HEADER: &[u8; 8] = b"SKNIDXR1";
 const MANIFEST_HEADER: &str = "SKEIN_PROPERTY_PROJECTION_MANIFEST_V1";
 const ARTIFACT_ID: u64 = 0x534b_5052_4944_5831;
 const BLOCK_ID_BASE: u64 = 3 << 60;
+const COMPOSITE_PROPERTY_IDENTITY_PREFIX: &str = "skein-composite-property-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PersistentPropertyProjectionKind {
     Equality,
     Range,
     FullText,
+    CompositeEquality,
+}
+
+pub fn persistent_composite_property_identity(
+    properties: &[String],
+) -> Result<String, PersistentPropertyProjectionError> {
+    if properties.len() < 2 {
+        return Err(PersistentPropertyProjectionError::Source(
+            "persistent composite property projection requires at least two properties".to_string(),
+        ));
+    }
+    let mut identity = String::from(COMPOSITE_PROPERTY_IDENTITY_PREFIX);
+    for property in properties {
+        identity.push(':');
+        identity.push_str(&encode_hex(property.as_bytes()));
+    }
+    Ok(identity)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -224,6 +242,11 @@ impl PersistentPropertyProjectionManifest {
                 "property projection definitions are not strictly ordered".to_string(),
             ));
         }
+        for definition in &self.definitions {
+            if definition.kind == PersistentPropertyProjectionKind::CompositeEquality {
+                decode_composite_property_identity(&definition.property)?;
+            }
+        }
         let mut previous_end = ARTIFACT_HEADER.len() as u64 + 8;
         let mut previous_key = None;
         let mut entries = 0u64;
@@ -247,6 +270,17 @@ impl PersistentPropertyProjectionManifest {
                     "property projection block {} has no complete definition",
                     block.block_id
                 )));
+            }
+            if block.kind == PersistentPropertyProjectionKind::CompositeEquality {
+                let arity = decode_composite_property_identity(&block.property)?.len();
+                if !composite_key_has_arity(&block.min_key, arity)
+                    || !composite_key_has_arity(&block.max_key, arity)
+                {
+                    return Err(PersistentPropertyProjectionError::Corrupt(format!(
+                        "composite property projection block {} has invalid key arity",
+                        block.block_id
+                    )));
+                }
             }
             let key = block_descriptor_key(block);
             if previous_key
@@ -294,6 +328,18 @@ impl PersistentPropertyProjectionManifest {
             })
             .ok()
             .is_some_and(|index| self.definitions[index].complete)
+    }
+
+    pub fn supports_composite_equality(&self, label_id: LabelId, properties: &[String]) -> bool {
+        persistent_composite_property_identity(properties)
+            .ok()
+            .is_some_and(|identity| {
+                self.supports(
+                    label_id,
+                    &identity,
+                    PersistentPropertyProjectionKind::CompositeEquality,
+                )
+            })
     }
 
     pub fn encode(&self) -> Result<String, PersistentPropertyProjectionError> {
@@ -540,10 +586,24 @@ impl PersistentPropertyProjectionWriter {
                 && left.property == right.property
                 && left.kind == right.kind
         });
-        let mut by_label: BTreeMap<LabelId, Vec<usize>> = BTreeMap::new();
+        let mut by_label: BTreeMap<LabelId, Vec<PreparedProjectionDefinition>> = BTreeMap::new();
         for (index, definition) in definitions.iter_mut().enumerate() {
             definition.complete = true;
-            by_label.entry(definition.label_id).or_default().push(index);
+            let value_source =
+                if definition.kind == PersistentPropertyProjectionKind::CompositeEquality {
+                    ProjectionValueSource::Composite(decode_composite_property_identity(
+                        &definition.property,
+                    )?)
+                } else {
+                    ProjectionValueSource::Scalar
+                };
+            by_label
+                .entry(definition.label_id)
+                .or_default()
+                .push(PreparedProjectionDefinition {
+                    definition_index: index,
+                    value_source,
+                });
         }
         let mut runs = ProjectionSpillRuns::new(path, generation, self.config);
         let mut chunk = Vec::new();
@@ -558,16 +618,17 @@ impl PersistentPropertyProjectionWriter {
                 let Some(indexes) = by_label.get(label) else {
                     continue;
                 };
-                for definition_index in indexes {
-                    let definition = &definitions[*definition_index];
-                    let Some(value) = node.properties.get(&definition.property) else {
-                        continue;
-                    };
+                for prepared in indexes {
+                    let definition_index = prepared.definition_index;
+                    let definition = &definitions[definition_index];
                     match definition.kind {
                         PersistentPropertyProjectionKind::Equality => {
+                            let Some(value) = node.properties.get(&definition.property) else {
+                                continue;
+                            };
                             let encoded = encode_standalone_value(value)?;
                             if encoded.len() as u64 > self.config.max_index_key_bytes.get() {
-                                definitions[*definition_index].complete = false;
+                                definitions[definition_index].complete = false;
                                 continue;
                             }
                             self.emit(
@@ -586,12 +647,15 @@ impl PersistentPropertyProjectionWriter {
                             )?;
                         }
                         PersistentPropertyProjectionKind::Range => {
+                            let Some(value) = node.properties.get(&definition.property) else {
+                                continue;
+                            };
                             if !is_range_value(value) {
                                 continue;
                             }
                             let encoded = encode_standalone_value(value)?;
                             if encoded.len() as u64 > self.config.max_index_key_bytes.get() {
-                                definitions[*definition_index].complete = false;
+                                definitions[definition_index].complete = false;
                                 continue;
                             }
                             self.emit(
@@ -610,6 +674,9 @@ impl PersistentPropertyProjectionWriter {
                             )?;
                         }
                         PersistentPropertyProjectionKind::FullText => {
+                            let Some(value) = node.properties.get(&definition.property) else {
+                                continue;
+                            };
                             let Value::String(value) = value else {
                                 continue;
                             };
@@ -629,6 +696,43 @@ impl PersistentPropertyProjectionWriter {
                                     &mut peak_resident_bytes,
                                 )?;
                             }
+                        }
+                        PersistentPropertyProjectionKind::CompositeEquality => {
+                            let ProjectionValueSource::Composite(properties) =
+                                &prepared.value_source
+                            else {
+                                return Err(PersistentPropertyProjectionError::Corrupt(
+                                    "composite property projection has a scalar value source"
+                                        .to_string(),
+                                ));
+                            };
+                            let Some(values) = properties
+                                .iter()
+                                .map(|property| node.properties.get(property).cloned())
+                                .collect::<Option<Vec<_>>>()
+                            else {
+                                continue;
+                            };
+                            let value = Value::List(values);
+                            let encoded = encode_standalone_value(&value)?;
+                            if encoded.len() as u64 > self.config.max_index_key_bytes.get() {
+                                definitions[definition_index].complete = false;
+                                continue;
+                            }
+                            self.emit(
+                                EntryKey {
+                                    kind: definition.kind,
+                                    label_id: *label,
+                                    property: definition.property.clone(),
+                                    value,
+                                    node_id: node.id,
+                                },
+                                &mut runs,
+                                &mut chunk,
+                                &mut chunk_bytes,
+                                &mut generated_entries,
+                                &mut peak_resident_bytes,
+                            )?;
                         }
                     }
                 }
@@ -763,6 +867,16 @@ impl PersistentPropertyProjectionWriter {
             manifest,
         })
     }
+}
+
+struct PreparedProjectionDefinition {
+    definition_index: usize,
+    value_source: ProjectionValueSource,
+}
+
+enum ProjectionValueSource {
+    Scalar,
+    Composite(Vec<String>),
 }
 
 struct ProjectionSpillRuns {
@@ -1340,6 +1454,41 @@ impl PersistentPropertyProjectionReader {
         )
     }
 
+    pub fn scan_composite_equality_candidates(
+        &self,
+        label_id: LabelId,
+        properties: &[String],
+        values: &[&Value],
+        mut consumer: impl FnMut(
+            NodeId,
+        )
+            -> Result<CanonicalScanControl, PersistentPropertyProjectionError>,
+    ) -> Result<
+        (PersistentPropertyProjectionReadReport, CanonicalScanControl),
+        PersistentPropertyProjectionError,
+    > {
+        if properties.len() != values.len() {
+            return Err(PersistentPropertyProjectionError::Source(
+                "composite property projection key arity does not match its definition".to_string(),
+            ));
+        }
+        let identity = persistent_composite_property_identity(properties)?;
+        self.scan_candidates(
+            label_id,
+            &identity,
+            PersistentPropertyProjectionKind::CompositeEquality,
+            |candidate| {
+                composite_key_ordering(candidate, values).is_some_and(|order| order.is_eq())
+            },
+            |block| {
+                composite_key_ordering(&block.min_key, values).is_some_and(|order| order.is_le())
+                    && composite_key_ordering(&block.max_key, values)
+                        .is_some_and(|order| order.is_ge())
+            },
+            &mut consumer,
+        )
+    }
+
     pub fn scan_full_text_token_candidates(
         &self,
         label_id: LabelId,
@@ -1495,11 +1644,22 @@ fn decode_projection_block(
             descriptor.block_id
         )));
     }
+    let composite_arity = if kind == PersistentPropertyProjectionKind::CompositeEquality {
+        Some(decode_composite_property_identity(&property)?.len())
+    } else {
+        None
+    };
     let mut first = None;
     let mut previous = None;
     for _ in 0..entry_count {
         let value_len = cursor.read_u32()? as usize;
         let value = decode_standalone_value(cursor.read_exact(value_len)?)?;
+        if composite_arity.is_some_and(|arity| !composite_key_has_arity(&value, arity)) {
+            return Err(PersistentPropertyProjectionError::Corrupt(format!(
+                "composite property projection block {} contains a key with invalid arity",
+                descriptor.block_id
+            )));
+        }
         let node_id = NodeId(cursor.read_u64()?);
         let key = (value.clone(), node_id);
         if previous.as_ref().is_some_and(|previous| previous >= &key) {
@@ -1563,6 +1723,23 @@ fn full_text_tokens_streaming(value: &str) -> impl Iterator<Item = String> + '_ 
 
 fn is_range_value(value: &Value) -> bool {
     matches!(value, Value::Int(_) | Value::Float(_) | Value::String(_))
+}
+
+fn composite_key_has_arity(value: &Value, arity: usize) -> bool {
+    matches!(value, Value::List(values) if values.len() == arity)
+}
+
+fn composite_key_ordering(value: &Value, expected: &[&Value]) -> Option<std::cmp::Ordering> {
+    let Value::List(values) = value else {
+        return None;
+    };
+    for (left, right) in values.iter().zip(expected) {
+        let ordering = left.cmp(right);
+        if !ordering.is_eq() {
+            return Some(ordering);
+        }
+    }
+    Some(values.len().cmp(&expected.len()))
 }
 
 fn range_bounds_match(
@@ -1643,6 +1820,7 @@ fn kind_tag(kind: PersistentPropertyProjectionKind) -> u8 {
         PersistentPropertyProjectionKind::Equality => 3,
         PersistentPropertyProjectionKind::Range => 1,
         PersistentPropertyProjectionKind::FullText => 2,
+        PersistentPropertyProjectionKind::CompositeEquality => 4,
     }
 }
 
@@ -1653,10 +1831,34 @@ fn kind_from_tag(
         1 => Ok(PersistentPropertyProjectionKind::Range),
         2 => Ok(PersistentPropertyProjectionKind::FullText),
         3 => Ok(PersistentPropertyProjectionKind::Equality),
+        4 => Ok(PersistentPropertyProjectionKind::CompositeEquality),
         _ => Err(PersistentPropertyProjectionError::Corrupt(format!(
             "invalid property projection kind {tag}"
         ))),
     }
+}
+
+fn decode_composite_property_identity(
+    identity: &str,
+) -> Result<Vec<String>, PersistentPropertyProjectionError> {
+    let encoded = identity
+        .strip_prefix(COMPOSITE_PROPERTY_IDENTITY_PREFIX)
+        .and_then(|suffix| suffix.strip_prefix(':'))
+        .ok_or_else(|| {
+            PersistentPropertyProjectionError::Corrupt(
+                "composite property projection has an invalid identity prefix".to_string(),
+            )
+        })?;
+    let properties = encoded
+        .split(':')
+        .map(|property| decode_utf8_hex(property, "composite property identity"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if properties.len() < 2 {
+        return Err(PersistentPropertyProjectionError::Corrupt(
+            "composite property projection identity has fewer than two properties".to_string(),
+        ));
+    }
+    Ok(properties)
 }
 
 fn write_string(
@@ -1860,7 +2062,7 @@ mod tests {
     }
 
     #[test]
-    fn external_projection_round_trips_equality_range_and_full_text_candidates() {
+    fn external_projection_round_trips_scalar_and_composite_candidates() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1878,6 +2080,7 @@ mod tests {
             target_block_bytes: NonZeroU64::new(128).unwrap(),
             ..PersistentPropertyProjectionConfig::default()
         };
+        let composite_properties = vec!["rank".to_string(), "text".to_string()];
         let definitions = vec![
             PersistentPropertyProjectionDefinition {
                 label_id: LabelId(1),
@@ -1895,6 +2098,12 @@ mod tests {
                 label_id: LabelId(1),
                 property: "text".to_string(),
                 kind: PersistentPropertyProjectionKind::FullText,
+                complete: false,
+            },
+            PersistentPropertyProjectionDefinition {
+                label_id: LabelId(1),
+                property: persistent_composite_property_identity(&composite_properties).unwrap(),
+                kind: PersistentPropertyProjectionKind::CompositeEquality,
                 complete: false,
             },
         ];
@@ -1960,6 +2169,112 @@ mod tests {
             })
             .unwrap();
         assert_eq!(text, vec![1, 3]);
+        assert!(reader
+            .manifest()
+            .supports_composite_equality(LabelId(1), &composite_properties));
+        let mut composite = Vec::new();
+        let (composite_report, _) = reader
+            .scan_composite_equality_candidates(
+                LabelId(1),
+                &composite_properties,
+                &[&Value::Int(20), &Value::String("Other".to_string())],
+                |id| {
+                    composite.push(id.0);
+                    Ok(CanonicalScanControl::Continue)
+                },
+            )
+            .unwrap();
+        assert_eq!(composite, vec![2]);
+        assert_eq!(composite_report.candidates_returned, 1);
+
+        composite.clear();
+        reader
+            .scan_composite_equality_candidates(
+                LabelId(1),
+                &composite_properties,
+                &[&Value::Int(20), &Value::String("Graph Memory".to_string())],
+                |id| {
+                    composite.push(id.0);
+                    Ok(CanonicalScanControl::Continue)
+                },
+            )
+            .unwrap();
+        assert!(composite.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn composite_property_identity_is_unambiguous_and_validated() {
+        let properties = vec!["a:b".to_string(), "".to_string(), "\u{1f9f5}".to_string()];
+        let identity = persistent_composite_property_identity(&properties).unwrap();
+        assert_eq!(
+            decode_composite_property_identity(&identity).unwrap(),
+            properties
+        );
+
+        let error = persistent_composite_property_identity(&["only".to_string()]).unwrap_err();
+        assert!(error.to_string().contains("at least two properties"));
+        let error =
+            decode_composite_property_identity("skein-composite-property-v1:zz:61").unwrap_err();
+        assert!(error.to_string().contains("invalid hexadecimal data"));
+    }
+
+    #[test]
+    fn oversized_composite_key_disables_the_projection_without_partial_coverage() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "skein-oversized-composite-projection-{}-{nonce}",
+            std::process::id(),
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("projection.skein");
+        let properties = vec!["rank".to_string(), "text".to_string()];
+        let definition = PersistentPropertyProjectionDefinition {
+            label_id: LabelId(1),
+            property: persistent_composite_property_identity(&properties).unwrap(),
+            kind: PersistentPropertyProjectionKind::CompositeEquality,
+            complete: false,
+        };
+        let output = PersistentPropertyProjectionWriter::new(PersistentPropertyProjectionConfig {
+            max_index_key_bytes: NonZeroU64::new(8).unwrap(),
+            ..PersistentPropertyProjectionConfig::default()
+        })
+        .write_fallible(
+            &path,
+            ManifestGeneration(3),
+            12,
+            vec![definition],
+            vec![Ok(node(1, 10, "long composite value"))],
+        )
+        .unwrap();
+
+        assert_eq!(output.manifest.entry_count, 0);
+        assert!(!output
+            .manifest
+            .supports_composite_equality(LabelId(1), &properties));
+        let reader = PersistentPropertyProjectionReader::open(
+            &path,
+            output.manifest,
+            Arc::new(SegmentCache::new(1024)),
+            StoreId(5),
+            NonZeroU64::new(1024).unwrap(),
+        )
+        .unwrap();
+        let error = reader
+            .scan_composite_equality_candidates(
+                LabelId(1),
+                &properties,
+                &[
+                    &Value::Int(10),
+                    &Value::String("long composite value".to_string()),
+                ],
+                |_| Ok(CanonicalScanControl::Continue),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("unavailable or incomplete"));
         fs::remove_dir_all(root).unwrap();
     }
 }

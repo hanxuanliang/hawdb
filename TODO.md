@@ -172,8 +172,10 @@ crash; read-only recovery remains fail closed.
     or rollback path. Keep the differential oracle in qualification code only.
 
 - [ ] Persist and activate the remaining canonical graph indexes.
-  - Publish stable-id, composite-property, relationship-property, forward
-    adjacency, and reverse adjacency roots with the canonical graph epoch.
+  - Publish stable-id and relationship-property roots with the canonical graph
+    epoch. Equality, range, full-text, ordered composite-equality, forward
+    adjacency, and reverse adjacency projections are generation-bound and
+    demand-paged.
   - Activate each index class independently after differential, recovery,
     cache-budget, and production-shaped evidence; derived BM25, vector,
     statistics, analytics, and optional columnar projections remain outside

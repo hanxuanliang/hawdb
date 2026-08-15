@@ -118,7 +118,7 @@ impl GraphStore {
                 })
             })
         });
-        let property_projection_definitions = catalog
+        let mut property_projection_definitions = catalog
             .property_indexes()
             .map(|index| {
                 let kind = match index.kind {
@@ -134,6 +134,16 @@ impl GraphStore {
                 }
             })
             .collect::<Vec<_>>();
+        for index in catalog.composite_property_indexes() {
+            let property = persistent_composite_property_identity(&index.properties)
+                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            property_projection_definitions.push(PersistentPropertyProjectionDefinition {
+                label_id: index.label_id,
+                property,
+                kind: PersistentPropertyProjectionKind::CompositeEquality,
+                complete: false,
+            });
+        }
         let merged_relationships = self.canonical_base.as_ref().map(|_| {
             self.relationship_records_owned().map(|record| {
                 record.map_err(|error| CanonicalSegmentError::Source(error.to_string()))
