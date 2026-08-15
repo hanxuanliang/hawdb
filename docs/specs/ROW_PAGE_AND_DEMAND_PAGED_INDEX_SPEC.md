@@ -1478,6 +1478,16 @@ checkpoint binding, demand-read, lifecycle, or serving obligations.
   substituting 512 MiB as a universal cutoff. Production-copy evidence remains
   a separate runner over the imported replica and its actual resource profile;
   this synthetic fixture MUST NOT claim that qualification.
+  The production graph runner retains the complete ordered cold/warm resource
+  series instead of only the final warm profile. It records per-run streaming,
+  row/payload, RSS, page-fault, and cache-residency evidence, derives an
+  aggregate from that series, and records process memory across the entire
+  open/read/cancellation lifecycle.
+  The final release evaluator independently recomputes the aggregate and
+  rejects a missing, reordered, incorrectly phased, truncated, over-budget, or
+  inconsistent series. Per-query page-fault limits apply to each run; the
+  lifecycle total is separate recorded evidence and MUST NOT be compared to a
+  single-query limit.
   The same typed runner covers `content_documents`, `thread_messages`,
   `content_chunks`, and `content_anchors`. Its base, WAL-recovered, and live
   phases execute parameterized PostgreSQL-dialect statements through canonical

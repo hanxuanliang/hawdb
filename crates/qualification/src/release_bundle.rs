@@ -7,6 +7,8 @@ use std::collections::BTreeSet;
 
 #[path = "release_bundle/durability.rs"]
 mod durability;
+#[path = "release_bundle/graph_resource.rs"]
+mod graph_resource;
 #[path = "release_bundle/graph_search.rs"]
 mod graph_search;
 #[path = "release_bundle/runtime.rs"]

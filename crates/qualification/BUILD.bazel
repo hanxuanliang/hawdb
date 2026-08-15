@@ -44,6 +44,7 @@ rust_library(
         "src/production_vector/tests.rs",
         "src/release_bundle.rs",
         "src/release_bundle/durability.rs",
+        "src/release_bundle/graph_resource.rs",
         "src/release_bundle/graph_search.rs",
         "src/release_bundle/runtime.rs",
         "src/release_bundle/tests.rs",

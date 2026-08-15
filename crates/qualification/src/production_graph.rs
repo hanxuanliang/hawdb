@@ -1,14 +1,14 @@
 use super::{latency_percentiles, runtime_report, LatencyPercentiles, MixedSoakRuntimeReport};
 use crate::evidence_digest::{hash_bytes, hash_value};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use skein::{
     IoConcurrencyBudget, NowledgeGraphStatement, NowledgeMemEmbeddedStoreHandle,
     NowledgeMemGraphMode, NowledgeMemOpenOptions, NowledgeMemReadOptions,
-    PersistentGraphIndexClass, ProductionEvidenceBinding, ProductionQualificationIdentity,
-    RuntimeCancellationToken, RuntimeGovernor, RuntimeGovernorConfig, RuntimeTaskContext,
-    StorageDeviceProfile, StorageResidencyReport, StorageResourceProfileLimits,
-    StorageResourceProfileReport, Value,
+    PersistentGraphIndexClass, ProcessMemoryProfile, ProcessMemorySnapshot,
+    ProductionEvidenceBinding, ProductionQualificationIdentity, RuntimeCancellationToken,
+    RuntimeGovernor, RuntimeGovernorConfig, RuntimeTaskContext, StorageDeviceProfile,
+    StorageResidencyReport, StorageResourceProfileLimits, StorageResourceProfileReport, Value,
 };
 use skein_query::QueryIdentity;
 use std::error::Error;
@@ -147,6 +147,89 @@ pub struct ProductionGraphExecutionSummary {
     pub latency: LatencyPercentiles,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct ProductionGraphProcessMemoryEvidence {
+    pub resident_memory_available: bool,
+    pub total_page_faults_available: bool,
+    pub split_page_faults_available: bool,
+    pub start_resident_bytes: u64,
+    pub start_peak_resident_bytes: u64,
+    pub steady_resident_bytes: u64,
+    pub peak_resident_bytes: u64,
+    pub steady_resident_growth_bytes: u64,
+    pub lifetime_peak_resident_growth_bytes: u64,
+    pub total_page_faults: Option<u64>,
+    pub minor_page_faults: Option<u64>,
+    pub major_page_faults: Option<u64>,
+}
+
+impl From<ProcessMemoryProfile> for ProductionGraphProcessMemoryEvidence {
+    fn from(profile: ProcessMemoryProfile) -> Self {
+        Self {
+            resident_memory_available: profile.capabilities.resident_memory,
+            total_page_faults_available: profile.capabilities.total_page_faults,
+            split_page_faults_available: profile.capabilities.split_page_faults,
+            start_resident_bytes: profile.start_resident_bytes,
+            start_peak_resident_bytes: profile.start_peak_resident_bytes,
+            steady_resident_bytes: profile.steady_resident_bytes,
+            peak_resident_bytes: profile.peak_resident_bytes,
+            steady_resident_growth_bytes: profile.steady_resident_growth_bytes,
+            lifetime_peak_resident_growth_bytes: profile.lifetime_peak_resident_growth_bytes,
+            total_page_faults: profile.total_page_faults,
+            minor_page_faults: profile.minor_page_faults,
+            major_page_faults: profile.major_page_faults,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductionGraphResourcePhase {
+    Cold,
+    Warm,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductionGraphResourceRunEvidence {
+    pub run: usize,
+    pub phase: ProductionGraphResourcePhase,
+    pub fully_streamed: bool,
+    pub output_rows: usize,
+    pub output_payload_bytes: usize,
+    pub intermediate_rows: usize,
+    pub intermediate_payload_bytes: usize,
+    pub steady_resident_bytes: Option<u64>,
+    pub peak_resident_bytes: Option<u64>,
+    pub steady_resident_growth_bytes: Option<u64>,
+    pub lifetime_peak_resident_growth_bytes: Option<u64>,
+    pub total_page_faults: Option<u64>,
+    pub minor_page_faults: Option<u64>,
+    pub major_page_faults: Option<u64>,
+    pub segment_cache_resident_bytes_before: u64,
+    pub segment_cache_resident_bytes_after: u64,
+    pub segment_cache_hit_count: u64,
+    pub segment_cache_miss_count: u64,
+    pub segment_cache_eviction_count: u64,
+    pub segment_cache_admission_rejection_count: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductionGraphResourceSummary {
+    pub measurement_runs: usize,
+    pub max_steady_resident_bytes: Option<u64>,
+    pub max_peak_resident_bytes: Option<u64>,
+    pub max_steady_resident_growth_bytes: Option<u64>,
+    pub max_lifetime_peak_resident_growth_bytes: Option<u64>,
+    pub total_page_faults: Option<u64>,
+    pub minor_page_faults: Option<u64>,
+    pub major_page_faults: Option<u64>,
+    pub max_segment_cache_resident_bytes: u64,
+    pub segment_cache_hit_count: u64,
+    pub segment_cache_miss_count: u64,
+    pub segment_cache_eviction_count: u64,
+    pub segment_cache_admission_rejection_count: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PersistentGraphIndexProductionRunEvidence {
     pub run: usize,
@@ -203,6 +286,9 @@ pub struct ProductionGraphStorageQualificationReport {
     pub evidence_binding: ProductionEvidenceBinding,
     pub execution: ProductionGraphExecutionSummary,
     pub runtime: MixedSoakRuntimeReport,
+    pub lifecycle_process_memory: ProductionGraphProcessMemoryEvidence,
+    pub resource_runs: Vec<ProductionGraphResourceRunEvidence>,
+    pub resource_summary: ProductionGraphResourceSummary,
     pub storage_resource_profile: StorageResourceProfileReport,
     pub persistent_index_evidence: Option<PersistentGraphIndexProductionEvidence>,
 }
@@ -223,6 +309,9 @@ impl ProductionGraphStorageQualificationReport {
             "evidence_binding": self.evidence_binding.json(),
             "execution": self.execution,
             "runtime": self.runtime,
+            "lifecycle_process_memory": self.lifecycle_process_memory,
+            "resource_runs": self.resource_runs,
+            "resource_summary": self.resource_summary,
             "storage_resource_profile": self.storage_resource_profile.json(),
             "persistent_index_evidence": self.persistent_index_evidence,
         })
@@ -233,6 +322,8 @@ pub fn run_production_graph_storage_qualification(
     config: ProductionGraphStorageQualificationConfig,
 ) -> Result<ProductionGraphStorageQualificationReport, ProductionGraphQualificationError> {
     config.validate()?;
+    let process_start =
+        ProcessMemorySnapshot::capture().map_err(ProductionGraphQualificationError::from_error)?;
     let query_identity = QueryIdentity::new("cypher", &config.statement.cypher);
     let parameter_digest = parameter_digest(&config.statement.parameters);
     let storage_io = IoConcurrencyBudget::desktop_bound_for_device(StorageDeviceProfile::detect(
@@ -283,8 +374,15 @@ pub fn run_production_graph_storage_qualification(
     let runtime_after = store
         .runtime_governor_snapshot()
         .map_err(ProductionGraphQualificationError::from_error)?;
+    let process_end =
+        ProcessMemorySnapshot::capture().map_err(ProductionGraphQualificationError::from_error)?;
+    let lifecycle_process_memory = ProductionGraphProcessMemoryEvidence::from(
+        ProcessMemoryProfile::between(process_start, process_end),
+    );
     let runtime = runtime_report(runtime_before, runtime_after);
     let execution = execution_summary(&profiles, &durations);
+    let resource_runs = resource_run_evidence(&profiles);
+    let resource_summary = resource_summary(&resource_runs);
     let mut blocker_codes = profiles
         .iter()
         .flat_map(StorageResourceProfileReport::production_blocker_codes)
@@ -481,6 +579,9 @@ pub fn run_production_graph_storage_qualification(
         evidence_binding: config.evidence_binding,
         execution,
         runtime,
+        lifecycle_process_memory,
+        resource_runs,
+        resource_summary,
         storage_resource_profile,
         persistent_index_evidence,
     })
@@ -652,6 +753,112 @@ fn execution_summary(
     summary
 }
 
+fn resource_run_evidence(
+    profiles: &[StorageResourceProfileReport],
+) -> Vec<ProductionGraphResourceRunEvidence> {
+    profiles
+        .iter()
+        .enumerate()
+        .map(|(run, profile)| {
+            let pipeline = &profile.query.execution_profile.pipeline_memory_report;
+            ProductionGraphResourceRunEvidence {
+                run,
+                phase: if run == 0 {
+                    ProductionGraphResourcePhase::Cold
+                } else {
+                    ProductionGraphResourcePhase::Warm
+                },
+                fully_streamed: profile.query.fully_streamed,
+                output_rows: profile.query.output_rows,
+                output_payload_bytes: profile.query.output_payload_bytes,
+                intermediate_rows: pipeline.intermediate_rows,
+                intermediate_payload_bytes: pipeline.intermediate_payload_bytes,
+                steady_resident_bytes: pipeline.steady_resident_bytes,
+                peak_resident_bytes: pipeline.peak_resident_bytes,
+                steady_resident_growth_bytes: pipeline.steady_resident_growth_bytes,
+                lifetime_peak_resident_growth_bytes: pipeline.lifetime_peak_resident_growth_bytes,
+                total_page_faults: pipeline.total_page_faults,
+                minor_page_faults: pipeline.minor_page_faults,
+                major_page_faults: pipeline.major_page_faults,
+                segment_cache_resident_bytes_before: profile.before.segment_cache_resident_bytes,
+                segment_cache_resident_bytes_after: profile.after.segment_cache_resident_bytes,
+                segment_cache_hit_count: profile
+                    .after
+                    .segment_cache_hit_count
+                    .saturating_sub(profile.before.segment_cache_hit_count),
+                segment_cache_miss_count: profile
+                    .after
+                    .segment_cache_miss_count
+                    .saturating_sub(profile.before.segment_cache_miss_count),
+                segment_cache_eviction_count: profile
+                    .after
+                    .segment_cache_eviction_count
+                    .saturating_sub(profile.before.segment_cache_eviction_count),
+                segment_cache_admission_rejection_count: profile
+                    .after
+                    .segment_cache_admission_rejection_count
+                    .saturating_sub(profile.before.segment_cache_admission_rejection_count),
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn resource_summary(
+    runs: &[ProductionGraphResourceRunEvidence],
+) -> ProductionGraphResourceSummary {
+    ProductionGraphResourceSummary {
+        measurement_runs: runs.len(),
+        max_steady_resident_bytes: max_complete(runs, |run| run.steady_resident_bytes),
+        max_peak_resident_bytes: max_complete(runs, |run| run.peak_resident_bytes),
+        max_steady_resident_growth_bytes: max_complete(runs, |run| {
+            run.steady_resident_growth_bytes
+        }),
+        max_lifetime_peak_resident_growth_bytes: max_complete(runs, |run| {
+            run.lifetime_peak_resident_growth_bytes
+        }),
+        total_page_faults: sum_present(runs, |run| run.total_page_faults),
+        minor_page_faults: sum_present(runs, |run| run.minor_page_faults),
+        major_page_faults: sum_present(runs, |run| run.major_page_faults),
+        max_segment_cache_resident_bytes: runs.iter().fold(0, |maximum, run| {
+            maximum
+                .max(run.segment_cache_resident_bytes_before)
+                .max(run.segment_cache_resident_bytes_after)
+        }),
+        segment_cache_hit_count: runs.iter().fold(0u64, |total, run| {
+            total.saturating_add(run.segment_cache_hit_count)
+        }),
+        segment_cache_miss_count: runs.iter().fold(0u64, |total, run| {
+            total.saturating_add(run.segment_cache_miss_count)
+        }),
+        segment_cache_eviction_count: runs.iter().fold(0u64, |total, run| {
+            total.saturating_add(run.segment_cache_eviction_count)
+        }),
+        segment_cache_admission_rejection_count: runs.iter().fold(0u64, |total, run| {
+            total.saturating_add(run.segment_cache_admission_rejection_count)
+        }),
+    }
+}
+
+fn max_complete(
+    runs: &[ProductionGraphResourceRunEvidence],
+    metric: impl Fn(&ProductionGraphResourceRunEvidence) -> Option<u64>,
+) -> Option<u64> {
+    runs.iter()
+        .try_fold(None::<u64>, |maximum, run| {
+            metric(run).map(|value| Some(maximum.map_or(value, |current| current.max(value))))
+        })
+        .flatten()
+}
+
+fn sum_present(
+    runs: &[ProductionGraphResourceRunEvidence],
+    metric: impl Fn(&ProductionGraphResourceRunEvidence) -> Option<u64>,
+) -> Option<u64> {
+    runs.iter().try_fold(0u64, |total, run| {
+        metric(run).map(|value| total.saturating_add(value))
+    })
+}
+
 pub(crate) fn validate_production_identity_for_current_target(
     evidence_binding: &ProductionEvidenceBinding,
     expected_identity: &ProductionQualificationIdentity,
@@ -700,6 +907,53 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn resource_run(run: usize, value: u64) -> ProductionGraphResourceRunEvidence {
+        ProductionGraphResourceRunEvidence {
+            run,
+            phase: if run == 0 {
+                ProductionGraphResourcePhase::Cold
+            } else {
+                ProductionGraphResourcePhase::Warm
+            },
+            fully_streamed: true,
+            output_rows: usize::try_from(value).unwrap(),
+            output_payload_bytes: usize::try_from(value + 1).unwrap(),
+            intermediate_rows: usize::try_from(value + 2).unwrap(),
+            intermediate_payload_bytes: usize::try_from(value + 3).unwrap(),
+            steady_resident_bytes: Some(value),
+            peak_resident_bytes: Some(value + 1),
+            steady_resident_growth_bytes: Some(value + 2),
+            lifetime_peak_resident_growth_bytes: Some(value + 3),
+            total_page_faults: Some(value + 4),
+            minor_page_faults: Some(value + 5),
+            major_page_faults: Some(value + 6),
+            segment_cache_resident_bytes_before: value + 7,
+            segment_cache_resident_bytes_after: value + 8,
+            segment_cache_hit_count: value + 9,
+            segment_cache_miss_count: value + 10,
+            segment_cache_eviction_count: value + 11,
+            segment_cache_admission_rejection_count: value + 12,
+        }
+    }
+
+    #[test]
+    fn resource_summary_keeps_every_run_and_does_not_mask_missing_metrics() {
+        let runs = vec![resource_run(0, 10), resource_run(1, 20)];
+        let summary = resource_summary(&runs);
+        assert_eq!(summary.measurement_runs, 2);
+        assert_eq!(summary.max_steady_resident_bytes, Some(20));
+        assert_eq!(summary.max_segment_cache_resident_bytes, 28);
+        assert_eq!(summary.total_page_faults, Some(38));
+        assert_eq!(summary.segment_cache_hit_count, 48);
+
+        let mut incomplete = runs;
+        incomplete[1].steady_resident_bytes = None;
+        incomplete[1].total_page_faults = None;
+        let incomplete = resource_summary(&incomplete);
+        assert_eq!(incomplete.max_steady_resident_bytes, None);
+        assert_eq!(incomplete.total_page_faults, None);
+    }
 
     #[test]
     fn production_runner_uses_admitted_handle_and_redacts_inputs() {
@@ -826,6 +1080,21 @@ mod tests {
         assert_eq!(report.runtime.admissions_delta, 4);
         assert_eq!(report.runtime.completions_delta, 4);
         assert_eq!(report.execution.measurement_runs, 3);
+        assert_eq!(report.resource_runs.len(), 3);
+        assert_eq!(
+            report.resource_runs[0].phase,
+            ProductionGraphResourcePhase::Cold
+        );
+        assert_eq!(
+            report.resource_runs[1].phase,
+            ProductionGraphResourcePhase::Warm
+        );
+        assert_eq!(report.resource_summary.measurement_runs, 3);
+        assert!(report.resource_summary.max_steady_resident_bytes.is_some());
+        assert!(report.resource_summary.max_peak_resident_bytes.is_some());
+        assert!(report.resource_summary.total_page_faults.is_some());
+        assert!(report.lifecycle_process_memory.resident_memory_available);
+        assert!(report.lifecycle_process_memory.total_page_faults_available);
         assert!(report.storage_resource_profile.production_ready());
         let index_evidence = report
             .persistent_index_evidence
@@ -868,5 +1137,6 @@ mod tests {
 
         assert_ne!(first, second);
         assert!(!first.contains("sensitive-a"));
+        assert!(!second.contains("sensitive-b"));
     }
 }

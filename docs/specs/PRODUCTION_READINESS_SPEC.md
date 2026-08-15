@@ -72,21 +72,28 @@ The preferred executable contract is
 through `NowledgeMemEmbeddedStoreHandle`, applies an explicit out-of-core
 `DatabaseConfig`, acquires a runtime-governor permit for every measurement,
 and emits `skein-production-graph-storage-qualification-v1`. The report stores
-only query and parameter digests, retains the bound raw storage profile, and
-fails readiness on admission rejection, permit leakage, overcommit, stale
-identity, or any resource-profile blocker. When a persistent graph index class
-is under qualification, the typed requirement additionally binds a reference
-result digest and row count plus per-run page and byte budgets. Every run must
-observe that exact class through the store-owned read counters; the bounded
-streaming digest consumer does not retain or serialize result rows. At least
-two measurement runs are required. The required index class itself MUST report
-a cache miss on the first run and a cache hit on a later run; process-wide
-cache counters cannot satisfy this obligation. The relevant property-projection
-or adjacency artifact MUST exceed the configured segment-cache capacity. A
-pre-cancelled bounded read MUST terminate within its explicit latency budget,
-leave zero pinned cache bytes, avoid poisoning the handle, and be followed by
-a successful digest read. A CLI may transport this report, but it MUST NOT
-replace the typed function in the production host.
+only query and parameter digests, retains every raw cold and warm resource run,
+and derives a reproducible aggregate from that complete series. Each run
+records streaming status, output and intermediate row/payload counts, steady
+and peak RSS, RSS growth, total and platform-supported split page faults, and
+segment-cache residency and counter deltas. The report also
+records one process-memory profile spanning open, measurements, cancellation,
+and final digest verification. It retains the final bound raw storage profile
+for its limits and storage identity, and fails readiness on admission
+rejection, permit leakage, overcommit, stale identity, or any resource-profile
+blocker. When a persistent graph index class is under qualification, the typed
+requirement additionally binds a reference result digest and row count plus
+per-run page and byte budgets. Every run must observe that exact class through
+the store-owned read counters; the bounded streaming digest consumer does not
+retain or serialize result rows. At least two measurement runs are required.
+The required index class itself MUST report a cache miss on the first run and a
+cache hit on a later run; process-wide cache counters cannot satisfy this
+obligation. The relevant property-projection or adjacency artifact MUST exceed
+the configured segment-cache capacity. A pre-cancelled bounded read MUST
+terminate within its explicit latency budget, leave zero pinned cache bytes,
+avoid poisoning the handle, and be followed by a successful digest read. A CLI
+may transport this report, but it MUST NOT replace the typed function in the
+production host.
 
 The complete persistent-index release artifact MUST be produced by
 `run_production_graph_index_qualification_matrix`. The matrix accepts exactly
@@ -108,11 +115,14 @@ cross-process evidence gate. It consumes the raw graph-storage, out-of-core
 search, per-target vector, per-worker morsel, active-route blocking, storage
 crash-recovery, and exact-revision release-control artifacts. The evaluator
 does not trust their top-level `ready` fields: it revalidates protocols,
-release bindings, raw resource limits, lifecycle coverage, target and worker
-matrices, scalar parity, runtime-permit cleanup, spill cleanup, crash-point
-coverage, required CI conclusions, artifact digests, and the caller-declared
-regression policy. Its output retains only source-artifact SHA-256 digests and
-assessments, so it can be retained as release evidence without copying queries,
+release bindings, every graph cold/warm resource run, the recomputed graph
+resource summary, lifecycle process-memory capabilities, raw resource limits,
+lifecycle coverage, target and worker matrices, scalar parity, runtime-permit
+cleanup, spill cleanup, crash-point coverage, required CI conclusions,
+artifact digests, and the caller-declared regression policy. A missing,
+truncated, reordered, incorrectly phased, over-budget, or summary-inconsistent
+graph run fails closed. Its output retains only source-artifact SHA-256 digests
+and assessments, so it can be retained as release evidence without copying queries,
 paths, embeddings, or row payloads.
 
 `skein-qualification-bundle` is a thin CI and release transport over that

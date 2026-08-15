@@ -18,6 +18,10 @@ and algorithms outside active routes are not implied backlog items.
   - Record revision, target, feature set, configuration digest, dataset
     fingerprint, steady and peak RSS, page faults, intermediate rows, payload
     bytes, cache residency, spill, and admission counters.
+  - The typed graph runner now retains every ordered cold/warm resource run,
+    its recomputed aggregate, and lifecycle process memory. The final bundle
+    rejects missing, truncated, reordered, over-budget, or inconsistent run
+    evidence instead of trusting only the last warm profile.
   - Bind the artifact to the release readiness bundle and reject stale or
     mismatched evidence.
   - Acceptance: traffic readiness is derived from the production-copy report,

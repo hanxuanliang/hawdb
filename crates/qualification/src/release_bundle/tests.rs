@@ -70,6 +70,71 @@ fn top_level_ready_cannot_hide_invalid_raw_storage_evidence() {
 }
 
 #[test]
+fn graph_resource_series_cannot_drop_the_cold_run() {
+    let expected = identity("linux", "x86_64");
+    let mut artifact = graph(&expected);
+    artifact["resource_runs"]
+        .as_array_mut()
+        .expect("resource runs are an array")
+        .remove(0);
+    let report = evaluate_production_release_qualification_bundle(
+        ProductionReleaseQualificationArtifacts {
+            graph_storage: Some(artifact),
+            ..ProductionReleaseQualificationArtifacts::default()
+        },
+        expected,
+        ProductionReleaseQualificationPolicy::default(),
+    );
+
+    assert!(!report.graph_storage.ready);
+    assert!(report
+        .graph_storage
+        .blocker_codes
+        .contains(&"graph_resource_run_count_mismatch".to_string()));
+}
+
+#[test]
+fn graph_resource_summary_cannot_hide_a_cold_run_limit_violation() {
+    let expected = identity("linux", "x86_64");
+    let mut artifact = graph(&expected);
+    artifact["resource_runs"][0]["steady_resident_bytes"] = serde_json::json!(10_001);
+    artifact["resource_summary"]["max_steady_resident_bytes"] = serde_json::json!(10_001);
+    let report = evaluate_production_release_qualification_bundle(
+        ProductionReleaseQualificationArtifacts {
+            graph_storage: Some(artifact),
+            ..ProductionReleaseQualificationArtifacts::default()
+        },
+        expected,
+        ProductionReleaseQualificationPolicy::default(),
+    );
+
+    assert!(!report.graph_storage.ready);
+    assert!(report
+        .graph_storage
+        .blocker_codes
+        .contains(&"graph_resource_run_steady_rss_limit_exceeded".to_string()));
+}
+
+#[test]
+fn windows_graph_resource_evidence_uses_total_page_faults_without_unix_split() {
+    let expected = identity("windows", "x86_64");
+    let report = evaluate_production_release_qualification_bundle(
+        ProductionReleaseQualificationArtifacts {
+            graph_storage: Some(graph(&expected)),
+            ..ProductionReleaseQualificationArtifacts::default()
+        },
+        expected,
+        ProductionReleaseQualificationPolicy::default(),
+    );
+
+    assert!(
+        report.graph_storage.ready,
+        "{:?}",
+        report.graph_storage.blocker_codes
+    );
+}
+
+#[test]
 fn vector_matrix_rejects_stale_shared_release_identity() {
     let expected = identity("linux", "x86_64");
     let mut stale = identity("linux", "aarch64");
@@ -291,6 +356,14 @@ fn latency() -> Value {
 }
 
 fn graph(identity: &ProductionQualificationIdentity) -> Value {
+    let split_page_faults = identity.target_os != "windows";
+    let lifecycle_minor_page_faults = split_page_faults.then_some(48u64);
+    let lifecycle_major_page_faults = split_page_faults.then_some(2u64);
+    let cold_minor_page_faults = split_page_faults.then_some(10u64);
+    let run_major_page_faults = split_page_faults.then_some(0u64);
+    let summary_major_page_faults = split_page_faults.then_some(0u64);
+    let profile_minor_page_faults = split_page_faults.then_some(10u64);
+    let profile_major_page_faults = split_page_faults.then_some(0u64);
     serde_json::json!({
         "protocol": "skein-production-graph-storage-qualification-v1",
         "evidence_kind": "representative_production_replica",
@@ -299,10 +372,88 @@ fn graph(identity: &ProductionQualificationIdentity) -> Value {
         "blocker_codes": [],
         "evidence_binding": binding(identity),
         "execution": {
-            "measurement_runs": 100,
-            "intermediate_rows": 100_000,
+            "measurement_runs": 2,
+            "output_rows": 20,
+            "output_payload_bytes": 2_000,
+            "intermediate_rows": 200_000,
+            "intermediate_payload_bytes": 2_000_000,
         },
         "runtime": runtime(),
+        "lifecycle_process_memory": {
+            "resident_memory_available": true,
+            "total_page_faults_available": true,
+            "split_page_faults_available": split_page_faults,
+            "start_resident_bytes": 1_000,
+            "start_peak_resident_bytes": 2_000,
+            "steady_resident_bytes": 6_000,
+            "peak_resident_bytes": 8_000,
+            "steady_resident_growth_bytes": 5_000,
+            "lifetime_peak_resident_growth_bytes": 6_000,
+            "total_page_faults": 50,
+            "minor_page_faults": lifecycle_minor_page_faults,
+            "major_page_faults": lifecycle_major_page_faults,
+        },
+        "resource_runs": [
+            {
+                "run": 0,
+                "phase": "cold",
+                "fully_streamed": true,
+                "output_rows": 10,
+                "output_payload_bytes": 1_000,
+                "intermediate_rows": 100_000,
+                "intermediate_payload_bytes": 1_000_000,
+                "steady_resident_bytes": 5_000,
+                "peak_resident_bytes": 7_000,
+                "steady_resident_growth_bytes": 500,
+                "lifetime_peak_resident_growth_bytes": 1_000,
+                "total_page_faults": 10,
+                "minor_page_faults": cold_minor_page_faults,
+                "major_page_faults": run_major_page_faults,
+                "segment_cache_resident_bytes_before": 0,
+                "segment_cache_resident_bytes_after": 512,
+                "segment_cache_hit_count": 0,
+                "segment_cache_miss_count": 1,
+                "segment_cache_eviction_count": 0,
+                "segment_cache_admission_rejection_count": 0,
+            },
+            {
+                "run": 1,
+                "phase": "warm",
+                "fully_streamed": true,
+                "output_rows": 10,
+                "output_payload_bytes": 1_000,
+                "intermediate_rows": 100_000,
+                "intermediate_payload_bytes": 1_000_000,
+                "steady_resident_bytes": 5_000,
+                "peak_resident_bytes": 7_000,
+                "steady_resident_growth_bytes": 0,
+                "lifetime_peak_resident_growth_bytes": 0,
+                "total_page_faults": 10,
+                "minor_page_faults": cold_minor_page_faults,
+                "major_page_faults": run_major_page_faults,
+                "segment_cache_resident_bytes_before": 512,
+                "segment_cache_resident_bytes_after": 512,
+                "segment_cache_hit_count": 1,
+                "segment_cache_miss_count": 0,
+                "segment_cache_eviction_count": 0,
+                "segment_cache_admission_rejection_count": 0,
+            }
+        ],
+        "resource_summary": {
+            "measurement_runs": 2,
+            "max_steady_resident_bytes": 5_000,
+            "max_peak_resident_bytes": 7_000,
+            "max_steady_resident_growth_bytes": 500,
+            "max_lifetime_peak_resident_growth_bytes": 1_000,
+            "total_page_faults": 20,
+            "minor_page_faults": split_page_faults.then_some(20u64),
+            "major_page_faults": summary_major_page_faults,
+            "max_segment_cache_resident_bytes": 512,
+            "segment_cache_hit_count": 1,
+            "segment_cache_miss_count": 1,
+            "segment_cache_eviction_count": 0,
+            "segment_cache_admission_rejection_count": 0,
+        },
         "storage_resource_profile": {
             "protocol": "skein-storage-resource-profile-v2",
             "resource_ready": true,
@@ -320,6 +471,7 @@ fn graph(identity: &ProductionQualificationIdentity) -> Value {
                 "max_intermediate_payload_bytes": 2_000_000,
                 "max_output_rows": 100,
                 "max_output_payload_bytes": 10_000,
+                "require_fully_streamed": true,
             },
             "storage": {
                 "durable": true,
@@ -327,14 +479,21 @@ fn graph(identity: &ProductionQualificationIdentity) -> Value {
                 "canonical_artifact_bytes": 2_000,
                 "canonical_exceeds_cache": true,
                 "delta_within_budget": true,
+                "segment_cache_capacity_bytes": 1_024,
+                "segment_cache_resident_bytes_before": 512,
+                "segment_cache_resident_bytes_after": 512,
+                "segment_cache_hit_count_delta": 1,
+                "segment_cache_miss_count_delta": 0,
+                "segment_cache_eviction_count_delta": 0,
+                "segment_cache_admission_rejection_count_delta": 0,
             },
             "execution": {
                 "fully_streamed": true,
                 "steady_resident_bytes": 5_000,
                 "peak_resident_bytes": 7_000,
                 "total_page_faults": 10,
-                "minor_page_faults": 10,
-                "major_page_faults": 0,
+                "minor_page_faults": profile_minor_page_faults,
+                "major_page_faults": profile_major_page_faults,
                 "intermediate_rows": 100_000,
                 "intermediate_payload_bytes": 1_000_000,
                 "output_rows": 10,
@@ -342,7 +501,7 @@ fn graph(identity: &ProductionQualificationIdentity) -> Value {
                 "metric_capabilities": {
                     "resident_memory": true,
                     "total_page_faults": true,
-                    "split_page_faults": true,
+                    "split_page_faults": split_page_faults,
                 },
             },
         },

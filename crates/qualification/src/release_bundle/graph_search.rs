@@ -80,6 +80,7 @@ pub(super) fn validate_graph(
         &mut blockers,
     );
     validate_profile_limits(profile, &mut blockers);
+    super::graph_resource::validate(artifact, profile, expected, &mut blockers);
     deduplicate(blockers)
 }
 
