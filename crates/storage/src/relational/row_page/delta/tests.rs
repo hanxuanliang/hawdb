@@ -26,7 +26,7 @@ fn immutable_runs_round_trip_across_bounded_flushes() {
         ..RelationalRowDeltaConfig::default()
     };
     let mut builder =
-        RelationalRowDeltaBuilder::new(&directory, &base, 1, None, table_schemas(), config)
+        RelationalRowDeltaBuilder::new(&directory, &base, 1, None, table_metadata(), config)
             .unwrap();
     builder.record(2, capture(2, Some("two-v2"))).unwrap();
     builder.record(3, capture(1, None)).unwrap();
@@ -97,7 +97,7 @@ fn dirty_run_coalesces_repeated_keys_to_the_latest_epoch() {
 fn delta_schema_must_match_the_base_root_column_count() {
     let directory = unique_test_dir("column-count-fence");
     let base = publish_and_open_base(&directory);
-    let mut schemas = table_schemas();
+    let mut schemas = table_metadata();
     schemas[0].column_count = NonZeroU32::new(3).unwrap();
     assert!(matches!(
         RelationalRowDeltaBuilder::new(
@@ -673,7 +673,7 @@ fn builder(
         base,
         delta_generation,
         expected_previous,
-        table_schemas(),
+        table_metadata(),
         config,
     )
     .unwrap()
@@ -716,11 +716,12 @@ fn publish_and_open_base(directory: &Path) -> RelationalRowPageRootReader {
         .unwrap()
 }
 
-fn table_schemas() -> Vec<RelationalRowDeltaTableSchema> {
-    vec![RelationalRowDeltaTableSchema {
+fn table_metadata() -> Vec<RelationalRowDeltaTableMetadata> {
+    vec![RelationalRowDeltaTableMetadata {
         table: "documents".to_string(),
         schema_digest: schema_digest(),
         column_count: NonZeroU32::new(2).unwrap(),
+        row_count: 1,
     }]
 }
 

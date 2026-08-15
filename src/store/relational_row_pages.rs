@@ -714,7 +714,7 @@ impl GraphStore {
         if self.commit_epoch == builder.base_commit_epoch() {
             return;
         }
-        match builder.finish(self.commit_epoch, None) {
+        match builder.finish_with_state(self.commit_epoch, None, &self.relational_state) {
             Ok(report) => match self.open_relational_row_delta_view(self.commit_epoch) {
                 Ok((view, _delta)) => {
                     self.relational_row_pages.read_view = Some(view);
@@ -1176,6 +1176,10 @@ mod tests {
             }
         ));
         let view = read_only.relational_row_pages.read_view.as_ref().unwrap();
+        assert_eq!(
+            view.recovery_delta().unwrap().manifest().tables()[0].row_count,
+            2
+        );
         assert!(matches!(
             view.overlay_value("documents", &key(2)).unwrap(),
             Some(skein_storage::RelationalRowPageRecoveredValue::Present(value))

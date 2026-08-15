@@ -23,7 +23,7 @@ pub use delta::{
     RelationalRowDeltaBaseBinding, RelationalRowDeltaBuilder, RelationalRowDeltaConfig,
     RelationalRowDeltaError, RelationalRowDeltaGeneration, RelationalRowDeltaManifest,
     RelationalRowDeltaPublicationPhase, RelationalRowDeltaReadReport, RelationalRowDeltaReader,
-    RelationalRowDeltaReport, RelationalRowDeltaTableSchema,
+    RelationalRowDeltaReport, RelationalRowDeltaTableMetadata,
     DEFAULT_RELATIONAL_ROW_DELTA_DIRTY_BYTES, DEFAULT_RELATIONAL_ROW_DELTA_DIRTY_ENTRIES,
     DEFAULT_RELATIONAL_ROW_DELTA_MANIFEST_BYTES, DEFAULT_RELATIONAL_ROW_DELTA_RUNS,
     DEFAULT_RELATIONAL_ROW_DELTA_RUN_BYTES, RELATIONAL_ROW_DELTA_MANIFEST_FILE,

@@ -796,7 +796,7 @@ fn visit_run(
 fn decode_value(
     kind: u8,
     encoded_row: &[u8],
-    table: &super::RelationalRowDeltaTableSchema,
+    table: &super::RelationalRowDeltaTableMetadata,
     config: RelationalRowDeltaConfig,
 ) -> Result<RelationalRowPageRecoveredValue, RelationalRowDeltaError> {
     if kind == 0 {

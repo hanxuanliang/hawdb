@@ -4,7 +4,7 @@ use crate::relational::{
     RelationalOverflowPublicationConfig, RelationalOverflowPublisher, RelationalOverflowRef,
     RelationalRow, RelationalRowChange, RelationalRowChangeCapture,
     RelationalRowChangeCaptureLimits, RelationalRowDeltaBuilder, RelationalRowDeltaConfig,
-    RelationalRowDeltaReader, RelationalRowDeltaTableSchema, RelationalRowPageEntry,
+    RelationalRowDeltaReader, RelationalRowDeltaTableMetadata, RelationalRowPageEntry,
     RelationalRowPageId, RelationalRowPagePublicationConfig, RelationalRowPagePublisher,
     RelationalRowPageRootReader, RelationalRowPageTableDelta, RelationalValue,
 };
@@ -415,10 +415,11 @@ impl SnapshotFixture {
             &row_root,
             1,
             None,
-            vec![RelationalRowDeltaTableSchema {
+            vec![RelationalRowDeltaTableMetadata {
                 table: "documents".to_string(),
                 schema_digest: schema_digest(),
                 column_count: NonZeroU32::new(2).unwrap(),
+                row_count: 3,
             }],
             delta_config,
         )

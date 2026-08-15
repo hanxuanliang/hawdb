@@ -6,10 +6,10 @@ EXTENDS Naturals, Sequences, FiniteSets
 (* Replay coalesces primary-key changes in a finite dirty map and flushes  *)
 (* complete ordered run sets before publishing an immutable generation     *)
 (* manifest. The abstract row-root fence includes generation, epoch, schema *)
-(* digest, and column count. The latest manifest is replaced only after     *)
-(* that fence and the previous-delta fence are revalidated. Failed or       *)
-(* poisoned candidates                                                     *)
-(* remain unreachable, while readers retain their selected generation.     *)
+(* digest, column count, and exact final row count. The latest manifest is  *)
+(* replaced only after that fence and the previous-delta fence are          *)
+(* revalidated. Failed or poisoned candidates remain unreachable, while     *)
+(* readers retain their selected generation.                               *)
 (***************************************************************************)
 
 CONSTANT MaxEpoch, DirtyBudget, MaxDeltaGeneration, MaxBaseGeneration
@@ -63,6 +63,7 @@ VARIABLES
     candidateExpectedPrevious,
     replayCursor,
     candidateState,
+    candidateRowCount,
     dirtyKeys,
     dirtyValues,
     candidateRuns,
@@ -76,10 +77,12 @@ VARIABLES
     selectedBaseGeneration,
     selectedEpoch,
     selectedState,
+    selectedRowCount,
     readerPinned,
     readerGeneration,
     readerEpoch,
     readerState,
+    readerRowCount,
     sqlUsesDelta
 
 vars == <<
@@ -96,6 +99,7 @@ vars == <<
     candidateExpectedPrevious,
     replayCursor,
     candidateState,
+    candidateRowCount,
     dirtyKeys,
     dirtyValues,
     candidateRuns,
@@ -109,10 +113,12 @@ vars == <<
     selectedBaseGeneration,
     selectedEpoch,
     selectedState,
+    selectedRowCount,
     readerPinned,
     readerGeneration,
     readerEpoch,
     readerState,
+    readerRowCount,
     sqlUsesDelta
 >>
 
@@ -130,6 +136,7 @@ Init ==
     /\ candidateExpectedPrevious = 0
     /\ replayCursor = 1
     /\ candidateState = BaseState
+    /\ candidateRowCount = Cardinality(BaseState)
     /\ dirtyKeys = {}
     /\ dirtyValues = [key \in Keys |-> FALSE]
     /\ candidateRuns = <<>>
@@ -143,10 +150,12 @@ Init ==
     /\ selectedBaseGeneration = BaseGeneration
     /\ selectedEpoch = BaseEpoch
     /\ selectedState = BaseState
+    /\ selectedRowCount = Cardinality(BaseState)
     /\ readerPinned = FALSE
     /\ readerGeneration = 0
     /\ readerEpoch = BaseEpoch
     /\ readerState = BaseState
+    /\ readerRowCount = Cardinality(BaseState)
     /\ sqlUsesDelta = FALSE
 
 Commit(present) ==
@@ -163,12 +172,12 @@ Commit(present) ==
         rowBaseGeneration, phase, nextDeltaGeneration,
         candidateGeneration, candidateBaseGeneration, candidateBaseEpoch,
         candidateTargetEpoch, candidateExpectedPrevious, replayCursor,
-        candidateState, dirtyKeys, dirtyValues, candidateRuns,
+        candidateState, candidateRowCount, dirtyKeys, dirtyValues, candidateRuns,
         durableRunSets, durableManifests, candidateNeedsOverflow,
         overflowRootReady, candidateOverflowClosed, poisoned,
         selectedGeneration, selectedBaseGeneration, selectedEpoch,
-        selectedState, readerPinned, readerGeneration, readerEpoch,
-        readerState, sqlUsesDelta
+        selectedState, selectedRowCount, readerPinned, readerGeneration, readerEpoch,
+        readerState, readerRowCount, sqlUsesDelta
         >>
 
 BeginGeneration(needsOverflow) ==
@@ -185,6 +194,7 @@ BeginGeneration(needsOverflow) ==
     /\ candidateExpectedPrevious' = selectedGeneration
     /\ replayCursor' = 1
     /\ candidateState' = BaseState
+    /\ candidateRowCount' = Cardinality(BaseState)
     /\ dirtyKeys' = {}
     /\ dirtyValues' = [key \in Keys |-> FALSE]
     /\ candidateRuns' = <<>>
@@ -195,8 +205,8 @@ BeginGeneration(needsOverflow) ==
         canonicalState, commitEpoch, wal, rowBaseGeneration,
         durableRunSets, durableManifests, overflowRootReady,
         selectedGeneration, selectedBaseGeneration, selectedEpoch,
-        selectedState, readerPinned, readerGeneration, readerEpoch,
-        readerState, sqlUsesDelta
+        selectedState, selectedRowCount, readerPinned, readerGeneration, readerEpoch,
+        readerState, readerRowCount, sqlUsesDelta
         >>
 
 ReplayNext ==
@@ -206,6 +216,7 @@ ReplayNext ==
         /\ \/ change.key \in dirtyKeys
            \/ Cardinality(dirtyKeys) < DirtyBudget
         /\ candidateState' = ApplyChange(candidateState, change)
+        /\ candidateRowCount' = Cardinality(ApplyChange(candidateState, change))
         /\ dirtyKeys' = dirtyKeys \cup {change.key}
         /\ dirtyValues' = [dirtyValues EXCEPT ![change.key] = change.present]
     /\ replayCursor' = replayCursor + 1
@@ -216,8 +227,8 @@ ReplayNext ==
         candidateRuns, durableRunSets, durableManifests,
         candidateNeedsOverflow, overflowRootReady, candidateOverflowClosed,
         poisoned, selectedGeneration, selectedBaseGeneration, selectedEpoch,
-        selectedState, readerPinned, readerGeneration, readerEpoch,
-        readerState, sqlUsesDelta
+        selectedState, selectedRowCount, readerPinned, readerGeneration, readerEpoch,
+        readerState, readerRowCount, sqlUsesDelta
         >>
 
 FlushDirty ==
@@ -233,11 +244,11 @@ FlushDirty ==
         canonicalState, commitEpoch, wal, rowBaseGeneration, phase,
         nextDeltaGeneration, candidateGeneration, candidateBaseGeneration,
         candidateBaseEpoch, candidateTargetEpoch, candidateExpectedPrevious,
-        replayCursor, candidateState, durableRunSets, durableManifests,
+        replayCursor, candidateState, candidateRowCount, durableRunSets, durableManifests,
         candidateNeedsOverflow, overflowRootReady, candidateOverflowClosed,
         poisoned, selectedGeneration, selectedBaseGeneration, selectedEpoch,
-        selectedState, readerPinned, readerGeneration, readerEpoch,
-        readerState, sqlUsesDelta
+        selectedState, selectedRowCount, readerPinned, readerGeneration, readerEpoch,
+        readerState, readerRowCount, sqlUsesDelta
         >>
 
 FinishReplay ==
@@ -245,6 +256,7 @@ FinishReplay ==
     /\ replayCursor > Len(wal)
     /\ dirtyKeys = {}
     /\ candidateState = canonicalState
+    /\ candidateRowCount = Cardinality(canonicalState)
     /\ candidateTargetEpoch = commitEpoch
     /\ phase' = "runsDurable"
     /\ durableRunSets' = durableRunSets \cup {candidateGeneration}
@@ -252,11 +264,11 @@ FinishReplay ==
         canonicalState, commitEpoch, wal, rowBaseGeneration,
         nextDeltaGeneration, candidateGeneration, candidateBaseGeneration,
         candidateBaseEpoch, candidateTargetEpoch, candidateExpectedPrevious,
-        replayCursor, candidateState, dirtyKeys, dirtyValues, candidateRuns,
+        replayCursor, candidateState, candidateRowCount, dirtyKeys, dirtyValues, candidateRuns,
         durableManifests, candidateNeedsOverflow, overflowRootReady,
         candidateOverflowClosed, poisoned, selectedGeneration,
-        selectedBaseGeneration, selectedEpoch, selectedState, readerPinned,
-        readerGeneration, readerEpoch, readerState, sqlUsesDelta
+        selectedBaseGeneration, selectedEpoch, selectedState, selectedRowCount, readerPinned,
+        readerGeneration, readerEpoch, readerState, readerRowCount, sqlUsesDelta
         >>
 
 PrepareOverflowRoot ==
@@ -266,11 +278,11 @@ PrepareOverflowRoot ==
         canonicalState, commitEpoch, wal, rowBaseGeneration, phase,
         nextDeltaGeneration, candidateGeneration, candidateBaseGeneration,
         candidateBaseEpoch, candidateTargetEpoch, candidateExpectedPrevious,
-        replayCursor, candidateState, dirtyKeys, dirtyValues, candidateRuns,
+        replayCursor, candidateState, candidateRowCount, dirtyKeys, dirtyValues, candidateRuns,
         durableRunSets, durableManifests, candidateNeedsOverflow,
         candidateOverflowClosed, poisoned, selectedGeneration,
-        selectedBaseGeneration, selectedEpoch, selectedState, readerPinned,
-        readerGeneration, readerEpoch, readerState, sqlUsesDelta
+        selectedBaseGeneration, selectedEpoch, selectedState, selectedRowCount, readerPinned,
+        readerGeneration, readerEpoch, readerState, readerRowCount, sqlUsesDelta
         >>
 
 ValidateOverflowClosure ==
@@ -283,11 +295,11 @@ ValidateOverflowClosure ==
         canonicalState, commitEpoch, wal, rowBaseGeneration, phase,
         nextDeltaGeneration, candidateGeneration, candidateBaseGeneration,
         candidateBaseEpoch, candidateTargetEpoch, candidateExpectedPrevious,
-        replayCursor, candidateState, dirtyKeys, dirtyValues, candidateRuns,
+        replayCursor, candidateState, candidateRowCount, dirtyKeys, dirtyValues, candidateRuns,
         durableRunSets, durableManifests, candidateNeedsOverflow,
         overflowRootReady, poisoned, selectedGeneration,
-        selectedBaseGeneration, selectedEpoch, selectedState, readerPinned,
-        readerGeneration, readerEpoch, readerState, sqlUsesDelta
+        selectedBaseGeneration, selectedEpoch, selectedState, selectedRowCount, readerPinned,
+        readerGeneration, readerEpoch, readerState, readerRowCount, sqlUsesDelta
         >>
 
 RejectMissingOverflow ==
@@ -300,11 +312,11 @@ RejectMissingOverflow ==
         canonicalState, commitEpoch, wal, rowBaseGeneration,
         nextDeltaGeneration, candidateGeneration, candidateBaseGeneration,
         candidateBaseEpoch, candidateTargetEpoch, candidateExpectedPrevious,
-        replayCursor, candidateState, dirtyKeys, dirtyValues, candidateRuns,
+        replayCursor, candidateState, candidateRowCount, dirtyKeys, dirtyValues, candidateRuns,
         durableRunSets, durableManifests, candidateNeedsOverflow,
         overflowRootReady, candidateOverflowClosed, selectedGeneration,
-        selectedBaseGeneration, selectedEpoch, selectedState, readerPinned,
-        readerGeneration, readerEpoch, readerState, sqlUsesDelta
+        selectedBaseGeneration, selectedEpoch, selectedState, selectedRowCount, readerPinned,
+        readerGeneration, readerEpoch, readerState, readerRowCount, sqlUsesDelta
         >>
 
 PersistGenerationManifest ==
@@ -317,11 +329,11 @@ PersistGenerationManifest ==
         canonicalState, commitEpoch, wal, rowBaseGeneration,
         nextDeltaGeneration, candidateGeneration, candidateBaseGeneration,
         candidateBaseEpoch, candidateTargetEpoch, candidateExpectedPrevious,
-        replayCursor, candidateState, dirtyKeys, dirtyValues, candidateRuns,
+        replayCursor, candidateState, candidateRowCount, dirtyKeys, dirtyValues, candidateRuns,
         durableRunSets, candidateNeedsOverflow, overflowRootReady,
         candidateOverflowClosed, poisoned, selectedGeneration,
-        selectedBaseGeneration, selectedEpoch, selectedState, readerPinned,
-        readerGeneration, readerEpoch, readerState, sqlUsesDelta
+        selectedBaseGeneration, selectedEpoch, selectedState, selectedRowCount, readerPinned,
+        readerGeneration, readerEpoch, readerState, readerRowCount, sqlUsesDelta
         >>
 
 PublishLatestManifest ==
@@ -337,14 +349,15 @@ PublishLatestManifest ==
     /\ selectedBaseGeneration' = candidateBaseGeneration
     /\ selectedEpoch' = candidateTargetEpoch
     /\ selectedState' = candidateState
+    /\ selectedRowCount' = candidateRowCount
     /\ UNCHANGED <<
         canonicalState, commitEpoch, wal, rowBaseGeneration,
         nextDeltaGeneration, candidateGeneration, candidateBaseGeneration,
         candidateBaseEpoch, candidateTargetEpoch, candidateExpectedPrevious,
-        replayCursor, candidateState, dirtyKeys, dirtyValues, candidateRuns,
+        replayCursor, candidateState, candidateRowCount, dirtyKeys, dirtyValues, candidateRuns,
         durableRunSets, durableManifests, candidateNeedsOverflow,
         overflowRootReady, candidateOverflowClosed, poisoned, readerPinned,
-        readerGeneration, readerEpoch, readerState, sqlUsesDelta
+        readerGeneration, readerEpoch, readerState, readerRowCount, sqlUsesDelta
         >>
 
 PublishCompetitor ==
@@ -355,6 +368,7 @@ PublishCompetitor ==
     /\ selectedBaseGeneration' = rowBaseGeneration
     /\ selectedEpoch' = commitEpoch
     /\ selectedState' = canonicalState
+    /\ selectedRowCount' = Cardinality(canonicalState)
     /\ durableRunSets' = durableRunSets \cup {candidateGeneration + 1}
     /\ durableManifests' = durableManifests \cup {candidateGeneration + 1}
     /\ nextDeltaGeneration' = candidateGeneration + 2
@@ -362,10 +376,10 @@ PublishCompetitor ==
         canonicalState, commitEpoch, wal, rowBaseGeneration, phase,
         candidateGeneration, candidateBaseGeneration, candidateBaseEpoch,
         candidateTargetEpoch, candidateExpectedPrevious, replayCursor,
-        candidateState, dirtyKeys, dirtyValues, candidateRuns,
+        candidateState, candidateRowCount, dirtyKeys, dirtyValues, candidateRuns,
         candidateNeedsOverflow, overflowRootReady, candidateOverflowClosed,
         poisoned, readerPinned, readerGeneration, readerEpoch, readerState,
-        sqlUsesDelta
+        readerRowCount, sqlUsesDelta
         >>
 
 AdvanceRowBase ==
@@ -376,12 +390,12 @@ AdvanceRowBase ==
         canonicalState, commitEpoch, wal, phase, nextDeltaGeneration,
         candidateGeneration, candidateBaseGeneration, candidateBaseEpoch,
         candidateTargetEpoch, candidateExpectedPrevious, replayCursor,
-        candidateState, dirtyKeys, dirtyValues, candidateRuns,
+        candidateState, candidateRowCount, dirtyKeys, dirtyValues, candidateRuns,
         durableRunSets, durableManifests, candidateNeedsOverflow,
         overflowRootReady, candidateOverflowClosed, poisoned,
         selectedGeneration, selectedBaseGeneration, selectedEpoch,
-        selectedState, readerPinned, readerGeneration, readerEpoch,
-        readerState, sqlUsesDelta
+        selectedState, selectedRowCount, readerPinned, readerGeneration, readerEpoch,
+        readerState, readerRowCount, sqlUsesDelta
         >>
 
 RejectStaleCandidate ==
@@ -394,11 +408,11 @@ RejectStaleCandidate ==
         canonicalState, commitEpoch, wal, rowBaseGeneration,
         nextDeltaGeneration, candidateGeneration, candidateBaseGeneration,
         candidateBaseEpoch, candidateTargetEpoch, candidateExpectedPrevious,
-        replayCursor, candidateState, dirtyKeys, dirtyValues, candidateRuns,
+        replayCursor, candidateState, candidateRowCount, dirtyKeys, dirtyValues, candidateRuns,
         durableRunSets, durableManifests, candidateNeedsOverflow,
         overflowRootReady, candidateOverflowClosed, selectedGeneration,
-        selectedBaseGeneration, selectedEpoch, selectedState, readerPinned,
-        readerGeneration, readerEpoch, readerState, sqlUsesDelta
+        selectedBaseGeneration, selectedEpoch, selectedState, selectedRowCount, readerPinned,
+        readerGeneration, readerEpoch, readerState, readerRowCount, sqlUsesDelta
         >>
 
 RejectPartialBatch ==
@@ -410,11 +424,11 @@ RejectPartialBatch ==
         canonicalState, commitEpoch, wal, rowBaseGeneration,
         nextDeltaGeneration, candidateGeneration, candidateBaseGeneration,
         candidateBaseEpoch, candidateTargetEpoch, candidateExpectedPrevious,
-        replayCursor, candidateState, dirtyKeys, dirtyValues, candidateRuns,
+        replayCursor, candidateState, candidateRowCount, dirtyKeys, dirtyValues, candidateRuns,
         durableRunSets, durableManifests, candidateNeedsOverflow,
         overflowRootReady, candidateOverflowClosed, selectedGeneration,
-        selectedBaseGeneration, selectedEpoch, selectedState, readerPinned,
-        readerGeneration, readerEpoch, readerState, sqlUsesDelta
+        selectedBaseGeneration, selectedEpoch, selectedState, selectedRowCount, readerPinned,
+        readerGeneration, readerEpoch, readerState, readerRowCount, sqlUsesDelta
         >>
 
 PinReader ==
@@ -424,15 +438,16 @@ PinReader ==
     /\ readerGeneration' = selectedGeneration
     /\ readerEpoch' = selectedEpoch
     /\ readerState' = selectedState
+    /\ readerRowCount' = selectedRowCount
     /\ UNCHANGED <<
         canonicalState, commitEpoch, wal, rowBaseGeneration, phase,
         nextDeltaGeneration, candidateGeneration, candidateBaseGeneration,
         candidateBaseEpoch, candidateTargetEpoch, candidateExpectedPrevious,
-        replayCursor, candidateState, dirtyKeys, dirtyValues, candidateRuns,
+        replayCursor, candidateState, candidateRowCount, dirtyKeys, dirtyValues, candidateRuns,
         durableRunSets, durableManifests, candidateNeedsOverflow,
         overflowRootReady, candidateOverflowClosed, poisoned,
         selectedGeneration, selectedBaseGeneration, selectedEpoch,
-        selectedState, sqlUsesDelta
+        selectedState, selectedRowCount, sqlUsesDelta
         >>
 
 Crash ==
@@ -445,6 +460,7 @@ Crash ==
     /\ candidateExpectedPrevious' = selectedGeneration
     /\ replayCursor' = 1
     /\ candidateState' = BaseState
+    /\ candidateRowCount' = Cardinality(BaseState)
     /\ dirtyKeys' = {}
     /\ dirtyValues' = [key \in Keys |-> FALSE]
     /\ candidateRuns' = <<>>
@@ -455,11 +471,12 @@ Crash ==
     /\ readerGeneration' = 0
     /\ readerEpoch' = BaseEpoch
     /\ readerState' = BaseState
+    /\ readerRowCount' = Cardinality(BaseState)
     /\ UNCHANGED <<
         canonicalState, commitEpoch, wal, rowBaseGeneration,
         nextDeltaGeneration, durableRunSets, durableManifests,
         overflowRootReady, selectedGeneration, selectedBaseGeneration,
-        selectedEpoch, selectedState, sqlUsesDelta
+        selectedEpoch, selectedState, selectedRowCount, sqlUsesDelta
         >>
 
 Next ==
@@ -498,6 +515,7 @@ TypeOK ==
     /\ candidateExpectedPrevious \in 0..MaxDeltaGeneration
     /\ replayCursor \in 1..(Len(wal) + 1)
     /\ candidateState \subseteq Keys
+    /\ candidateRowCount \in 0..Cardinality(Keys)
     /\ dirtyKeys \subseteq Keys
     /\ dirtyValues \in [Keys -> BOOLEAN]
     /\ candidateRuns \in Seq([keys: SUBSET Keys, values: [Keys -> BOOLEAN]])
@@ -511,10 +529,12 @@ TypeOK ==
     /\ selectedBaseGeneration \in BaseGeneration..MaxBaseGeneration
     /\ selectedEpoch \in BaseEpoch..MaxEpoch
     /\ selectedState \subseteq Keys
+    /\ selectedRowCount \in 0..Cardinality(Keys)
     /\ readerPinned \in BOOLEAN
     /\ readerGeneration \in 0..MaxDeltaGeneration
     /\ readerEpoch \in BaseEpoch..MaxEpoch
     /\ readerState \subseteq Keys
+    /\ readerRowCount \in 0..Cardinality(Keys)
     /\ sqlUsesDelta \in BOOLEAN
 
 CanonicalEqualsWal ==
@@ -545,6 +565,7 @@ SelectedGenerationIsComplete ==
     selectedGeneration # 0 =>
         /\ selectedEpoch <= commitEpoch
         /\ selectedState = StateAtEpoch(wal, selectedEpoch)
+        /\ selectedRowCount = Cardinality(selectedState)
 
 OnlyClosedOverflowPublishes ==
     selectedGeneration = candidateGeneration /\ candidateGeneration # 0 =>
@@ -564,6 +585,7 @@ PinnedReaderDoesNotDrift ==
     readerPinned =>
         /\ readerGeneration \in durableManifests
         /\ readerState = StateAtEpoch(wal, readerEpoch)
+        /\ readerRowCount = Cardinality(readerState)
 
 ProductionSqlRemainsOnCanonicalPath == ~sqlUsesDelta
 

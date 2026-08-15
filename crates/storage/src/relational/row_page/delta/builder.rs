@@ -2,7 +2,7 @@ use super::{
     codec, durability, relational_row_delta_manifest_generation_file,
     relational_row_delta_run_file, RelationalRowDeltaBaseBinding, RelationalRowDeltaConfig,
     RelationalRowDeltaError, RelationalRowDeltaGeneration, RelationalRowDeltaManifest,
-    RelationalRowDeltaPublicationPhase, RelationalRowDeltaReport, RelationalRowDeltaTableSchema,
+    RelationalRowDeltaPublicationPhase, RelationalRowDeltaReport, RelationalRowDeltaTableMetadata,
     RowDeltaKey, RowDeltaRunDescriptor, RowDeltaValue, COMPLETE_PUBLICATION_TRACE,
     RELATIONAL_ROW_DELTA_MANIFEST_FILE, RELATIONAL_ROW_DELTA_PUBLICATION_LOCK_FILE,
 };
@@ -37,7 +37,7 @@ pub struct RelationalRowDeltaBuilder {
     delta_generation: u64,
     expected_previous: Option<RelationalRowDeltaGeneration>,
     config: RelationalRowDeltaConfig,
-    tables: Vec<RelationalRowDeltaTableSchema>,
+    tables: Vec<RelationalRowDeltaTableMetadata>,
     schema_set_digest: skein_integrity::Sha256Digest,
     visible_commit_epoch: u64,
     replayed_batches: u64,
@@ -57,7 +57,7 @@ impl RelationalRowDeltaBuilder {
         state: &RelationalState,
         config: RelationalRowDeltaConfig,
     ) -> Result<(), RelationalRowDeltaError> {
-        let tables = table_schemas_for_state(state)?;
+        let tables = table_metadata_for_state(state)?;
         codec::validate_tables_against_base(base, tables, config)?;
         Ok(())
     }
@@ -91,7 +91,7 @@ impl RelationalRowDeltaBuilder {
         config: RelationalRowDeltaConfig,
     ) -> Result<Self, RelationalRowDeltaError> {
         let delta_generation = next_recovery_delta_generation(base, expected_previous)?;
-        let tables = table_schemas_for_state(state)?;
+        let tables = table_metadata_for_state(state)?;
         Self::new_inner(
             directory,
             base,
@@ -111,7 +111,7 @@ impl RelationalRowDeltaBuilder {
         state: &RelationalState,
         config: RelationalRowDeltaConfig,
     ) -> Result<Self, RelationalRowDeltaError> {
-        let tables = table_schemas_for_state(state)?;
+        let tables = table_metadata_for_state(state)?;
         Self::new(
             directory,
             base,
@@ -127,7 +127,7 @@ impl RelationalRowDeltaBuilder {
         base: &RelationalRowPageRootReader,
         delta_generation: u64,
         expected_previous: Option<RelationalRowDeltaGeneration>,
-        tables: Vec<RelationalRowDeltaTableSchema>,
+        tables: Vec<RelationalRowDeltaTableMetadata>,
         config: RelationalRowDeltaConfig,
     ) -> Result<Self, RelationalRowDeltaError> {
         Self::new_inner(
@@ -146,7 +146,7 @@ impl RelationalRowDeltaBuilder {
         base: &RelationalRowPageRootReader,
         delta_generation: u64,
         expected_previous: Option<RelationalRowDeltaGeneration>,
-        tables: Vec<RelationalRowDeltaTableSchema>,
+        tables: Vec<RelationalRowDeltaTableMetadata>,
         config: RelationalRowDeltaConfig,
         row_root_selection: RowRootSelection,
     ) -> Result<Self, RelationalRowDeltaError> {
@@ -242,11 +242,42 @@ impl RelationalRowDeltaBuilder {
         )
     }
 
+    #[cfg(test)]
     pub fn finish(
         self,
         expected_visible_commit_epoch: u64,
         overflow_root: Option<&RelationalOverflowRootReader>,
     ) -> Result<RelationalRowDeltaReport, RelationalRowDeltaError> {
+        self.finish_inner(expected_visible_commit_epoch, overflow_root, None)
+    }
+
+    /// Publishes a recovery delta with exact final row counts bound to the
+    /// same relational state that produced its captured row changes.
+    pub fn finish_with_state(
+        mut self,
+        expected_visible_commit_epoch: u64,
+        overflow_root: Option<&RelationalOverflowRootReader>,
+        final_state: &RelationalState,
+    ) -> Result<RelationalRowDeltaReport, RelationalRowDeltaError> {
+        let final_tables = table_metadata_for_state(final_state)?;
+        if final_tables.len() != self.tables.len()
+            || final_tables
+                .iter()
+                .zip(&self.tables)
+                .any(|(final_table, base_table)| {
+                    final_table.table != base_table.table
+                        || final_table.schema_digest != base_table.schema_digest
+                        || final_table.column_count != base_table.column_count
+                })
+        {
+            return Err(RelationalRowDeltaError::RequiresCheckpoint {
+                tables: final_tables
+                    .iter()
+                    .map(|table| table.table.clone())
+                    .collect(),
+            });
+        }
+        self.tables = final_tables;
         self.finish_inner(expected_visible_commit_epoch, overflow_root, None)
     }
 
@@ -718,9 +749,9 @@ fn next_row_delta_generation() -> u64 {
     generation.max(1)
 }
 
-fn table_schemas_for_state(
+fn table_metadata_for_state(
     state: &RelationalState,
-) -> Result<Vec<RelationalRowDeltaTableSchema>, RelationalRowDeltaError> {
+) -> Result<Vec<RelationalRowDeltaTableMetadata>, RelationalRowDeltaError> {
     state
         .table_schemas()
         .map(|schema| {
@@ -745,10 +776,16 @@ fn table_schemas_for_state(
                         schema.name
                     ))
                 })?;
-            Ok(RelationalRowDeltaTableSchema {
+            Ok(RelationalRowDeltaTableMetadata {
                 table: schema.name.clone(),
                 schema_digest,
                 column_count,
+                row_count: u64::try_from(state.row_count(&schema.name)).map_err(|_| {
+                    RelationalRowDeltaError::Admission(format!(
+                        "row delta table {} row count does not fit u64",
+                        schema.name
+                    ))
+                })?,
             })
         })
         .collect()

@@ -1,6 +1,6 @@
 use super::{
     durability, RelationalRowDeltaBaseBinding, RelationalRowDeltaConfig, RelationalRowDeltaError,
-    RelationalRowDeltaManifest, RelationalRowDeltaTableSchema, RowDeltaBound, RowDeltaKey,
+    RelationalRowDeltaManifest, RelationalRowDeltaTableMetadata, RowDeltaBound, RowDeltaKey,
     RowDeltaRunDescriptor, RowDeltaValue,
 };
 use crate::relational::row_page::{RelationalRowPageRootReader, RelationalRowPageTableRoot};
@@ -19,15 +19,15 @@ pub(super) const RUN_HEADER_BYTES: usize = 176;
 const RUN_INTEGRITY_OFFSET: usize = 140;
 pub(super) const ENTRY_DESCRIPTOR_BYTES: usize = 80;
 const ENTRY_BINDING_OFFSET: usize = 48;
-const TABLE_DESCRIPTOR_BYTES: usize = 40;
+const TABLE_DESCRIPTOR_BYTES: usize = 48;
 const RUN_DESCRIPTOR_BYTES: usize = 100;
 const DIRTY_ENTRY_OVERHEAD_BYTES: usize = 96;
 
 pub(super) fn validate_tables_against_base(
     base: &RelationalRowPageRootReader,
-    mut tables: Vec<RelationalRowDeltaTableSchema>,
+    mut tables: Vec<RelationalRowDeltaTableMetadata>,
     config: RelationalRowDeltaConfig,
-) -> Result<Vec<RelationalRowDeltaTableSchema>, RelationalRowDeltaError> {
+) -> Result<Vec<RelationalRowDeltaTableMetadata>, RelationalRowDeltaError> {
     if tables.len() > config.max_tables.get() {
         return Err(RelationalRowDeltaError::Admission(format!(
             "row delta declares {} tables, exceeding limit {}",
@@ -67,7 +67,7 @@ pub(super) fn validate_tables_against_base(
 }
 
 fn validate_table_against_base(
-    table: &RelationalRowDeltaTableSchema,
+    table: &RelationalRowDeltaTableMetadata,
     base: &RelationalRowPageTableRoot,
 ) -> Result<(), RelationalRowDeltaError> {
     if table.table != base.table
@@ -83,7 +83,7 @@ fn validate_table_against_base(
 }
 
 pub(super) fn schema_set_digest(
-    tables: &[RelationalRowDeltaTableSchema],
+    tables: &[RelationalRowDeltaTableMetadata],
 ) -> Result<Sha256Digest, RelationalRowDeltaError> {
     let mut hasher = IntegrityHasher::new();
     for table in tables {
@@ -112,7 +112,7 @@ pub(super) fn run_set_digest(
 }
 
 pub(super) fn ensure_manifest_capacity(
-    tables: &[RelationalRowDeltaTableSchema],
+    tables: &[RelationalRowDeltaTableMetadata],
     runs: &[RowDeltaRunDescriptor],
     config: RelationalRowDeltaConfig,
 ) -> Result<(), RelationalRowDeltaError> {
@@ -131,7 +131,7 @@ pub(super) fn ensure_manifest_capacity(
 }
 
 pub(super) fn ensure_next_run_manifest_capacity(
-    tables: &[RelationalRowDeltaTableSchema],
+    tables: &[RelationalRowDeltaTableMetadata],
     runs: &[RowDeltaRunDescriptor],
     lower_key_bytes: usize,
     upper_key_bytes: usize,
@@ -188,7 +188,7 @@ pub(super) fn encode_manifest(
     })?;
     let mut payload = Vec::with_capacity(payload_len);
     for table in &manifest.tables {
-        encode_table_schema(table, &mut payload)?;
+        encode_table_metadata(table, &mut payload)?;
     }
     for run in &manifest.runs {
         payload.extend_from_slice(&encode_run_descriptor(run)?);
@@ -322,7 +322,7 @@ fn decode_manifest(
     let mut offset = 0usize;
     let mut tables = Vec::with_capacity(table_count);
     for _ in 0..table_count {
-        tables.push(decode_table_schema(payload, &mut offset, config)?);
+        tables.push(decode_table_metadata(payload, &mut offset, config)?);
     }
     let mut runs = Vec::with_capacity(run_count);
     for _ in 0..run_count {
@@ -386,7 +386,7 @@ fn decode_manifest(
 }
 
 fn manifest_payload_len(
-    tables: &[RelationalRowDeltaTableSchema],
+    tables: &[RelationalRowDeltaTableMetadata],
     runs: &[RowDeltaRunDescriptor],
 ) -> Result<usize, RelationalRowDeltaError> {
     let table_bytes = tables.iter().try_fold(0usize, |bytes, table| {
@@ -412,8 +412,8 @@ fn manifest_payload_len(
     })
 }
 
-fn encode_table_schema(
-    table: &RelationalRowDeltaTableSchema,
+fn encode_table_metadata(
+    table: &RelationalRowDeltaTableMetadata,
     encoded: &mut Vec<u8>,
 ) -> Result<(), RelationalRowDeltaError> {
     let name_len = u32::try_from(table.table.len()).map_err(|_| {
@@ -423,16 +423,17 @@ fn encode_table_schema(
     })?;
     encoded.extend_from_slice(&name_len.to_le_bytes());
     encoded.extend_from_slice(&table.column_count.get().to_le_bytes());
+    encoded.extend_from_slice(&table.row_count.to_le_bytes());
     encoded.extend_from_slice(table.schema_digest.as_bytes());
     encoded.extend_from_slice(table.table.as_bytes());
     Ok(())
 }
 
-fn decode_table_schema(
+fn decode_table_metadata(
     encoded: &[u8],
     offset: &mut usize,
     config: RelationalRowDeltaConfig,
-) -> Result<RelationalRowDeltaTableSchema, RelationalRowDeltaError> {
+) -> Result<RelationalRowDeltaTableMetadata, RelationalRowDeltaError> {
     let fixed = take(
         encoded,
         offset,
@@ -444,7 +445,7 @@ fn decode_table_schema(
         RelationalRowDeltaError::Corrupt("row delta table has zero columns".to_string())
     })?;
     let name = take(encoded, offset, name_len, "row delta table name")?;
-    let table = RelationalRowDeltaTableSchema {
+    let table = RelationalRowDeltaTableMetadata {
         table: std::str::from_utf8(name)
             .map_err(|error| {
                 RelationalRowDeltaError::Corrupt(format!(
@@ -453,11 +454,12 @@ fn decode_table_schema(
             })?
             .to_string(),
         schema_digest: Sha256Digest::from_bytes(
-            fixed[8..40]
+            fixed[16..48]
                 .try_into()
                 .expect("schema digest has a fixed length"),
         ),
         column_count,
+        row_count: read_u64(&fixed[8..16]),
     };
     validate_table_schema(&table, config, ErrorClass::Corrupt)?;
     Ok(table)
@@ -652,7 +654,7 @@ fn validate_manifest(
 }
 
 fn validate_table_schema(
-    table: &RelationalRowDeltaTableSchema,
+    table: &RelationalRowDeltaTableMetadata,
     config: RelationalRowDeltaConfig,
     class: ErrorClass,
 ) -> Result<(), RelationalRowDeltaError> {

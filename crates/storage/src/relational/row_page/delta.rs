@@ -102,10 +102,11 @@ impl RelationalRowDeltaBaseBinding {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RelationalRowDeltaTableSchema {
+pub struct RelationalRowDeltaTableMetadata {
     pub table: String,
     pub schema_digest: Sha256Digest,
     pub column_count: NonZeroU32,
+    pub row_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,7 +117,7 @@ pub struct RelationalRowDeltaManifest {
     pub schema_set_digest: Sha256Digest,
     pub run_set_digest: Sha256Digest,
     pub overflow_root: Option<RelationalOverflowRootBinding>,
-    tables: Vec<RelationalRowDeltaTableSchema>,
+    tables: Vec<RelationalRowDeltaTableMetadata>,
     runs: Vec<RowDeltaRunDescriptor>,
     total_entries: u64,
 }
@@ -129,7 +130,7 @@ impl RelationalRowDeltaManifest {
         }
     }
 
-    pub fn tables(&self) -> &[RelationalRowDeltaTableSchema] {
+    pub fn tables(&self) -> &[RelationalRowDeltaTableMetadata] {
         &self.tables
     }
 

@@ -156,7 +156,7 @@ pub use relational::{
     RelationalRowChangeCaptureLimits, RelationalRowDeltaBaseBinding, RelationalRowDeltaBuilder,
     RelationalRowDeltaConfig, RelationalRowDeltaError, RelationalRowDeltaGeneration,
     RelationalRowDeltaManifest, RelationalRowDeltaPublicationPhase, RelationalRowDeltaReadReport,
-    RelationalRowDeltaReader, RelationalRowDeltaReport, RelationalRowDeltaTableSchema,
+    RelationalRowDeltaReader, RelationalRowDeltaReport, RelationalRowDeltaTableMetadata,
     RelationalRowPageArtifactMetadata, RelationalRowPageBootstrap,
     RelationalRowPageBootstrapReport, RelationalRowPageCheckpointError,
     RelationalRowPageDemandReadError, RelationalRowPageDemandReadLimits,

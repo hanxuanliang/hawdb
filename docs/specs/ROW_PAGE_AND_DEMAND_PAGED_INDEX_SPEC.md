@@ -938,17 +938,20 @@ new candidate file is created.
 One generation has both an immutable manifest
 `relational-row-delta-{base_generation}-{delta_generation}.manifest.skein`
 and the publish-last selector `relational-row-delta.manifest.skein`.
-`SKRDMF01` version 1 has a fixed 248-byte header followed by 40-byte table
+`SKRDMF01` version 1 has a fixed 248-byte header followed by 48-byte table
 descriptors plus names and 100-byte run descriptors plus lower/upper keys. It
-binds exact table and run-set digests, optional overflow-root identity, run
-artifact length and digest, total entries, and the complete epoch fence. Table
-count, run count, manifest bytes, dirty bytes, row/key sizes, and cumulative
-run bytes are independently bounded. Normal open validates this bounded
-manifest and exact run file lengths only; descriptor, payload, and full-run
-integrity are demand-checked while visiting the selected runs. Callback effects
-remain provisional until a complete visit returns success. An explicit early
-stop verifies each emitted entry binding but does not read or hash the
-unselected suffix.
+binds each table's schema identity and exact final row count from the same
+`RelationalState` that produced the recovery changes, plus exact table and
+run-set digests, optional overflow-root identity, run artifact length and
+digest, total entries, and the complete epoch fence. A schema or table-set
+change requires a new checkpoint rather than publishing counts against a
+different catalog. Table count, run count, manifest bytes, dirty bytes, row/key
+sizes, and cumulative run bytes are independently bounded. Normal open
+validates this bounded manifest and exact run file lengths only; descriptor,
+payload, and full-run integrity are demand-checked while visiting the selected
+runs. Callback effects remain provisional until a complete visit returns
+success. An explicit early stop verifies each emitted entry binding but does
+not read or hash the unselected suffix.
 
 Publication is manifest-last:
 
@@ -1562,8 +1565,9 @@ checkpoint binding, demand-read, lifecycle, or serving obligations.
   separate SQL serving refinement.
 - `SkeinRowDeltaRuns.tla`: bounded coalescing and immutable run flush,
   overflow closure, run-before-generation-manifest durability, row-root and
-  previous-delta fencing, manifest-last selection, crash isolation, poisoned
-  candidate rejection, and pinned generation stability.
+  previous-delta fencing, exact final row-count publication, manifest-last
+  selection, crash isolation, poisoned candidate rejection, and pinned
+  generation stability.
 - `SkeinRelationalRowDemandRead.tla`: exact root-generation pinning, cold page
   residency, ordered streaming, page/byte/row/tree-height/hydration bounds,
   requested-field-only overflow hydration, one-page pins, cancellation and

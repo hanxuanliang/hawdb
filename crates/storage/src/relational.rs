@@ -67,7 +67,7 @@ pub use row_page::{
     RelationalRowDeltaBaseBinding, RelationalRowDeltaBuilder, RelationalRowDeltaConfig,
     RelationalRowDeltaError, RelationalRowDeltaGeneration, RelationalRowDeltaManifest,
     RelationalRowDeltaPublicationPhase, RelationalRowDeltaReadReport, RelationalRowDeltaReader,
-    RelationalRowDeltaReport, RelationalRowDeltaTableSchema, RelationalRowPageArtifactMetadata,
+    RelationalRowDeltaReport, RelationalRowDeltaTableMetadata, RelationalRowPageArtifactMetadata,
     RelationalRowPageBootstrap, RelationalRowPageBootstrapReport, RelationalRowPageCheckpointError,
     RelationalRowPageDemandReadError, RelationalRowPageDemandReadLimits,
     RelationalRowPageDemandReadReport, RelationalRowPageDemandReader, RelationalRowPageEntry,
