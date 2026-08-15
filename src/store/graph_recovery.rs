@@ -762,9 +762,8 @@ impl GraphStore {
                     "relational checkpoint contains {file_len} bytes, exceeding max_record_bytes {max_bytes}"
                 )));
             }
-            let bytes = fs::read(&path)?;
-            verify_integrity(
-                &bytes,
+            verify_file_integrity(
+                &path,
                 metadata.encoded_len,
                 metadata.encoded_checksum,
                 metadata.encoded_sha256,

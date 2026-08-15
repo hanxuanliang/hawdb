@@ -208,6 +208,9 @@ checksummed generation checkpoint, which is published by the same durable
 manifest as graph canonical segments and the replacement WAL. Backup, restore,
 scrub, generation reclamation, and reopen include this artifact and fail closed
 when it is missing, corrupt, oversized, or carries a different commit epoch.
+Ordinary reopen verifies the outer relational-checkpoint identity with a bounded
+streaming buffer before the file decoder runs; checkpoint size MUST NOT create a
+second full-file validation buffer beside decoded relational state.
 There is no second relational WAL, fsync stream, database handle, or production
 sidecar API.
 

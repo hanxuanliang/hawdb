@@ -5437,6 +5437,32 @@ fn verify_integrity(
     Ok(())
 }
 
+fn verify_file_integrity(
+    path: &Path,
+    expected_len: u64,
+    expected_checksum: u64,
+    expected_sha256: Sha256Digest,
+    artifact: &str,
+) -> Result<()> {
+    let (actual_len, actual_checksum, actual_sha256) = file_checksum(path)?;
+    if actual_len != expected_len {
+        return Err(SkeinError::Storage(format!(
+            "{artifact} encoded length mismatch: expected {expected_len}, got {actual_len}"
+        )));
+    }
+    if actual_checksum != expected_checksum {
+        return Err(SkeinError::Storage(format!(
+            "{artifact} CRC32C mismatch: expected {expected_checksum}, got {actual_checksum}"
+        )));
+    }
+    if actual_sha256 != expected_sha256 {
+        return Err(SkeinError::Storage(format!(
+            "{artifact} SHA-256 mismatch: expected {expected_sha256}, got {actual_sha256}"
+        )));
+    }
+    Ok(())
+}
+
 fn elapsed_micros(started: std::time::Instant) -> u64 {
     started.elapsed().as_micros().min(u64::MAX as u128) as u64
 }
