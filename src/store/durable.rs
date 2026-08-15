@@ -42,15 +42,15 @@ use skein_storage::{
     FileSegmentRangeReader, ManifestGeneration, NodeId, NodeRecord,
     PersistentPropertyProjectionConfig, PersistentPropertyProjectionDefinition,
     PersistentPropertyProjectionManifest, PersistentPropertyProjectionReader,
-    PersistentPropertyProjectionWriter, ProjectedGraphDefinition, PropertySpillConfig,
-    PropertySpillManifest, PropertySpillReader, RelId, RelRecord, RelationalDecodeLimits,
-    RelationalIndexArtifactMetadata, RelationalIndexGenerationArtifacts,
-    RelationalOverflowArtifactMetadata, RelationalOverflowGenerationArtifacts,
-    RelationalRowPageArtifactMetadata, RelationalRowPageGenerationArtifacts, RelationalState,
-    ScanSegmentManifest, SearchProjectionGraphChange, SegmentCache, StorageBackupReport,
-    StorageDebtController, StoragePressureSignals, StorageScrubReport, StoreId,
-    StoreStableIdMapping, WalReplayConfig, WalSyncGroupFlush, WalSyncGroupProgress,
-    WalSyncGroupState,
+    PersistentPropertyProjectionRecord, PersistentPropertyProjectionWriter,
+    ProjectedGraphDefinition, PropertySpillConfig, PropertySpillManifest, PropertySpillReader,
+    RelId, RelRecord, RelationalDecodeLimits, RelationalIndexArtifactMetadata,
+    RelationalIndexGenerationArtifacts, RelationalOverflowArtifactMetadata,
+    RelationalOverflowGenerationArtifacts, RelationalRowPageArtifactMetadata,
+    RelationalRowPageGenerationArtifacts, RelationalState, ScanSegmentManifest,
+    SearchProjectionGraphChange, SegmentCache, StorageBackupReport, StorageDebtController,
+    StoragePressureSignals, StorageScrubReport, StoreId, StoreStableIdMapping, WalReplayConfig,
+    WalSyncGroupFlush, WalSyncGroupProgress, WalSyncGroupState,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -1565,7 +1565,7 @@ impl DurableStore {
     where
         N: IntoIterator<
             Item = std::result::Result<
-                NodeRecord,
+                PersistentPropertyProjectionRecord,
                 skein_storage::PersistentPropertyProjectionError,
             >,
         >,

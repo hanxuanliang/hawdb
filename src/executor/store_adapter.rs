@@ -92,6 +92,35 @@ impl GraphExecutionRead for GraphStore {
         .map(to_execution_control)
     }
 
+    fn visit_adjacent_relationships_with_filter_owned(
+        &self,
+        node_id: NodeId,
+        rel_type: Option<RelTypeId>,
+        direction: AdjacencyDirection,
+        filter: &PropertyFilter,
+        consumer: &mut dyn FnMut(RelRecord) -> Result<ScanControl>,
+    ) -> Result<(ScanControl, Option<skein_storage::ScanPruningReport>)> {
+        let mut consumer_error = None;
+        let (control, report) = GraphStore::visit_adjacent_relationships_with_filter_owned(
+            self,
+            node_id,
+            rel_type,
+            direction,
+            filter,
+            |relationship| match consumer(relationship) {
+                Ok(control) => to_store_control(control),
+                Err(error) => {
+                    consumer_error = Some(error);
+                    GraphScanControl::Stop
+                }
+            },
+        )?;
+        match consumer_error {
+            Some(error) => Err(error),
+            None => Ok((to_execution_control(control), report)),
+        }
+    }
+
     fn scan_relationships_with_filter_pruning<'a>(
         &'a self,
         rel_type: Option<RelTypeId>,

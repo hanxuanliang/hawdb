@@ -2,6 +2,42 @@
 
 use super::*;
 
+fn push_property_projection_definition(
+    definitions: &mut Vec<PersistentPropertyProjectionDefinition>,
+    admission: &mut PersistentPropertyProjectionDefinitionAdmission,
+    definition: PersistentPropertyProjectionDefinition,
+) -> Result<()> {
+    admission
+        .admit(&definition)
+        .map_err(|error| SkeinError::Storage(error.to_string()))?;
+    definitions.push(definition);
+    Ok(())
+}
+
+fn push_relationship_property_projection_definitions(
+    definitions: &mut Vec<PersistentPropertyProjectionDefinition>,
+    admission: &mut PersistentPropertyProjectionDefinitionAdmission,
+    rel_type: RelTypeId,
+    property: &str,
+) -> Result<()> {
+    for kind in [
+        PersistentPropertyProjectionKind::RelationshipEquality,
+        PersistentPropertyProjectionKind::RelationshipRange,
+    ] {
+        push_property_projection_definition(
+            definitions,
+            admission,
+            PersistentPropertyProjectionDefinition {
+                label_id: LabelId(rel_type.0),
+                property: property.to_string(),
+                kind,
+                complete: false,
+            },
+        )?;
+    }
+    Ok(())
+}
+
 impl GraphStore {
     pub fn checkpoint(&mut self, catalog: &Catalog) -> Result<()> {
         self.checkpoint_with_reader_epoch(catalog, None)
@@ -111,38 +147,86 @@ impl GraphStore {
                 record.map_err(|error| CanonicalSegmentError::Source(error.to_string()))
             })
         });
-        let property_projection_nodes = self.canonical_base.as_ref().map(|_| {
-            self.node_records_owned().map(|record| {
-                record.map_err(|error| {
-                    skein_storage::PersistentPropertyProjectionError::Source(error.to_string())
-                })
-            })
+        let property_projection_records = self.canonical_base.as_ref().map(|_| {
+            let nodes = self.node_records_owned().map(|record| {
+                record
+                    .map(PersistentPropertyProjectionRecord::Node)
+                    .map_err(|error| {
+                        skein_storage::PersistentPropertyProjectionError::Source(error.to_string())
+                    })
+            });
+            let relationships = self.relationship_records_owned().map(|record| {
+                record
+                    .map(PersistentPropertyProjectionRecord::Relationship)
+                    .map_err(|error| {
+                        skein_storage::PersistentPropertyProjectionError::Source(error.to_string())
+                    })
+            });
+            nodes.chain(relationships)
         });
-        let mut property_projection_definitions = catalog
-            .property_indexes()
-            .map(|index| {
-                let kind = match index.kind {
-                    IndexKind::Equality => PersistentPropertyProjectionKind::Equality,
-                    IndexKind::Range => PersistentPropertyProjectionKind::Range,
-                    IndexKind::FullText => PersistentPropertyProjectionKind::FullText,
-                };
+        let mut property_projection_definitions = Vec::new();
+        let mut property_projection_definition_admission =
+            PersistentPropertyProjectionDefinitionAdmission::new(build_config.property_projection);
+        for index in catalog.property_indexes() {
+            let kind = match index.kind {
+                IndexKind::Equality => PersistentPropertyProjectionKind::Equality,
+                IndexKind::Range => PersistentPropertyProjectionKind::Range,
+                IndexKind::FullText => PersistentPropertyProjectionKind::FullText,
+            };
+            push_property_projection_definition(
+                &mut property_projection_definitions,
+                &mut property_projection_definition_admission,
                 PersistentPropertyProjectionDefinition {
                     label_id: index.label_id,
                     property: index.property.clone(),
                     kind,
                     complete: false,
-                }
-            })
-            .collect::<Vec<_>>();
+                },
+            )?;
+        }
         for index in catalog.composite_property_indexes() {
             let property = persistent_composite_property_identity(&index.properties)
                 .map_err(|error| SkeinError::Storage(error.to_string()))?;
-            property_projection_definitions.push(PersistentPropertyProjectionDefinition {
-                label_id: index.label_id,
-                property,
-                kind: PersistentPropertyProjectionKind::CompositeEquality,
-                complete: false,
-            });
+            push_property_projection_definition(
+                &mut property_projection_definitions,
+                &mut property_projection_definition_admission,
+                PersistentPropertyProjectionDefinition {
+                    label_id: index.label_id,
+                    property,
+                    kind: PersistentPropertyProjectionKind::CompositeEquality,
+                    complete: false,
+                },
+            )?;
+        }
+        let mut relationship_property_definitions = BTreeSet::new();
+        for (rel_type, property, _) in self.relationship_property_index.keys() {
+            if relationship_property_definitions.insert((*rel_type, property.clone())) {
+                push_relationship_property_projection_definitions(
+                    &mut property_projection_definitions,
+                    &mut property_projection_definition_admission,
+                    *rel_type,
+                    property,
+                )?;
+            }
+        }
+        if let Some(projection) = &self.persistent_property_projection {
+            for definition in &projection.manifest().definitions {
+                if matches!(
+                    definition.kind,
+                    PersistentPropertyProjectionKind::RelationshipEquality
+                        | PersistentPropertyProjectionKind::RelationshipRange
+                ) && relationship_property_definitions.insert((
+                    RelTypeId(definition.label_id.0),
+                    definition.property.clone(),
+                )) {
+                    push_relationship_property_projection_definitions(
+                        &mut property_projection_definitions,
+                        &mut property_projection_definition_admission,
+                        RelTypeId(definition.label_id.0),
+                        &definition.property,
+                    )?;
+                }
+            }
         }
         let merged_relationships = self.canonical_base.as_ref().map(|_| {
             self.relationship_records_owned().map(|record| {
@@ -206,17 +290,28 @@ impl GraphStore {
                     build_config.adjacency,
                 )?,
             };
-            let property_projection_manifest_artifact = match property_projection_nodes {
-                Some(nodes) => durable.write_persistent_property_projection(
+            let property_projection_manifest_artifact = match property_projection_records {
+                Some(records) => durable.write_persistent_property_projection(
                     property_projection_definitions,
-                    nodes,
+                    records,
                     generation,
                     commit_epoch,
                     build_config.property_projection,
                 )?,
                 None => durable.write_persistent_property_projection(
                     property_projection_definitions,
-                    self.nodes.values().cloned().map(Ok),
+                    self.nodes
+                        .values()
+                        .cloned()
+                        .map(PersistentPropertyProjectionRecord::Node)
+                        .map(Ok)
+                        .chain(
+                            self.relationships
+                                .values()
+                                .cloned()
+                                .map(PersistentPropertyProjectionRecord::Relationship)
+                                .map(Ok),
+                        ),
                     generation,
                     commit_epoch,
                     build_config.property_projection,

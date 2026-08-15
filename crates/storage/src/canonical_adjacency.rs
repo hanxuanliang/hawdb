@@ -1201,6 +1201,26 @@ impl CanonicalAdjacencyReader {
         &self.manifest
     }
 
+    pub fn estimate_endpoint_entries(
+        &self,
+        endpoint: NodeId,
+        direction: AdjacencyDirection,
+        rel_type: Option<RelTypeId>,
+    ) -> u64 {
+        let direction = direction_tag(direction);
+        let start = self.manifest.blocks.partition_point(|block| {
+            (direction_tag(block.direction), block.endpoint.0) < (direction, endpoint.0)
+        });
+        let end = self.manifest.blocks.partition_point(|block| {
+            (direction_tag(block.direction), block.endpoint.0) <= (direction, endpoint.0)
+        });
+        self.manifest.blocks[start..end]
+            .iter()
+            .filter(|block| rel_type.is_none_or(|expected| block.rel_type == expected))
+            .map(|block| u64::from(block.record_count))
+            .sum()
+    }
+
     pub fn scan_endpoint_control(
         &self,
         endpoint: NodeId,

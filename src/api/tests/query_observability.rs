@@ -361,6 +361,68 @@ fn explain_analyze_reports_relationship_property_scan_pruning_profile() {
 }
 
 #[test]
+fn explain_analyze_reports_out_of_core_relationship_projection_pruning() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "skein-relationship-projection-profile-{}-{nonce}",
+        std::process::id(),
+    ));
+    let mut db = Database::open_with_config(
+        &path,
+        DatabaseConfig {
+            storage_residency_mode: crate::StorageResidencyMode::OutOfCore,
+            ..DatabaseConfig::default()
+        },
+    )
+    .unwrap();
+    db.query("CREATE (:Memory {id: 'source'})").unwrap();
+    for (id, rank) in [("old", 10), ("selected", 20), ("new", 30)] {
+        db.query(&format!("CREATE (:Entity {{id: '{id}'}})"))
+            .unwrap();
+        db.query(&format!(
+            "MATCH (m:Memory {{id: 'source'}}), (e:Entity {{id: '{id}'}}) \
+             CREATE (m)-[:LINKS_TO {{rank: {rank}}}]->(e)"
+        ))
+        .unwrap();
+    }
+    db.checkpoint().unwrap();
+
+    let output = db
+        .explain_analyze_query(
+            "MATCH (m:Memory {id: 'source'})-[r:LINKS_TO {rank: 20}]->(e:Entity) \
+             RETURN e.id AS id",
+        )
+        .unwrap();
+
+    assert_eq!(output.output.rows.len(), 1);
+    assert_eq!(
+        output.output.rows[0].get("id"),
+        Some(&Value::String("selected".to_string()))
+    );
+    let relationship_scan = output
+        .execution_profile
+        .scan_pruning_reports
+        .iter()
+        .find(|scan| {
+            matches!(
+                scan.strategy,
+                crate::store::ScanPruningStrategy::PropertyEq { ref property }
+                    if property == "rank"
+            )
+        })
+        .expect("out-of-core relationship projection pruning report");
+    assert!(relationship_scan.pruned);
+    assert_eq!(relationship_scan.candidate_count_before_pruning, 3);
+    assert_eq!(relationship_scan.output_count, 1);
+
+    drop(db);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn explain_analyze_pushes_relationship_where_predicate_to_scan_pruning() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'source'})").unwrap();

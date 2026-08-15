@@ -1421,6 +1421,149 @@ impl GraphStore {
         Ok(GraphScanControl::Continue)
     }
 
+    pub fn visit_adjacent_relationships_with_filter_owned(
+        &self,
+        node_id: NodeId,
+        rel_type: Option<RelTypeId>,
+        direction: AdjacencyDirection,
+        filter: &PropertyFilter,
+        mut consumer: impl FnMut(RelRecord) -> GraphScanControl,
+    ) -> Result<(GraphScanControl, Option<ScanPruningReport>)> {
+        let Some(rel_type) = rel_type else {
+            return self.visit_adjacent_relationships_filter_fallback(
+                node_id, None, direction, filter, consumer,
+            );
+        };
+        let (Some(reader), Some(adjacency), Some(projection)) = (
+            self.canonical_base.as_ref(),
+            self.canonical_adjacency.as_ref(),
+            self.persistent_property_projection.as_ref(),
+        ) else {
+            return self.visit_adjacent_relationships_filter_fallback(
+                node_id,
+                Some(rel_type),
+                direction,
+                filter,
+                consumer,
+            );
+        };
+        let Some(probe) = relationship_projection_probe(projection, rel_type, filter) else {
+            return self.visit_adjacent_relationships_filter_fallback(
+                node_id,
+                Some(rel_type),
+                direction,
+                filter,
+                consumer,
+            );
+        };
+        let adjacency_entries =
+            adjacency.estimate_endpoint_entries(node_id, direction, Some(rel_type));
+        if probe.estimated_entries() > adjacency_entries {
+            return self.visit_adjacent_relationships_filter_fallback(
+                node_id,
+                Some(rel_type),
+                direction,
+                filter,
+                consumer,
+            );
+        }
+
+        let mut graph_control = GraphScanControl::Continue;
+        let mut candidate_count = 0usize;
+        let mut output_count = 0usize;
+        let projection_control = probe
+            .scan(projection, |relationship_id| {
+                if self.relationship_tombstones.contains(&relationship_id)
+                    || self.relationships.contains_key(&relationship_id)
+                {
+                    return Ok(CanonicalScanControl::Continue);
+                }
+                candidate_count = candidate_count.saturating_add(1);
+                let relationship = reader
+                    .get_relationship(relationship_id)?
+                    .ok_or_else(|| {
+                        PersistentPropertyProjectionError::Corrupt(format!(
+                            "relationship property projection references missing canonical relationship {}",
+                            relationship_id.0
+                        ))
+                    })?;
+                if relationship.rel_type != rel_type || !probe.matches(&relationship) {
+                    return Err(PersistentPropertyProjectionError::Corrupt(format!(
+                        "relationship property projection candidate {} fails its canonical seek predicate",
+                        relationship_id.0
+                    )));
+                }
+                if relationship_matches_endpoint(&relationship, node_id, direction)
+                    && property_filter_matches(
+                        filter,
+                        relationship.id.0,
+                        &relationship.properties,
+                    )
+                {
+                    output_count = output_count.saturating_add(1);
+                    if consumer(relationship) == GraphScanControl::Stop {
+                        graph_control = GraphScanControl::Stop;
+                        return Ok(CanonicalScanControl::Stop);
+                    }
+                }
+                Ok(CanonicalScanControl::Continue)
+            })
+            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+        if projection_control == CanonicalScanControl::Stop {
+            return Ok((graph_control, None));
+        }
+        for relationship in self.relationships.values() {
+            if relationship.rel_type != rel_type || !probe.matches(relationship) {
+                continue;
+            }
+            candidate_count = candidate_count.saturating_add(1);
+            if relationship_matches_endpoint(relationship, node_id, direction)
+                && property_filter_matches(filter, relationship.id.0, &relationship.properties)
+            {
+                output_count = output_count.saturating_add(1);
+                if consumer(relationship.clone()) == GraphScanControl::Stop {
+                    return Ok((GraphScanControl::Stop, None));
+                }
+            }
+        }
+        let candidate_count_before_pruning = self.relationship_count_for_type(Some(rel_type));
+        Ok((
+            GraphScanControl::Continue,
+            Some(ScanPruningReport {
+                target_kind: ScanPruningTargetKind::Relationship,
+                label_id: None,
+                rel_type_id: Some(rel_type),
+                strategy: probe.strategy(),
+                pruned: true,
+                exact_empty: candidate_count == 0,
+                candidate_count_before_pruning,
+                pruned_candidate_count: candidate_count_before_pruning
+                    .saturating_sub(candidate_count),
+                candidate_count_before_filter: candidate_count,
+                output_count,
+                filtered_out_count: candidate_count.saturating_sub(output_count),
+            }),
+        ))
+    }
+
+    fn visit_adjacent_relationships_filter_fallback(
+        &self,
+        node_id: NodeId,
+        rel_type: Option<RelTypeId>,
+        direction: AdjacencyDirection,
+        filter: &PropertyFilter,
+        mut consumer: impl FnMut(RelRecord) -> GraphScanControl,
+    ) -> Result<(GraphScanControl, Option<ScanPruningReport>)> {
+        self.visit_adjacent_relationships_owned(node_id, rel_type, direction, |relationship| {
+            if property_filter_matches(filter, relationship.id.0, &relationship.properties) {
+                consumer(relationship)
+            } else {
+                GraphScanControl::Continue
+            }
+        })
+        .map(|control| (control, None))
+    }
+
     pub fn try_visit_adjacent_relationships_owned(
         &self,
         node_id: NodeId,
@@ -2256,5 +2399,200 @@ impl GraphStore {
             AdjacencyDirection::Outgoing => self.outgoing.get(&(node_id, rel_type)),
             AdjacencyDirection::Incoming => self.incoming.get(&(node_id, rel_type)),
         }
+    }
+}
+
+enum RelationshipProjectionProbe<'a> {
+    Equality {
+        rel_type: RelTypeId,
+        property: &'a str,
+        values: Vec<&'a Value>,
+        estimated_entries: u64,
+    },
+    Range {
+        rel_type: RelTypeId,
+        property: &'a str,
+        lower: Option<&'a (Value, bool)>,
+        upper: Option<&'a (Value, bool)>,
+        estimated_entries: u64,
+    },
+}
+
+impl RelationshipProjectionProbe<'_> {
+    fn estimated_entries(&self) -> u64 {
+        match self {
+            Self::Equality {
+                estimated_entries, ..
+            }
+            | Self::Range {
+                estimated_entries, ..
+            } => *estimated_entries,
+        }
+    }
+
+    fn strategy(&self) -> ScanPruningStrategy {
+        match self {
+            Self::Equality {
+                property, values, ..
+            } if values.len() == 1 => ScanPruningStrategy::PropertyEq {
+                property: (*property).to_string(),
+            },
+            Self::Equality { property, .. } => ScanPruningStrategy::PropertyIn {
+                property: (*property).to_string(),
+            },
+            Self::Range { property, .. } => ScanPruningStrategy::PropertyRange {
+                property: (*property).to_string(),
+            },
+        }
+    }
+
+    fn matches(&self, relationship: &RelRecord) -> bool {
+        match self {
+            Self::Equality {
+                property, values, ..
+            } => relationship
+                .properties
+                .get(*property)
+                .is_some_and(|actual| values.contains(&actual)),
+            Self::Range {
+                property,
+                lower,
+                upper,
+                ..
+            } => relationship
+                .properties
+                .get(*property)
+                .is_some_and(|value| range_bounds_match(value, *lower, *upper)),
+        }
+    }
+
+    fn scan(
+        &self,
+        projection: &PersistentPropertyProjectionReader,
+        mut consumer: impl FnMut(
+            RelId,
+        ) -> std::result::Result<
+            CanonicalScanControl,
+            PersistentPropertyProjectionError,
+        >,
+    ) -> std::result::Result<CanonicalScanControl, PersistentPropertyProjectionError> {
+        match self {
+            Self::Equality {
+                rel_type,
+                property,
+                values,
+                ..
+            } => {
+                for value in values {
+                    let (_, control) = projection.scan_relationship_equality_candidates(
+                        *rel_type,
+                        property,
+                        value,
+                        &mut consumer,
+                    )?;
+                    if control == CanonicalScanControl::Stop {
+                        return Ok(control);
+                    }
+                }
+                Ok(CanonicalScanControl::Continue)
+            }
+            Self::Range {
+                rel_type,
+                property,
+                lower,
+                upper,
+                ..
+            } => projection
+                .scan_relationship_range_candidates(*rel_type, property, *lower, *upper, consumer)
+                .map(|(_, control)| control),
+        }
+    }
+}
+
+fn relationship_projection_probe<'a>(
+    projection: &PersistentPropertyProjectionReader,
+    rel_type: RelTypeId,
+    filter: &'a PropertyFilter,
+) -> Option<RelationshipProjectionProbe<'a>> {
+    match filter {
+        PropertyFilter::And(filters) => filters
+            .iter()
+            .filter_map(|filter| relationship_projection_probe(projection, rel_type, filter))
+            .min_by_key(RelationshipProjectionProbe::estimated_entries),
+        PropertyFilter::Eq { property, value } => projection
+            .manifest()
+            .supports_relationship(
+                rel_type,
+                property,
+                PersistentPropertyProjectionKind::RelationshipEquality,
+            )
+            .then(|| RelationshipProjectionProbe::Equality {
+                rel_type,
+                property,
+                values: vec![value],
+                estimated_entries: projection
+                    .estimate_relationship_equality_entries(rel_type, property, value),
+            }),
+        PropertyFilter::In { property, values } => projection
+            .manifest()
+            .supports_relationship(
+                rel_type,
+                property,
+                PersistentPropertyProjectionKind::RelationshipEquality,
+            )
+            .then(|| {
+                let values = values
+                    .iter()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                let estimated_entries = values.iter().fold(0u64, |entries, value| {
+                    entries.saturating_add(
+                        projection
+                            .estimate_relationship_equality_entries(rel_type, property, value),
+                    )
+                });
+                RelationshipProjectionProbe::Equality {
+                    rel_type,
+                    property,
+                    values,
+                    estimated_entries,
+                }
+            }),
+        PropertyFilter::Range {
+            property,
+            lower,
+            upper,
+        } if lower.is_some() || upper.is_some() => projection
+            .manifest()
+            .supports_relationship(
+                rel_type,
+                property,
+                PersistentPropertyProjectionKind::RelationshipRange,
+            )
+            .then(|| RelationshipProjectionProbe::Range {
+                rel_type,
+                property,
+                lower: lower.as_ref(),
+                upper: upper.as_ref(),
+                estimated_entries: projection.estimate_relationship_range_entries(
+                    rel_type,
+                    property,
+                    lower.as_ref(),
+                    upper.as_ref(),
+                ),
+            }),
+        _ => None,
+    }
+}
+
+fn relationship_matches_endpoint(
+    relationship: &RelRecord,
+    node_id: NodeId,
+    direction: AdjacencyDirection,
+) -> bool {
+    match direction {
+        AdjacencyDirection::Outgoing => relationship.source == node_id,
+        AdjacencyDirection::Incoming => relationship.target == node_id,
     }
 }

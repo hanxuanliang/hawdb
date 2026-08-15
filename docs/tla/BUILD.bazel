@@ -27,6 +27,7 @@ _STORAGE_MODELS = [
     "SkeinPageCacheAdmission",
     "SkeinProjectionDurability",
     "SkeinPropertyIndexPruning",
+    "SkeinRelationshipPropertyProjection",
     "SkeinRelationalIndexDemandRead",
     "SkeinRelationalIndexShadowPublication",
     "SkeinRelationalRowDemandRead",

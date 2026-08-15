@@ -116,7 +116,8 @@ use skein_storage::{
     encode_relational_checkpoint, encode_relational_wal_batch,
     persistent_composite_property_identity, sync_parent_directory, AdjacencyPostingList,
     CanonicalEndpointDirection, CanonicalNodeIterator, CanonicalRelationshipIterator,
-    CanonicalSegmentError, RelationalCheckpointIndexLoad, RelationalDecodeLimits,
+    CanonicalSegmentError, PersistentPropertyProjectionDefinitionAdmission,
+    PersistentPropertyProjectionRecord, RelationalCheckpointIndexLoad, RelationalDecodeLimits,
     RelationalMutationLimits, RelationalOverflowConfig, RelationalOverflowPublicationConfig,
     RelationalOverflowPublisher, RelationalRowPageGenerationRequest,
     RelationalRowPagePublicationConfig, RelationalRowPagePublisher, RelationalState,
@@ -5561,8 +5562,8 @@ mod tests {
         DurabilityPolicy, GraphMutation, MutationLimits, RelationalColumnSchema,
         RelationalHydrationBudget, RelationalInsertMode, RelationalKey, RelationalRow,
         RelationalScalarType, RelationalTableSchema, RelationalTransaction, RelationalValue,
-        RelationalWrite, ScanPredicate, ScanSegmentAccessPlan, ScanSegmentFallback,
-        ScanSegmentManifest, StorageResidencyMode, WalReplayConfig,
+        RelationalWrite, RelationshipPropertyUpdate, ScanPredicate, ScanSegmentAccessPlan,
+        ScanSegmentFallback, ScanSegmentManifest, StorageResidencyMode, WalReplayConfig,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs::{self, OpenOptions};
@@ -7119,6 +7120,243 @@ mod tests {
             assert!(
                 error.to_string().contains("content digest verification"),
                 "unexpected property projection corruption error: {error}"
+            );
+        }
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn out_of_core_relationship_property_projection_prunes_and_merges_wal_delta() {
+        use skein_storage::PersistentPropertyProjectionKind;
+        use std::io::{Seek, SeekFrom};
+
+        let path = unique_test_dir("relationship_property_projection_checkpoint");
+        let replay_config = WalReplayConfig {
+            residency_mode: StorageResidencyMode::OutOfCore,
+            ..WalReplayConfig::default()
+        };
+        let source;
+        let second_relationship;
+        let delta_relationship;
+        let corrupt_offset;
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay_config,
+            )
+            .unwrap();
+            source = store
+                .create_node(
+                    &mut catalog,
+                    "Memory",
+                    properties([("id", Value::String("source".to_string()))]),
+                )
+                .unwrap();
+            let targets = (0..3)
+                .map(|id| {
+                    store
+                        .create_node(&mut catalog, "Entity", properties([("id", Value::Int(id))]))
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let relationship_ids = [10_i64, 20, 30]
+                .into_iter()
+                .zip(&targets)
+                .map(|(rank, target)| {
+                    store
+                        .create_relationship(
+                            &mut catalog,
+                            source,
+                            *target,
+                            "LINKS_TO",
+                            properties([("rank", Value::Int(rank))]),
+                        )
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            second_relationship = relationship_ids[1];
+            store.checkpoint(&catalog).unwrap();
+
+            let rel_type = catalog.rel_type_id("LINKS_TO").unwrap();
+            let manifest = store.persistent_property_projection_manifest().unwrap();
+            assert!(manifest.supports_relationship(
+                rel_type,
+                "rank",
+                PersistentPropertyProjectionKind::RelationshipEquality,
+            ));
+            assert!(manifest.supports_relationship(
+                rel_type,
+                "rank",
+                PersistentPropertyProjectionKind::RelationshipRange,
+            ));
+            corrupt_offset = manifest
+                .blocks
+                .iter()
+                .find(|block| {
+                    block.kind == PersistentPropertyProjectionKind::RelationshipEquality
+                        && block.min_key <= Value::Int(20)
+                        && Value::Int(20) <= block.max_key
+                })
+                .map(|block| block.offset + block.length.get() - 1)
+                .unwrap();
+
+            let mut ids = Vec::new();
+            let (_, report) = store
+                .visit_adjacent_relationships_with_filter_owned(
+                    source,
+                    Some(rel_type),
+                    AdjacencyDirection::Outgoing,
+                    &PropertyFilter::Eq {
+                        property: "rank".to_string(),
+                        value: Value::Int(20),
+                    },
+                    |relationship| {
+                        ids.push(relationship.id);
+                        GraphScanControl::Continue
+                    },
+                )
+                .unwrap();
+            assert_eq!(ids, vec![second_relationship]);
+            assert!(report.is_some_and(|report| {
+                report.pruned
+                    && matches!(
+                        report.strategy,
+                        ScanPruningStrategy::PropertyEq { ref property }
+                            if property == "rank"
+                    )
+            }));
+
+            store
+                .set_relationship_property(
+                    &mut catalog,
+                    RelationshipPropertyUpdate {
+                        source_label: "Memory".to_string(),
+                        filter: Some(PropertyFilter::IdEq {
+                            value: Value::Int(source.0 as i64),
+                        }),
+                        rel_type: "LINKS_TO".to_string(),
+                        target_label: "Entity".to_string(),
+                        target_filter: None,
+                        rel_filter: Some(PropertyFilter::IdEq {
+                            value: Value::Int(second_relationship.0 as i64),
+                        }),
+                        property: "rank".to_string(),
+                        value: Value::Int(40),
+                    },
+                )
+                .unwrap();
+            delta_relationship = store
+                .create_relationship(
+                    &mut catalog,
+                    source,
+                    targets[1],
+                    "LINKS_TO",
+                    properties([("rank", Value::Int(20))]),
+                )
+                .unwrap();
+
+            ids.clear();
+            store
+                .visit_adjacent_relationships_with_filter_owned(
+                    source,
+                    Some(rel_type),
+                    AdjacencyDirection::Outgoing,
+                    &PropertyFilter::Eq {
+                        property: "rank".to_string(),
+                        value: Value::Int(20),
+                    },
+                    |relationship| {
+                        ids.push(relationship.id);
+                        GraphScanControl::Continue
+                    },
+                )
+                .unwrap();
+            assert_eq!(ids, vec![delta_relationship]);
+            ids.clear();
+            store
+                .visit_adjacent_relationships_with_filter_owned(
+                    source,
+                    Some(rel_type),
+                    AdjacencyDirection::Outgoing,
+                    &PropertyFilter::Range {
+                        property: "rank".to_string(),
+                        lower: Some((Value::Int(35), true)),
+                        upper: Some((Value::Int(45), true)),
+                    },
+                    |relationship| {
+                        ids.push(relationship.id);
+                        GraphScanControl::Continue
+                    },
+                )
+                .unwrap();
+            assert_eq!(ids, vec![second_relationship]);
+        }
+        {
+            let mut catalog = Catalog::default();
+            let store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay_config,
+            )
+            .unwrap();
+            let rel_type = catalog.rel_type_id("LINKS_TO").unwrap();
+            let mut ids = Vec::new();
+            store
+                .visit_adjacent_relationships_with_filter_owned(
+                    source,
+                    Some(rel_type),
+                    AdjacencyDirection::Outgoing,
+                    &PropertyFilter::Eq {
+                        property: "rank".to_string(),
+                        value: Value::Int(20),
+                    },
+                    |relationship| {
+                        ids.push(relationship.id);
+                        GraphScanControl::Continue
+                    },
+                )
+                .unwrap();
+            assert_eq!(ids, vec![delta_relationship]);
+        }
+        {
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path.join(property_projection_artifact_generation_file(1)))
+                .unwrap();
+            file.seek(SeekFrom::Start(corrupt_offset)).unwrap();
+            file.write_all(&[0xff]).unwrap();
+            file.sync_all().unwrap();
+        }
+        {
+            let mut catalog = Catalog::default();
+            let store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay_config,
+            )
+            .unwrap();
+            let rel_type = catalog.rel_type_id("LINKS_TO").unwrap();
+            let error = store
+                .visit_adjacent_relationships_with_filter_owned(
+                    source,
+                    Some(rel_type),
+                    AdjacencyDirection::Outgoing,
+                    &PropertyFilter::Eq {
+                        property: "rank".to_string(),
+                        value: Value::Int(20),
+                    },
+                    |_| GraphScanControl::Continue,
+                )
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("content digest verification"),
+                "unexpected relationship property projection corruption error: {error}"
             );
         }
         std::fs::remove_dir_all(path).unwrap();

@@ -109,9 +109,10 @@ pub use projection::{
 pub use property_projection::{
     persistent_composite_property_identity, PersistentPropertyProjectionBlockDescriptor,
     PersistentPropertyProjectionBuildReport, PersistentPropertyProjectionConfig,
-    PersistentPropertyProjectionDefinition, PersistentPropertyProjectionError,
-    PersistentPropertyProjectionKind, PersistentPropertyProjectionManifest,
-    PersistentPropertyProjectionReadReport, PersistentPropertyProjectionReader,
+    PersistentPropertyProjectionDefinition, PersistentPropertyProjectionDefinitionAdmission,
+    PersistentPropertyProjectionError, PersistentPropertyProjectionKind,
+    PersistentPropertyProjectionManifest, PersistentPropertyProjectionReadReport,
+    PersistentPropertyProjectionReader, PersistentPropertyProjectionRecord,
     PersistentPropertyProjectionWriteOutput, PersistentPropertyProjectionWriter,
 };
 pub use property_spill::{

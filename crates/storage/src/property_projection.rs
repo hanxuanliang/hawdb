@@ -3,10 +3,10 @@ use crate::canonical::{
 };
 use crate::{
     content_digest, durable_replace_file, ContentDigest, FileSegmentRangeReader,
-    ManifestGeneration, NodeId, NodeRecord, SegmentCache, SegmentRangeReader, SegmentReadError,
-    SegmentReadRange, StoreId,
+    ManifestGeneration, NodeId, NodeRecord, RelId, RelRecord, SegmentCache, SegmentRangeReader,
+    SegmentReadError, SegmentReadRange, StoreId,
 };
-use skein_core::{LabelId, Value};
+use skein_core::{LabelId, RelTypeId, Value};
 use skein_integrity::{Crc32cHasher, IntegrityHasher, Sha256Digest};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, VecDeque};
@@ -32,6 +32,14 @@ pub enum PersistentPropertyProjectionKind {
     Range,
     FullText,
     CompositeEquality,
+    RelationshipEquality,
+    RelationshipRange,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PersistentPropertyProjectionRecord {
+    Node(NodeRecord),
+    Relationship(RelRecord),
 }
 
 pub fn persistent_composite_property_identity(
@@ -61,6 +69,8 @@ pub struct PersistentPropertyProjectionDefinition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PersistentPropertyProjectionConfig {
     pub memory_budget_bytes: NonZeroU64,
+    pub max_definition_count: NonZeroUsize,
+    pub max_definition_bytes: NonZeroU64,
     pub max_spill_bytes: NonZeroU64,
     pub max_spill_runs: NonZeroUsize,
     pub max_merge_fan_in: NonZeroUsize,
@@ -74,6 +84,10 @@ impl Default for PersistentPropertyProjectionConfig {
         Self {
             memory_budget_bytes: NonZeroU64::new(32 * 1024 * 1024)
                 .expect("default property projection memory budget is non-zero"),
+            max_definition_count: NonZeroUsize::new(65_536)
+                .expect("default property projection definition limit is non-zero"),
+            max_definition_bytes: NonZeroU64::new(8 * 1024 * 1024)
+                .expect("default property projection definition byte limit is non-zero"),
             max_spill_bytes: NonZeroU64::new(4 * 1024 * 1024 * 1024 * 1024)
                 .expect("default property projection spill budget is non-zero"),
             max_spill_runs: NonZeroUsize::new(4_096)
@@ -112,6 +126,14 @@ pub enum PersistentPropertyProjectionError {
     GeneratedEntryBudgetExceeded {
         required_entries: u64,
         max_entries: u64,
+    },
+    DefinitionCountBudgetExceeded {
+        required_definitions: usize,
+        max_definitions: usize,
+    },
+    DefinitionBytesBudgetExceeded {
+        required_bytes: u64,
+        max_bytes: u64,
     },
     BlockTooLarge {
         block_bytes: u64,
@@ -154,6 +176,20 @@ impl Display for PersistentPropertyProjectionError {
                 formatter,
                 "property projection build requires {required_entries} generated entries, exceeding {max_entries}"
             ),
+            Self::DefinitionCountBudgetExceeded {
+                required_definitions,
+                max_definitions,
+            } => write!(
+                formatter,
+                "property projection build requires {required_definitions} definitions, exceeding {max_definitions}"
+            ),
+            Self::DefinitionBytesBudgetExceeded {
+                required_bytes,
+                max_bytes,
+            } => write!(
+                formatter,
+                "property projection definitions require {required_bytes} resident bytes, exceeding {max_bytes}"
+            ),
             Self::BlockTooLarge {
                 block_bytes,
                 max_bytes,
@@ -191,6 +227,63 @@ impl From<SegmentReadError> for PersistentPropertyProjectionError {
 impl From<CanonicalSegmentError> for PersistentPropertyProjectionError {
     fn from(error: CanonicalSegmentError) -> Self {
         Self::Canonical(error)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PersistentPropertyProjectionDefinitionAdmission {
+    max_definitions: usize,
+    max_bytes: u64,
+    definition_count: usize,
+    resident_bytes: u64,
+}
+
+impl PersistentPropertyProjectionDefinitionAdmission {
+    pub fn new(config: PersistentPropertyProjectionConfig) -> Self {
+        Self {
+            max_definitions: config.max_definition_count.get(),
+            max_bytes: config.max_definition_bytes.get(),
+            definition_count: 0,
+            resident_bytes: 0,
+        }
+    }
+
+    pub fn admit(
+        &mut self,
+        definition: &PersistentPropertyProjectionDefinition,
+    ) -> Result<(), PersistentPropertyProjectionError> {
+        let required_definitions = self.definition_count.saturating_add(1);
+        if required_definitions > self.max_definitions {
+            return Err(
+                PersistentPropertyProjectionError::DefinitionCountBudgetExceeded {
+                    required_definitions,
+                    max_definitions: self.max_definitions,
+                },
+            );
+        }
+        let definition_bytes = (std::mem::size_of::<PersistentPropertyProjectionDefinition>()
+            as u64)
+            .saturating_add(definition.property.len() as u64);
+        let required_bytes = self.resident_bytes.saturating_add(definition_bytes);
+        if required_bytes > self.max_bytes {
+            return Err(
+                PersistentPropertyProjectionError::DefinitionBytesBudgetExceeded {
+                    required_bytes,
+                    max_bytes: self.max_bytes,
+                },
+            );
+        }
+        self.definition_count = required_definitions;
+        self.resident_bytes = required_bytes;
+        Ok(())
+    }
+
+    pub const fn definition_count(&self) -> usize {
+        self.definition_count
+    }
+
+    pub const fn resident_bytes(&self) -> u64 {
+        self.resident_bytes
     }
 }
 
@@ -340,6 +433,19 @@ impl PersistentPropertyProjectionManifest {
                     PersistentPropertyProjectionKind::CompositeEquality,
                 )
             })
+    }
+
+    pub fn supports_relationship(
+        &self,
+        rel_type: RelTypeId,
+        property: &str,
+        kind: PersistentPropertyProjectionKind,
+    ) -> bool {
+        matches!(
+            kind,
+            PersistentPropertyProjectionKind::RelationshipEquality
+                | PersistentPropertyProjectionKind::RelationshipRange
+        ) && self.supports(LabelId(rel_type.0), property, kind)
     }
 
     pub fn encode(&self) -> Result<String, PersistentPropertyProjectionError> {
@@ -518,7 +624,9 @@ impl PersistentPropertyProjectionManifest {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PersistentPropertyProjectionBuildReport {
-    pub input_node_count: u64,
+    pub definition_count: usize,
+    pub definition_bytes: u64,
+    pub input_record_count: u64,
     pub generated_entry_count: u64,
     pub persisted_entry_count: u64,
     pub block_count: u64,
@@ -578,7 +686,9 @@ impl PersistentPropertyProjectionWriter {
         nodes: N,
     ) -> Result<PersistentPropertyProjectionWriteOutput, PersistentPropertyProjectionError>
     where
-        N: IntoIterator<Item = Result<NodeRecord, PersistentPropertyProjectionError>>,
+        N: IntoIterator<
+            Item = Result<PersistentPropertyProjectionRecord, PersistentPropertyProjectionError>,
+        >,
     {
         definitions.sort_by(|left, right| definition_key(left).cmp(&definition_key(right)));
         definitions.dedup_by(|left, right| {
@@ -586,7 +696,15 @@ impl PersistentPropertyProjectionWriter {
                 && left.property == right.property
                 && left.kind == right.kind
         });
-        let mut by_label: BTreeMap<LabelId, Vec<PreparedProjectionDefinition>> = BTreeMap::new();
+        let mut definition_admission =
+            PersistentPropertyProjectionDefinitionAdmission::new(self.config);
+        for definition in &definitions {
+            definition_admission.admit(definition)?;
+        }
+        let definition_count = definition_admission.definition_count();
+        let definition_bytes = definition_admission.resident_bytes();
+        let mut by_subject: BTreeMap<ProjectionSubject, Vec<PreparedProjectionDefinition>> =
+            BTreeMap::new();
         for (index, definition) in definitions.iter_mut().enumerate() {
             definition.complete = true;
             let value_source =
@@ -597,8 +715,8 @@ impl PersistentPropertyProjectionWriter {
                 } else {
                     ProjectionValueSource::Scalar
                 };
-            by_label
-                .entry(definition.label_id)
+            by_subject
+                .entry(definition_subject(definition))
                 .or_default()
                 .push(PreparedProjectionDefinition {
                     definition_index: index,
@@ -609,21 +727,38 @@ impl PersistentPropertyProjectionWriter {
         let mut chunk = Vec::new();
         let mut chunk_bytes = 0u64;
         let mut generated_entries = 0u64;
-        let mut input_nodes = 0u64;
+        let mut input_records = 0u64;
         let mut peak_resident_bytes = 0u64;
-        for node in nodes {
-            let node = node?;
-            input_nodes = input_nodes.saturating_add(1);
-            for label in &node.labels {
-                let Some(indexes) = by_label.get(label) else {
+        for record in nodes {
+            let record = record?;
+            input_records = input_records.saturating_add(1);
+            let (subjects, properties, entity_id) = match &record {
+                PersistentPropertyProjectionRecord::Node(node) => (
+                    node.labels
+                        .iter()
+                        .copied()
+                        .map(ProjectionSubject::Node)
+                        .collect::<Vec<_>>(),
+                    &node.properties,
+                    NodeId(node.id.0),
+                ),
+                PersistentPropertyProjectionRecord::Relationship(relationship) => (
+                    vec![ProjectionSubject::Relationship(relationship.rel_type)],
+                    &relationship.properties,
+                    NodeId(relationship.id.0),
+                ),
+            };
+            for subject in subjects {
+                let Some(indexes) = by_subject.get(&subject) else {
                     continue;
                 };
                 for prepared in indexes {
                     let definition_index = prepared.definition_index;
                     let definition = &definitions[definition_index];
                     match definition.kind {
-                        PersistentPropertyProjectionKind::Equality => {
-                            let Some(value) = node.properties.get(&definition.property) else {
+                        PersistentPropertyProjectionKind::Equality
+                        | PersistentPropertyProjectionKind::RelationshipEquality => {
+                            let Some(value) = properties.get(&definition.property) else {
                                 continue;
                             };
                             let encoded = encode_standalone_value(value)?;
@@ -634,10 +769,10 @@ impl PersistentPropertyProjectionWriter {
                             self.emit(
                                 EntryKey {
                                     kind: definition.kind,
-                                    label_id: *label,
+                                    label_id: definition.label_id,
                                     property: definition.property.clone(),
                                     value: value.clone(),
-                                    node_id: node.id,
+                                    node_id: entity_id,
                                 },
                                 &mut runs,
                                 &mut chunk,
@@ -646,8 +781,9 @@ impl PersistentPropertyProjectionWriter {
                                 &mut peak_resident_bytes,
                             )?;
                         }
-                        PersistentPropertyProjectionKind::Range => {
-                            let Some(value) = node.properties.get(&definition.property) else {
+                        PersistentPropertyProjectionKind::Range
+                        | PersistentPropertyProjectionKind::RelationshipRange => {
+                            let Some(value) = properties.get(&definition.property) else {
                                 continue;
                             };
                             if !is_range_value(value) {
@@ -661,10 +797,10 @@ impl PersistentPropertyProjectionWriter {
                             self.emit(
                                 EntryKey {
                                     kind: definition.kind,
-                                    label_id: *label,
+                                    label_id: definition.label_id,
                                     property: definition.property.clone(),
                                     value: value.clone(),
-                                    node_id: node.id,
+                                    node_id: entity_id,
                                 },
                                 &mut runs,
                                 &mut chunk,
@@ -674,7 +810,7 @@ impl PersistentPropertyProjectionWriter {
                             )?;
                         }
                         PersistentPropertyProjectionKind::FullText => {
-                            let Some(value) = node.properties.get(&definition.property) else {
+                            let Some(value) = properties.get(&definition.property) else {
                                 continue;
                             };
                             let Value::String(value) = value else {
@@ -684,10 +820,10 @@ impl PersistentPropertyProjectionWriter {
                                 self.emit(
                                     EntryKey {
                                         kind: definition.kind,
-                                        label_id: *label,
+                                        label_id: definition.label_id,
                                         property: definition.property.clone(),
                                         value: Value::String(token),
-                                        node_id: node.id,
+                                        node_id: entity_id,
                                     },
                                     &mut runs,
                                     &mut chunk,
@@ -698,7 +834,7 @@ impl PersistentPropertyProjectionWriter {
                             }
                         }
                         PersistentPropertyProjectionKind::CompositeEquality => {
-                            let ProjectionValueSource::Composite(properties) =
+                            let ProjectionValueSource::Composite(composite_properties) =
                                 &prepared.value_source
                             else {
                                 return Err(PersistentPropertyProjectionError::Corrupt(
@@ -706,9 +842,9 @@ impl PersistentPropertyProjectionWriter {
                                         .to_string(),
                                 ));
                             };
-                            let Some(values) = properties
+                            let Some(values) = composite_properties
                                 .iter()
-                                .map(|property| node.properties.get(property).cloned())
+                                .map(|property| properties.get(property).cloned())
                                 .collect::<Option<Vec<_>>>()
                             else {
                                 continue;
@@ -722,10 +858,10 @@ impl PersistentPropertyProjectionWriter {
                             self.emit(
                                 EntryKey {
                                     kind: definition.kind,
-                                    label_id: *label,
+                                    label_id: definition.label_id,
                                     property: definition.property.clone(),
                                     value,
-                                    node_id: node.id,
+                                    node_id: entity_id,
                                 },
                                 &mut runs,
                                 &mut chunk,
@@ -748,7 +884,9 @@ impl PersistentPropertyProjectionWriter {
             generation,
             source_commit_epoch,
             definitions,
-            input_nodes,
+            definition_count,
+            definition_bytes,
+            input_records,
             generated_entries,
             peak_resident_bytes,
             &runs,
@@ -810,7 +948,9 @@ impl PersistentPropertyProjectionWriter {
         generation: ManifestGeneration,
         source_commit_epoch: u64,
         definitions: Vec<PersistentPropertyProjectionDefinition>,
-        input_nodes: u64,
+        definition_count: usize,
+        definition_bytes: u64,
+        input_records: u64,
         generated_entries: u64,
         peak_resident_bytes: u64,
         runs: &ProjectionSpillRuns,
@@ -856,7 +996,9 @@ impl PersistentPropertyProjectionWriter {
         let manifest = artifact.finish()?;
         Ok(PersistentPropertyProjectionWriteOutput {
             report: PersistentPropertyProjectionBuildReport {
-                input_node_count: input_nodes,
+                definition_count,
+                definition_bytes,
+                input_record_count: input_records,
                 generated_entry_count: generated_entries,
                 persisted_entry_count: manifest.entry_count,
                 block_count: manifest.blocks.len() as u64,
@@ -872,6 +1014,12 @@ impl PersistentPropertyProjectionWriter {
 struct PreparedProjectionDefinition {
     definition_index: usize,
     value_source: ProjectionValueSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ProjectionSubject {
+    Node(LabelId),
+    Relationship(RelTypeId),
 }
 
 enum ProjectionValueSource {
@@ -1489,6 +1637,88 @@ impl PersistentPropertyProjectionReader {
         )
     }
 
+    pub fn scan_relationship_equality_candidates(
+        &self,
+        rel_type: RelTypeId,
+        property: &str,
+        value: &Value,
+        mut consumer: impl FnMut(
+            RelId,
+        )
+            -> Result<CanonicalScanControl, PersistentPropertyProjectionError>,
+    ) -> Result<
+        (PersistentPropertyProjectionReadReport, CanonicalScanControl),
+        PersistentPropertyProjectionError,
+    > {
+        self.scan_candidates(
+            LabelId(rel_type.0),
+            property,
+            PersistentPropertyProjectionKind::RelationshipEquality,
+            |candidate| candidate == value,
+            |block| block.min_key <= *value && *value <= block.max_key,
+            &mut |id| consumer(RelId(id.0)),
+        )
+    }
+
+    pub fn scan_relationship_range_candidates(
+        &self,
+        rel_type: RelTypeId,
+        property: &str,
+        lower: Option<&(Value, bool)>,
+        upper: Option<&(Value, bool)>,
+        mut consumer: impl FnMut(
+            RelId,
+        )
+            -> Result<CanonicalScanControl, PersistentPropertyProjectionError>,
+    ) -> Result<
+        (PersistentPropertyProjectionReadReport, CanonicalScanControl),
+        PersistentPropertyProjectionError,
+    > {
+        self.scan_candidates(
+            LabelId(rel_type.0),
+            property,
+            PersistentPropertyProjectionKind::RelationshipRange,
+            |value| range_bounds_match(value, lower, upper),
+            |block| range_block_might_match(block, lower, upper),
+            &mut |id| consumer(RelId(id.0)),
+        )
+    }
+
+    pub fn estimate_relationship_equality_entries(
+        &self,
+        rel_type: RelTypeId,
+        property: &str,
+        value: &Value,
+    ) -> u64 {
+        self.blocks_for_definition(
+            PersistentPropertyProjectionKind::RelationshipEquality,
+            LabelId(rel_type.0),
+            property,
+        )
+        .iter()
+        .filter(|block| block.min_key <= *value && *value <= block.max_key)
+        .map(|block| u64::from(block.entry_count))
+        .sum()
+    }
+
+    pub fn estimate_relationship_range_entries(
+        &self,
+        rel_type: RelTypeId,
+        property: &str,
+        lower: Option<&(Value, bool)>,
+        upper: Option<&(Value, bool)>,
+    ) -> u64 {
+        self.blocks_for_definition(
+            PersistentPropertyProjectionKind::RelationshipRange,
+            LabelId(rel_type.0),
+            property,
+        )
+        .iter()
+        .filter(|block| range_block_might_match(block, lower, upper))
+        .map(|block| u64::from(block.entry_count))
+        .sum()
+    }
+
     pub fn scan_full_text_token_candidates(
         &self,
         label_id: LabelId,
@@ -1803,6 +2033,21 @@ fn definition_key(
     (definition.kind, definition.label_id, &definition.property)
 }
 
+fn definition_subject(definition: &PersistentPropertyProjectionDefinition) -> ProjectionSubject {
+    match definition.kind {
+        PersistentPropertyProjectionKind::RelationshipEquality
+        | PersistentPropertyProjectionKind::RelationshipRange => {
+            ProjectionSubject::Relationship(RelTypeId(definition.label_id.0))
+        }
+        PersistentPropertyProjectionKind::Equality
+        | PersistentPropertyProjectionKind::Range
+        | PersistentPropertyProjectionKind::FullText
+        | PersistentPropertyProjectionKind::CompositeEquality => {
+            ProjectionSubject::Node(definition.label_id)
+        }
+    }
+}
+
 fn block_descriptor_key(
     block: &PersistentPropertyProjectionBlockDescriptor,
 ) -> (PersistentPropertyProjectionKind, LabelId, &str, &Value, u64) {
@@ -1821,6 +2066,8 @@ fn kind_tag(kind: PersistentPropertyProjectionKind) -> u8 {
         PersistentPropertyProjectionKind::Range => 1,
         PersistentPropertyProjectionKind::FullText => 2,
         PersistentPropertyProjectionKind::CompositeEquality => 4,
+        PersistentPropertyProjectionKind::RelationshipEquality => 5,
+        PersistentPropertyProjectionKind::RelationshipRange => 6,
     }
 }
 
@@ -1832,6 +2079,8 @@ fn kind_from_tag(
         2 => Ok(PersistentPropertyProjectionKind::FullText),
         3 => Ok(PersistentPropertyProjectionKind::Equality),
         4 => Ok(PersistentPropertyProjectionKind::CompositeEquality),
+        5 => Ok(PersistentPropertyProjectionKind::RelationshipEquality),
+        6 => Ok(PersistentPropertyProjectionKind::RelationshipRange),
         _ => Err(PersistentPropertyProjectionError::Corrupt(format!(
             "invalid property projection kind {tag}"
         ))),
@@ -2061,8 +2310,18 @@ mod tests {
         }
     }
 
+    fn relationship(id: u64, rank: i64) -> RelRecord {
+        RelRecord {
+            id: RelId(id),
+            source: NodeId(1),
+            target: NodeId(2),
+            rel_type: RelTypeId(1),
+            properties: BTreeMap::from([("rank".to_string(), Value::Int(rank))]),
+        }
+    }
+
     #[test]
-    fn external_projection_round_trips_scalar_and_composite_candidates() {
+    fn external_projection_round_trips_node_composite_and_relationship_candidates() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -2106,6 +2365,18 @@ mod tests {
                 kind: PersistentPropertyProjectionKind::CompositeEquality,
                 complete: false,
             },
+            PersistentPropertyProjectionDefinition {
+                label_id: LabelId(1),
+                property: "rank".to_string(),
+                kind: PersistentPropertyProjectionKind::RelationshipEquality,
+                complete: false,
+            },
+            PersistentPropertyProjectionDefinition {
+                label_id: LabelId(1),
+                property: "rank".to_string(),
+                kind: PersistentPropertyProjectionKind::RelationshipRange,
+                complete: false,
+            },
         ];
         let output = PersistentPropertyProjectionWriter::new(config)
             .write_fallible(
@@ -2114,9 +2385,22 @@ mod tests {
                 11,
                 definitions,
                 vec![
-                    Ok(node(1, 10, "Graph Memory")),
-                    Ok(node(2, 20, "Other")),
-                    Ok(node(3, 30, "Memory Graph")),
+                    Ok(PersistentPropertyProjectionRecord::Node(node(
+                        1,
+                        10,
+                        "Graph Memory",
+                    ))),
+                    Ok(PersistentPropertyProjectionRecord::Node(node(
+                        2, 20, "Other",
+                    ))),
+                    Ok(PersistentPropertyProjectionRecord::Node(node(
+                        3,
+                        30,
+                        "Memory Graph",
+                    ))),
+                    Ok(PersistentPropertyProjectionRecord::Relationship(
+                        relationship(7, 20),
+                    )),
                 ],
             )
             .unwrap();
@@ -2200,6 +2484,28 @@ mod tests {
             )
             .unwrap();
         assert!(composite.is_empty());
+        let mut relationships = Vec::new();
+        reader
+            .scan_relationship_equality_candidates(RelTypeId(1), "rank", &Value::Int(20), |id| {
+                relationships.push(id.0);
+                Ok(CanonicalScanControl::Continue)
+            })
+            .unwrap();
+        assert_eq!(relationships, vec![7]);
+        relationships.clear();
+        reader
+            .scan_relationship_range_candidates(
+                RelTypeId(1),
+                "rank",
+                Some(&(Value::Int(15), true)),
+                Some(&(Value::Int(25), true)),
+                |id| {
+                    relationships.push(id.0);
+                    Ok(CanonicalScanControl::Continue)
+                },
+            )
+            .unwrap();
+        assert_eq!(relationships, vec![7]);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2247,7 +2553,11 @@ mod tests {
             ManifestGeneration(3),
             12,
             vec![definition],
-            vec![Ok(node(1, 10, "long composite value"))],
+            vec![Ok(PersistentPropertyProjectionRecord::Node(node(
+                1,
+                10,
+                "long composite value",
+            )))],
         )
         .unwrap();
 
@@ -2275,6 +2585,76 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.to_string().contains("unavailable or incomplete"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn definition_admission_rejects_before_artifact_creation() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "skein-property-projection-definition-budget-{}-{nonce}",
+            std::process::id(),
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let definitions = vec![
+            PersistentPropertyProjectionDefinition {
+                label_id: LabelId(1),
+                property: "rank".to_string(),
+                kind: PersistentPropertyProjectionKind::RelationshipEquality,
+                complete: false,
+            },
+            PersistentPropertyProjectionDefinition {
+                label_id: LabelId(1),
+                property: "rank".to_string(),
+                kind: PersistentPropertyProjectionKind::RelationshipRange,
+                complete: false,
+            },
+        ];
+        let count_path = root.join("count.skein");
+        let count_error =
+            PersistentPropertyProjectionWriter::new(PersistentPropertyProjectionConfig {
+                max_definition_count: NonZeroUsize::new(1).unwrap(),
+                ..PersistentPropertyProjectionConfig::default()
+            })
+            .write_fallible(
+                &count_path,
+                ManifestGeneration(1),
+                1,
+                definitions.clone(),
+                Vec::<Result<_, PersistentPropertyProjectionError>>::new(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            count_error,
+            PersistentPropertyProjectionError::DefinitionCountBudgetExceeded {
+                required_definitions: 2,
+                max_definitions: 1,
+            }
+        ));
+        assert!(!count_path.exists());
+
+        let bytes_path = root.join("bytes.skein");
+        let bytes_error =
+            PersistentPropertyProjectionWriter::new(PersistentPropertyProjectionConfig {
+                max_definition_bytes: NonZeroU64::new(1).unwrap(),
+                ..PersistentPropertyProjectionConfig::default()
+            })
+            .write_fallible(
+                &bytes_path,
+                ManifestGeneration(1),
+                1,
+                definitions,
+                Vec::<Result<_, PersistentPropertyProjectionError>>::new(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            bytes_error,
+            PersistentPropertyProjectionError::DefinitionBytesBudgetExceeded { max_bytes: 1, .. }
+        ));
+        assert!(!bytes_path.exists());
         fs::remove_dir_all(root).unwrap();
     }
 }

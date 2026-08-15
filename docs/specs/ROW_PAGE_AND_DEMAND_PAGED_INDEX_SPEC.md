@@ -60,8 +60,10 @@ reads, and a byte-bounded digest-verified cache. Equality, range, full-text,
 and ordered composite-equality graph-property indexes have a checkpoint-
 generation projection whose payload blocks remain cold until a query needs
 them; post-checkpoint WAL changes stay in the COW overlay and are merged at
-read time. Stable-id and relationship-property graph index state remains
-materialized or rebuilt in memory and remains migration work. Relational
+read time. Relationship equality and range predicates over a bound one-hop
+expansion use the same demand-paged artifact when its estimated global posting
+work does not exceed the endpoint adjacency work. Stable-id graph index state
+remains materialized or rebuilt in memory and remains migration work. Relational
 constraints may opt into the generation-
 bound authoritative reader, but materialized relational postings remain a
 temporary checkpoint builder and differential oracle until the next migration
@@ -92,6 +94,25 @@ overlapping blocks, validates every candidate against its canonical row, skips
 base rows shadowed by the COW/WAL overlay, and finally streams matching overlay
 rows. A missing or incomplete composite definition falls back to the canonical
 path; corruption after selection fails closed and poisons the handle.
+
+Relationship-property equality and range indexes reuse the generation-bound
+property artifact with relationship-specific kind tags, so a numerically equal
+label id and relationship-type id cannot share a definition. Checkpoint build
+streams canonical relationships after nodes under the same spill, generated-
+entry, key-size, and resident-byte limits. The complete node and relationship
+definition directory is admitted before artifact creation; defaults reject
+more than 65,536 definitions or 8 MiB of definition residency, and the build
+report records both actual values. Opening the artifact keeps payload blocks
+cold. A one-hop expansion selects a supported relationship probe only
+when the estimated key-overlapping property entries are no greater than the
+estimated endpoint/type adjacency entries; otherwise it retains the adjacency
+path. A selected probe reads only key-overlapping blocks, re-reads each
+candidate relationship from canonical storage, verifies type, property, and
+endpoint predicates, skips base relationships shadowed by the COW/WAL overlay,
+and then streams matching overlay relationships. Unsupported or incomplete
+definitions fall back to adjacency. Corruption after selection fails closed
+and poisons the database handle. `EXPLAIN ANALYZE` records the selected
+relationship pruning strategy and candidate counts.
 
 The immutable index-page codec is the first format-only slice of step 1. It
 defines generation-tagged root, interior, leaf, and posting pages. Every page

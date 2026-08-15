@@ -171,11 +171,12 @@ crash; read-only recovery remains fail closed.
     the ordinary materialized row selector instead of retaining a compatibility
     or rollback path. Keep the differential oracle in qualification code only.
 
-- [ ] Persist and activate the remaining canonical graph indexes.
-  - Publish stable-id and relationship-property roots with the canonical graph
-    epoch. Equality, range, full-text, ordered composite-equality, forward
+- [ ] Persist and activate the remaining stable-id graph index.
+  - Publish the stable-id root with the canonical graph epoch. Equality, range,
+    full-text, ordered composite-equality, relationship equality/range, forward
     adjacency, and reverse adjacency projections are generation-bound and
-    demand-paged.
+    demand-paged. Relationship probes choose the property projection only when
+    its estimated work does not exceed the bound endpoint adjacency path.
   - Activate each index class independently after differential, recovery,
     cache-budget, and production-shaped evidence; derived BM25, vector,
     statistics, analytics, and optional columnar projections remain outside

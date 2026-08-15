@@ -375,12 +375,27 @@ pub fn one_hop_relationships_with_budget(
             admit_relationship(relationship)?;
             Ok(ScanControl::Continue)
         };
-        store.visit_adjacent_relationships_owned(
-            source,
-            rel_type_id,
-            adjacency_direction,
-            &mut visit,
-        )?;
+        if store.is_out_of_core()
+            && let Some(filter) = relationship_filter.as_ref()
+        {
+            let (_, report) = store.visit_adjacent_relationships_with_filter_owned(
+                source,
+                rel_type_id,
+                adjacency_direction,
+                filter,
+                &mut visit,
+            )?;
+            if let Some(report) = report {
+                observer.record_scan_pruning_report(report);
+            }
+        } else {
+            store.visit_adjacent_relationships_owned(
+                source,
+                rel_type_id,
+                adjacency_direction,
+                &mut visit,
+            )?;
+        }
         Ok(())
     };
     match direction {
