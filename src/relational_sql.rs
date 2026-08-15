@@ -875,7 +875,7 @@ mod tests {
         {
             let tight_config = DatabaseConfig {
                 max_read_result_payload_bytes: Some(4 * 1024),
-                ..config
+                ..config.clone()
             };
             let mut database = Database::open_with_durability_and_config(
                 &path,
@@ -889,6 +889,34 @@ mod tests {
             let admitted_info = relational_explain_operator_info(&admitted, "IndexRangeScanExec");
             assert!(admitted_info.contains("runtime_path=demand_paged"));
             assert!(admitted_info.contains("fallback_reasons=none"));
+            let aggregate = database
+                .query_sql(
+                    "SELECT COALESCE(SUM(OCTET_LENGTH(body)), 0) AS body_bytes FROM documents",
+                )
+                .expect("scan large inputs independently of the small output payload budget");
+            assert!(
+                matches!(aggregate.rows[0]["body_bytes"], Value::Int(value) if value > 96 * 1024)
+            );
+        }
+        {
+            let hydration_limited_config = DatabaseConfig {
+                max_read_result_payload_bytes: Some(4 * 1024),
+                max_relational_hydration_bytes: std::num::NonZeroUsize::new(32 * 1024)
+                    .expect("test hydration budget is non-zero"),
+                ..config.clone()
+            };
+            let mut database = Database::open_with_durability_and_config(
+                &path,
+                DurabilityPolicy::default(),
+                hydration_limited_config,
+            )
+            .expect("reopen demand-index database with a hydration budget");
+            let error = database
+                .query_sql(
+                    "SELECT COALESCE(SUM(OCTET_LENGTH(body)), 0) AS body_bytes FROM documents",
+                )
+                .expect_err("large aggregate inputs must honor the hydration budget");
+            assert!(error.to_string().contains("overflow hydration"));
         }
         {
             use std::io::{Read, Seek, SeekFrom, Write};

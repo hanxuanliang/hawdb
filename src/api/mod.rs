@@ -257,6 +257,7 @@ pub struct DatabaseConfig {
     pub max_checkpoint_decoded_bytes: Option<u64>,
     pub segment_cache_capacity_bytes: u64,
     pub max_relational_index_read_bytes: NonZeroUsize,
+    pub max_relational_hydration_bytes: NonZeroUsize,
     pub storage_residency_mode: skein_storage::StorageResidencyMode,
     pub auto_materialize_checkpoint_bytes: u64,
     pub max_out_of_core_delta_bytes: Option<u64>,
@@ -329,10 +330,10 @@ fn relational_query_limits_with_payload(
         batch_rows: config.execution_memory.batch_rows,
         blocking_operator_bytes: config.execution_memory.blocking_operator_bytes,
         hydration: skein_storage::RelationalHydrationBudget {
-            max_rows: max_output_rows,
-            max_compressed_bytes: max_output_payload_bytes,
-            max_decompressed_bytes: max_output_payload_bytes,
-            max_memory_bytes: max_output_payload_bytes,
+            max_rows: max_row_read_rows,
+            max_compressed_bytes: config.max_relational_hydration_bytes.get(),
+            max_decompressed_bytes: config.max_relational_hydration_bytes.get(),
+            max_memory_bytes: config.max_relational_hydration_bytes.get(),
             ..skein_storage::RelationalHydrationBudget::default()
         },
         index_read: skein_storage::RelationalIndexReadLimits {
@@ -397,6 +398,10 @@ impl Default for DatabaseConfig {
                 skein_storage::DEFAULT_RELATIONAL_INDEX_READ_BYTES,
             )
             .expect("default relational index read byte budget is non-zero"),
+            max_relational_hydration_bytes: NonZeroUsize::new(
+                skein_storage::DEFAULT_MAX_RELATIONAL_HYDRATION_BYTES,
+            )
+            .expect("default relational hydration byte budget is non-zero"),
             storage_residency_mode: skein_storage::StorageResidencyMode::Auto,
             auto_materialize_checkpoint_bytes:
                 skein_storage::DEFAULT_AUTO_MATERIALIZE_CHECKPOINT_BYTES,
