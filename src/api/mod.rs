@@ -256,6 +256,7 @@ pub struct DatabaseConfig {
     pub max_checkpoint_encoded_bytes: Option<u64>,
     pub max_checkpoint_decoded_bytes: Option<u64>,
     pub segment_cache_capacity_bytes: u64,
+    pub max_relational_index_read_bytes: NonZeroUsize,
     pub storage_residency_mode: skein_storage::StorageResidencyMode,
     pub auto_materialize_checkpoint_bytes: u64,
     pub max_out_of_core_delta_bytes: Option<u64>,
@@ -320,9 +321,7 @@ fn relational_query_limits_with_payload(
     let max_row_read_bytes = max_row_read_pages
         .saturating_mul(skein_storage::DEFAULT_RELATIONAL_ROW_PAGE_BYTES)
         .max(1);
-    let max_index_read_bytes = usize::try_from(config.segment_cache_capacity_bytes)
-        .unwrap_or(usize::MAX)
-        .clamp(1, skein_storage::DEFAULT_RELATIONAL_INDEX_READ_BYTES);
+    let max_index_read_bytes = config.max_relational_index_read_bytes;
     crate::relational_sql::RelationalQueryLimits {
         max_output_rows,
         max_output_payload_bytes,
@@ -341,8 +340,7 @@ fn relational_query_limits_with_payload(
                 max_intermediate_rows.clamp(1, skein_storage::DEFAULT_RELATIONAL_INDEX_READ_ROWS),
             )
             .expect("relational index query row budget is non-zero"),
-            max_bytes: NonZeroUsize::new(max_index_read_bytes)
-                .expect("relational index query byte budget is non-zero"),
+            max_bytes: max_index_read_bytes,
             ..skein_storage::RelationalIndexReadLimits::default()
         },
         row_read: skein_storage::RelationalRowPageSnapshotReadLimits {
@@ -395,6 +393,10 @@ impl Default for DatabaseConfig {
             max_checkpoint_encoded_bytes: Some(skein_storage::DEFAULT_MAX_CHECKPOINT_ENCODED_BYTES),
             max_checkpoint_decoded_bytes: Some(skein_storage::DEFAULT_MAX_CHECKPOINT_DECODED_BYTES),
             segment_cache_capacity_bytes: skein_storage::DEFAULT_SEGMENT_CACHE_CAPACITY_BYTES,
+            max_relational_index_read_bytes: NonZeroUsize::new(
+                skein_storage::DEFAULT_RELATIONAL_INDEX_READ_BYTES,
+            )
+            .expect("default relational index read byte budget is non-zero"),
             storage_residency_mode: skein_storage::StorageResidencyMode::Auto,
             auto_materialize_checkpoint_bytes:
                 skein_storage::DEFAULT_AUTO_MATERIALIZE_CHECKPOINT_BYTES,

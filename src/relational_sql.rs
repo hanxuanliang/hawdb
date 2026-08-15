@@ -691,6 +691,7 @@ mod tests {
             std::process::id()
         ));
         let config = DatabaseConfig {
+            segment_cache_capacity_bytes: 64 * 1024,
             relational_index_mode: skein_storage::RelationalIndexMode::DemandPaged,
             ..DatabaseConfig::default()
         };

@@ -1330,6 +1330,10 @@ checkpoint binding, demand-read, lifecycle, or serving obligations.
   append bytes, and bytes in newly named immutable generation artifacts. Its
   write-amplification value is explicitly a lower bound over WAL append plus
   those new artifacts; it MUST NOT be presented as block-device bytes written.
+  The cumulative relational-index read-byte budget is independent of segment
+  cache residency capacity: a bounded streaming query may read and evict more
+  bytes than can be resident simultaneously. Both values remain explicit in
+  resource evidence.
   `Capability512Mib` records whether the observed process peak fits the named
   512 MiB capability profile, but an ordinary in-process run is not proof of an
   OS-enforced limit. The exact value identifies qualification evidence; it is
