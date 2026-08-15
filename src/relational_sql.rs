@@ -871,13 +871,12 @@ mod tests {
                 tight_config,
             )
             .expect("reopen demand-index database with a tight read budget");
-            let admitted_fallback = database
+            let admitted = database
                 .query_sql("EXPLAIN ANALYZE SELECT id FROM documents WHERE owner = 'owner-1'")
-                .expect("fall back when the index page cannot be admitted");
-            let admitted_info =
-                relational_explain_operator_info(&admitted_fallback, "IndexRangeScanExec");
-            assert!(admitted_info.contains("runtime_path=canonical_fallback"));
-            assert!(admitted_info.contains("fallback_reasons=admission_rejected"));
+                .expect("read the index page independently of the small result budget");
+            let admitted_info = relational_explain_operator_info(&admitted, "IndexRangeScanExec");
+            assert!(admitted_info.contains("runtime_path=demand_paged"));
+            assert!(admitted_info.contains("fallback_reasons=none"));
         }
         {
             use std::io::{Read, Seek, SeekFrom, Write};
@@ -1062,11 +1061,11 @@ mod tests {
                 DurabilityPolicy::default(),
                 DatabaseConfig {
                     relational_index_mode: skein_storage::RelationalIndexMode::Authoritative,
-                    max_read_result_payload_bytes: Some(4 * 1024),
+                    segment_cache_capacity_bytes: 32 * 1024,
                     ..DatabaseConfig::default()
                 },
             )
-            .expect("open authoritative SQL reader with tight admission");
+            .expect("open authoritative SQL reader with an undersized cache");
             let error = database
                 .query_sql("SELECT id FROM documents WHERE owner = 'owner-1'")
                 .expect_err("authoritative SQL must not fall back after admission rejection");
@@ -1105,6 +1104,32 @@ mod tests {
                 output.rows
             ),
         }
+    }
+
+    #[test]
+    fn database_sql_options_enforce_per_statement_payload_admission() {
+        let mut database = Database::new();
+        database
+            .query_sql("CREATE TABLE documents (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
+            .unwrap();
+        database
+            .query_sql("INSERT INTO documents (id, body) VALUES ('doc-1', 'payload')")
+            .unwrap();
+
+        let error = database
+            .query_sql_with_params_options(
+                "SELECT body FROM documents WHERE id = $1",
+                &[Value::String("doc-1".to_string())],
+                crate::QueryStreamOptions {
+                    max_rows: Some(1),
+                    max_payload_bytes: Some(1),
+                },
+            )
+            .expect_err("per-statement payload budget must be enforced");
+
+        assert!(error
+            .to_string()
+            .contains("relational SQL output exceeds max_output_payload_bytes 1"));
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use super::{latency_percentiles, runtime_report, LatencyPercentiles, MixedSoakRuntimeReport};
+use crate::evidence_digest::{hash_bytes, hash_value};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use skein::{
@@ -303,54 +304,12 @@ pub(crate) fn validate_production_identity_for_current_target(
 
 pub(crate) fn parameter_digest(parameters: &std::collections::BTreeMap<String, Value>) -> String {
     let mut hasher = Sha256::new();
-    hash_field(&mut hasher, b"skein-production-query-parameters-v1");
+    hash_bytes(&mut hasher, b"skein-production-query-parameters-v1");
     for (name, value) in parameters {
-        hash_field(&mut hasher, name.as_bytes());
+        hash_bytes(&mut hasher, name.as_bytes());
         hash_value(&mut hasher, value);
     }
     format!("sha256:{:x}", hasher.finalize())
-}
-
-fn hash_value(hasher: &mut Sha256, value: &Value) {
-    match value {
-        Value::Null => hasher.update([0]),
-        Value::Bool(value) => {
-            hasher.update([1]);
-            hasher.update([u8::from(*value)]);
-        }
-        Value::Int(value) => {
-            hasher.update([2]);
-            hasher.update(value.to_le_bytes());
-        }
-        Value::Float(value) => {
-            hasher.update([3]);
-            hasher.update(value.to_bits().to_le_bytes());
-        }
-        Value::String(value) => {
-            hasher.update([4]);
-            hash_field(hasher, value.as_bytes());
-        }
-        Value::List(values) => {
-            hasher.update([5]);
-            hasher.update((values.len() as u64).to_le_bytes());
-            for value in values {
-                hash_value(hasher, value);
-            }
-        }
-        Value::Map(values) => {
-            hasher.update([6]);
-            hasher.update((values.len() as u64).to_le_bytes());
-            for (name, value) in values {
-                hash_field(hasher, name.as_bytes());
-                hash_value(hasher, value);
-            }
-        }
-    }
-}
-
-fn hash_field(hasher: &mut Sha256, value: &[u8]) {
-    hasher.update((value.len() as u64).to_le_bytes());
-    hasher.update(value);
 }
 
 #[cfg(test)]

@@ -320,6 +320,9 @@ fn relational_query_limits_with_payload(
     let max_row_read_bytes = max_row_read_pages
         .saturating_mul(skein_storage::DEFAULT_RELATIONAL_ROW_PAGE_BYTES)
         .max(1);
+    let max_index_read_bytes = usize::try_from(config.segment_cache_capacity_bytes)
+        .unwrap_or(usize::MAX)
+        .clamp(1, skein_storage::DEFAULT_RELATIONAL_INDEX_READ_BYTES);
     crate::relational_sql::RelationalQueryLimits {
         max_output_rows,
         max_output_payload_bytes,
@@ -338,11 +341,8 @@ fn relational_query_limits_with_payload(
                 max_intermediate_rows.clamp(1, skein_storage::DEFAULT_RELATIONAL_INDEX_READ_ROWS),
             )
             .expect("relational index query row budget is non-zero"),
-            max_bytes: NonZeroUsize::new(
-                max_output_payload_bytes
-                    .clamp(1, skein_storage::DEFAULT_RELATIONAL_INDEX_READ_BYTES),
-            )
-            .expect("relational index query byte budget is non-zero"),
+            max_bytes: NonZeroUsize::new(max_index_read_bytes)
+                .expect("relational index query byte budget is non-zero"),
             ..skein_storage::RelationalIndexReadLimits::default()
         },
         row_read: skein_storage::RelationalRowPageSnapshotReadLimits {
@@ -418,6 +418,16 @@ impl Default for DatabaseConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryOutput {
     pub rows: Vec<Row>,
+}
+
+impl QueryOutput {
+    /// Returns the deterministic payload accounting used by query result
+    /// admission. Container allocation overhead is intentionally excluded.
+    pub fn payload_bytes(&self) -> usize {
+        self.rows.iter().fold(0usize, |total, row| {
+            total.saturating_add(executor::map_payload_bytes(row))
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -19454,7 +19464,10 @@ impl DatabaseReadTransaction {
         )
     }
 
-    pub(crate) fn query_sql_with_params_options(
+    /// Executes PostgreSQL-dialect SQL with per-statement row and payload
+    /// admission against this pinned read transaction. Configured database
+    /// limits remain hard upper bounds.
+    pub fn query_sql_with_params_options(
         &self,
         sql_text: &str,
         parameters: &[Value],

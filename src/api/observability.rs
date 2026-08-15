@@ -1,6 +1,6 @@
 use super::{
-    system_sql, Database, QueryOutput, SlowQueryLogExportOptions, SlowQueryLogRecordSummary,
-    StatementExecutionContext,
+    system_sql, Database, QueryOutput, QueryStreamOptions, SlowQueryLogExportOptions,
+    SlowQueryLogRecordSummary, StatementExecutionContext,
 };
 use crate::error::{Result, SkeinError};
 use crate::relational_sql::compile_relational_statement_sql;
@@ -121,8 +121,31 @@ impl Database {
         parameters: &[Value],
         max_rows: Option<usize>,
     ) -> Result<QueryOutput> {
+        self.query_sql_with_params_options(
+            sql_text,
+            parameters,
+            QueryStreamOptions {
+                max_rows,
+                max_payload_bytes: self.config.max_read_result_payload_bytes,
+            },
+        )
+    }
+
+    /// Executes PostgreSQL-dialect SQL with per-statement row and payload
+    /// admission. Configured database limits remain hard upper bounds.
+    pub fn query_sql_with_params_options(
+        &mut self,
+        sql_text: &str,
+        parameters: &[Value],
+        options: QueryStreamOptions,
+    ) -> Result<QueryOutput> {
         self.store.ensure_usable()?;
-        let max_rows = super::restrictive_query_limit(self.config.max_read_result_rows, max_rows);
+        let max_rows =
+            super::restrictive_query_limit(self.config.max_read_result_rows, options.max_rows);
+        let max_payload_bytes = super::restrictive_query_limit(
+            self.config.max_read_result_payload_bytes,
+            options.max_payload_bytes,
+        );
         let prepared = skein_sql::prepare_postgres_sql(sql_text)?;
         super::reject_locking_select_without_manager(&prepared.statement, false)?;
         if crate::relational_sql::statement_writes_system_schema_registry(&prepared.statement) {
@@ -142,7 +165,7 @@ impl Database {
                 sql_text,
                 parameters,
                 max_rows,
-                self.config.max_read_result_payload_bytes,
+                max_payload_bytes,
                 &system_sql::SystemSqlContext {
                     catalog: &self.catalog,
                     store: &self.store,
@@ -167,7 +190,11 @@ impl Database {
                     super::relational_index_read_mode(&self.config, &self.store),
                     crate::relational_sql::RelationalRowReadMode::Store(&self.store),
                 ),
-                super::relational_query_limits(&self.config, max_rows),
+                super::relational_query_limits_with_payload(
+                    &self.config,
+                    max_rows,
+                    max_payload_bytes,
+                ),
                 &self.config.execution_memory,
                 None,
             );

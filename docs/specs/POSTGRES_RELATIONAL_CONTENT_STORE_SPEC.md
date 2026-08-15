@@ -124,10 +124,13 @@ invariant.
 Rows and index postings use ordered immutable COW pages. Publishing a snapshot
 shares all untouched pages. A point insert, update, or delete MUST clone only
 the affected row and posting pages, apart from a page split. Creating an index
-may scan the table once; ordinary mutations MUST maintain materialized indexes
-incrementally. Foreign-key validation MUST inspect changed child rows and MUST
-scan a child table only when a referenced visible key is actually removed or
-changed.
+may scan the table once. Before the first checkpoint, ordinary mutations may
+maintain materialized postings incrementally. After authoritative activation,
+mutations MUST validate constraints against the pinned persistent base plus
+recovery/live deltas and publish bounded index and row overlays; they MUST NOT
+reconstruct database-sized posting maps. Foreign-key validation MUST inspect
+changed child rows and MUST scan a child table only when a referenced visible
+key is actually removed or changed.
 
 Transactions are admitted by mutation-row and payload-byte limits before
 publication. A constraint or durability failure MUST leave the published epoch
@@ -199,6 +202,14 @@ the relational state owned by `GraphStore`. Read transactions pin the same COW
 relational snapshot as graph state. This exposes statements rather than
 route-specific typed APIs.
 
+Every production read statement MUST pass its declared row and payload limits
+through `QueryStreamOptions`. Database-level limits remain hard upper bounds.
+The payload limit constrains result and projected large-value hydration bytes;
+it MUST NOT be reused as the index-page I/O budget. Index reads derive their
+separate bounded I/O limit from the admitted segment cache and the engine's
+index-read ceiling, so a small result does not make a valid persistent index
+page unreadable.
+
 The relational executor implements the frozen corpus semantics, including
 joins, aggregation, ordering, distinct, budgets, and late hydration. Base scans,
 primary-key lookups, index-prefix visits, joins, residual filters, projection,
@@ -266,6 +277,31 @@ before cutover. The source SQLite database remains unchanged until a separately
 authorized decommissioning step.
 
 ## Qualification
+
+`run_content_store_initial_row_page_qualification` is the typed first-table
+storage lifecycle gate. It creates a new evidence database from the frozen DDL,
+inserts `content_documents` and `thread_messages` only through frozen
+PostgreSQL mutation statements, publishes a checkpoint, and reopens with
+authoritative persistent indexes. It then executes the frozen document lookup,
+ordered message page, and message aggregate with each statement's exact row
+and payload limits.
+
+The report binds the source revision, corpus and schema identities, qualified
+tables, cache capacity, checkpoint generation/epoch, deterministic output
+digests, output payload bytes, cache deltas, and parsed `EXPLAIN ANALYZE`
+evidence. Success requires `runtime_path=authoritative` and
+`row_runtime_path=snapshot_rows`. A post-checkpoint mutation must reappear from
+a non-empty WAL recovery delta after reopen, and a later mutation must appear
+from a non-empty live row overlay without a checkpoint. Page pins must return
+to zero after every read. Cold and warm checkpoint reads must return identical
+ordered results.
+
+This gate deliberately covers storage lifecycle and per-statement admission,
+not complete Content Store cutover. Multi-statement transaction groups,
+locking, cancellation, injected corruption, resource profiling, and the
+remaining tables stay fail-closed until their separate qualification evidence
+is present. The runner never embeds its database path or payload contents in
+the serialized report.
 
 The focused Rust tests cover:
 

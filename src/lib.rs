@@ -540,7 +540,7 @@ pub use store::{
     OrderedAdjacencyEntry, PropertyIndexConsistencyReport, PublishedReadView, RecoveryMode,
     RelationalConstraintQualificationProbeReport, RelationalConstraintQualificationReport,
     RelationalConstraintQualificationUse, RelationalIndexArtifactMetadata,
-    RelationalIndexGenerationArtifacts, RelationalIndexQualificationProbeKind,
+    RelationalIndexGenerationArtifacts, RelationalIndexMode, RelationalIndexQualificationProbeKind,
     RelationalIndexQualificationProbeReport, RelationalIndexReadLimits, RelationalIndexReadReport,
     RelationalIndexReadViewBackendReport, RelationalIndexReadViewReport,
     RelationalIndexRecoveryReadReport, RelationalIndexViewQualificationOptions,

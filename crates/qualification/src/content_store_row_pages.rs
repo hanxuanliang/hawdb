@@ -1,0 +1,286 @@
+mod evidence;
+mod fixture;
+#[cfg(test)]
+mod tests;
+
+use crate::{
+    nowledge_content_store_schema_identity, nowledge_content_store_sql_corpus,
+    ContentStoreSchemaIdentity, ContentStoreSqlCorpus, ContentStoreSqlCorpusIdentity,
+};
+use evidence::{execute_qualified_read, execute_read_set, require_matching_results};
+use fixture::{
+    bootstrap_checkpoint, corpus_statement, database_config, initial_read_specs,
+    thread_page_parameters, upsert_thread_message, QUALIFIED_TABLES,
+};
+use serde::Serialize;
+use skein::{Database, DurabilityPolicy, RelationalIndexMode, Result, SkeinError};
+use std::path::PathBuf;
+
+pub const CONTENT_STORE_INITIAL_ROW_PAGE_QUALIFICATION_PROTOCOL: &str =
+    "skein-content-store-initial-row-page-qualification-v1";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentStoreInitialRowPageQualificationConfig {
+    pub database_path: PathBuf,
+    pub source_revision: String,
+    pub base_message_count: usize,
+    pub message_payload_bytes: usize,
+    pub segment_cache_capacity_bytes: u64,
+}
+
+impl ContentStoreInitialRowPageQualificationConfig {
+    pub fn synthetic(
+        database_path: impl Into<PathBuf>,
+        source_revision: impl Into<String>,
+    ) -> Self {
+        Self {
+            database_path: database_path.into(),
+            source_revision: source_revision.into(),
+            base_message_count: 8,
+            message_payload_bytes: 8 * 1024,
+            segment_cache_capacity_bytes: 512 * 1024,
+        }
+    }
+
+    fn validate(&self, corpus: &ContentStoreSqlCorpus) -> Result<()> {
+        if self.database_path.exists() {
+            return Err(SkeinError::Semantic(
+                "content-store row-page qualification requires a new database path".to_string(),
+            ));
+        }
+        if self.source_revision.trim().is_empty() {
+            return Err(SkeinError::Semantic(
+                "content-store row-page qualification source revision must not be empty"
+                    .to_string(),
+            ));
+        }
+        if self.base_message_count == 0 || self.message_payload_bytes == 0 {
+            return Err(SkeinError::Semantic(
+                "content-store row-page qualification message count and payload must be non-zero"
+                    .to_string(),
+            ));
+        }
+        if self.segment_cache_capacity_bytes == 0 {
+            return Err(SkeinError::Semantic(
+                "content-store row-page qualification cache capacity must be non-zero".to_string(),
+            ));
+        }
+        let page = corpus_statement(corpus, "thread_messages_page")?;
+        let final_message_count = self.base_message_count.saturating_add(2);
+        if final_message_count > page.max_rows {
+            return Err(SkeinError::Semantic(format!(
+                "content-store row-page qualification needs {final_message_count} rows but thread_messages_page admits {}",
+                page.max_rows
+            )));
+        }
+        let minimum_payload = self
+            .message_payload_bytes
+            .checked_mul(final_message_count)
+            .ok_or_else(|| {
+                SkeinError::Semantic(
+                    "content-store row-page qualification payload size overflow".to_string(),
+                )
+            })?;
+        if minimum_payload > page.max_payload_bytes {
+            return Err(SkeinError::Semantic(format!(
+                "content-store row-page qualification message payloads need at least {minimum_payload} bytes but thread_messages_page admits {}",
+                page.max_payload_bytes
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentStoreRowPageReadPhase {
+    ColdCheckpoint,
+    WarmCheckpoint,
+    WalRecovery,
+    LiveOverlay,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContentStoreRowPageCacheDelta {
+    pub hits: u64,
+    pub misses: u64,
+    pub insertions: u64,
+    pub evictions: u64,
+    pub admission_rejections: u64,
+    pub resident_bytes_after: u64,
+    pub pinned_bytes_after: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContentStoreRowPageExecutionEvidence {
+    pub index_runtime_path: String,
+    pub row_runtime_path: String,
+    pub base_generation: u64,
+    pub delta_generation: Option<u64>,
+    pub base_commit_epoch: u64,
+    pub visible_commit_epoch: u64,
+    pub root_set_digest: String,
+    pub logical_pages: u64,
+    pub logical_bytes: u64,
+    pub physical_pages: u64,
+    pub physical_bytes: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub cache_admission_rejections: u64,
+    pub overlay_entries: u64,
+    pub overlay_bytes: u64,
+    pub rows_visited: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContentStoreRowPageReadReport {
+    pub statement_name: String,
+    pub phase: ContentStoreRowPageReadPhase,
+    pub max_rows: usize,
+    pub max_payload_bytes: usize,
+    pub output_rows: usize,
+    pub output_payload_bytes: usize,
+    pub output_sha256: String,
+    pub cache: ContentStoreRowPageCacheDelta,
+    pub execution: ContentStoreRowPageExecutionEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContentStoreInitialRowPageQualificationReport {
+    pub protocol: String,
+    pub source_revision: String,
+    pub corpus: ContentStoreSqlCorpusIdentity,
+    pub schema: ContentStoreSchemaIdentity,
+    pub qualified_tables: Vec<String>,
+    pub base_message_count: usize,
+    pub final_message_count: usize,
+    pub message_payload_bytes: usize,
+    pub segment_cache_capacity_bytes: u64,
+    pub checkpoint_generation: u64,
+    pub checkpoint_commit_epoch: u64,
+    pub cold_checkpoint_reads: Vec<ContentStoreRowPageReadReport>,
+    pub warm_checkpoint_reads: Vec<ContentStoreRowPageReadReport>,
+    pub wal_replayed_entries: usize,
+    pub wal_replayed_bytes: u64,
+    pub wal_recovery_read: ContentStoreRowPageReadReport,
+    pub live_overlay_read: ContentStoreRowPageReadReport,
+    pub ready: bool,
+}
+
+impl ContentStoreInitialRowPageQualificationReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("content-store row-page report is serializable")
+    }
+}
+
+/// Qualifies the first relational Content Store tables through the public SQL
+/// path. The caller owns the new database directory and may retain it as an
+/// evidence artifact after this function returns.
+pub fn run_content_store_initial_row_page_qualification(
+    config: ContentStoreInitialRowPageQualificationConfig,
+) -> Result<ContentStoreInitialRowPageQualificationReport> {
+    let corpus = nowledge_content_store_sql_corpus()?;
+    config.validate(&corpus)?;
+
+    let checkpoint = bootstrap_checkpoint(&config, &corpus)?;
+    let authoritative_config = database_config(&config, RelationalIndexMode::Authoritative);
+    let mut database = Database::open_with_durability_and_config(
+        &config.database_path,
+        DurabilityPolicy::SyncOnEveryWrite,
+        authoritative_config.clone(),
+    )?;
+
+    let read_specs = initial_read_specs(&corpus, config.base_message_count)?;
+    let cold_checkpoint_reads = execute_read_set(
+        &mut database,
+        &read_specs,
+        ContentStoreRowPageReadPhase::ColdCheckpoint,
+    )?;
+    let warm_checkpoint_reads = execute_read_set(
+        &mut database,
+        &read_specs,
+        ContentStoreRowPageReadPhase::WarmCheckpoint,
+    )?;
+    require_matching_results(&cold_checkpoint_reads, &warm_checkpoint_reads)?;
+
+    upsert_thread_message(
+        &mut database,
+        &corpus,
+        config.base_message_count,
+        config.message_payload_bytes,
+        "wal",
+    )?;
+    drop(database);
+
+    let mut database = Database::open_with_durability_and_config(
+        &config.database_path,
+        DurabilityPolicy::SyncOnEveryWrite,
+        authoritative_config,
+    )?;
+    let recovery = database.storage_recovery_report();
+    if recovery.replayed_wal_entries == 0 {
+        return Err(SkeinError::Execution(
+            "content-store row-page qualification did not replay the post-checkpoint WAL mutation"
+                .to_string(),
+        ));
+    }
+    let page = corpus_statement(&corpus, "thread_messages_page")?;
+    let wal_recovery_read = execute_qualified_read(
+        &mut database,
+        page,
+        thread_page_parameters(config.base_message_count + 1),
+        ContentStoreRowPageReadPhase::WalRecovery,
+        config.base_message_count + 1,
+    )?;
+    if wal_recovery_read.execution.delta_generation.is_none() {
+        return Err(SkeinError::Execution(
+            "content-store row-page qualification WAL read did not use a recovery delta"
+                .to_string(),
+        ));
+    }
+
+    upsert_thread_message(
+        &mut database,
+        &corpus,
+        config.base_message_count + 1,
+        config.message_payload_bytes,
+        "live",
+    )?;
+    let live_overlay_read = execute_qualified_read(
+        &mut database,
+        page,
+        thread_page_parameters(config.base_message_count + 2),
+        ContentStoreRowPageReadPhase::LiveOverlay,
+        config.base_message_count + 2,
+    )?;
+    if live_overlay_read.execution.overlay_entries == 0 {
+        return Err(SkeinError::Execution(
+            "content-store row-page qualification live read did not use the row overlay"
+                .to_string(),
+        ));
+    }
+
+    Ok(ContentStoreInitialRowPageQualificationReport {
+        protocol: CONTENT_STORE_INITIAL_ROW_PAGE_QUALIFICATION_PROTOCOL.to_string(),
+        source_revision: config.source_revision,
+        corpus: corpus.identity(),
+        schema: nowledge_content_store_schema_identity(),
+        qualified_tables: QUALIFIED_TABLES
+            .iter()
+            .map(|table| (*table).to_string())
+            .collect(),
+        base_message_count: config.base_message_count,
+        final_message_count: config.base_message_count + 2,
+        message_payload_bytes: config.message_payload_bytes,
+        segment_cache_capacity_bytes: config.segment_cache_capacity_bytes,
+        checkpoint_generation: checkpoint.generation,
+        checkpoint_commit_epoch: checkpoint.commit_epoch,
+        cold_checkpoint_reads,
+        warm_checkpoint_reads,
+        wal_replayed_entries: recovery.replayed_wal_entries,
+        wal_replayed_bytes: recovery.replayed_wal_bytes,
+        wal_recovery_read,
+        live_overlay_read,
+        ready: true,
+    })
+}

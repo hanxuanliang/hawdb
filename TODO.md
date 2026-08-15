@@ -113,9 +113,17 @@ crash; read-only recovery remains fail closed.
   - Qualify `content_documents` and `thread_messages` first, then
     `content_chunks` and `content_anchors`, using the frozen PostgreSQL statement
     corpus and one pinned graph-plus-relational epoch.
+  - The typed first-table runner now proves authoritative checkpoint/reopen,
+    exact per-statement row/payload admission, cold/warm result identity, WAL
+    recovery delta, live row overlay, cache accounting, and zero leaked page
+    pins for `content_documents` and `thread_messages`.
   - Require checkpoint/reopen, WAL replay, corruption, cancellation, locking,
     cold/warm latency, RSS, page-fault, and write-amplification evidence under
     the 512 MiB desktop profile before enabling the path by default.
+  - Remaining first-table evidence is injected corruption, cancellation,
+    pessimistic locking and multi-statement transaction groups, plus measured
+    latency, RSS, page faults, and write amplification. Then extend the same
+    contract to `content_chunks` and `content_anchors`.
   - Because no storage format has shipped, activation is destructive: remove
     the ordinary materialized row selector instead of retaining a compatibility
     or rollback path. Keep the differential oracle in qualification code only.

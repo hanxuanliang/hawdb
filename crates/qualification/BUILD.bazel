@@ -9,6 +9,11 @@ rust_library(
     crate_root = "src/lib.rs",
     srcs = [
         "src/content_store_sql_corpus.rs",
+        "src/evidence_digest.rs",
+        "src/content_store_row_pages.rs",
+        "src/content_store_row_pages/evidence.rs",
+        "src/content_store_row_pages/fixture.rs",
+        "src/content_store_row_pages/tests.rs",
         "src/lib.rs",
         "src/production_blocking.rs",
         "src/production_graph.rs",
