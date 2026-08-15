@@ -1,3 +1,4 @@
+mod corruption;
 mod evidence;
 mod fixture;
 mod isolation;
@@ -9,6 +10,7 @@ use crate::{
     nowledge_content_store_schema_identity, nowledge_content_store_sql_corpus,
     ContentStoreSchemaIdentity, ContentStoreSqlCorpus, ContentStoreSqlCorpusIdentity,
 };
+use corruption::qualify_content_store_corruption;
 use evidence::{execute_qualified_read, execute_read_set, require_matching_results};
 use fixture::{
     bootstrap_checkpoint, corpus_statement, database_config, initial_read_specs,
@@ -169,6 +171,7 @@ pub struct ContentStoreInitialRowPageQualificationReport {
     pub wal_recovery_read: ContentStoreRowPageReadReport,
     pub live_overlay_read: ContentStoreRowPageReadReport,
     pub multi_statement_transaction: ContentStoreTransactionQualificationReport,
+    pub corruption: ContentStoreCorruptionQualificationReport,
     pub isolation: ContentStoreIsolationQualificationReport,
     pub ready: bool,
 }
@@ -202,6 +205,19 @@ pub struct ContentStoreIsolationQualificationReport {
     pub owner_rollback_preserved_row: bool,
     pub commit_epoch_before: u64,
     pub commit_epoch_after: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContentStoreCorruptionQualificationReport {
+    pub artifact_name: String,
+    pub artifact_generation: u64,
+    pub artifact_bytes: u64,
+    pub bit_flip_offset: u64,
+    pub scrub_rejected: bool,
+    pub damaged_handle_poisoned: bool,
+    pub post_failure_sql_rejected: bool,
+    pub source_preserved: bool,
+    pub source_row_sha256: String,
 }
 
 impl ContentStoreInitialRowPageQualificationReport {
@@ -252,7 +268,7 @@ pub fn run_content_store_initial_row_page_qualification(
     let mut database = Database::open_with_durability_and_config(
         &config.database_path,
         DurabilityPolicy::SyncOnEveryWrite,
-        authoritative_config,
+        authoritative_config.clone(),
     )?;
     let recovery = database.storage_recovery_report();
     if recovery.replayed_wal_entries == 0 {
@@ -303,6 +319,12 @@ pub fn run_content_store_initial_row_page_qualification(
         config.base_message_count + 2,
         config.message_payload_bytes,
     )?;
+    let corruption = qualify_content_store_corruption(
+        &mut database,
+        &config.database_path,
+        &authoritative_config,
+        &multi_statement_transaction.inserted_content_message_id,
+    )?;
     let isolation = qualify_content_store_isolation(
         database,
         &corpus,
@@ -332,6 +354,7 @@ pub fn run_content_store_initial_row_page_qualification(
         wal_recovery_read,
         live_overlay_read,
         multi_statement_transaction,
+        corruption,
         isolation,
         ready: true,
     })

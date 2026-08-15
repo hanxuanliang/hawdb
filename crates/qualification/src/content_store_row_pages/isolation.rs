@@ -1,19 +1,19 @@
+use super::evidence::{
+    message_point_options, message_point_parameters, require_one_message,
+    MESSAGE_POINT_MAX_PAYLOAD_BYTES, MESSAGE_POINT_MAX_ROWS, MESSAGE_POINT_SQL,
+};
 use super::fixture::{corpus_statement, thread_message_parameters};
 use super::ContentStoreIsolationQualificationReport;
 use crate::evidence_digest::rows_sha256;
 use crate::ContentStoreSqlCorpus;
 use skein::{
-    ConcurrentTransactionOptions, Database, QueryStreamOptions, Result, RuntimeCancellationToken,
-    RuntimeTaskContext, SkeinError, Value,
+    ConcurrentTransactionOptions, Database, Result, RuntimeCancellationToken, RuntimeTaskContext,
+    SkeinError,
 };
 use std::time::Duration;
 
-const MESSAGE_POINT_SQL: &str =
-    "SELECT content_message_id, content FROM thread_messages WHERE content_message_id = $1";
 const MESSAGE_FOR_UPDATE_SQL: &str =
     "SELECT content_message_id FROM thread_messages WHERE content_message_id = $1 FOR UPDATE";
-const MESSAGE_POINT_MAX_ROWS: usize = 1;
-const MESSAGE_POINT_MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 const OWNER_LOCK_TIMEOUT: Duration = Duration::from_secs(1);
 const WAITER_LOCK_TIMEOUT: Duration = Duration::from_millis(25);
 
@@ -24,11 +24,8 @@ pub(super) fn qualify_content_store_isolation(
     payload_bytes: usize,
 ) -> Result<ContentStoreIsolationQualificationReport> {
     let content_message_id = format!("content-message-{message_position:08}");
-    let point_parameters = [Value::String(content_message_id.clone())];
-    let point_options = QueryStreamOptions {
-        max_rows: Some(MESSAGE_POINT_MAX_ROWS),
-        max_payload_bytes: Some(MESSAGE_POINT_MAX_PAYLOAD_BYTES),
-    };
+    let point_parameters = message_point_parameters(&content_message_id);
+    let point_options = message_point_options();
 
     let read = database.begin_read_transaction();
     let cancellation = RuntimeCancellationToken::new();
@@ -55,7 +52,7 @@ pub(super) fn qualify_content_store_isolation(
 
     let before_lock =
         read.query_sql_with_params_options(MESSAGE_POINT_SQL, &point_parameters, point_options)?;
-    require_one_message(&before_lock.rows, &content_message_id)?;
+    require_one_message(&before_lock.rows, &content_message_id, "isolation")?;
     let row_sha256 = rows_sha256(&before_lock.rows);
     let cancellation_pinned_bytes_after = database
         .segment_cache_snapshot()
@@ -78,7 +75,7 @@ pub(super) fn qualify_content_store_isolation(
         OWNER_LOCK_TIMEOUT,
     ))?;
     let locked = owner.query_sql_with_params(MESSAGE_FOR_UPDATE_SQL, &point_parameters)?;
-    require_one_message(&locked.rows, &content_message_id)?;
+    require_one_message(&locked.rows, &content_message_id, "isolation")?;
 
     let message = corpus_statement(corpus, "upsert_thread_message")?;
     let mut waiter = concurrent.begin_transaction(ConcurrentTransactionOptions::pessimistic(
@@ -120,7 +117,7 @@ pub(super) fn qualify_content_store_isolation(
     owner.rollback();
 
     let after_lock = concurrent.query_sql_with_params(MESSAGE_POINT_SQL, &point_parameters)?;
-    require_one_message(&after_lock.rows, &content_message_id)?;
+    require_one_message(&after_lock.rows, &content_message_id, "isolation")?;
     if rows_sha256(&after_lock.rows) != row_sha256 {
         return Err(SkeinError::Execution(
             "content-store timed-out UPSERT changed the locked row".to_string(),
@@ -148,17 +145,4 @@ pub(super) fn qualify_content_store_isolation(
         commit_epoch_before,
         commit_epoch_after,
     })
-}
-
-fn require_one_message(rows: &[skein::Row], content_message_id: &str) -> Result<()> {
-    let matches_message = matches!(
-        rows.first().and_then(|row| row.get("content_message_id")),
-        Some(Value::String(actual)) if actual == content_message_id
-    );
-    if rows.len() != 1 || !matches_message {
-        return Err(SkeinError::Execution(format!(
-            "content-store isolation expected exactly message {content_message_id}, got {rows:?}"
-        )));
-    }
-    Ok(())
 }

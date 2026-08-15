@@ -11,6 +11,7 @@ rust_library(
         "src/content_store_sql_corpus.rs",
         "src/evidence_digest.rs",
         "src/content_store_row_pages.rs",
+        "src/content_store_row_pages/corruption.rs",
         "src/content_store_row_pages/evidence.rs",
         "src/content_store_row_pages/fixture.rs",
         "src/content_store_row_pages/isolation.rs",

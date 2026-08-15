@@ -1319,7 +1319,11 @@ checkpoint binding, demand-read, lifecycle, or serving obligations.
   qualification propagates cancellation through a pinned Content Store point
   read, proves zero leaked page pins and later-reader usability, and exercises a
   `FOR UPDATE` point lock against a same-key UPSERT with bounded timeout,
-  aborted-waiter, rollback, unchanged-row, and unchanged-epoch evidence.
+  aborted-waiter, rollback, unchanged-row, and unchanged-epoch evidence. Its
+  corruption probe creates and restores a public backup into a disposable
+  directory, bit-flips the current v1 row-page artifact, requires full scrub to
+  poison that handle and reject later SQL, and rechecks that the retained source
+  database is unchanged.
 - `SkeinRowRecovery.tla`: checkpoint-correlated row-root mount, exact ordered
   primary-key WAL overlay, graph-only epoch advancement, whole-fragment
   admission, fail-closed invalidation, complete-prefix view publication, cold

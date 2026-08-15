@@ -76,6 +76,12 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
             .multi_statement_transaction
             .inserted_content_message_id
     );
+    assert!(report.corruption.scrub_rejected);
+    assert!(report.corruption.damaged_handle_poisoned);
+    assert!(report.corruption.post_failure_sql_rejected);
+    assert!(report.corruption.source_preserved);
+    assert!(report.corruption.artifact_bytes > 0);
+    assert!(report.corruption.bit_flip_offset < report.corruption.artifact_bytes);
     assert!(report
         .cold_checkpoint_reads
         .iter()

@@ -127,13 +127,15 @@ crash; read-only recovery remains fail closed.
     a bounded private index overlay across SQL statements. The typed runner now
     executes a Content Store-shaped message UPSERT, page read, rejected foreign
     key statement, payload aggregate, and document-summary update as one group,
-    and proves transaction-workspace routing plus atomic publication. Remaining
-    The same runner now proves a cancelled Content Store point read is
+    and proves transaction-workspace routing plus atomic publication. The same
+    runner now proves a cancelled Content Store point read is
     non-poisoning and pin-clean, and that `FOR UPDATE` makes a same-key UPSERT
-    time out and abort without changing the row or commit epoch. Remaining
-    first-table evidence is injected corruption plus measured latency, RSS,
-    page faults, and write amplification. Then extend the same contract to
-    `content_chunks` and `content_anchors`.
+    time out and abort without changing the row or commit epoch. A disposable
+    backup/restore probe now bit-flips the current row-page artifact, requires
+    scrub to poison the damaged handle, rejects later SQL, and proves the source
+    database remains unchanged. Remaining first-table evidence is measured
+    latency, RSS, page faults, and write amplification. Then extend the same
+    contract to `content_chunks` and `content_anchors`.
   - Because no storage format has shipped, activation is destructive: remove
     the ordinary materialized row selector instead of retaining a compatibility
     or rollback path. Keep the differential oracle in qualification code only.

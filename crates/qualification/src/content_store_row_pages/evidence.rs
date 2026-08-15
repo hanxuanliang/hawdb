@@ -8,6 +8,38 @@ use skein::{Database, QueryStreamOptions, Result, SkeinError, Value};
 
 const EXPLAIN_MAX_ROWS: usize = 128;
 const EXPLAIN_MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+pub(super) const MESSAGE_POINT_SQL: &str =
+    "SELECT content_message_id, content FROM thread_messages WHERE content_message_id = $1";
+pub(super) const MESSAGE_POINT_MAX_ROWS: usize = 1;
+pub(super) const MESSAGE_POINT_MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+
+pub(super) fn message_point_parameters(content_message_id: &str) -> [Value; 1] {
+    [Value::String(content_message_id.to_string())]
+}
+
+pub(super) const fn message_point_options() -> QueryStreamOptions {
+    QueryStreamOptions {
+        max_rows: Some(MESSAGE_POINT_MAX_ROWS),
+        max_payload_bytes: Some(MESSAGE_POINT_MAX_PAYLOAD_BYTES),
+    }
+}
+
+pub(super) fn require_one_message(
+    rows: &[skein::Row],
+    content_message_id: &str,
+    probe: &str,
+) -> Result<()> {
+    let matches_message = matches!(
+        rows.first().and_then(|row| row.get("content_message_id")),
+        Some(Value::String(actual)) if actual == content_message_id
+    );
+    if rows.len() != 1 || !matches_message {
+        return Err(SkeinError::Execution(format!(
+            "content-store {probe} expected exactly message {content_message_id}, got {rows:?}"
+        )));
+    }
+    Ok(())
+}
 
 pub(super) fn execute_read_set(
     database: &mut Database,
