@@ -141,9 +141,10 @@ crash; read-only recovery remains fail closed.
     incremental schema drift fail before artifact creation. A read-only
     `OutOfCore` plus `Authoritative` open now validates the current row and index
     views and then releases its transitional materialized checkpoint rows while
-    retaining schemas and exact logical counts. Cold open still fully decodes
-    those rows before release, so schema-only open is required to remove the
-    startup peak rather than only steady-state residency.
+    retaining schemas and exact logical counts. When no WAL record follows the
+    checkpoint, it now builds that sparse state directly from canonical root
+    metadata and avoids the full row decode. WAL-bearing recovery still needs a
+    sparse mutation workspace before its startup peak can be removed.
   - The typed runner now qualifies `content_documents`, `thread_messages`,
     `content_chunks`, and `content_anchors` using the frozen PostgreSQL statement
     corpus and graph-plus-relational commits that publish one shared epoch.
@@ -220,8 +221,9 @@ crash; read-only recovery remains fail closed.
   - Because no storage format has shipped, activation is destructive: remove
     the ordinary materialized row selector instead of retaining a compatibility
     or rollback path. The read-only authoritative serving handle now has no row
-    fallback; the remaining work is to avoid constructing that oracle during
-    cold open and keep it only in offline qualification code.
+    fallback and a clean checkpoint no longer constructs that oracle. The
+    remaining work is sparse WAL mutation recovery before the full oracle can
+    be kept only in offline qualification code.
 
 - [ ] Differentially qualify and production-activate persistent graph indexes.
   - Equality, range, full-text, ordered composite-equality, relationship

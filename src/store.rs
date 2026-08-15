@@ -987,6 +987,7 @@ pub struct StorageResidencyReport {
 pub struct RelationalRowStorageResidencyReport {
     pub serving: bool,
     pub materialized_rows_resident: bool,
+    pub checkpoint_state_metadata_only: bool,
     pub materialized_row_count: usize,
     pub materialized_row_bytes: u64,
     pub logical_row_count: usize,

@@ -195,6 +195,7 @@ fn engine_system_schema_bootstraps_during_persistent_open() {
 #[test]
 fn read_only_out_of_core_open_validates_system_schema_through_canonical_rows() {
     let path = unique_test_dir("read_only_out_of_core_system_schema");
+    let body = "x".repeat(8 * 1024);
     {
         let mut db = Database::open_with_config(
             &path,
@@ -205,8 +206,14 @@ fn read_only_out_of_core_open_validates_system_schema_through_canonical_rows() {
         )
         .unwrap();
         db.apply_system_schema_registry(&registry_v1()).unwrap();
-        db.query_sql("INSERT INTO content_documents (id, body) VALUES ('doc-1', 'body')")
-            .unwrap();
+        db.query_sql_with_params(
+            "INSERT INTO content_documents (id, body) VALUES ($1, $2)",
+            &[
+                Value::String("doc-1".to_string()),
+                Value::String(body.clone()),
+            ],
+        )
+        .unwrap();
         db.checkpoint().unwrap();
     }
 
@@ -222,11 +229,19 @@ fn read_only_out_of_core_open_validates_system_schema_through_canonical_rows() {
     .unwrap();
 
     assert!(!db.store.relational_state().materialized_rows_resident());
+    assert!(db.store.relational_state().canonical_row_metadata_only());
+    assert_eq!(db.store.relational_state().overflow_segment_count(), 0);
+    assert!(
+        db.storage_residency_report()
+            .relational_rows
+            .overflow_extent_count
+            > 0
+    );
     assert_eq!(
         db.query_sql("SELECT body FROM content_documents WHERE id = 'doc-1'")
             .unwrap()
             .rows[0]["body"],
-        Value::String("body".to_string())
+        Value::String(body)
     );
     let validation = db.apply_system_schema_registry(&registry_v1()).unwrap();
     assert!(validation.applied_versions.is_empty());

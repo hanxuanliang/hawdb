@@ -484,8 +484,10 @@ views MUST both serve at the database epoch, share their base generation, base
 epoch, and visible epoch, and report checkpoint, recovery-delta, and live
 overlay bytes independently. A read-only `OutOfCore` plus `Authoritative`
 handle MUST report that materialized checkpoint rows are absent while retaining
-the exact logical row count, and system-schema validation plus ordinary SQL
-must use the same canonical row snapshot rather than a direct state scan. Both
+the exact logical row count. With an empty post-checkpoint WAL it MUST also
+report a metadata-only checkpoint state, proving that cold open did not
+construct the row oracle. System-schema validation plus ordinary SQL must use
+the same canonical row snapshot rather than a direct state scan. Both
 canonical row and canonical index artifacts
 MUST exceed the configured cache while an individual admitted read wave still
 fits: cache admission rejection or a leaked pin blocks readiness.

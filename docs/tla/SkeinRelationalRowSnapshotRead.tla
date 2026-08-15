@@ -10,8 +10,8 @@ EXTENDS Integers, Naturals, Sequences, FiniteSets
 (* pinned reader. Admission, cancellation, and callback panic do not poison*)
 (* the reader; corruption does. An unresolved overflow reference is resolved*)
 (* only through the relational state pinned at the same visible epoch.      *)
-(* A read-only out-of-core activation may detach its materialized base only *)
-(* after the canonical serving view is ready; it never falls back afterward.*)
+(* A read-only out-of-core activation may omit or detach its materialized    *)
+(* base only after the canonical serving view is ready; it never falls back.*)
 (***************************************************************************)
 
 CONSTANT MaxOverlayEntries, MaxOverlayBytes
@@ -448,7 +448,7 @@ PublishSchemaCheckpoint ==
         stoppedEarly, schemaWalDurable
         >>
 
-DetachMaterializedBase ==
+ActivateDetachedBase ==
     /\ readState = "idle"
     /\ servingState \in {"ready", "readyAfterSchema"}
     /\ servingState' = "readyDetached"
@@ -486,7 +486,7 @@ Next ==
     \/ BeginSchemaCheckpoint
     \/ CrashBeforeSchemaManifest
     \/ PublishSchemaCheckpoint
-    \/ DetachMaterializedBase
+    \/ ActivateDetachedBase
 
 Spec == Init /\ [][Next]_vars
 

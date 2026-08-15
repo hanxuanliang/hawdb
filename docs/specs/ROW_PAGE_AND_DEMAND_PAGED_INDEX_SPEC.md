@@ -417,9 +417,12 @@ activation changes constraint and fallback semantics and omits materialized
 postings. A read-only `OutOfCore` plus `Authoritative` open additionally drops
 the transitional materialized checkpoint rows after both the canonical row
 view and authoritative index view are validated at the current epoch. The
-writable transaction workspace remains materialized. Cold open still decodes
-the relational checkpoint before releasing those rows, so eliminating that
-startup peak is a separate activation step.
+writable transaction workspace remains materialized. When the WAL has no
+records after the checkpoint, cold open constructs only schemas and exact row
+counts from the self-describing canonical row root and never decodes or
+constructs the transitional checkpoint rows. WAL-bearing and writable recovery
+still use the materialized recovery state until sparse mutation recovery is
+implemented.
 
 ## Identities and terminology
 
@@ -795,9 +798,11 @@ artifact file lengths. It verifies row-to-overflow binding and table schemas,
 but does not read row-page slots or hash database-scale payload artifacts.
 Descriptor and page integrity checks remain demand-read or scrub obligations.
 
-A read-only `OutOfCore` plus `Authoritative` handle may detach the decoded
-checkpoint-row oracle only after the current canonical row snapshot reader and
-the current authoritative index view both open successfully. Detachment keeps
+A read-only `OutOfCore` plus `Authoritative` handle with an empty post-checkpoint
+WAL builds a metadata-only `RelationalState` directly from the validated row
+root. An already decoded state may otherwise detach its checkpoint-row oracle
+only after the current canonical row snapshot reader and the current
+authoritative index view both open successfully. Both paths keep
 the complete schemas, exact manifest-derived logical row counts, and overflow
 resolvers, while reporting zero materialized row count and bytes. SQL must then
 serve only through the pinned row pages and persistent indexes. Mutation,
@@ -1603,7 +1608,8 @@ recovery generations, base and visible epochs, immutable artifact bytes, and
 bounded live-overlay counts and bytes. Row residency additionally records root
 descriptors, root keys, overflow extents, conservative live resident bytes,
 whether checkpoint rows remain materialized, materialized row count and bytes,
-and the exact logical row count retained after detachment;
+whether the checkpoint state was built from canonical metadata without a row
+decode, and the exact logical row count retained after detachment;
 index residency records roots, base pages, and immutable recovery-delta pages.
 If no read view is current at the database epoch, `serving` MUST be false and
 the report MUST NOT manufacture a generation from stale files. Production-copy

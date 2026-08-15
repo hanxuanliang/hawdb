@@ -102,6 +102,7 @@ impl RelationalRowPageState {
     ) -> RelationalRowStorageResidencyReport {
         let mut report = RelationalRowStorageResidencyReport {
             materialized_rows_resident: state.materialized_rows_resident(),
+            checkpoint_state_metadata_only: state.canonical_row_metadata_only(),
             materialized_row_count: state.materialized_row_count(),
             materialized_row_bytes: state.estimated_materialized_row_bytes(),
             logical_row_count: state.total_row_count(),
@@ -1123,7 +1124,10 @@ mod tests {
 
     #[test]
     fn read_only_open_reuses_an_exact_published_row_delta() {
-        let replay = WalReplayConfig::default();
+        let replay = WalReplayConfig {
+            relational_index_mode: RelationalIndexMode::Shadow,
+            ..WalReplayConfig::default()
+        };
         let path = seed_row_root_with_wal_insert("read-only-row-delta", replay);
 
         let mut writable_catalog = Catalog::default();
@@ -1153,9 +1157,15 @@ mod tests {
             &path,
             &mut read_only_catalog,
             DurabilityPolicy::default(),
-            replay,
+            WalReplayConfig {
+                residency_mode: StorageResidencyMode::OutOfCore,
+                relational_index_mode: RelationalIndexMode::Shadow,
+                ..WalReplayConfig::default()
+            },
         )
         .unwrap();
+        assert!(read_only.relational_state.materialized_rows_resident());
+        assert!(!read_only.relational_state.canonical_row_metadata_only());
         assert!(matches!(
             read_only.relational_row_page_recovery_status(),
             RelationalRowPageRecoveryStatus::WalRecovered {
@@ -1221,6 +1231,7 @@ mod tests {
         .unwrap();
 
         assert!(!read_only.relational_state.materialized_rows_resident());
+        assert!(read_only.relational_state.canonical_row_metadata_only());
         assert_eq!(read_only.relational_state.materialized_row_count(), 0);
         assert_eq!(
             read_only
@@ -1233,6 +1244,7 @@ mod tests {
         let residency = read_only.storage_residency_report().relational_rows;
         assert!(residency.serving);
         assert!(!residency.materialized_rows_resident);
+        assert!(residency.checkpoint_state_metadata_only);
         assert_eq!(residency.materialized_row_count, 0);
         assert_eq!(residency.materialized_row_bytes, 0);
         assert_eq!(residency.logical_row_count, 2);

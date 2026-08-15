@@ -235,6 +235,7 @@ fn relational_row_residency_json(
     serde_json::json!({
         "serving": report.serving,
         "materialized_rows_resident": report.materialized_rows_resident,
+        "checkpoint_state_metadata_only": report.checkpoint_state_metadata_only,
         "materialized_row_count": report.materialized_row_count,
         "materialized_row_bytes": report.materialized_row_bytes,
         "logical_row_count": report.logical_row_count,

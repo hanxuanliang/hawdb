@@ -289,6 +289,24 @@ impl GraphStore {
             )));
         }
         let relational_checkpoint = relational_checkpoint_metadata(body)?;
+        let canonical_relational_manifest = if relational_checkpoint.is_some()
+            && durable.read_only
+            && config.residency_mode == StorageResidencyMode::OutOfCore
+            && config
+                .relational_index_mode
+                .requires_authoritative_indexes()
+            && durable.wal_replay_start_lsn == durable.next_lsn
+        {
+            let overflow = durable.open_bound_relational_overflow()?;
+            Some(
+                durable
+                    .open_bound_relational_row_pages(&overflow)?
+                    .manifest()
+                    .clone(),
+            )
+        } else {
+            None
+        };
         let mut loaded_search_projection_change_log_start_epoch = None;
         let mut loaded_generation = None;
         let mut loaded_commit_epoch = None;
@@ -769,27 +787,38 @@ impl GraphStore {
                 metadata.encoded_sha256,
                 "relational checkpoint",
             )?;
-            let index_load = if config
-                .relational_index_mode
-                .requires_authoritative_indexes()
-            {
-                RelationalCheckpointIndexLoad::OmitMaterializedPostings
+            if let Some(row_root) = canonical_relational_manifest.as_ref() {
+                if row_root.source_commit_epoch != self.commit_epoch {
+                    return Err(SkeinError::Storage(format!(
+                        "relational row root epoch {} does not match graph commit epoch {}",
+                        row_root.source_commit_epoch, self.commit_epoch
+                    )));
+                }
+                self.relational_state = RelationalState::from_canonical_row_root(row_root)
+                    .map_err(|error| SkeinError::Storage(error.to_string()))?;
             } else {
-                RelationalCheckpointIndexLoad::MaterializedPostings
-            };
-            let checkpoint = decode_relational_checkpoint_file_with_index_load(
-                &path,
-                RelationalDecodeLimits::checkpoint(),
-                index_load,
-            )
-            .map_err(|error| SkeinError::Storage(error.to_string()))?;
-            if checkpoint.epoch != self.commit_epoch {
-                return Err(SkeinError::Storage(format!(
-                    "relational checkpoint epoch {} does not match graph commit epoch {}",
-                    checkpoint.epoch, self.commit_epoch
-                )));
+                let index_load = if config
+                    .relational_index_mode
+                    .requires_authoritative_indexes()
+                {
+                    RelationalCheckpointIndexLoad::OmitMaterializedPostings
+                } else {
+                    RelationalCheckpointIndexLoad::MaterializedPostings
+                };
+                let checkpoint = decode_relational_checkpoint_file_with_index_load(
+                    &path,
+                    RelationalDecodeLimits::checkpoint(),
+                    index_load,
+                )
+                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                if checkpoint.epoch != self.commit_epoch {
+                    return Err(SkeinError::Storage(format!(
+                        "relational checkpoint epoch {} does not match graph commit epoch {}",
+                        checkpoint.epoch, self.commit_epoch
+                    )));
+                }
+                self.relational_state = checkpoint.state;
             }
-            self.relational_state = checkpoint.state;
         }
         match loaded_search_projection_change_log_start_epoch {
             Some(start_epoch) => {

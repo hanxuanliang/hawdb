@@ -927,7 +927,9 @@ pub struct RelationalState {
     overflow_segments: BTreeMap<Sha256Digest, RelationalOverflowSegment>,
     materialized_index_postings_resident: bool,
     materialized_rows_resident: bool,
+    canonical_row_metadata_only: bool,
     detached_row_counts: Arc<BTreeMap<String, usize>>,
+    detached_total_row_count: usize,
     detached_row_bytes: u64,
 }
 
@@ -939,7 +941,9 @@ impl Default for RelationalState {
             overflow_segments: BTreeMap::new(),
             materialized_index_postings_resident: true,
             materialized_rows_resident: true,
+            canonical_row_metadata_only: false,
             detached_row_counts: Arc::new(BTreeMap::new()),
+            detached_total_row_count: 0,
             detached_row_bytes: 0,
         }
     }
@@ -984,6 +988,10 @@ impl RelationalState {
         self.materialized_rows_resident
     }
 
+    pub fn canonical_row_metadata_only(&self) -> bool {
+        self.canonical_row_metadata_only
+    }
+
     pub fn materialized_row_count(&self) -> usize {
         if !self.materialized_rows_resident {
             return 0;
@@ -1017,7 +1025,8 @@ impl RelationalState {
             .segments
             .iter()
             .map(|(table, segment)| (table.clone(), segment.rows.len()))
-            .collect();
+            .collect::<BTreeMap<_, _>>();
+        self.detached_total_row_count = counts.values().copied().sum();
         self.detached_row_bytes = self.estimated_materialized_row_bytes();
         self.detached_row_counts = Arc::new(counts);
         for segment in self.segments.values_mut() {
@@ -1025,6 +1034,83 @@ impl RelationalState {
         }
         self.materialized_rows_resident = false;
         self.materialized_index_postings_resident = false;
+    }
+
+    /// Builds the read-only relational catalog directly from a validated
+    /// canonical row root without decoding the transitional row checkpoint.
+    pub fn from_canonical_row_root(
+        manifest: &RelationalRowPageRootManifest,
+    ) -> Result<Self, RelationalError> {
+        let mut schemas = BTreeMap::new();
+        let mut segments = BTreeMap::new();
+        let mut row_counts = BTreeMap::new();
+        let mut total_rows = 0usize;
+        for table in &manifest.tables {
+            if table.table != table.schema.name {
+                return Err(RelationalError::Corruption(format!(
+                    "canonical row root table {} carries schema {}",
+                    table.table, table.schema.name
+                )));
+            }
+            validate_table_schema(&table.schema).map_err(|error| {
+                RelationalError::Corruption(format!(
+                    "canonical row root table {} has invalid schema: {error}",
+                    table.table
+                ))
+            })?;
+            let schema_digest = index_shadow::relational_schema_digest(&table.schema)
+                .map_err(|error| RelationalError::Corruption(error.to_string()))?;
+            if schema_digest != table.schema_digest {
+                return Err(RelationalError::Corruption(format!(
+                    "canonical row root table {} schema digest mismatch",
+                    table.table
+                )));
+            }
+            if table.schema.columns.len() != table.column_count.get() as usize {
+                return Err(RelationalError::Corruption(format!(
+                    "canonical row root table {} declares {} columns for a {}-column schema",
+                    table.table,
+                    table.column_count,
+                    table.schema.columns.len()
+                )));
+            }
+            let row_count = usize::try_from(table.row_count).map_err(|_| {
+                RelationalError::Admission(format!(
+                    "canonical row root table {} row count {} exceeds platform capacity",
+                    table.table, table.row_count
+                ))
+            })?;
+            total_rows = total_rows.checked_add(row_count).ok_or_else(|| {
+                RelationalError::Admission(
+                    "canonical row root total row count exceeds platform capacity".to_string(),
+                )
+            })?;
+            if schemas
+                .insert(table.table.clone(), Arc::new(table.schema.clone()))
+                .is_some()
+            {
+                return Err(RelationalError::Corruption(format!(
+                    "canonical row root repeats table {}",
+                    table.table
+                )));
+            }
+            segments.insert(
+                table.table.clone(),
+                Arc::new(RelationalTableSegment::default()),
+            );
+            row_counts.insert(table.table.clone(), row_count);
+        }
+        Ok(Self {
+            schemas,
+            segments,
+            overflow_segments: BTreeMap::new(),
+            materialized_index_postings_resident: false,
+            materialized_rows_resident: false,
+            canonical_row_metadata_only: true,
+            detached_row_counts: Arc::new(row_counts),
+            detached_total_row_count: total_rows,
+            detached_row_bytes: manifest.page_artifact.encoded_len,
+        })
     }
 
     pub fn require_materialized_rows(&self, context: &str) -> Result<(), RelationalError> {
@@ -1444,7 +1530,7 @@ impl RelationalState {
 
     pub fn total_row_count(&self) -> usize {
         if !self.materialized_rows_resident {
-            return self.detached_row_counts.values().copied().sum();
+            return self.detached_total_row_count;
         }
         self.segments
             .values()
