@@ -79,6 +79,12 @@ pub(super) fn parse_property_projection_manifest_generation_file(name: &str) -> 
         .ok()
 }
 
+pub(super) fn parse_property_projection_descriptor_generation_file(name: &str) -> Option<u64> {
+    parse_hyphenated_generation_file(name, "property-index-descriptors-", ".pages.skein").or_else(
+        || parse_hyphenated_generation_file(name, "property-index-descriptors-", ".root.skein"),
+    )
+}
+
 pub(super) fn parse_relational_index_artifact_generation_file(name: &str) -> Option<u64> {
     name.strip_prefix("relational-index-shadow-")?
         .strip_suffix(".pages.skein")?
@@ -145,6 +151,7 @@ pub(super) fn storage_generation_for_file(name: &str) -> Option<u64> {
         .or_else(|| parse_property_spill_manifest_generation_file(name))
         .or_else(|| parse_generation_file(name, "property-index."))
         .or_else(|| parse_property_projection_manifest_generation_file(name))
+        .or_else(|| parse_property_projection_descriptor_generation_file(name))
         .or_else(|| parse_relational_index_artifact_generation_file(name))
         .or_else(|| parse_relational_index_manifest_generation_file(name))
         .or_else(|| parse_relational_row_generation_file(name))

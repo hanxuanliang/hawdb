@@ -259,6 +259,8 @@ fn target_files(kind: DerivedArtifactKind, generation: u64) -> Vec<String> {
         DerivedArtifactKind::PersistentPropertyProjection => vec![
             property_projection_artifact_generation_file(generation),
             property_projection_manifest_generation_file(generation),
+            skein_storage::property_projection_descriptor_page_file(generation),
+            skein_storage::property_projection_descriptor_root_file(generation),
         ],
     }
 }

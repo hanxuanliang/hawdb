@@ -3,8 +3,10 @@ use crate::canonical::{
 };
 use crate::{
     content_digest, durable_replace_file, ContentDigest, FileSegmentRangeReader,
-    ManifestGeneration, NodeId, NodeRecord, RelId, RelRecord, SegmentCache, SegmentRangeRead,
-    SegmentReadError, SegmentReadRange, StoreId,
+    GraphDescriptorKind, GraphDescriptorTreeBuildConfig, GraphDescriptorTreeBuilder,
+    GraphDescriptorTreeError, GraphDescriptorTreePaths, GraphDescriptorTreeWriteOutput,
+    ManifestGeneration, NodeId, NodeRecord, PreparedGraphDescriptorTree, RelId, RelRecord,
+    SegmentCache, SegmentRangeRead, SegmentReadError, SegmentReadRange, StoreId,
 };
 use skein_core::{LabelId, RelTypeId, Value};
 use skein_integrity::{Crc32cHasher, IntegrityHasher, Sha256Digest};
@@ -23,8 +25,20 @@ const BLOCK_HEADER: &[u8; 8] = b"SKNIDX01";
 const RUN_HEADER: &[u8; 8] = b"SKNIDXR1";
 const MANIFEST_HEADER: &str = "SKEIN_PROPERTY_PROJECTION_MANIFEST_V1";
 const ARTIFACT_ID: u64 = 0x534b_5052_4944_5831;
+const DESCRIPTOR_ARTIFACT_ID: u64 = 0x534b_5052_4453_4331;
 const BLOCK_ID_BASE: u64 = 3 << 60;
 const COMPOSITE_PROPERTY_IDENTITY_PREFIX: &str = "skein-composite-property-v1";
+const DESCRIPTOR_VALUE_MAGIC: &[u8; 8] = b"SKPPDSC1";
+const DESCRIPTOR_VALUE_VERSION: u16 = 1;
+const DESCRIPTOR_VALUE_HEADER_BYTES: usize = 68;
+
+pub fn property_projection_descriptor_page_file(generation: u64) -> String {
+    format!("property-index-descriptors-{generation}.pages.skein")
+}
+
+pub fn property_projection_descriptor_root_file(generation: u64) -> String {
+    format!("property-index-descriptors-{generation}.root.skein")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PersistentPropertyProjectionKind {
@@ -109,6 +123,7 @@ pub enum PersistentPropertyProjectionError {
     Io(std::io::Error),
     Read(SegmentReadError),
     Canonical(CanonicalSegmentError),
+    DescriptorTree(GraphDescriptorTreeError),
     Source(String),
     Corrupt(String),
     MemoryBudgetExceeded {
@@ -147,6 +162,7 @@ impl Display for PersistentPropertyProjectionError {
             Self::Io(error) => Display::fmt(error, formatter),
             Self::Read(error) => Display::fmt(error, formatter),
             Self::Canonical(error) => Display::fmt(error, formatter),
+            Self::DescriptorTree(error) => Display::fmt(error, formatter),
             Self::Source(message) | Self::Corrupt(message) => formatter.write_str(message),
             Self::MemoryBudgetExceeded {
                 required_bytes,
@@ -207,6 +223,7 @@ impl Error for PersistentPropertyProjectionError {
             Self::Io(error) => Some(error),
             Self::Read(error) => Some(error),
             Self::Canonical(error) => Some(error),
+            Self::DescriptorTree(error) => Some(error),
             _ => None,
         }
     }
@@ -227,6 +244,12 @@ impl From<SegmentReadError> for PersistentPropertyProjectionError {
 impl From<CanonicalSegmentError> for PersistentPropertyProjectionError {
     fn from(error: CanonicalSegmentError) -> Self {
         Self::Canonical(error)
+    }
+}
+
+impl From<GraphDescriptorTreeError> for PersistentPropertyProjectionError {
+    fn from(error: GraphDescriptorTreeError) -> Self {
+        Self::DescriptorTree(error)
     }
 }
 
@@ -299,6 +322,163 @@ pub struct PersistentPropertyProjectionBlockDescriptor {
     pub length: NonZeroU64,
     pub content_digest: ContentDigest,
     pub entry_count: u32,
+}
+
+impl PersistentPropertyProjectionBlockDescriptor {
+    pub fn descriptor_tree_key(&self) -> Vec<u8> {
+        let mut key =
+            property_projection_descriptor_prefix(self.kind, self.label_id, &self.property);
+        key.extend_from_slice(&self.block_id.to_be_bytes());
+        key
+    }
+
+    pub fn encode_descriptor_tree_value(
+        &self,
+    ) -> Result<Vec<u8>, PersistentPropertyProjectionError> {
+        let property_len = u32::try_from(self.property.len()).map_err(|_| {
+            PersistentPropertyProjectionError::Corrupt(
+                "property projection descriptor property length exceeds u32".to_string(),
+            )
+        })?;
+        let min_key = encode_standalone_value(&self.min_key)?;
+        let max_key = encode_standalone_value(&self.max_key)?;
+        let min_key_len = u32::try_from(min_key.len()).map_err(|_| {
+            PersistentPropertyProjectionError::Corrupt(
+                "property projection descriptor minimum key length exceeds u32".to_string(),
+            )
+        })?;
+        let max_key_len = u32::try_from(max_key.len()).map_err(|_| {
+            PersistentPropertyProjectionError::Corrupt(
+                "property projection descriptor maximum key length exceeds u32".to_string(),
+            )
+        })?;
+        let capacity = DESCRIPTOR_VALUE_HEADER_BYTES
+            .checked_add(self.property.len())
+            .and_then(|bytes| bytes.checked_add(min_key.len()))
+            .and_then(|bytes| bytes.checked_add(max_key.len()))
+            .ok_or_else(|| {
+                PersistentPropertyProjectionError::Corrupt(
+                    "property projection descriptor length overflow".to_string(),
+                )
+            })?;
+        let mut encoded = Vec::with_capacity(capacity);
+        encoded.extend_from_slice(DESCRIPTOR_VALUE_MAGIC);
+        encoded.extend_from_slice(&DESCRIPTOR_VALUE_VERSION.to_le_bytes());
+        encoded.extend_from_slice(&0u16.to_le_bytes());
+        encoded.extend_from_slice(&self.block_id.to_le_bytes());
+        encoded.push(kind_tag(self.kind));
+        encoded.extend_from_slice(&[0u8; 3]);
+        encoded.extend_from_slice(&self.label_id.0.to_le_bytes());
+        encoded.extend_from_slice(&self.entry_count.to_le_bytes());
+        encoded.extend_from_slice(&self.offset.to_le_bytes());
+        encoded.extend_from_slice(&self.length.get().to_le_bytes());
+        encoded.extend_from_slice(&self.content_digest.0.to_le_bytes());
+        encoded.extend_from_slice(&property_len.to_le_bytes());
+        encoded.extend_from_slice(&min_key_len.to_le_bytes());
+        encoded.extend_from_slice(&max_key_len.to_le_bytes());
+        encoded.extend_from_slice(self.property.as_bytes());
+        encoded.extend_from_slice(&min_key);
+        encoded.extend_from_slice(&max_key);
+        debug_assert_eq!(encoded.len(), capacity);
+        Ok(encoded)
+    }
+
+    pub fn decode_descriptor_tree_entry(
+        key: &[u8],
+        encoded: &[u8],
+    ) -> Result<Self, PersistentPropertyProjectionError> {
+        if encoded.len() < DESCRIPTOR_VALUE_HEADER_BYTES || &encoded[..8] != DESCRIPTOR_VALUE_MAGIC
+        {
+            return Err(PersistentPropertyProjectionError::Corrupt(
+                "property projection descriptor has an invalid header or length".to_string(),
+            ));
+        }
+        let version = u16::from_le_bytes(encoded[8..10].try_into().expect("fixed version"));
+        let flags = u16::from_le_bytes(encoded[10..12].try_into().expect("fixed flags"));
+        if version != DESCRIPTOR_VALUE_VERSION || flags != 0 || encoded[21..24] != [0u8; 3] {
+            return Err(PersistentPropertyProjectionError::Corrupt(format!(
+                "property projection descriptor has unsupported version {version}, flags {flags}, or reserved fields"
+            )));
+        }
+        let property_len =
+            u32::from_le_bytes(encoded[56..60].try_into().expect("fixed property length")) as usize;
+        let min_key_len = u32::from_le_bytes(
+            encoded[60..64]
+                .try_into()
+                .expect("fixed minimum key length"),
+        ) as usize;
+        let max_key_len = u32::from_le_bytes(
+            encoded[64..68]
+                .try_into()
+                .expect("fixed maximum key length"),
+        ) as usize;
+        let property_end = DESCRIPTOR_VALUE_HEADER_BYTES
+            .checked_add(property_len)
+            .ok_or_else(|| descriptor_length_overflow("property"))?;
+        let min_key_end = property_end
+            .checked_add(min_key_len)
+            .ok_or_else(|| descriptor_length_overflow("minimum key"))?;
+        let max_key_end = min_key_end
+            .checked_add(max_key_len)
+            .ok_or_else(|| descriptor_length_overflow("maximum key"))?;
+        if max_key_end != encoded.len() {
+            return Err(PersistentPropertyProjectionError::Corrupt(
+                "property projection descriptor field lengths do not match its encoded length"
+                    .to_string(),
+            ));
+        }
+        let property = std::str::from_utf8(&encoded[DESCRIPTOR_VALUE_HEADER_BYTES..property_end])
+            .map_err(|error| {
+                PersistentPropertyProjectionError::Corrupt(format!(
+                    "property projection descriptor property is not UTF-8: {error}"
+                ))
+            })?
+            .to_string();
+        let length = NonZeroU64::new(u64::from_le_bytes(
+            encoded[40..48].try_into().expect("fixed block length"),
+        ))
+        .ok_or_else(|| {
+            PersistentPropertyProjectionError::Corrupt(
+                "property projection descriptor block length is zero".to_string(),
+            )
+        })?;
+        let descriptor = Self {
+            block_id: u64::from_le_bytes(encoded[12..20].try_into().expect("fixed block id")),
+            kind: kind_from_tag(encoded[20])?,
+            label_id: LabelId(u32::from_le_bytes(
+                encoded[24..28].try_into().expect("fixed label id"),
+            )),
+            entry_count: u32::from_le_bytes(encoded[28..32].try_into().expect("fixed entry count")),
+            offset: u64::from_le_bytes(encoded[32..40].try_into().expect("fixed offset")),
+            length,
+            content_digest: ContentDigest(u64::from_le_bytes(
+                encoded[48..56].try_into().expect("fixed content digest"),
+            )),
+            property,
+            min_key: decode_standalone_value(&encoded[property_end..min_key_end])?,
+            max_key: decode_standalone_value(&encoded[min_key_end..max_key_end])?,
+        };
+        if descriptor.block_id < BLOCK_ID_BASE
+            || descriptor.entry_count == 0
+            || descriptor.min_key > descriptor.max_key
+            || descriptor.descriptor_tree_key() != key
+        {
+            return Err(PersistentPropertyProjectionError::Corrupt(
+                "property projection descriptor identity or bounds are inconsistent".to_string(),
+            ));
+        }
+        if descriptor.kind == PersistentPropertyProjectionKind::CompositeEquality {
+            let arity = decode_composite_property_identity(&descriptor.property)?.len();
+            if !composite_key_has_arity(&descriptor.min_key, arity)
+                || !composite_key_has_arity(&descriptor.max_key, arity)
+            {
+                return Err(PersistentPropertyProjectionError::Corrupt(
+                    "property projection composite descriptor has invalid key arity".to_string(),
+                ));
+            }
+        }
+        Ok(descriptor)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -639,6 +819,7 @@ pub struct PersistentPropertyProjectionBuildReport {
 pub struct PersistentPropertyProjectionWriteOutput {
     pub manifest: PersistentPropertyProjectionManifest,
     pub report: PersistentPropertyProjectionBuildReport,
+    pub descriptor_tree: Option<GraphDescriptorTreeWriteOutput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -682,8 +863,58 @@ impl PersistentPropertyProjectionWriter {
         path: &Path,
         generation: ManifestGeneration,
         source_commit_epoch: u64,
+        definitions: Vec<PersistentPropertyProjectionDefinition>,
+        nodes: N,
+    ) -> Result<PersistentPropertyProjectionWriteOutput, PersistentPropertyProjectionError>
+    where
+        N: IntoIterator<
+            Item = Result<PersistentPropertyProjectionRecord, PersistentPropertyProjectionError>,
+        >,
+    {
+        self.write_fallible_inner(
+            path,
+            generation,
+            source_commit_epoch,
+            definitions,
+            nodes,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_fallible_with_descriptor_tree<N>(
+        &self,
+        path: &Path,
+        generation: ManifestGeneration,
+        source_commit_epoch: u64,
+        definitions: Vec<PersistentPropertyProjectionDefinition>,
+        nodes: N,
+        descriptor_paths: GraphDescriptorTreePaths,
+        descriptor_config: GraphDescriptorTreeBuildConfig,
+    ) -> Result<PersistentPropertyProjectionWriteOutput, PersistentPropertyProjectionError>
+    where
+        N: IntoIterator<
+            Item = Result<PersistentPropertyProjectionRecord, PersistentPropertyProjectionError>,
+        >,
+    {
+        self.write_fallible_inner(
+            path,
+            generation,
+            source_commit_epoch,
+            definitions,
+            nodes,
+            Some((descriptor_paths, descriptor_config)),
+        )
+    }
+
+    fn write_fallible_inner<N>(
+        &self,
+        path: &Path,
+        generation: ManifestGeneration,
+        source_commit_epoch: u64,
         mut definitions: Vec<PersistentPropertyProjectionDefinition>,
         nodes: N,
+        descriptor_tree: Option<(GraphDescriptorTreePaths, GraphDescriptorTreeBuildConfig)>,
     ) -> Result<PersistentPropertyProjectionWriteOutput, PersistentPropertyProjectionError>
     where
         N: IntoIterator<
@@ -890,8 +1121,9 @@ impl PersistentPropertyProjectionWriter {
             generated_entries,
             peak_resident_bytes,
             &runs,
+            descriptor_tree,
         );
-        let output = match output {
+        let (mut output, prepared_descriptor_tree) = match output {
             Ok(output) => output,
             Err(error) => {
                 let _ = fs::remove_file(&tmp_path);
@@ -899,6 +1131,9 @@ impl PersistentPropertyProjectionWriter {
             }
         };
         durable_replace_file(&tmp_path, path)?;
+        if let Some(prepared) = prepared_descriptor_tree {
+            output.descriptor_tree = Some(prepared.publish()?);
+        }
         Ok(output)
     }
 
@@ -954,7 +1189,14 @@ impl PersistentPropertyProjectionWriter {
         generated_entries: u64,
         peak_resident_bytes: u64,
         runs: &ProjectionSpillRuns,
-    ) -> Result<PersistentPropertyProjectionWriteOutput, PersistentPropertyProjectionError> {
+        descriptor_tree: Option<(GraphDescriptorTreePaths, GraphDescriptorTreeBuildConfig)>,
+    ) -> Result<
+        (
+            PersistentPropertyProjectionWriteOutput,
+            Option<PreparedGraphDescriptorTree>,
+        ),
+        PersistentPropertyProjectionError,
+    > {
         let mut readers = runs
             .paths
             .iter()
@@ -970,12 +1212,25 @@ impl PersistentPropertyProjectionWriter {
             current.push(key);
         }
         let file = File::create(path)?;
+        let descriptor_tree = descriptor_tree
+            .map(|(paths, config)| {
+                GraphDescriptorTreeBuilder::create(
+                    paths,
+                    GraphDescriptorKind::PropertyProjection,
+                    generation.0,
+                    source_commit_epoch,
+                    DESCRIPTOR_ARTIFACT_ID,
+                    config,
+                )
+            })
+            .transpose()?;
         let mut artifact = ProjectionArtifactBuilder::new(
             file,
             generation,
             source_commit_epoch,
             definitions,
             self.config,
+            descriptor_tree,
         )?;
         let mut previous = None;
         while let Some(Reverse((key, run_index))) = heap.pop() {
@@ -993,21 +1248,26 @@ impl PersistentPropertyProjectionWriter {
                 heap.push(Reverse((next.clone(), run_index)));
             }
         }
-        let manifest = artifact.finish()?;
-        Ok(PersistentPropertyProjectionWriteOutput {
-            report: PersistentPropertyProjectionBuildReport {
-                definition_count,
-                definition_bytes,
-                input_record_count: input_records,
-                generated_entry_count: generated_entries,
-                persisted_entry_count: manifest.entry_count,
-                block_count: manifest.blocks.len() as u64,
-                spill_run_count: runs.next_run_sequence,
-                spill_bytes: runs.spill_bytes,
-                peak_resident_bytes,
+        let (manifest, prepared_descriptor_tree) = artifact.finish()?;
+        let block_count = manifest.blocks.len() as u64;
+        Ok((
+            PersistentPropertyProjectionWriteOutput {
+                report: PersistentPropertyProjectionBuildReport {
+                    definition_count,
+                    definition_bytes,
+                    input_record_count: input_records,
+                    generated_entry_count: generated_entries,
+                    persisted_entry_count: manifest.entry_count,
+                    block_count,
+                    spill_run_count: runs.next_run_sequence,
+                    spill_bytes: runs.spill_bytes,
+                    peak_resident_bytes,
+                },
+                manifest,
+                descriptor_tree: None,
             },
-            manifest,
-        })
+            prepared_descriptor_tree,
+        ))
     }
 }
 
@@ -1269,6 +1529,7 @@ struct ProjectionArtifactBuilder {
     pending_bytes: u64,
     pending_resident_bytes: u64,
     blocks: Vec<PersistentPropertyProjectionBlockDescriptor>,
+    descriptor_tree: Option<GraphDescriptorTreeBuilder>,
 }
 
 impl ProjectionArtifactBuilder {
@@ -1278,6 +1539,7 @@ impl ProjectionArtifactBuilder {
         source_commit_epoch: u64,
         definitions: Vec<PersistentPropertyProjectionDefinition>,
         config: PersistentPropertyProjectionConfig,
+        descriptor_tree: Option<GraphDescriptorTreeBuilder>,
     ) -> Result<Self, PersistentPropertyProjectionError> {
         let mut writer = BufWriter::new(file);
         let mut artifact_digest = IntegrityHasher::new();
@@ -1301,6 +1563,7 @@ impl ProjectionArtifactBuilder {
             pending_bytes: 0,
             pending_resident_bytes: 0,
             blocks: Vec::new(),
+            descriptor_tree,
         })
     }
 
@@ -1433,19 +1696,25 @@ impl ProjectionArtifactBuilder {
             )?;
         }
         let length = NonZeroU64::new(block_bytes).expect("projection block is non-empty");
-        self.blocks
-            .push(PersistentPropertyProjectionBlockDescriptor {
-                block_id: self.next_block_id,
-                label_id: first.label_id,
-                property: first.property.clone(),
-                kind: first.kind,
-                min_key,
-                max_key,
-                offset: self.artifact_len,
-                length,
-                content_digest: ContentDigest(block_digest.finish()),
-                entry_count,
-            });
+        let descriptor = PersistentPropertyProjectionBlockDescriptor {
+            block_id: self.next_block_id,
+            label_id: first.label_id,
+            property: first.property.clone(),
+            kind: first.kind,
+            min_key,
+            max_key,
+            offset: self.artifact_len,
+            length,
+            content_digest: ContentDigest(block_digest.finish()),
+            entry_count,
+        };
+        if let Some(descriptor_tree) = &mut self.descriptor_tree {
+            descriptor_tree.push(
+                descriptor.descriptor_tree_key(),
+                descriptor.encode_descriptor_tree_value()?,
+            )?;
+        }
+        self.blocks.push(descriptor);
         self.artifact_len = self.artifact_len.saturating_add(block_bytes);
         self.next_block_id = self.next_block_id.saturating_add(1);
         self.entry_count = self.entry_count.saturating_add(u64::from(entry_count));
@@ -1457,7 +1726,13 @@ impl ProjectionArtifactBuilder {
 
     fn finish(
         mut self,
-    ) -> Result<PersistentPropertyProjectionManifest, PersistentPropertyProjectionError> {
+    ) -> Result<
+        (
+            PersistentPropertyProjectionManifest,
+            Option<PreparedGraphDescriptorTree>,
+        ),
+        PersistentPropertyProjectionError,
+    > {
         self.flush_block()?;
         self.writer.flush()?;
         self.writer.get_ref().sync_all()?;
@@ -1474,7 +1749,12 @@ impl ProjectionArtifactBuilder {
             blocks: self.blocks,
         };
         manifest.validate()?;
-        Ok(manifest)
+        let descriptor_tree = self
+            .descriptor_tree
+            .take()
+            .map(GraphDescriptorTreeBuilder::finish)
+            .transpose()?;
+        Ok((manifest, descriptor_tree))
     }
 }
 
@@ -2084,6 +2364,42 @@ fn kind_tag(kind: PersistentPropertyProjectionKind) -> u8 {
     }
 }
 
+fn kind_order_tag(kind: PersistentPropertyProjectionKind) -> u8 {
+    match kind {
+        PersistentPropertyProjectionKind::Equality => 1,
+        PersistentPropertyProjectionKind::Range => 2,
+        PersistentPropertyProjectionKind::FullText => 3,
+        PersistentPropertyProjectionKind::CompositeEquality => 4,
+        PersistentPropertyProjectionKind::RelationshipEquality => 5,
+        PersistentPropertyProjectionKind::RelationshipRange => 6,
+    }
+}
+
+fn property_projection_descriptor_prefix(
+    kind: PersistentPropertyProjectionKind,
+    label_id: LabelId,
+    property: &str,
+) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(7usize.saturating_add(property.len()));
+    encoded.push(kind_order_tag(kind));
+    encoded.extend_from_slice(&label_id.0.to_be_bytes());
+    for byte in property.as_bytes() {
+        if *byte == 0 {
+            encoded.extend_from_slice(&[0, 1]);
+        } else {
+            encoded.push(*byte);
+        }
+    }
+    encoded.extend_from_slice(&[0, 0]);
+    encoded
+}
+
+fn descriptor_length_overflow(field: &str) -> PersistentPropertyProjectionError {
+    PersistentPropertyProjectionError::Corrupt(format!(
+        "property projection descriptor {field} length overflows usize"
+    ))
+}
+
 fn kind_from_tag(
     tag: u8,
 ) -> Result<PersistentPropertyProjectionKind, PersistentPropertyProjectionError> {
@@ -2333,6 +2649,82 @@ mod tests {
         }
     }
 
+    fn descriptor(
+        block_id: u64,
+        kind: PersistentPropertyProjectionKind,
+        label_id: u32,
+        property: &str,
+        min_key: Value,
+        max_key: Value,
+    ) -> PersistentPropertyProjectionBlockDescriptor {
+        PersistentPropertyProjectionBlockDescriptor {
+            block_id,
+            label_id: LabelId(label_id),
+            property: property.to_string(),
+            kind,
+            min_key,
+            max_key,
+            offset: 24,
+            length: NonZeroU64::new(128).unwrap(),
+            content_digest: ContentDigest(91),
+            entry_count: 3,
+        }
+    }
+
+    #[test]
+    fn descriptor_tree_entry_codec_is_order_preserving_and_symmetric() {
+        let descriptors = [
+            descriptor(
+                BLOCK_ID_BASE,
+                PersistentPropertyProjectionKind::Equality,
+                1,
+                "a",
+                Value::Int(1),
+                Value::Int(4),
+            ),
+            descriptor(
+                BLOCK_ID_BASE + 1,
+                PersistentPropertyProjectionKind::Equality,
+                1,
+                "a\0b",
+                Value::Int(5),
+                Value::Int(8),
+            ),
+            descriptor(
+                BLOCK_ID_BASE + 2,
+                PersistentPropertyProjectionKind::Range,
+                1,
+                "a",
+                Value::Int(1),
+                Value::Int(8),
+            ),
+        ];
+        let keys = descriptors
+            .iter()
+            .map(PersistentPropertyProjectionBlockDescriptor::descriptor_tree_key)
+            .collect::<Vec<_>>();
+        assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
+        for (descriptor, key) in descriptors.iter().zip(&keys) {
+            let encoded = descriptor.encode_descriptor_tree_value().unwrap();
+            assert_eq!(
+                PersistentPropertyProjectionBlockDescriptor::decode_descriptor_tree_entry(
+                    key, &encoded,
+                )
+                .unwrap(),
+                *descriptor
+            );
+            let mut mismatched_key = key.clone();
+            *mismatched_key.last_mut().unwrap() ^= 1;
+            assert!(
+                PersistentPropertyProjectionBlockDescriptor::decode_descriptor_tree_entry(
+                    &mismatched_key,
+                    &encoded,
+                )
+                .is_err()
+            );
+        }
+    }
+
     #[test]
     fn external_projection_round_trips_node_composite_and_relationship_candidates() {
         let nonce = std::time::SystemTime::now()
@@ -2346,6 +2738,10 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let path = root.join("projection.skein");
+        let descriptor_paths = GraphDescriptorTreePaths::new(
+            root.join("projection-descriptors.pages.skein"),
+            root.join("projection-descriptors.root.skein"),
+        );
         let config = PersistentPropertyProjectionConfig {
             memory_budget_bytes: NonZeroU64::new(256).unwrap(),
             max_merge_fan_in: NonZeroUsize::new(2).unwrap(),
@@ -2392,11 +2788,11 @@ mod tests {
             },
         ];
         let output = PersistentPropertyProjectionWriter::new(config)
-            .write_fallible(
+            .write_fallible_with_descriptor_tree(
                 &path,
                 ManifestGeneration(2),
                 11,
-                definitions,
+                definitions.clone(),
                 vec![
                     Ok(PersistentPropertyProjectionRecord::Node(node(
                         1,
@@ -2415,9 +2811,54 @@ mod tests {
                         relationship(7, 20),
                     )),
                 ],
+                descriptor_paths.clone(),
+                GraphDescriptorTreeBuildConfig::default(),
             )
             .unwrap();
         assert!(output.report.spill_run_count > 1);
+        let descriptor_tree = output.descriptor_tree.as_ref().unwrap();
+        assert_eq!(
+            descriptor_tree.root.kind,
+            GraphDescriptorKind::PropertyProjection
+        );
+        assert_eq!(
+            descriptor_tree.root.descriptor_count,
+            output.report.block_count
+        );
+        let reopened_descriptor_root = crate::GraphDescriptorTreeRootReader::open(
+            descriptor_paths.clone(),
+            GraphDescriptorTreeBuildConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(reopened_descriptor_root.root(), &descriptor_tree.root);
+        let data_before = fs::read(&path).unwrap();
+        let pages_before = fs::read(&descriptor_paths.page_artifact).unwrap();
+        let root_before = fs::read(&descriptor_paths.root_manifest).unwrap();
+        let overwrite = PersistentPropertyProjectionWriter::new(config)
+            .write_fallible_with_descriptor_tree(
+                &path,
+                ManifestGeneration(2),
+                11,
+                definitions,
+                vec![Ok(PersistentPropertyProjectionRecord::Node(node(
+                    9,
+                    90,
+                    "replacement",
+                )))],
+                descriptor_paths.clone(),
+                GraphDescriptorTreeBuildConfig::default(),
+            )
+            .expect_err("same-generation descriptor artifacts are immutable");
+        assert!(overwrite.to_string().contains("already exists"));
+        assert_eq!(fs::read(&path).unwrap(), data_before);
+        assert_eq!(
+            fs::read(&descriptor_paths.page_artifact).unwrap(),
+            pages_before
+        );
+        assert_eq!(
+            fs::read(&descriptor_paths.root_manifest).unwrap(),
+            root_before
+        );
         let manifest =
             PersistentPropertyProjectionManifest::decode(&output.manifest.encode().unwrap())
                 .unwrap();

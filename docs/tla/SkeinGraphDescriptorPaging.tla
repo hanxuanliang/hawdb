@@ -9,6 +9,9 @@ EXTENDS FiniteSets, Naturals
 (* warming descriptor pages; a later selection cannot move that reader. A   *)
 (* lookup admits at most MaxResidentPages and pins one selected page until   *)
 (* completion. Corruption fails the read closed and poisons the handle.      *)
+(* The model is instantiated per descriptor class. Property-projection       *)
+(* shadow publication currently refines only candidate/write/publish/crash;  *)
+(* its ActivatePublishedRoot action is reserved for the serving contract.    *)
 (***************************************************************************)
 
 CONSTANTS Pages, Generations, MaxResidentPages

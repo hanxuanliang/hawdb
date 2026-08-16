@@ -127,7 +127,8 @@ pub use projection::{
     StorageOpenTimings, StorageReclamationWatermark, StorageRecoveryReport, StoreStableIdMapping,
 };
 pub use property_projection::{
-    persistent_composite_property_identity, PersistentPropertyProjectionBlockDescriptor,
+    persistent_composite_property_identity, property_projection_descriptor_page_file,
+    property_projection_descriptor_root_file, PersistentPropertyProjectionBlockDescriptor,
     PersistentPropertyProjectionBuildReport, PersistentPropertyProjectionConfig,
     PersistentPropertyProjectionDefinition, PersistentPropertyProjectionDefinitionAdmission,
     PersistentPropertyProjectionError, PersistentPropertyProjectionKind,

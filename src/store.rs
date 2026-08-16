@@ -59,7 +59,8 @@ use artifact_files::{
     canonical_manifest_generation_file, checkpoint_generation_file,
     cleanup_abandoned_checkpoint_preparations, has_storage_artifacts,
     parse_canonical_adjacency_descriptor_generation_file, parse_canonical_manifest_generation_file,
-    parse_generation_file, parse_property_projection_manifest_generation_file,
+    parse_generation_file, parse_property_projection_descriptor_generation_file,
+    parse_property_projection_manifest_generation_file,
     parse_property_spill_manifest_generation_file, parse_relational_index_artifact_generation_file,
     parse_relational_index_manifest_generation_file,
     parse_relational_overflow_extent_generation_file, parse_relational_overflow_generation_file,
@@ -6444,7 +6445,7 @@ mod tests {
             store.backup_to(&catalog, &backup).unwrap()
         };
         assert!(report.generation > 0);
-        assert_eq!(report.file_count, 19);
+        assert_eq!(report.file_count, 21);
         assert!(backup
             .join(skein_storage::canonical_adjacency_descriptor_page_file(
                 report.generation
@@ -6452,6 +6453,16 @@ mod tests {
             .exists());
         assert!(backup
             .join(skein_storage::canonical_adjacency_descriptor_root_file(
+                report.generation
+            ))
+            .exists());
+        assert!(backup
+            .join(skein_storage::property_projection_descriptor_page_file(
+                report.generation
+            ))
+            .exists());
+        assert!(backup
+            .join(skein_storage::property_projection_descriptor_root_file(
                 report.generation
             ))
             .exists());

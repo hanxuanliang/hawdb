@@ -5,6 +5,7 @@ use super::{
     canonical_manifest_generation_file, checkpoint_generation_file, checksum_bytes, decode_string,
     encode_string, parse_canonical_adjacency_descriptor_generation_file,
     parse_canonical_manifest_generation_file, parse_generation_file,
+    parse_property_projection_descriptor_generation_file,
     parse_property_projection_manifest_generation_file,
     parse_property_spill_manifest_generation_file, parse_relational_index_artifact_generation_file,
     parse_relational_index_manifest_generation_file, parse_relational_overflow_generation_file,
@@ -204,6 +205,7 @@ fn validate_backup_file_name(name: &str) -> Result<()> {
         || parse_property_spill_manifest_generation_file(name).is_some()
         || parse_generation_file(name, "property-index.").is_some()
         || parse_property_projection_manifest_generation_file(name).is_some()
+        || parse_property_projection_descriptor_generation_file(name).is_some()
         || parse_relational_index_artifact_generation_file(name).is_some()
         || parse_relational_index_manifest_generation_file(name).is_some()
         || parse_relational_row_generation_file(name).is_some()
@@ -601,9 +603,15 @@ pub(super) fn validate_backup_files(
     ) {
         let projection_manifest_name = property_projection_manifest_generation_file(generation);
         let projection_artifact_name = property_projection_artifact_generation_file(generation);
+        let descriptor_page_name =
+            skein_storage::property_projection_descriptor_page_file(generation);
+        let descriptor_root_name =
+            skein_storage::property_projection_descriptor_root_file(generation);
         for required in [
             projection_manifest_name.as_str(),
             projection_artifact_name.as_str(),
+            descriptor_page_name.as_str(),
+            descriptor_root_name.as_str(),
         ] {
             if !names.contains(required) {
                 return Err(SkeinError::Storage(format!(
@@ -641,6 +649,37 @@ pub(super) fn validate_backup_files(
             return Err(SkeinError::Storage(
                 "backup property projection artifact metadata does not match its manifest"
                     .to_string(),
+            ));
+        }
+        let descriptor_paths = GraphDescriptorTreePaths::new(
+            root.join(&descriptor_page_name),
+            root.join(&descriptor_root_name),
+        );
+        let descriptor_root = GraphDescriptorTreeRootReader::open(
+            descriptor_paths,
+            GraphDescriptorTreeBuildConfig::default(),
+        )
+        .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+        if descriptor_root.root().kind != GraphDescriptorKind::PropertyProjection
+            || descriptor_root.root().generation != generation
+            || descriptor_root.root().source_commit_epoch != manifest.checkpoint_commit_epoch
+            || descriptor_root.root().descriptor_count != projection_manifest.blocks.len() as u64
+        {
+            return Err(SkeinError::Storage(
+                "backup property projection descriptor root identity is inconsistent".to_string(),
+            ));
+        }
+        let descriptor_page = files
+            .iter()
+            .find(|file| file.name == descriptor_page_name)
+            .expect("required property projection descriptor pages must exist");
+        if descriptor_page.encoded_len != descriptor_root.root().page_artifact_len
+            || descriptor_page.encoded_checksum
+                != descriptor_root.root().page_artifact_crc32c.as_u64()
+            || descriptor_page.sha256 != descriptor_root.root().page_artifact_sha256
+        {
+            return Err(SkeinError::Storage(
+                "backup property projection descriptor pages do not match their root".to_string(),
             ));
         }
     }

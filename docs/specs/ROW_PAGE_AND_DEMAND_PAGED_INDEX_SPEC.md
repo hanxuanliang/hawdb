@@ -1441,9 +1441,12 @@ This bound remains a fail-closed transition guard for selected graph manifests.
 Canonical adjacency descriptors are no longer part of that graph-size-dependent
 manifest image: the outer durable manifest binds one compact descriptor root,
 and normal open admits and verifies only that root while page payloads remain
-cold. Other manifest-backed graph structures MUST still report both the
-configured aggregate limit and selected encoded manifest bytes, and MUST reject
-a selected generation that exceeds the limit.
+cold. Property-projection block descriptors now also have a publish-last shadow
+root, but production serving still uses the selected resident manifest until a
+separate activation contract binds that root through the outer manifest. Other
+manifest-backed graph structures MUST still report both the configured
+aggregate limit and selected encoded manifest bytes, and MUST reject a selected
+generation that exceeds the limit.
 
 ### Graph descriptor page v1
 
@@ -1477,6 +1480,42 @@ generation-bound root selected by the outer durable manifest. Descriptor pages
 remain cold until a prefix scan or explicit deep scrub reads them. Page payloads
 are admitted independently of the graph-manifest open budget and use the shared
 byte-bounded storage cache.
+
+### Property-projection shadow descriptor root v1
+
+Every property-projection checkpoint now writes a second, non-serving
+descriptor representation for equality, range, full-text, composite equality,
+relationship equality, and relationship range blocks:
+
+- the leaf key is `(kind order, label or relationship-type id, escaped UTF-8
+  property identity, block id)`. Numeric fields are big-endian. A zero byte in
+  the property is escaped and the property terminator sorts before every
+  continuation, so byte order matches the writer's logical definition order;
+- the versioned value carries the complete block identity, kind, label, entry
+  count, exact data-artifact range and CRC32C, property identity, and encoded
+  minimum and maximum keys. Decode rejects non-zero reserved fields, malformed
+  lengths, zero ranges/counts, invalid composite arity, and every key/value
+  identity disagreement;
+- the spill merge writes each completed block to the existing immutable data
+  artifact and simultaneously streams its descriptor into the bounded generic
+  tree builder. The data artifact is synchronized and atomically replaced
+  before the immutable page artifact and root are published. Existing
+  same-generation page or root destinations are never overwritten;
+- the shadow root binds `PropertyProjection`, generation, source commit epoch,
+  exact page-artifact integrity, descriptor count, page counts, height, and the
+  root-page reference. Backup validation, derived-repair quarantine,
+  checkpoint discard, orphan cleanup, and generation reclamation treat its
+  pages and root as the same generation as the selected projection artifact;
+- production lookup behavior deliberately remains unchanged in this step. The
+  selected text manifest still contains the resident block vector, and the
+  outer manifest does not bind or activate the shadow root. A crash may leave
+  an unselected shadow candidate, but cannot make it query-visible.
+
+`SkeinGraphDescriptorPaging.tla` is instantiated once per descriptor class.
+For this shadow stage, the Rust refinement covers candidate creation, durable
+page completion, publish-last root publication, and crash cleanup; its serving
+activation transition remains disabled until the next property-projection
+contract removes resident block descriptors and supplies demand-read evidence.
 
 ### Canonical adjacency demand descriptor root v1
 

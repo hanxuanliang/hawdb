@@ -282,8 +282,13 @@ crash; read-only recovery remains fail closed.
     manifest. Normal open reads only the compact root; endpoint scans use the
     bound demand reader and shared cache, while deep scrub verifies the complete
     uncached closure. Canonical adjacency v1 rejects cross-generation page
-    references until retained-closure reclamation is formalized. Next migrate
-    the remaining graph block descriptors and collect representative
+    references until retained-closure reclamation is formalized. Property
+    projection checkpoints now also stream all six node/relationship index
+    classes into bounded descriptor pages and publish an immutable shadow root
+    after the data artifact; backup, repair, discard, and reclamation retain the
+    shadow closure. Next bind that root through the outer manifest, activate its
+    demand reader, remove the resident block vector, then migrate canonical
+    segment and property-spill descriptors. Collect representative
     production-copy evidence before claiming that all graph/index startup
     metadata residency is independent of entry count.
   - The independent general graph-storage release artifact now has a bounded

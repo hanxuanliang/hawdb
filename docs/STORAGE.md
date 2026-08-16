@@ -26,10 +26,15 @@ Files:
   generation-bound canonical adjacency blocks plus the demand-paged descriptor
   tree used by out-of-core traversal. The outer manifest binds the exact data
   and descriptor-root identities; there is no separate adjacency manifest.
-- `property-index.<generation>.skein` and
-  `property-index.<generation>.manifest.skein`: rebuildable, generation-bound
-  persistent property projection. The property spill artifact remains part of
-  canonical checkpoint input and is not eligible for derived repair.
+- `property-index.<generation>.skein`,
+  `property-index.<generation>.manifest.skein`,
+  `property-index-descriptors-<generation>.pages.skein`, and
+  `property-index-descriptors-<generation>.root.skein`: rebuildable,
+  generation-bound persistent property projection. The descriptor tree is a
+  publish-last shadow representation; production reads still select the
+  manifest until the separate demand-serving activation. The property spill
+  artifact remains part of canonical checkpoint input and is not eligible for
+  derived repair.
 - `wal.<generation>.skein`: append-only committed mutation records beginning at
   the replay LSN published by the manifest. The only v1 encoding uses binary
   fragment framing with the `SKWALB01` file header. Text WAL bytes and unknown

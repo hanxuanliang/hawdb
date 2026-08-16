@@ -851,6 +851,12 @@ impl DurableStore {
                     self.root_path
                         .join(property_projection_manifest_generation_file(generation)),
                 );
+                for name in [
+                    skein_storage::property_projection_descriptor_page_file(generation),
+                    skein_storage::property_projection_descriptor_root_file(generation),
+                ] {
+                    sources.insert(name.clone(), self.root_path.join(name));
+                }
             }
             let mut files = Vec::with_capacity(sources.len().saturating_add(1));
             for (name, source) in sources {
@@ -1805,15 +1811,41 @@ impl DurableStore {
         let artifact_path = self
             .root_path
             .join(property_projection_artifact_generation_file(generation));
+        let descriptor_paths = GraphDescriptorTreePaths::new(
+            self.root_path
+                .join(skein_storage::property_projection_descriptor_page_file(
+                    generation,
+                )),
+            self.root_path
+                .join(skein_storage::property_projection_descriptor_root_file(
+                    generation,
+                )),
+        );
         let output = PersistentPropertyProjectionWriter::new(config)
-            .write_fallible(
+            .write_fallible_with_descriptor_tree(
                 &artifact_path,
                 ManifestGeneration(generation),
                 source_commit_epoch,
                 definitions,
                 nodes,
+                descriptor_paths,
+                GraphDescriptorTreeBuildConfig::default(),
             )
             .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        let descriptor_tree = output.descriptor_tree.as_ref().ok_or_else(|| {
+            SkeinError::Storage(
+                "property projection checkpoint omitted its descriptor root".to_string(),
+            )
+        })?;
+        if descriptor_tree.root.kind != GraphDescriptorKind::PropertyProjection
+            || descriptor_tree.root.generation != generation
+            || descriptor_tree.root.source_commit_epoch != source_commit_epoch
+            || descriptor_tree.root.descriptor_count != output.report.block_count
+        {
+            return Err(SkeinError::Storage(
+                "property projection descriptor root identity is inconsistent".to_string(),
+            ));
+        }
         let encoded = output
             .manifest
             .encode()
@@ -2268,6 +2300,8 @@ impl DurableStore {
             property_spill_manifest_generation_file(generation),
             property_projection_artifact_generation_file(generation),
             property_projection_manifest_generation_file(generation),
+            skein_storage::property_projection_descriptor_page_file(generation),
+            skein_storage::property_projection_descriptor_root_file(generation),
             skein_storage::relational_index_shadow_artifact_file(generation),
             skein_storage::relational_index_shadow_manifest_generation_file(generation),
             skein_storage::relational_row_page_artifact_file(generation),
