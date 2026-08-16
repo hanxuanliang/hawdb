@@ -1,16 +1,15 @@
-#[path = "shared/qualification_input.rs"]
-mod qualification_input;
-
 #[path = "shared/graph_qualification_input.rs"]
 mod graph_qualification_input;
 
-#[path = "graph_index_qualification/plan.rs"]
+#[path = "shared/qualification_input.rs"]
+mod qualification_input;
+
+#[path = "graph_storage_qualification/plan.rs"]
 mod plan;
 
 use plan::read_plan;
 use skein_qualification::{
-    run_production_graph_index_qualification_matrix,
-    PRODUCTION_GRAPH_INDEX_QUALIFICATION_MATRIX_PROTOCOL,
+    run_production_graph_storage_qualification, PRODUCTION_GRAPH_STORAGE_QUALIFICATION_PROTOCOL,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -21,7 +20,7 @@ fn main() -> ExitCode {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&report.json())
-                    .expect("graph index qualification report must serialize")
+                    .expect("graph storage qualification report must serialize")
             );
             if report.ready {
                 ExitCode::SUCCESS
@@ -37,7 +36,7 @@ fn main() -> ExitCode {
             println!(
                 "{}",
                 serde_json::json!({
-                    "protocol": PRODUCTION_GRAPH_INDEX_QUALIFICATION_MATRIX_PROTOCOL,
+                    "protocol": PRODUCTION_GRAPH_STORAGE_QUALIFICATION_PROTOCOL,
                     "evidence_kind": "representative_production_replica",
                     "production_eligible": true,
                     "ready": false,
@@ -45,7 +44,7 @@ fn main() -> ExitCode {
                     "errors": ["qualification_failed"],
                 })
             );
-            eprintln!("skein-graph-index-qualification: {error}");
+            eprintln!("skein-graph-storage-qualification: {error}");
             ExitCode::from(2)
         }
     }
@@ -53,12 +52,12 @@ fn main() -> ExitCode {
 
 fn run(
     args: impl IntoIterator<Item = String>,
-) -> Result<Option<skein_qualification::ProductionGraphIndexQualificationMatrixReport>, String> {
+) -> Result<Option<skein_qualification::ProductionGraphStorageQualificationReport>, String> {
     let Some((database_path, plan_path)) = parse_args(args)? else {
         return Ok(None);
     };
     let config = read_plan(&plan_path)?.into_config(database_path)?;
-    run_production_graph_index_qualification_matrix(config)
+    run_production_graph_storage_qualification(config)
         .map(Some)
         .map_err(|error| error.to_string())
 }
@@ -96,7 +95,7 @@ fn parse_args(
 }
 
 fn usage() -> &'static str {
-    "usage: skein-graph-index-qualification \
+    "usage: skein-graph-storage-qualification \
      --database-path <existing-read-only-skein-directory> --plan-json <path>"
 }
 
@@ -117,8 +116,8 @@ mod tests {
             "database".to_string(),
             "--plan-json".to_string(),
             "plan.json".to_string(),
-            "--plan-json".to_string(),
-            "again.json".to_string(),
+            "--database-path".to_string(),
+            "again".to_string(),
         ])
         .unwrap_err()
         .contains("duplicate"));
@@ -127,8 +126,8 @@ mod tests {
     #[test]
     fn plan_protocol_is_stable() {
         assert_eq!(
-            plan::GRAPH_INDEX_QUALIFICATION_PLAN_PROTOCOL,
-            "skein-production-graph-index-plan-v1"
+            plan::GRAPH_STORAGE_QUALIFICATION_PLAN_PROTOCOL,
+            "skein-production-graph-storage-plan-v1"
         );
     }
 }

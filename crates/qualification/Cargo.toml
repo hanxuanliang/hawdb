@@ -42,6 +42,10 @@ path = "src/bin/content_store_mutation_qualification.rs"
 name = "skein-graph-index-qualification"
 path = "src/bin/graph_index_qualification.rs"
 
+[[bin]]
+name = "skein-graph-storage-qualification"
+path = "src/bin/graph_storage_qualification.rs"
+
 # The aarch64 hardware SHA-256 backend is only reachable through this feature;
 # x86 already detects SHA-NI at runtime and needs nothing here. `sha2-asm`
 # ships GNU-syntax `.S` sources, which MSVC cannot assemble, so the activation

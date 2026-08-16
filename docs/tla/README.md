@@ -1044,6 +1044,14 @@ readiness is not a refinement witness. The bounded
 `skein-graph-index-qualification` plan parser only constructs this existing
 typed all-class matrix with one caller-owned read-only path and has no
 independent durable or activation transition.
+The bounded `skein-graph-storage-qualification` parser likewise constructs one
+existing typed `ShadowReadOnly + OutOfCore` general graph measurement and has
+no durable, publication, or activation transition. It shares the graph index
+collector's resource-profile parser, so the dynamic desktop policy and the
+explicit 512 MiB capability cannot diverge at this refinement boundary. Its
+report is evaluated by the release bundle against the same graph resource,
+identity, streaming, and fail-closed obligations modeled above; it is not an
+additional state machine.
 
 `SkeinRelationalIndexShadowPublication.tla` models the generation-aligned but
 non-authoritative relational index candidate. Candidate fixed-slot pages become

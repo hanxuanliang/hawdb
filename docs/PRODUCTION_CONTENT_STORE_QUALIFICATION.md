@@ -99,8 +99,9 @@ Plan parsing rejects unknown fields and files larger than 32 MiB.
 Use `capability_512_mib` for the separately configured low-memory capability
 run. It sets an explicit 512 MiB Skein runtime ceiling. Use
 `desktop_bound_8_gib` for the dynamic desktop policy: Skein derives its budget
-from current headroom and caps automatic capacity at 2 GiB. A custom profile is
-represented as:
+from current headroom, caps automatic capacity at 2 GiB, normally operates in
+the 1--2 GiB range, and may fall below that range under pressure. A custom
+profile is represented as:
 
 ```json
 {

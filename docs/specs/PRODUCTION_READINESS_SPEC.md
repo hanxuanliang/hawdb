@@ -136,6 +136,26 @@ non-zero explicit memory ceiling.
 The operational invocation and parser-tested plan are documented in
 [`PRODUCTION_GRAPH_INDEX_QUALIFICATION.md`](../PRODUCTION_GRAPH_INDEX_QUALIFICATION.md).
 
+`skein-graph-storage-qualification` is the corresponding thin collector for
+the independent general graph-storage artifact. It accepts one existing
+database path separately from a bounded
+`skein-production-graph-storage-plan-v1` document and MUST construct the same
+`ShadowReadOnly + OutOfCore` read-only boundary. The plan contains exactly one
+representative parameterized Cypher statement, at least two measurement runs,
+and explicit database, execution, result, intermediate, process-memory, and
+page-fault budgets. It MUST NOT install a persistent-index requirement; the
+all-class matrix remains the only persistent graph-index release evidence.
+
+The general collector and all-class collector MUST share the same resource
+profile semantics. `desktop_bound_8_gib` leaves the governor dynamic, caps
+automatic capacity at 2 GiB, and permits the effective budget to fall below
+the nominal 1--2 GiB range under pressure. `capability_512_mib` installs an
+explicit 512 MiB ceiling only for the separately declared low-memory
+capability. Neither collector may reinterpret 512 MiB as a universal release
+threshold. The operational invocation and parser-tested plan are documented
+in
+[`PRODUCTION_GRAPH_STORAGE_QUALIFICATION.md`](../PRODUCTION_GRAPH_STORAGE_QUALIFICATION.md).
+
 Default reports MUST redact local paths, query text, parameters, row payloads,
 embeddings, credentials, and raw parser or I/O payload fragments. Debug-only
 diagnostics MAY expose local detail through an explicit host decision, but

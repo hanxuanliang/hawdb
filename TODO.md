@@ -250,6 +250,13 @@ crash; read-only recovery remains fail closed.
     capability and production-profile workload artifacts are checked in; the
     policy report alone does not prove peak RSS.
 - [ ] Differentially qualify and production-activate persistent graph indexes.
+  - The independent general graph-storage release artifact now has a bounded
+    `skein-graph-storage-qualification` collector over the existing typed
+    runner. It binds one caller-owned read-only database to a strict plan,
+    derives `ShadowReadOnly + OutOfCore`, keeps the desktop governor dynamic,
+    and treats explicit 512 MiB execution as a separate capability profile.
+    Retain this item until a representative business-shaped graph artifact and
+    the all-class index matrix are checked in for the same release identity.
   - Equality, range, full-text, ordered composite-equality, relationship
     equality/range, forward adjacency, and reverse adjacency projections are
     generation-bound and demand-paged. Relationship probes choose the property
