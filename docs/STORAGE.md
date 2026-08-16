@@ -334,7 +334,11 @@ separate descriptor and data I/O/cache activity, physical failure poisons the
 reader, and block-size admission does not. Deep scrub bypasses both caches,
 hashes the complete artifacts, decodes every block, and proves contiguous byte,
 block-id, spill-id, block-count, and value-count closure. Backup validation and
-storage scrub run this exhaustive check.
+storage scrub run this exhaustive check. They open the selected spill reader
+before validating canonical records: every spill reference requires the same
+generation and source epoch and must be below that manifest's exact value
+count. Scrubbing a canonical artifact without its selected spill artifact fails
+closed rather than postponing the error until query-time hydration.
 
 Canonical segment descriptors use the same immutable page tree. A checkpoint
 synchronizes canonical data first, publishes descriptor pages and the root,
@@ -346,7 +350,9 @@ independent page, byte, descriptor, and height limits. Reports separate
 descriptor and canonical data cache/I/O. Physical failure sticky-poisons the
 reader, while admission remains non-poisoning. Backup and storage scrub hash
 both complete artifacts, decode every segment, and prove ordered contiguous
-closure without warming the shared cache.
+closure without warming the shared cache. Their record validation is bound to
+the selected property-spill reader, so individually valid canonical and spill
+artifacts cannot be accepted as an inconsistent pair.
 
 `DatabaseDoctor::derived_artifact_health` verifies the complete data,
 descriptor-page, descriptor-root, and block closure of the active adjacency and

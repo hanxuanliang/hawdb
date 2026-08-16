@@ -1399,6 +1399,15 @@ impl CanonicalSegmentReader {
         property_spills: Option<PropertySpillReader>,
     ) -> Result<Self, CanonicalSegmentError> {
         manifest.validate()?;
+        if let Some(property_spills) = &property_spills
+            && (property_spills.manifest().generation != manifest.generation
+                || property_spills.manifest().source_commit_epoch != manifest.source_commit_epoch)
+        {
+            return Err(CanonicalSegmentError::Corrupt(
+                "canonical and property spill artifacts do not share one generation and source epoch"
+                    .to_string(),
+            ));
+        }
         let descriptor_tree =
             PersistentCanonicalSegmentDescriptorTree::for_artifact(&path, manifest.generation);
         let (descriptor_paths, descriptor_config) = descriptor_tree.into_parts();
@@ -1485,6 +1494,9 @@ impl CanonicalSegmentReader {
     }
 
     fn deep_scrub_inner(&self) -> Result<CanonicalSegmentScrubReport, CanonicalSegmentError> {
+        if let Some(property_spills) = &self.property_spills {
+            property_spills.deep_scrub()?;
+        }
         let canonical_bytes_hashed = self.verify_whole_artifact()?;
         let mut artifact = File::open(&self.path)?;
         let mut expected_offset = (ARTIFACT_HEADER.len() + 8) as u64;
@@ -2607,10 +2619,18 @@ fn validate_encoded_value(
         }
         7 => {
             let spill_id = cursor.read_u64()?;
-            if property_spill_count.is_some_and(|count| spill_id >= count) {
-                return Err(CanonicalSegmentError::Corrupt(format!(
-                    "canonical record references property spill {spill_id} outside its selected artifact"
-                )));
+            match property_spill_count {
+                Some(count) if spill_id < count => {}
+                Some(_) => {
+                    return Err(CanonicalSegmentError::Corrupt(format!(
+                        "canonical record references property spill {spill_id} outside its selected artifact"
+                    )));
+                }
+                None => {
+                    return Err(CanonicalSegmentError::Corrupt(format!(
+                        "canonical record references property spill {spill_id} without a selected spill artifact"
+                    )));
+                }
             }
             Ok(())
         }
@@ -3565,6 +3585,7 @@ fn write_hashed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{PersistentPropertySpillDescriptorTree, PropertySpillConfig};
 
     fn collect_descriptors(
         reader: &CanonicalSegmentReader,
@@ -3753,6 +3774,137 @@ mod tests {
 
         drop(scrub_reader);
         remove_fixture(&path, manifest.generation);
+    }
+
+    #[test]
+    fn deep_scrub_requires_the_exact_property_spill_closure() {
+        let generation = ManifestGeneration(29);
+        let canonical_path = unique_path("spill_closure_canonical");
+        let spill_path = unique_path("spill_closure_values");
+        let spill_paths = GraphDescriptorTreePaths::new(
+            spill_path.with_extension("descriptors.pages.skein"),
+            spill_path.with_extension("descriptors.root.skein"),
+        );
+        let spill_config = PropertySpillConfig {
+            spill_threshold_bytes: NonZeroU64::new(1).unwrap(),
+            target_block_bytes: NonZeroU64::new(4096).unwrap(),
+            max_value_bytes: NonZeroU64::new(4096).unwrap(),
+        };
+        let nodes = (0..2).map(|id| {
+            Ok(NodeRecord {
+                id: NodeId(id),
+                labels: BTreeSet::from([LabelId(1)]),
+                properties: BTreeMap::from([(
+                    "payload".to_string(),
+                    Value::String(format!("payload-{id}")),
+                )]),
+            })
+        });
+        let (manifest, spill_output) = CanonicalSegmentWriter::new(CanonicalSegmentConfig {
+            target_segment_bytes: NonZeroU64::new(4096).unwrap(),
+            max_record_bytes: NonZeroU64::new(4096).unwrap(),
+        })
+        .write_fallible_with_property_spills(
+            &canonical_path,
+            generation,
+            nodes,
+            std::iter::empty(),
+            PropertySpillWriteOptions {
+                artifact_path: &spill_path,
+                source_commit_epoch: generation.0,
+                config: spill_config,
+                descriptor_tree: PersistentPropertySpillDescriptorTree::new(
+                    spill_paths.clone(),
+                    GraphDescriptorTreeBuildConfig::default(),
+                ),
+            },
+        )
+        .unwrap();
+        assert_eq!(spill_output.manifest.value_count, 2);
+
+        let reader_without_spills = CanonicalSegmentReader::open(
+            &canonical_path,
+            manifest.clone(),
+            Arc::new(SegmentCache::new(0)),
+            StoreId(29),
+            NonZeroU64::new(4096).unwrap(),
+        )
+        .unwrap();
+        let error = reader_without_spills.deep_scrub().unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("without a selected spill artifact"));
+        assert!(reader_without_spills.is_poisoned());
+
+        let short_spill_path = unique_path("spill_closure_short_values");
+        let short_spill_paths = GraphDescriptorTreePaths::new(
+            short_spill_path.with_extension("descriptors.pages.skein"),
+            short_spill_path.with_extension("descriptors.root.skein"),
+        );
+        let mut short_spill_writer = PropertySpillWriter::create(
+            short_spill_path.with_extension("skein.tmp"),
+            generation,
+            generation.0,
+            spill_config,
+            PersistentPropertySpillDescriptorTree::new(
+                short_spill_paths.clone(),
+                GraphDescriptorTreeBuildConfig::default(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(short_spill_writer.push(vec![0]).unwrap(), 0);
+        let short_spill_output = short_spill_writer
+            .finish()
+            .unwrap()
+            .publish(&short_spill_path)
+            .unwrap();
+        let short_property_spills = PropertySpillReader::open(
+            &short_spill_path,
+            short_spill_output.manifest,
+            PersistentPropertySpillDescriptorTree::new(
+                short_spill_paths,
+                GraphDescriptorTreeBuildConfig::default(),
+            ),
+            Arc::new(SegmentCache::new(0)),
+            StoreId(29),
+            NonZeroU64::new(8192).unwrap(),
+        )
+        .unwrap();
+        let reader_with_short_spills = CanonicalSegmentReader::open_with_property_spills(
+            &canonical_path,
+            manifest.clone(),
+            Arc::new(SegmentCache::new(0)),
+            StoreId(29),
+            NonZeroU64::new(4096).unwrap(),
+            short_property_spills,
+        )
+        .unwrap();
+        let error = reader_with_short_spills.deep_scrub().unwrap_err();
+        assert!(error.to_string().contains("outside its selected artifact"));
+        assert!(reader_with_short_spills.is_poisoned());
+
+        let property_spills = PropertySpillReader::open(
+            &spill_path,
+            spill_output.manifest,
+            PersistentPropertySpillDescriptorTree::new(
+                spill_paths,
+                GraphDescriptorTreeBuildConfig::default(),
+            ),
+            Arc::new(SegmentCache::new(0)),
+            StoreId(29),
+            NonZeroU64::new(8192).unwrap(),
+        )
+        .unwrap();
+        let reader = CanonicalSegmentReader::open_with_property_spills(
+            &canonical_path,
+            manifest,
+            Arc::new(SegmentCache::new(0)),
+            StoreId(29),
+            NonZeroU64::new(4096).unwrap(),
+            property_spills,
+        )
+        .unwrap();
+        assert_eq!(reader.deep_scrub().unwrap().records_checked, 2);
     }
 
     #[test]

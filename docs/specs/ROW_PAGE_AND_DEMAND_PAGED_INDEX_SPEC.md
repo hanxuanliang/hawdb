@@ -1521,10 +1521,15 @@ compact canonical segment manifest:
 - explicit deep scrub hashes both complete artifacts without warming the shared
   cache, decodes every descriptor and record framing, validates property value
   shape, and proves contiguous physical ranges, strictly increasing segment ids,
-  grouped kinds, disjoint per-kind record ranges, and exact aggregate counts;
+  grouped kinds, disjoint per-kind record ranges, and exact aggregate counts.
+  A spill-reference value is valid only when a property-spill reader with the
+  same generation and source epoch is selected and the referenced id is below
+  that spill manifest's exact value count;
 - backup, restore, storage scrub, checkpoint discard, abandoned-candidate
   cleanup, and generation reclamation treat canonical data, compact manifest,
-  descriptor pages, and root as one physical closure.
+  descriptor pages, root, and every selected property-spill reference as one
+  physical closure. Backup and storage scrub MUST open and exhaustively verify
+  the selected spill artifact before accepting canonical record framing;
 
 Publication refines the candidate-data, candidate-page, and publish-root
 transitions of `SkeinGraphDescriptorPaging.tla`; installing the compact manifest
@@ -1570,7 +1575,9 @@ tree for the large-property spill artifact:
   cleanup, and generation reclamation retain or verify data, manifest,
   descriptor pages, and root as one closure. Backup and storage scrub run the
   exhaustive descriptor/data closure check rather than accepting only
-  top-level artifact hashes.
+  top-level artifact hashes. They also bind this exact reader into canonical
+  deep scrub, so a missing, different-generation, or out-of-range spill
+  reference fails before a backup or scrub is accepted.
 
 The publication and demand-read paths refine `SkeinGraphDescriptorPaging.tla`:
 a descriptor root can be published only after its same-generation data artifact

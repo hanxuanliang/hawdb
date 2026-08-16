@@ -6430,6 +6430,7 @@ mod tests {
         let path = unique_test_dir("backup_source");
         let backup = unique_test_dir("backup_image");
         let restored = unique_test_dir("backup_restored");
+        let content = "backup-property-spill-".repeat(8_192);
         let report = {
             let mut catalog = Catalog::default();
             let mut store = GraphStore::open(&path, &mut catalog).unwrap();
@@ -6437,7 +6438,10 @@ mod tests {
                 .create_node(
                     &mut catalog,
                     "Memory",
-                    properties([("id", Value::String("memory-1".to_string()))]),
+                    properties([
+                        ("id", Value::String("memory-1".to_string())),
+                        ("content", Value::String(content.clone())),
+                    ]),
                 )
                 .unwrap();
             let target = store
@@ -6508,6 +6512,10 @@ mod tests {
         let store = GraphStore::open(&restored, &mut catalog).unwrap();
         assert_eq!(store.scan_nodes(None).count(), 2);
         assert_eq!(store.scan_relationships(None).count(), 1);
+        assert_eq!(
+            store.node(NodeId(0)).unwrap().properties["content"],
+            Value::String(content)
+        );
         assert_eq!(
             store.relationship(RelId(0)).unwrap().properties["weight"],
             Value::Int(7)
@@ -7202,6 +7210,7 @@ mod tests {
                 )
                 .unwrap();
             store.checkpoint(&catalog).unwrap();
+            store.scrub_storage().unwrap();
             let spill_manifest = store.property_spill_manifest().unwrap();
             assert_eq!(spill_manifest.value_count, 2);
             assert!(spill_manifest.value_bytes > 64 * 1024);

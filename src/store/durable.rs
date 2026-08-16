@@ -1167,23 +1167,21 @@ impl DurableStore {
                 root_reader.root().page_artifact_sha256,
                 "canonical segment descriptor pages",
             )?;
-            let config = CanonicalSegmentConfig::default();
-            let max_segment_bytes = NonZeroU64::new(
-                config
-                    .target_segment_bytes
-                    .get()
-                    .max(config.max_record_bytes.get().saturating_add(64)),
-            )
-            .expect("canonical segment maximum is non-zero");
-            CanonicalSegmentReader::open(
-                canonical_path,
-                artifact,
-                Arc::clone(&self.segment_cache),
-                self.store_id,
-                max_segment_bytes,
-            )
-            .and_then(|reader| reader.deep_scrub())
-            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+            let reader = self.canonical_segments.as_ref().ok_or_else(|| {
+                SkeinError::StorageIntegrity(
+                    "canonical manifest is selected without an open canonical reader during scrub"
+                        .to_string(),
+                )
+            })?;
+            if reader.path() != canonical_path || reader.manifest() != &artifact {
+                return Err(SkeinError::StorageIntegrity(
+                    "open canonical reader identity drifted from the selected manifest during scrub"
+                        .to_string(),
+                ));
+            }
+            reader
+                .deep_scrub()
+                .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
         }
 
         if let Some(binding) = manifest.canonical_adjacency_generation_artifacts {
@@ -1276,9 +1274,11 @@ impl DurableStore {
             )?;
             let artifact = PropertySpillManifest::decode(&fs::read_to_string(&manifest_path)?)
                 .map_err(|error| SkeinError::Storage(error.to_string()))?;
-            if artifact.source_commit_epoch != manifest.checkpoint_commit_epoch {
+            if artifact.generation != ManifestGeneration(generation)
+                || artifact.source_commit_epoch != manifest.checkpoint_commit_epoch
+            {
                 return Err(SkeinError::StorageIntegrity(
-                    "property spill source epoch does not match its checkpoint".to_string(),
+                    "property spill identity does not match its checkpoint".to_string(),
                 ));
             }
             scrub.verify_path(
@@ -1325,28 +1325,22 @@ impl DurableStore {
                 descriptor_root.root().page_artifact_sha256,
                 "property spill descriptor pages",
             )?;
-            let config = PropertySpillConfig::default();
-            let max_block_bytes = NonZeroU64::new(
-                config
-                    .target_block_bytes
-                    .get()
-                    .max(config.max_value_bytes.get().saturating_add(1024)),
-            )
-            .expect("property spill maximum block size is non-zero");
-            PropertySpillReader::open(
-                self.root_path
-                    .join(property_spill_artifact_generation_file(generation)),
-                artifact,
-                PersistentPropertySpillDescriptorTree::new(
-                    descriptor_paths,
-                    GraphDescriptorTreeBuildConfig::default(),
-                ),
-                Arc::clone(&self.segment_cache),
-                self.store_id,
-                max_block_bytes,
-            )
-            .and_then(|reader| reader.deep_scrub())
-            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+            let selected = self
+                .canonical_segments
+                .as_ref()
+                .and_then(CanonicalSegmentReader::property_spill_manifest)
+                .ok_or_else(|| {
+                    SkeinError::StorageIntegrity(
+                        "property spill manifest is selected without an open spill reader during scrub"
+                            .to_string(),
+                    )
+                })?;
+            if selected != &artifact {
+                return Err(SkeinError::StorageIntegrity(
+                    "open property spill reader identity drifted from the selected manifest during scrub"
+                        .to_string(),
+                ));
+            }
         }
 
         if let (Some(expected_len), Some(expected_checksum), Some(expected_sha256)) = (

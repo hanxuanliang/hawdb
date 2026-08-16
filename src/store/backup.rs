@@ -16,7 +16,8 @@ use super::{
     relational_checkpoint_generation_file, relational_checkpoint_metadata, source_scan,
     split_checkpoint_checksum, store_id_for_path, sync_parent_dir, wal_generation_file,
     BackupFileEntry, BackupManifest, DurableManifest, BACKUP_HEADER_V1, BACKUP_MANIFEST_FILE,
-    MANIFEST_FILE, PROPERTY_PROJECTION_MANIFEST_MAX_BYTES, STABLE_ID_MAPPING_FILE,
+    MANIFEST_FILE, PROPERTY_PROJECTION_MANIFEST_MAX_BYTES, PROPERTY_SPILL_MANIFEST_MAX_BYTES,
+    STABLE_ID_MAPPING_FILE,
 };
 use crate::error::{Result, SkeinError};
 use skein_integrity::{IntegrityHasher, Sha256Digest};
@@ -421,6 +422,8 @@ pub(super) fn validate_backup_files(
         }
         None => {}
     }
+    let property_spills =
+        validate_backup_property_spills(root, files, &names, manifest, generation)?;
     if let (Some(expected_len), Some(expected_checksum)) = (
         manifest.canonical_manifest_encoded_len,
         manifest.canonical_manifest_encoded_checksum,
@@ -527,15 +530,28 @@ pub(super) fn validate_backup_files(
                 .max(config.max_record_bytes.get().saturating_add(64)),
         )
         .expect("canonical segment maximum is non-zero");
-        CanonicalSegmentReader::open(
-            root.join(&canonical_artifact_name),
-            canonical_manifest,
-            Arc::new(SegmentCache::new(0)),
-            store_id_for_path(root)?,
-            max_segment_bytes,
-        )
-        .and_then(|reader| reader.deep_scrub())
-        .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+        let cache = Arc::new(SegmentCache::new(0));
+        let store_id = store_id_for_path(root)?;
+        let reader = match property_spills.clone() {
+            Some(property_spills) => CanonicalSegmentReader::open_with_property_spills(
+                root.join(&canonical_artifact_name),
+                canonical_manifest,
+                cache,
+                store_id,
+                max_segment_bytes,
+                property_spills,
+            ),
+            None => CanonicalSegmentReader::open(
+                root.join(&canonical_artifact_name),
+                canonical_manifest,
+                cache,
+                store_id,
+                max_segment_bytes,
+            ),
+        };
+        reader
+            .and_then(|reader| reader.deep_scrub())
+            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
     }
     if let Some(binding) = manifest.canonical_adjacency_generation_artifacts {
         let adjacency_artifact_name = canonical_adjacency_artifact_generation_file(generation);
@@ -622,121 +638,6 @@ pub(super) fn validate_backup_files(
             binding,
             root_reader,
             descriptor_config,
-            Arc::new(SegmentCache::new(0)),
-            store_id_for_path(root)?,
-            max_block_bytes,
-        )
-        .and_then(|reader| reader.deep_scrub())
-        .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
-    }
-    if let (Some(expected_len), Some(expected_checksum)) = (
-        manifest.property_spill_manifest_encoded_len,
-        manifest.property_spill_manifest_encoded_checksum,
-    ) {
-        let property_manifest_name = property_spill_manifest_generation_file(generation);
-        let property_artifact_name = property_spill_artifact_generation_file(generation);
-        let descriptor_page_name = skein_storage::property_spill_descriptor_page_file(generation);
-        let descriptor_root_name = skein_storage::property_spill_descriptor_root_file(generation);
-        for required in [
-            property_manifest_name.as_str(),
-            property_artifact_name.as_str(),
-            descriptor_page_name.as_str(),
-            descriptor_root_name.as_str(),
-        ] {
-            if !names.contains(required) {
-                return Err(SkeinError::Storage(format!(
-                    "backup is missing required property spill file: {required}"
-                )));
-            }
-        }
-        let encoded_manifest = files
-            .iter()
-            .find(|file| file.name == property_manifest_name)
-            .expect("required property spill manifest must exist");
-        if encoded_manifest.encoded_len != expected_len
-            || encoded_manifest.encoded_checksum != expected_checksum
-            || manifest.property_spill_manifest_encoded_sha256 != Some(encoded_manifest.sha256)
-        {
-            return Err(SkeinError::Storage(
-                "backup property spill manifest metadata does not match the durable manifest"
-                    .to_string(),
-            ));
-        }
-        let property_manifest_text = fs::read_to_string(root.join(&property_manifest_name))?;
-        let property_manifest = PropertySpillManifest::decode(&property_manifest_text)
-            .map_err(|error| SkeinError::Storage(error.to_string()))?;
-        if property_manifest.source_commit_epoch != manifest.checkpoint_commit_epoch {
-            return Err(SkeinError::Storage(
-                "backup property spill source epoch does not match its checkpoint".to_string(),
-            ));
-        }
-        let property_artifact = files
-            .iter()
-            .find(|file| file.name == property_artifact_name)
-            .expect("required property spill artifact must exist");
-        if property_manifest.artifact_len != property_artifact.encoded_len
-            || property_manifest.artifact_digest.0 != property_artifact.encoded_checksum
-            || property_manifest.artifact_sha256 != property_artifact.sha256
-        {
-            return Err(SkeinError::Storage(
-                "backup property spill artifact metadata does not match its manifest".to_string(),
-            ));
-        }
-        let descriptor_root = files
-            .iter()
-            .find(|file| file.name == descriptor_root_name)
-            .expect("required property spill descriptor root must exist");
-        if descriptor_root.encoded_len != property_manifest.descriptor_root_artifact.encoded_len
-            || descriptor_root.encoded_checksum
-                != u64::from(property_manifest.descriptor_root_artifact.encoded_crc32c)
-            || descriptor_root.sha256 != property_manifest.descriptor_root_artifact.encoded_sha256
-        {
-            return Err(SkeinError::Storage(
-                "backup property spill descriptor root does not match its manifest".to_string(),
-            ));
-        }
-        let descriptor_paths = GraphDescriptorTreePaths::new(
-            root.join(&descriptor_page_name),
-            root.join(&descriptor_root_name),
-        );
-        let root_reader = GraphDescriptorTreeRootReader::open_bound(
-            descriptor_paths.clone(),
-            property_manifest.descriptor_generation_artifacts(),
-            GraphDescriptorTreeBuildConfig::default(),
-        )
-        .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
-        if root_reader.root().descriptor_count != property_manifest.block_count {
-            return Err(SkeinError::Storage(
-                "backup property spill descriptor count does not match its manifest".to_string(),
-            ));
-        }
-        let descriptor_page = files
-            .iter()
-            .find(|file| file.name == descriptor_page_name)
-            .expect("required property spill descriptor pages must exist");
-        if descriptor_page.encoded_len != root_reader.root().page_artifact_len
-            || descriptor_page.encoded_checksum != root_reader.root().page_artifact_crc32c.as_u64()
-            || descriptor_page.sha256 != root_reader.root().page_artifact_sha256
-        {
-            return Err(SkeinError::Storage(
-                "backup property spill descriptor pages do not match their root".to_string(),
-            ));
-        }
-        let config = PropertySpillConfig::default();
-        let max_block_bytes = NonZeroU64::new(
-            config
-                .target_block_bytes
-                .get()
-                .max(config.max_value_bytes.get().saturating_add(1024)),
-        )
-        .expect("property spill maximum block size is non-zero");
-        PropertySpillReader::open(
-            root.join(&property_artifact_name),
-            property_manifest,
-            PersistentPropertySpillDescriptorTree::new(
-                descriptor_paths,
-                GraphDescriptorTreeBuildConfig::default(),
-            ),
             Arc::new(SegmentCache::new(0)),
             store_id_for_path(root)?,
             max_block_bytes,
@@ -859,6 +760,140 @@ pub(super) fn validate_backup_files(
         .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
     }
     Ok(())
+}
+
+fn validate_backup_property_spills(
+    root: &Path,
+    files: &[BackupFileEntry],
+    names: &BTreeSet<&str>,
+    manifest: DurableManifest,
+    generation: u64,
+) -> Result<Option<PropertySpillReader>> {
+    let (Some(expected_len), Some(expected_checksum), Some(expected_sha256)) = (
+        manifest.property_spill_manifest_encoded_len,
+        manifest.property_spill_manifest_encoded_checksum,
+        manifest.property_spill_manifest_encoded_sha256,
+    ) else {
+        return Ok(None);
+    };
+    let property_manifest_name = property_spill_manifest_generation_file(generation);
+    let property_artifact_name = property_spill_artifact_generation_file(generation);
+    let descriptor_page_name = skein_storage::property_spill_descriptor_page_file(generation);
+    let descriptor_root_name = skein_storage::property_spill_descriptor_root_file(generation);
+    for required in [
+        property_manifest_name.as_str(),
+        property_artifact_name.as_str(),
+        descriptor_page_name.as_str(),
+        descriptor_root_name.as_str(),
+    ] {
+        if !names.contains(required) {
+            return Err(SkeinError::Storage(format!(
+                "backup is missing required property spill file: {required}"
+            )));
+        }
+    }
+    let encoded_manifest = files
+        .iter()
+        .find(|file| file.name == property_manifest_name)
+        .expect("required property spill manifest must exist");
+    if encoded_manifest.encoded_len != expected_len
+        || encoded_manifest.encoded_checksum != expected_checksum
+        || encoded_manifest.sha256 != expected_sha256
+    {
+        return Err(SkeinError::Storage(
+            "backup property spill manifest metadata does not match the durable manifest"
+                .to_string(),
+        ));
+    }
+    if encoded_manifest.encoded_len > PROPERTY_SPILL_MANIFEST_MAX_BYTES {
+        return Err(SkeinError::Storage(format!(
+            "backup property spill manifest contains {} bytes, exceeding the {} byte format limit",
+            encoded_manifest.encoded_len, PROPERTY_SPILL_MANIFEST_MAX_BYTES
+        )));
+    }
+    let property_manifest_text = fs::read_to_string(root.join(&property_manifest_name))?;
+    let property_manifest = PropertySpillManifest::decode(&property_manifest_text)
+        .map_err(|error| SkeinError::Storage(error.to_string()))?;
+    if property_manifest.generation != ManifestGeneration(generation)
+        || property_manifest.source_commit_epoch != manifest.checkpoint_commit_epoch
+    {
+        return Err(SkeinError::Storage(
+            "backup property spill identity does not match its checkpoint".to_string(),
+        ));
+    }
+    let property_artifact = files
+        .iter()
+        .find(|file| file.name == property_artifact_name)
+        .expect("required property spill artifact must exist");
+    if property_manifest.artifact_len != property_artifact.encoded_len
+        || property_manifest.artifact_digest.0 != property_artifact.encoded_checksum
+        || property_manifest.artifact_sha256 != property_artifact.sha256
+    {
+        return Err(SkeinError::Storage(
+            "backup property spill artifact metadata does not match its manifest".to_string(),
+        ));
+    }
+    let descriptor_root = files
+        .iter()
+        .find(|file| file.name == descriptor_root_name)
+        .expect("required property spill descriptor root must exist");
+    if descriptor_root.encoded_len != property_manifest.descriptor_root_artifact.encoded_len
+        || descriptor_root.encoded_checksum
+            != u64::from(property_manifest.descriptor_root_artifact.encoded_crc32c)
+        || descriptor_root.sha256 != property_manifest.descriptor_root_artifact.encoded_sha256
+    {
+        return Err(SkeinError::Storage(
+            "backup property spill descriptor root does not match its manifest".to_string(),
+        ));
+    }
+    let descriptor_paths = GraphDescriptorTreePaths::new(
+        root.join(&descriptor_page_name),
+        root.join(&descriptor_root_name),
+    );
+    let root_reader = GraphDescriptorTreeRootReader::open_bound(
+        descriptor_paths.clone(),
+        property_manifest.descriptor_generation_artifacts(),
+        GraphDescriptorTreeBuildConfig::default(),
+    )
+    .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+    if root_reader.root().descriptor_count != property_manifest.block_count {
+        return Err(SkeinError::Storage(
+            "backup property spill descriptor count does not match its manifest".to_string(),
+        ));
+    }
+    let descriptor_page = files
+        .iter()
+        .find(|file| file.name == descriptor_page_name)
+        .expect("required property spill descriptor pages must exist");
+    if descriptor_page.encoded_len != root_reader.root().page_artifact_len
+        || descriptor_page.encoded_checksum != root_reader.root().page_artifact_crc32c.as_u64()
+        || descriptor_page.sha256 != root_reader.root().page_artifact_sha256
+    {
+        return Err(SkeinError::Storage(
+            "backup property spill descriptor pages do not match their root".to_string(),
+        ));
+    }
+    let config = PropertySpillConfig::default();
+    let max_block_bytes = NonZeroU64::new(
+        config
+            .target_block_bytes
+            .get()
+            .max(config.max_value_bytes.get().saturating_add(1024)),
+    )
+    .expect("property spill maximum block size is non-zero");
+    let reader = PropertySpillReader::open(
+        root.join(&property_artifact_name),
+        property_manifest,
+        PersistentPropertySpillDescriptorTree::new(
+            descriptor_paths,
+            GraphDescriptorTreeBuildConfig::default(),
+        ),
+        Arc::new(SegmentCache::new(0)),
+        store_id_for_path(root)?,
+        max_block_bytes,
+    )
+    .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+    Ok(Some(reader))
 }
 
 fn validate_backup_relational_roots(
