@@ -16,7 +16,11 @@ bazel test //docs/tla:storage_models --jobs=1 --test_output=errors
 `rules_tla` 0.2.0 is source-pinned in `MODULE.bazel`. It resolves TLA+ Tools
 1.7.4 by version and SHA-256 and uses Bazel's Java runtime toolchain. Each
 `.tla`/`.cfg` pair is an individual `tla_check`; the `storage_models` suite is
-the CI gate.
+the CI gate. [`storage_models.bzl`](storage_models.bzl) is the single,
+alphabetically ordered model-set manifest consumed by both Bazel and retained
+evidence collection. The collector rejects duplicates, a missing model pair,
+or any `.tla`/`.cfg` file omitted from that manifest, so its artifact cannot
+silently lag the authoritative Bazel suite.
 
 The release-evidence collector remains separate because `rules_tla` 0.2.0
 declares a success marker but does not expose a successful action log as an
@@ -24,7 +28,8 @@ output after a cache hit. Set `TLA_RESULTS_DIR` and `TLA_SOURCE_REVISION` when
 running `scripts/check-storage-tla.sh` to retain exact `.tla` and `.cfg` inputs,
 one complete TLC log per model, the Java version, and a revision- and tool-bound
 manifest. This repeats the bounded checks for audit retention; it is not the
-authoritative Bazel gate. CI validates the downloaded artifact with:
+authoritative Bazel gate. The retained manifest covers the complete model set,
+not a hand-maintained subset. CI validates the downloaded artifact with:
 
 ```bash
 scripts/check-storage-tla.sh --verify-results tla-results "$GITHUB_SHA"

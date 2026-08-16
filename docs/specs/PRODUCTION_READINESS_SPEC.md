@@ -549,15 +549,13 @@ MUST be model checked for the released storage protocol. Model-check
 configuration and results MUST be part of the release CI artifact set, not only
 documented as a local command.
 The revision-bound `tla-model-check-<revision>` artifact MUST contain successful
-TLC logs and exact `.tla` and `.cfg` inputs for `SkeinStorageDurability`,
-`SkeinWalGroupCommit`, `SkeinWalDoctor`, `SkeinGenerationReclamation`,
-`SkeinConcurrentSnapshots`, `SkeinTransactionConcurrency`,
-`SkeinCowPagePublication`, `SkeinSourceSegmentPublication`,
-`SkeinCrdtReplication`, and
-`SkeinGossipDelivery`, together
-with the Java version and the pinned TLA+ Tools version and SHA-256 digest. A
-downstream CI job MUST download and verify the complete artifact before the
-model-check gate succeeds.
+TLC logs and exact `.tla` and `.cfg` inputs for every model declared by the
+authoritative `docs/tla/storage_models.bzl` manifest, together with the Java
+version and the pinned TLA+ Tools version and SHA-256 digest. Bazel and the
+retained-evidence collector MUST consume that same manifest. Collection MUST
+fail on duplicate declarations, missing model pairs, or undeclared `.tla`/`.cfg`
+files. A downstream CI job MUST download and verify the complete artifact
+before the model-check gate succeeds.
 
 The typed crash artifact protocol is
 `skein-storage-crash-recovery-evidence-v1`. Every required crash point MUST

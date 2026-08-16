@@ -5,42 +5,56 @@ readonly tla_version="1.7.4"
 readonly tla_sha256="936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly repository_root
+readonly storage_models_file="$repository_root/docs/tla/storage_models.bzl"
 readonly tla_work_root="${TLA_WORK_ROOT:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/skein-tla}"
 readonly downloaded_jar="$tla_work_root/tla2tools-$tla_version.jar"
-readonly specifications=(
-  SkeinStorageDurability
-  SkeinWalGroupCommit
-  SkeinWalDoctor
-  SkeinGenerationReclamation
-  SkeinConcurrentSnapshots
-  SkeinTransactionConcurrency
-  SkeinCowPagePublication
-  SkeinContentSpaceMergeOwnership
-  SkeinContentSourceOwnershipMove
-  SkeinContentSourceReplacement
-  SkeinContentThreadDelete
-  SkeinContentThreadOwnershipMove
-  SkeinContentThreadReconcile
-  SkeinContentThreadTailDelete
-  SkeinContentThreadUpsert
-  SkeinSourceSegmentPublication
-  SkeinCrdtReplication
-  SkeinGossipDelivery
-  SkeinSystemSchemaUpgrade
-  SkeinPropertyIndexPruning
-  SkeinIndexPublication
-  SkeinRelationalIndexShadowPublication
-  SkeinRelationalIndexDemandRead
-  SkeinIndexRecovery
-  SkeinPageCacheAdmission
-  SkeinStatisticsEligibility
-  SkeinIndexStatistics
-  SkeinProjectionDurability
-  SkeinCompactionVisibility
-  SkeinColumnGroupManifest
-  SkeinRuntimeAdmission
-  SkeinColumnarShadowIntegration
-)
+
+specifications=()
+
+load_specifications() {
+  while IFS= read -r specification; do
+    specifications+=("$specification")
+  done < <(sed -n 's/^    "\([A-Za-z0-9_][A-Za-z0-9_]*\)",$/\1/p' "$storage_models_file")
+
+  if [[ "${#specifications[@]}" -eq 0 ]]; then
+    printf 'storage TLA+ model manifest is empty or invalid: %s\n' \
+      "$storage_models_file" >&2
+    return 1
+  fi
+
+  local declared
+  local sorted_unique
+  declared="$(printf '%s\n' "${specifications[@]}")"
+  sorted_unique="$(printf '%s\n' "${specifications[@]}" | LC_ALL=C sort -u)"
+  if [[ "$declared" != "$sorted_unique" ]]; then
+    printf 'storage TLA+ model manifest must be sorted and contain no duplicates\n' >&2
+    return 1
+  fi
+
+  local specification
+  for specification in "${specifications[@]}"; do
+    if [[ ! -f "$repository_root/docs/tla/$specification.tla" ]] ||
+      [[ ! -f "$repository_root/docs/tla/$specification.cfg" ]]; then
+      printf 'storage TLA+ model pair is missing for %s\n' "$specification" >&2
+      return 1
+    fi
+  done
+
+  local path
+  local model
+  for path in "$repository_root"/docs/tla/*.tla \
+    "$repository_root"/docs/tla/*.cfg; do
+    model="$(basename "$path")"
+    model="${model%.*}"
+    if ! grep -Fxq "$model" <<< "$declared"; then
+      printf 'storage TLA+ model pair is not declared: %s\n' "$model" >&2
+      return 1
+    fi
+  done
+}
+
+load_specifications
+readonly -a specifications
 
 manifest_json() {
   local revision="$1"

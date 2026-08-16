@@ -1,62 +1,7 @@
 load("@rules_tla//tla:defs.bzl", "tla_check")
+load(":storage_models.bzl", "STORAGE_MODELS")
 
 package(default_visibility = ["//visibility:public"])
-
-_STORAGE_MODELS = [
-    "SkeinColumnGroupManifest",
-    "SkeinColumnarShadowIntegration",
-    "SkeinCompactionVisibility",
-    "SkeinCompositePropertyProjection",
-    "SkeinContentSpaceMergeOwnership",
-    "SkeinContentSourceOwnershipMove",
-    "SkeinContentSourceReplacement",
-    "SkeinContentThreadDelete",
-    "SkeinContentThreadOwnershipMove",
-    "SkeinContentThreadReconcile",
-    "SkeinContentThreadTailDelete",
-    "SkeinContentThreadUpsert",
-    "SkeinConcurrentSnapshots",
-    "SkeinCowPagePublication",
-    "SkeinCrdtReplication",
-    "SkeinGenerationReclamation",
-    "SkeinGossipDelivery",
-    "SkeinGraphIndexQualification",
-    "SkeinIndexPublication",
-    "SkeinIndexRecovery",
-    "SkeinIndexStatistics",
-    "SkeinMemoryTierRelease",
-    "SkeinOverflowPublication",
-    "SkeinOverflowExactCompaction",
-    "SkeinPageCacheAdmission",
-    "SkeinProjectionDurability",
-    "SkeinPropertyIndexPruning",
-    "SkeinRelationshipPropertyProjection",
-    "SkeinRelationalIndexDemandRead",
-    "SkeinRelationalIndexShadowPublication",
-    "SkeinRelationalRowDemandRead",
-    "SkeinRelationalRowSnapshotRead",
-    "SkeinRelationalWalReplayAccess",
-    "SkeinRowPageMutation",
-    "SkeinRowDeltaRuns",
-    "SkeinRowLiveView",
-    "SkeinRowRecovery",
-    "SkeinRuntimeAdmission",
-    "SkeinSourceSegmentPublication",
-    "SkeinSparseRelationalActivation",
-    "SkeinSparseRelationalLiveCommit",
-    "SkeinSparseRelationalLivePreparation",
-    "SkeinSparseRelationalLiveStage",
-    "SkeinSparseRelationalRecovery",
-    "SkeinSparseWritableRelationalRecovery",
-    "SkeinStableIdentityPublication",
-    "SkeinStatisticsEligibility",
-    "SkeinStorageDurability",
-    "SkeinSystemSchemaUpgrade",
-    "SkeinTransactionConcurrency",
-    "SkeinTransactionIndexOverlay",
-    "SkeinWalDoctor",
-    "SkeinWalGroupCommit",
-]
 
 [
     tla_check(
@@ -74,10 +19,10 @@ _STORAGE_MODELS = [
             "auto",
         ],
     )
-    for model in _STORAGE_MODELS
+    for model in STORAGE_MODELS
 ]
 
 test_suite(
     name = "storage_models",
-    tests = [":" + model + "_check" for model in _STORAGE_MODELS],
+    tests = [":" + model + "_check" for model in STORAGE_MODELS],
 )
