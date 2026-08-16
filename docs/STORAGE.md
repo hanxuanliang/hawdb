@@ -40,10 +40,11 @@ Files:
   `properties.<generation>.manifest.skein`,
   `property-spill-descriptors-<generation>.pages.skein`, and
   `property-spill-descriptors-<generation>.root.skein`: canonical large graph
-  property values plus a same-generation shadow descriptor tree. The data
+  property values plus a same-generation demand-paged descriptor tree. The data
   artifact becomes durable before descriptor pages and the compact root. The
-  current reader still uses the manifest's block vector; demand activation and
-  removal of that graph-size-dependent vector are the next storage step.
+  compact manifest retains aggregate counts only; point hydration seeks one
+  descriptor and reads one selected block without making startup metadata
+  resident in proportion to the spill block count.
 - `wal.<generation>.skein`: append-only committed mutation records beginning at
   the replay LSN published by the manifest. The only v1 encoding uses binary
   fragment framing with the `SKWALB01` file header. Text WAL bytes and unknown
@@ -320,6 +321,16 @@ blocks. Deep scrub hashes the complete data and descriptor artifacts, decodes
 every block, and requires a contiguous block-id/range closure with exact block
 and entry counts. Backup validation and derived repair run that exhaustive
 closure check rather than validating only top-level file identities.
+
+Canonical large-property spills also use the descriptor demand boundary. Their
+fixed-width key is the block's maximum spill id, so hydration performs one
+lower-bound seek and reads only the block whose contiguous id range contains the
+requested value. The compact manifest contains no per-block vector. Read reports
+separate descriptor and data I/O/cache activity, physical failure poisons the
+reader, and block-size admission does not. Deep scrub bypasses both caches,
+hashes the complete artifacts, decodes every block, and proves contiguous byte,
+block-id, spill-id, block-count, and value-count closure. Backup validation and
+storage scrub run this exhaustive check.
 
 `DatabaseDoctor::derived_artifact_health` verifies the complete data,
 descriptor-page, descriptor-root, and block closure of the active adjacency and

@@ -27,7 +27,8 @@ use skein_storage::{
     GraphDescriptorTreePaths, GraphDescriptorTreeRootReader, ManifestGeneration,
     PersistentPropertyProjectionConfig, PersistentPropertyProjectionDescriptorTree,
     PersistentPropertyProjectionManifest, PersistentPropertyProjectionReader,
-    PropertySpillManifest, RelationalDecodeLimits, RelationalIndexArtifactMetadata,
+    PersistentPropertySpillDescriptorTree, PropertySpillConfig, PropertySpillManifest,
+    PropertySpillReader, RelationalDecodeLimits, RelationalIndexArtifactMetadata,
     RelationalIndexGenerationIdentity, RelationalIndexShadowConfig, RelationalIndexShadowReader,
     SegmentCache, StorageRestoreReport,
 };
@@ -627,12 +628,12 @@ pub(super) fn validate_backup_files(
             root.join(&descriptor_root_name),
         );
         let root_reader = GraphDescriptorTreeRootReader::open_bound(
-            descriptor_paths,
+            descriptor_paths.clone(),
             property_manifest.descriptor_generation_artifacts(),
             GraphDescriptorTreeBuildConfig::default(),
         )
         .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
-        if root_reader.root().descriptor_count != property_manifest.blocks.len() as u64 {
+        if root_reader.root().descriptor_count != property_manifest.block_count {
             return Err(SkeinError::Storage(
                 "backup property spill descriptor count does not match its manifest".to_string(),
             ));
@@ -649,6 +650,27 @@ pub(super) fn validate_backup_files(
                 "backup property spill descriptor pages do not match their root".to_string(),
             ));
         }
+        let config = PropertySpillConfig::default();
+        let max_block_bytes = NonZeroU64::new(
+            config
+                .target_block_bytes
+                .get()
+                .max(config.max_value_bytes.get().saturating_add(1024)),
+        )
+        .expect("property spill maximum block size is non-zero");
+        PropertySpillReader::open(
+            root.join(&property_artifact_name),
+            property_manifest,
+            PersistentPropertySpillDescriptorTree::new(
+                descriptor_paths,
+                GraphDescriptorTreeBuildConfig::default(),
+            ),
+            Arc::new(SegmentCache::new(0)),
+            store_id_for_path(root)?,
+            max_block_bytes,
+        )
+        .and_then(|reader| reader.deep_scrub())
+        .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
     }
     if let (Some(expected_len), Some(expected_checksum)) = (
         manifest.property_projection_manifest_encoded_len,

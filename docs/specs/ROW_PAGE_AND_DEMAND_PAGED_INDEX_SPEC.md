@@ -1481,41 +1481,50 @@ remain cold until a prefix scan or explicit deep scrub reads them. Page payloads
 are admitted independently of the graph-manifest open budget and use the shared
 byte-bounded storage cache.
 
-### Property-spill shadow descriptor root v1
+### Property-spill demand descriptor root v1
 
-Every canonical checkpoint persists a same-generation descriptor tree for the
-large-property spill artifact without changing the production value lookup
-path yet:
+Every canonical checkpoint persists and activates a same-generation descriptor
+tree for the large-property spill artifact:
 
 - the leaf key is the big-endian maximum spill id. Blocks contain contiguous
-  spill ids, so byte order is the writer's logical order and a future point
-  reader can seek the first upper bound greater than or equal to the requested
-  id;
+  spill ids, so byte order is the writer's logical order and a point reader
+  seeks the first upper bound greater than or equal to the requested id;
 - the fixed 68-byte value carries an eight-byte magic, version, zero flags,
   block id, exact artifact offset and non-zero length, block CRC32C, inclusive
   spill-id bounds, non-zero value count, and a zero reserved tail. Encode and
   decode require the key to agree with the value and require the inclusive id
   range to contain exactly the declared count;
 - the incremental spill writer streams each completed block descriptor into
-  `GraphDescriptorTreeBuilder`. It retains the legacy block vector only for the
-  current reader, not for descriptor-tree construction;
+  `GraphDescriptorTreeBuilder` and retains only aggregate counts. The compact
+  property manifest has constant-size metadata and no per-block vector;
 - the spill data artifact is synchronized and atomically replaced before the
   immutable descriptor page artifact and root are published. The property
   manifest binds source commit epoch and exact descriptor-root length, CRC32C,
   and SHA-256. The outer checkpoint manifest selects that manifest last;
 - normal open verifies the bound root, source epoch, descriptor count, and page
-  artifact length without reading descriptor page payloads. Backup, restore,
-  scrub, checkpoint discard, abandoned-candidate cleanup, and generation
-  reclamation retain or verify data, manifest, descriptor pages, and root as
-  one closure.
+  artifact length without reading descriptor page payloads. A lookup below the
+  declared value count performs one lower-bound descriptor seek under
+  independent page, page-byte, descriptor-count, and tree-height limits, then
+  reads only the selected data block;
+- descriptor pages and spill data blocks use distinct identities in the shared
+  byte-bounded cache. The read report separates descriptor page storage,
+  decode, cache, selected block bytes, and data-cache outcomes. A block-size
+  admission failure remains request-local;
+- physical descriptor, identity, range, digest, data, or I/O failure poisons
+  the reader. Explicit deep scrub bypasses both caches, hashes the complete
+  data and page artifacts, visits every descriptor, decodes every block, and
+  requires contiguous block ids, byte ranges, spill-id ranges, block count,
+  value count, and final artifact length;
+- backup, restore, storage scrub, checkpoint discard, abandoned-candidate
+  cleanup, and generation reclamation retain or verify data, manifest,
+  descriptor pages, and root as one closure. Backup and storage scrub run the
+  exhaustive descriptor/data closure check rather than accepting only
+  top-level artifact hashes.
 
-This is deliberately a shadow-publication stage. `PropertySpillReader` still
-uses the per-block vector in the property manifest. A later independent change
-must activate a bounded demand reader, exhaustive descriptor/data scrub, cache
-accounting, and corruption poison before removing that vector. The publication
-order refines `SkeinGraphDescriptorPaging.tla`: a descriptor root can be
-published only after its same-generation data artifact is durable. Demand-read
-transitions are not claimed for property spill at this stage.
+The publication and demand-read paths refine `SkeinGraphDescriptorPaging.tla`:
+a descriptor root can be published only after its same-generation data artifact
+is durable, open pins the selected generation without warming descriptor pages,
+and a physical demand-read failure makes later reads fail closed.
 
 ### Property-projection demand descriptor root v1
 

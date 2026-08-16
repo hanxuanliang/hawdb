@@ -117,6 +117,7 @@ impl GraphDescriptorTreeDemandReader {
             GraphDescriptorKind::PropertyProjection => {
                 RepresentationKind::PropertyProjectionDescriptorPage
             }
+            GraphDescriptorKind::PropertySpill => RepresentationKind::PropertySpillDescriptorPage,
             kind => {
                 return Err(admission(format!(
                     "graph descriptor demand reader has no cache representation for {kind:?}"
@@ -169,11 +170,60 @@ impl GraphDescriptorTreeDemandReader {
             )));
         }
         let mut state = TraversalState::new(limits, self.root.page_count, false)?;
+        let start = GraphDescriptorTreeScanStart::Prefix(prefix);
         let result = match &self.root.root {
-            Some(root) if range_can_contain_prefix(root, prefix) => self.scan_page(
+            Some(root) if start.range_may_match(root) => self.scan_page(
                 root,
                 self.root.height,
-                Some(prefix),
+                start,
+                true,
+                &mut state,
+                &mut consumer,
+            ),
+            Some(_) | None => Ok(GraphDescriptorTreeScanControl::Continue),
+        };
+        self.poison_on_physical_failure(&result);
+        result.map(|control| (state.report, control))
+    }
+
+    pub(crate) fn scan_from(
+        &self,
+        lower_bound: &[u8],
+        limits: GraphDescriptorTreeReadLimits,
+        mut consumer: impl FnMut(
+            &[u8],
+            &[u8],
+        )
+            -> Result<GraphDescriptorTreeScanControl, GraphDescriptorTreeError>,
+    ) -> Result<
+        (
+            GraphDescriptorTreeReadReport,
+            GraphDescriptorTreeScanControl,
+        ),
+        GraphDescriptorTreeError,
+    > {
+        self.ensure_healthy()?;
+        if lower_bound.is_empty() || lower_bound.len() > self.config.page_limits.max_key_bytes.get()
+        {
+            return Err(admission(format!(
+                "graph descriptor lower bound contains {} bytes, outside admitted range 1..={}",
+                lower_bound.len(),
+                self.config.page_limits.max_key_bytes
+            )));
+        }
+        if self.root.height > limits.max_tree_height.get() {
+            return Err(admission(format!(
+                "graph descriptor tree height {} exceeds read limit {}",
+                self.root.height, limits.max_tree_height
+            )));
+        }
+        let mut state = TraversalState::new(limits, self.root.page_count, false)?;
+        let start = GraphDescriptorTreeScanStart::LowerBound(lower_bound);
+        let result = match &self.root.root {
+            Some(root) if start.range_may_match(root) => self.scan_page(
+                root,
+                self.root.height,
+                start,
                 true,
                 &mut state,
                 &mut consumer,
@@ -218,7 +268,14 @@ impl GraphDescriptorTreeDemandReader {
         let mut state = TraversalState::new(limits, self.root.page_count, true)?;
         state.verify_global_key_order = true;
         let control = match &self.root.root {
-            Some(root) => self.scan_page(root, self.root.height, None, false, &mut state, consumer),
+            Some(root) => self.scan_page(
+                root,
+                self.root.height,
+                GraphDescriptorTreeScanStart::All,
+                false,
+                &mut state,
+                consumer,
+            ),
             None => Ok(GraphDescriptorTreeScanControl::Continue),
         }?;
         if control != GraphDescriptorTreeScanControl::Continue
@@ -285,7 +342,7 @@ impl GraphDescriptorTreeDemandReader {
         &self,
         reference: &GraphDescriptorPageRef,
         remaining_height: u32,
-        prefix: Option<&[u8]>,
+        start: GraphDescriptorTreeScanStart<'_>,
         use_cache: bool,
         state: &mut TraversalState,
         consumer: &mut impl FnMut(
@@ -324,13 +381,21 @@ impl GraphDescriptorTreeDemandReader {
                         }
                         state.previous_key = Some(entry.key.clone());
                     }
-                    if let Some(prefix) = prefix
-                        && !entry.key.starts_with(prefix)
-                    {
-                        if entry.key.as_slice() > prefix {
-                            break;
+                    match start {
+                        GraphDescriptorTreeScanStart::All => {}
+                        GraphDescriptorTreeScanStart::Prefix(prefix) => {
+                            if !entry.key.starts_with(prefix) {
+                                if entry.key.as_slice() > prefix {
+                                    break;
+                                }
+                                continue;
+                            }
                         }
-                        continue;
+                        GraphDescriptorTreeScanStart::LowerBound(lower_bound) => {
+                            if entry.key.as_slice() < lower_bound {
+                                continue;
+                            }
+                        }
                     }
                     state.report.descriptors_emitted = state
                         .report
@@ -356,14 +421,13 @@ impl GraphDescriptorTreeDemandReader {
                     ));
                 }
                 for entry in entries {
-                    if prefix.is_some_and(|prefix| !range_can_contain_prefix(&entry.child, prefix))
-                    {
+                    if !start.range_may_match(&entry.child) {
                         continue;
                     }
                     let control = self.scan_page(
                         &entry.child,
                         remaining_height - 1,
-                        prefix,
+                        start,
                         use_cache,
                         state,
                         consumer,
@@ -523,6 +587,23 @@ impl GraphDescriptorTreeDemandReader {
                 | Err(GraphDescriptorTreeError::Corrupt(_))
         ) {
             self.poisoned.store(true, Ordering::Release);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum GraphDescriptorTreeScanStart<'a> {
+    All,
+    Prefix(&'a [u8]),
+    LowerBound(&'a [u8]),
+}
+
+impl GraphDescriptorTreeScanStart<'_> {
+    fn range_may_match(self, reference: &GraphDescriptorPageRef) -> bool {
+        match self {
+            Self::All => true,
+            Self::Prefix(prefix) => range_can_contain_prefix(reference, prefix),
+            Self::LowerBound(lower_bound) => reference.upper_bound.as_slice() >= lower_bound,
         }
     }
 }

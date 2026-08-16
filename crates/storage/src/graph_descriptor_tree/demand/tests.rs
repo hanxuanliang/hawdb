@@ -116,6 +116,33 @@ fn scan_group(
     Ok((values, report))
 }
 
+fn scan_from(
+    reader: &GraphDescriptorTreeDemandReader,
+    group: u64,
+    item: u64,
+    max_descriptors: u64,
+) -> Result<(Vec<(u64, u64)>, GraphDescriptorTreeReadReport), GraphDescriptorTreeError> {
+    let mut lower_bound = Vec::with_capacity(16);
+    lower_bound.extend_from_slice(&group.to_be_bytes());
+    lower_bound.extend_from_slice(&item.to_be_bytes());
+    let mut values = Vec::new();
+    let mut read_limits = limits();
+    read_limits.max_descriptors = NonZeroU64::new(max_descriptors).unwrap();
+    let (report, _) = reader.scan_from(&lower_bound, read_limits, |key, encoded_value| {
+        let key_group = u64::from_be_bytes(key[..8].try_into().unwrap());
+        let key_item = u64::from_be_bytes(key[8..].try_into().unwrap());
+        let value = u64::from_le_bytes(encoded_value.try_into().unwrap());
+        assert_eq!(key_item, value);
+        values.push((key_group, key_item));
+        Ok(if values.len() as u64 == max_descriptors {
+            GraphDescriptorTreeScanControl::Stop
+        } else {
+            GraphDescriptorTreeScanControl::Continue
+        })
+    })?;
+    Ok((values, report))
+}
+
 #[test]
 fn prefix_scan_is_bounded_ordered_and_cacheable() {
     let directory = TestDirectory::new("prefix");
@@ -134,6 +161,23 @@ fn prefix_scan_is_bounded_ordered_and_cacheable() {
     assert_eq!(warm.storage_bytes_read, 0);
     assert_eq!(warm.page_bytes_decoded, cold.page_bytes_decoded);
     assert_eq!(warm.cache_hits, warm.pages_visited);
+    assert!(!reader.is_poisoned());
+}
+
+#[test]
+fn lower_bound_scan_seeks_to_the_first_greater_or_equal_descriptor() {
+    let directory = TestDirectory::new("lower-bound");
+    let output = build(directory.path());
+    let reader = open_reader(directory.path(), 128 * 1024);
+
+    let (values, cold) = scan_from(&reader, 4, 37, 3).unwrap();
+    assert_eq!(values, vec![(4, 37), (4, 38), (4, 39)]);
+    assert_eq!(cold.descriptors_emitted, 3);
+    assert!(cold.pages_visited < output.root.page_count);
+    assert!(cold.storage_bytes_read > 0);
+
+    let (after_last, _) = scan_from(&reader, 10, 0, 1).unwrap();
+    assert!(after_last.is_empty());
     assert!(!reader.is_poisoned());
 }
 

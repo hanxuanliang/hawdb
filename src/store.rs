@@ -196,7 +196,7 @@ const MANIFEST_HEADER_V1: &str = "SKEIN_MANIFEST_V1";
 const BACKUP_MANIFEST_FILE: &str = "backup.skein";
 const BACKUP_HEADER_V1: &str = "SKEIN_BACKUP_V1";
 const CANONICAL_MANIFEST_MAX_BYTES: u64 = 256 * 1024 * 1024;
-const PROPERTY_SPILL_MANIFEST_MAX_BYTES: u64 = 256 * 1024 * 1024;
+const PROPERTY_SPILL_MANIFEST_MAX_BYTES: u64 = 64 * 1024;
 const PROPERTY_PROJECTION_MANIFEST_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const CHECKPOINT_TEMPORARY_SPACE_MULTIPLIER: u64 = 4;
 const MIN_CHECKPOINT_TEMPORARY_SPACE_BYTES: u64 = 64 * 1024;
@@ -7206,9 +7206,9 @@ mod tests {
             .unwrap();
             assert_eq!(
                 descriptor_root.root().descriptor_count,
-                spill_manifest.blocks.len() as u64
+                spill_manifest.block_count
             );
-            corrupt_offset = spill_manifest.blocks[0].offset + 40;
+            corrupt_offset = 40;
             let canonical_manifest = store.canonical_segment_manifest().unwrap();
             assert!(canonical_manifest
                 .node_segments()

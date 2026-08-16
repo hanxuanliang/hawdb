@@ -140,7 +140,8 @@ pub use property_projection::{
 pub use property_spill::{
     property_spill_descriptor_page_file, property_spill_descriptor_root_file,
     PersistentPropertySpillDescriptorTree, PropertySpillBlockDescriptor, PropertySpillConfig,
-    PropertySpillError, PropertySpillManifest, PropertySpillReader, PropertySpillWriteOptions,
+    PropertySpillError, PropertySpillManifest, PropertySpillReadOutput, PropertySpillReadReport,
+    PropertySpillReader, PropertySpillScrubReport, PropertySpillWriteOptions,
     PropertySpillWriteOutput, PropertySpillWriter,
 };
 pub use relational::{

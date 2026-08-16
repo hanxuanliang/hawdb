@@ -1244,7 +1244,7 @@ impl DurableStore {
                 GraphDescriptorTreeBuildConfig::default(),
             )
             .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
-            if descriptor_root.root().descriptor_count != artifact.blocks.len() as u64 {
+            if descriptor_root.root().descriptor_count != artifact.block_count {
                 return Err(SkeinError::StorageIntegrity(
                     "property spill descriptor count does not match its manifest".to_string(),
                 ));
@@ -1256,6 +1256,28 @@ impl DurableStore {
                 descriptor_root.root().page_artifact_sha256,
                 "property spill descriptor pages",
             )?;
+            let config = PropertySpillConfig::default();
+            let max_block_bytes = NonZeroU64::new(
+                config
+                    .target_block_bytes
+                    .get()
+                    .max(config.max_value_bytes.get().saturating_add(1024)),
+            )
+            .expect("property spill maximum block size is non-zero");
+            PropertySpillReader::open(
+                self.root_path
+                    .join(property_spill_artifact_generation_file(generation)),
+                artifact,
+                PersistentPropertySpillDescriptorTree::new(
+                    descriptor_paths,
+                    GraphDescriptorTreeBuildConfig::default(),
+                ),
+                Arc::clone(&self.segment_cache),
+                self.store_id,
+                max_block_bytes,
+            )
+            .and_then(|reader| reader.deep_scrub())
+            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
         }
 
         if let (Some(expected_len), Some(expected_checksum), Some(expected_sha256)) = (
@@ -4180,7 +4202,7 @@ fn load_published_property_spills(
             manifest.source_commit_epoch, durable_manifest.checkpoint_commit_epoch
         )));
     }
-    let descriptor_root = GraphDescriptorTreeRootReader::open_bound(
+    let descriptor_tree = PersistentPropertySpillDescriptorTree::new(
         GraphDescriptorTreePaths::new(
             root.join(skein_storage::property_spill_descriptor_page_file(
                 generation,
@@ -4189,15 +4211,8 @@ fn load_published_property_spills(
                 generation,
             )),
         ),
-        manifest.descriptor_generation_artifacts(),
         GraphDescriptorTreeBuildConfig::default(),
-    )
-    .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
-    if descriptor_root.root().descriptor_count != manifest.blocks.len() as u64 {
-        return Err(SkeinError::StorageIntegrity(
-            "property spill descriptor count does not match its manifest".to_string(),
-        ));
-    }
+    );
     let config = PropertySpillConfig::default();
     let max_block_bytes = NonZeroU64::new(
         config
@@ -4209,6 +4224,7 @@ fn load_published_property_spills(
     PropertySpillReader::open(
         root.join(property_spill_artifact_generation_file(generation)),
         manifest,
+        descriptor_tree,
         cache,
         store_id,
         max_block_bytes,

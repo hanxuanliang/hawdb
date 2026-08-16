@@ -289,13 +289,14 @@ crash; read-only recovery remains fail closed.
     open retains no block vector; estimates and execution demand-scan ordered
     descriptor prefixes, while deep scrub, backup, and derived repair validate
     the full data/page/root closure. Property spill checkpoints now stream a
-    same-generation shadow descriptor tree, publish data before pages/root,
+    same-generation descriptor tree, publish data before pages/root,
     bind the root through the selected property manifest, and include the
     closure in normal-open root verification, scrub, backup, discard, and
-    reclamation. The
-    production spill reader still uses the manifest block vector; next activate
-    its bounded demand reader and remove that vector, then migrate canonical
-    segment descriptors. Collect representative
+    reclamation. The production spill reader now opens a compact manifest,
+    lower-bound seeks one descriptor under independent limits, reads one block,
+    exposes descriptor/data cache and I/O accounting, and uses exhaustive
+    uncached deep scrub with sticky physical-failure poison. Next migrate
+    canonical segment descriptors. Collect representative
     production-copy evidence before claiming that all graph/index startup
     metadata residency is independent of entry count.
   - The independent general graph-storage release artifact now has a bounded
