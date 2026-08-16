@@ -63,6 +63,8 @@ out as interfaces harden and dependency direction becomes acyclic. The current
 crate split includes `skein-core` for common graph primitives,
 `skein-cypher` for syntax-only Cypher AST/parser support, `skein-qos` for
 local resource classes, background admission, and expected-value ranking,
+`skein-sql-syntax` for dependency-free PostgreSQL token/span ownership and the
+SQL/PGQ syntax AST, `skein-sql` for semantic relational/SQL/PGQ lowering,
 `skein-plan` for Cypher logical/physical IR, typed phase roots, deterministic
 fingerprints, explain rendering, and plan-node metadata, and `skein-optimizer`
 for Cascades primitives plus graph-specific catalog, costing, access-path, and
@@ -79,6 +81,8 @@ crates/
   qos/                 work classes, local admission, background ranking
   optimizer/           Cascades memo/rules/search plus graph cost and lowering
   cypher/              token cursor, parser, AST, parameter model
+  sql-syntax/           PostgreSQL tokens, spans, errors, SQL/PGQ syntax AST
+  sql/                  relational and SQL/PGQ semantic lowering
   storage/             storage protocols, durable primitives, MVCC, indexes
   executor/            physical operators and query execution
   fuzz/                development-only differential oracles and replay bundles
@@ -255,6 +259,32 @@ The semantic graph query model is a separate layer between AST and logical plan.
 It resolves labels, relationship types, variable scopes, property references,
 and cardinality constraints. This keeps parser syntax compatibility separate
 from planning semantics.
+
+## PostgreSQL SQL/PGQ Pipeline
+
+Skein also treats PostgreSQL SQL/PGQ as a first-class syntax surface:
+
+```text
+PostgreSQL SQL with CREATE PROPERTY GRAPH or GRAPH_TABLE
+  -> skein-sql-syntax tokens, spans, and syntax AST
+  -> skein-sql binding and typed GRAPH_TABLE row schema
+  -> shared graph and relational logical plan
+  -> shared optimizer, executor, snapshot, and query admission
+  -> rows
+```
+
+This surface follows PostgreSQL SQL/PGQ rather than claiming standalone ISO
+GQL compatibility. Cypher and SQL/PGQ do not share a syntax AST and neither is
+rendered into the other. They converge only after binding, where graph scans,
+expansion, filtering, and projection use the same logical operators. The owned
+syntax crate is introduced incrementally; existing relational statement
+families remain on upstream `sqlparser` until equivalent positive and negative
+owned-parser coverage exists. The current owned `SELECT` syntax envelope uses a
+bounded Pratt expression AST, supports inner/left/cross joins around
+`GRAPH_TABLE`, and has a read-only catalog-driven binder for graph variables,
+labels, properties, correlated columns, and output schema. It is intentionally
+not wired into production SQL lowering until shared logical-plan lowering and
+execution qualification are complete.
 
 ### Schema-guided GraphRAG queries
 

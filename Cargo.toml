@@ -73,6 +73,7 @@ members = [
   "crates/readiness",
   "crates/route-ownership",
   "crates/sql",
+  "crates/sql-syntax",
   "crates/storage",
   "crates/telemetry",
   "crates/runtime-tokio",

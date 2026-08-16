@@ -438,6 +438,36 @@ qualification justifies moving them.
     repository only after portable export/import, doctor, projection rebuild,
     rollback, and route ownership all select Skein with no fallback.
 
+## P1: PostgreSQL SQL/PGQ Compatibility
+
+- [ ] Add the Skein-owned PostgreSQL syntax frontend specified by
+  `docs/specs/POSTGRES_SQL_PGQ_SPEC.md`.
+  - [x] Add dependency-free token, byte-span, structured-error, and syntax-AST
+    ownership under `crates/`.
+  - [x] Structurally parse PostgreSQL SQL/PGQ `CREATE PROPERTY GRAPH` and
+    standalone `GRAPH_TABLE`, including labels, properties, graph paths,
+    predicates, edge directions, and quantifiers.
+  - [x] Embed `GRAPH_TABLE` into a bounded owned PostgreSQL `SELECT` syntax
+    envelope with explicit statement-family routing, outer projection/filter/
+    grouping/order/limit/locking spans, and PostgreSQL-derived positive,
+    negative, and raw-parse-versus-bind-stage cases.
+  - [x] Replace opaque expression spans with a bounded Pratt AST, add
+    inner/left/cross joins, and add read-only catalog-driven binding for graph
+    slots, labels, properties, correlated columns, typed output schemas, and
+    PostgreSQL raw-parse-versus-bind failures.
+  - [ ] Add the remaining workload-qualified `SELECT` grammar and complete the
+    parser/binder differential corpus before routing production SQL execution
+    to the owned parser.
+  - [x] Keep existing relational SQL on upstream `sqlparser` until each statement
+    family has equivalent positive and negative owned-parser coverage; never
+    retry a second parser after a failure.
+  - [ ] Lower SQL/PGQ and Cypher into the same typed graph logical IR, optimizer,
+    executor, snapshot, admission, cancellation, and explain pipeline.
+  - [ ] Add property-graph catalog durability, information-schema views, bounded
+    fuzzing, PostgreSQL differential tests, and recovery qualification.
+  - Acceptance: active SQL/PGQ statements produce PostgreSQL-compatible rows
+    and error classes without a separate executor or public `query_gql` API.
+
 ## P2: Deferred Delivery Governance
 
 - [ ] Adopt `main` branch protection when Skein enters a release-candidate or

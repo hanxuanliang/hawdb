@@ -1,0 +1,35 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "skein_sql_syntax",
+    crate_name = "skein_sql_syntax",
+    crate_root = "src/lib.rs",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2024",
+)
+
+rust_test(
+    name = "skein_sql_syntax_tests",
+    crate = ":skein_sql_syntax",
+    edition = "2024",
+)
+
+rust_test(
+    name = "postgres_pgq_tests",
+    crate_name = "postgres_pgq_tests",
+    crate_root = "tests/postgres_pgq.rs",
+    srcs = ["tests/postgres_pgq.rs"],
+    edition = "2024",
+    deps = [":skein_sql_syntax"],
+)
+
+rust_test(
+    name = "postgres_select_pgq_tests",
+    crate_name = "postgres_select_pgq_tests",
+    crate_root = "tests/postgres_select_pgq.rs",
+    srcs = ["tests/postgres_select_pgq.rs"],
+    edition = "2024",
+    deps = [":skein_sql_syntax"],
+)

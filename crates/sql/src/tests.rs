@@ -7,6 +7,18 @@ use super::{
 use skein_core::Value;
 
 #[test]
+fn exposes_owned_postgres_sql_pgq_syntax() {
+    let statement = super::syntax::parse_pgq_statement(
+        "CREATE PROPERTY GRAPH knowledge VERTEX TABLES (memories KEY (id))",
+    )
+    .expect("valid PostgreSQL SQL/PGQ syntax");
+    assert!(matches!(
+        statement,
+        super::syntax::PgqStatement::CreatePropertyGraph(_)
+    ));
+}
+
+#[test]
 fn parses_postgres_select_subset() {
     let statement = parse_postgres_sql(
         "SELECT query, elapsed_micros AS elapsed FROM system.slow_queries \

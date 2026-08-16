@@ -1,11 +1,8 @@
 [package]
-name = "skein-sql"
+name = "skein-sql-syntax"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-skein-core = { path = "../core" }
-skein-sql-syntax = { path = "../sql-syntax" }
-sqlparser = "0.61"
