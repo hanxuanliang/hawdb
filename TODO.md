@@ -280,8 +280,12 @@ crash; read-only recovery remains fail closed.
     class cases pass. The final release bundle now requires this matrix and
     revalidates every raw case, including its declared per-run I/O budgets,
     rather than trusting top-level readiness. Retain this item until
-    representative production-replica cases for every class are checked in;
-    synthetic fixtures prove the contract, not production readiness.
+    representative production-replica cases for every class are checked in.
+    The `skein-graph-index-qualification` binary now binds one caller-owned
+    read-only path to a strict, parser-tested all-class plan and derives fixed
+    `ShadowReadOnly + OutOfCore` options without retaining queries, parameters,
+    rows, or paths; synthetic fixtures prove the contract, not production
+    readiness.
 
 ## P1: PostgreSQL-Dialect Relational Content Store
 

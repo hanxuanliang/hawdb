@@ -108,6 +108,34 @@ Each case serializes both its observed maximum block/byte reads and the
 declared per-run block/byte limits so that a later release process can
 re-evaluate every run without trusting the case's reported readiness.
 
+`skein-graph-index-qualification` is the thin developer and evidence collector
+for this typed matrix. It accepts one existing database path separately from a
+bounded `skein-production-graph-index-plan-v1` JSON document. The wrapper MUST
+derive `ShadowReadOnly + OutOfCore` open options and a read-only
+`DatabaseConfig`; the plan cannot weaken those selectors. It MUST NOT import,
+create, copy, repair, checkpoint, or mutate the representative database.
+
+The plan MUST bind one shared runtime configuration, database cache budget,
+process-resource envelope, release identity, and measurement count to all
+cases. It MUST list the eight classes exactly once in stable class order and
+retain explicit Cypher, typed parameters, query budgets, offline digest and row
+count, per-run block and byte limits, and cancellation-latency limit for every
+case. Unknown fields, missing or reordered classes, zero-sized budgets,
+out-of-domain values, invalid digests, or an oversized plan MUST fail before
+the database is opened. The local database path, Cypher, parameters, and result
+rows MUST NOT enter retained evidence.
+
+The `desktop_bound_8_gib` plan profile leaves runtime memory derivation dynamic
+and limits accepted peak RSS to 2 GiB. It does not independently prove that the
+detected host or cgroup limit is 8 GiB; release evidence MUST pair it with the
+fixed memory-policy qualification. The `capability_512_mib` profile installs an
+explicit 512 MiB governor ceiling and rejects a larger cache or RSS envelope.
+These profiles remain distinct. A configured workload profile MUST provide a
+non-zero explicit memory ceiling.
+
+The operational invocation and parser-tested plan are documented in
+[`PRODUCTION_GRAPH_INDEX_QUALIFICATION.md`](../PRODUCTION_GRAPH_INDEX_QUALIFICATION.md).
+
 Default reports MUST redact local paths, query text, parameters, row payloads,
 embeddings, credentials, and raw parser or I/O payload fragments. Debug-only
 diagnostics MAY expose local detail through an explicit host decision, but

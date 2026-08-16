@@ -1040,7 +1040,10 @@ The Rust refinement serializes each case's declared block/byte budgets and raw
 cold/warm runs. `evaluate_production_release_qualification_bundle` requires the
 all-class matrix and independently reconstructs the complete, ordered,
 current-identity evidence set before release admission; top-level matrix
-readiness is not a refinement witness.
+readiness is not a refinement witness. The bounded
+`skein-graph-index-qualification` plan parser only constructs this existing
+typed all-class matrix with one caller-owned read-only path and has no
+independent durable or activation transition.
 
 `SkeinRelationalIndexShadowPublication.tla` models the generation-aligned but
 non-authoritative relational index candidate. Candidate fixed-slot pages become

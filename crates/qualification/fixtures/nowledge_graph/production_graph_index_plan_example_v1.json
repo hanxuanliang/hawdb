@@ -1,0 +1,215 @@
+{
+  "protocol": "skein-production-graph-index-plan-v1",
+  "evidence_binding": {
+    "identity": {
+      "source_revision": "replace-with-skein-revision",
+      "rust_toolchain": "rustc 1.xx.x",
+      "target_os": "macos",
+      "target_arch": "aarch64",
+      "enabled_features": [
+        "full-text-search"
+      ],
+      "durable_format_version": 1,
+      "schema_version": 1,
+      "configuration_digest": "sha256:replace-with-qualified-config",
+      "deployment_profile": "desktop-bound-8-gib",
+      "dataset_fingerprint": "sha256:replace-with-offline-dataset-digest",
+      "canonical_graph_commit_epoch": 1,
+      "policy_version": 1
+    },
+    "generated_at_unix_seconds": 1
+  },
+  "expected_identity": {
+    "source_revision": "replace-with-skein-revision",
+    "rust_toolchain": "rustc 1.xx.x",
+    "target_os": "macos",
+    "target_arch": "aarch64",
+    "enabled_features": [
+      "full-text-search"
+    ],
+    "durable_format_version": 1,
+    "schema_version": 1,
+    "configuration_digest": "sha256:replace-with-qualified-config",
+    "deployment_profile": "desktop-bound-8-gib",
+    "dataset_fingerprint": "sha256:replace-with-offline-dataset-digest",
+    "canonical_graph_commit_epoch": 1,
+    "policy_version": 1
+  },
+  "runtime_profile": "desktop_bound_8_gib",
+  "database": {
+    "max_read_result_rows": 100000,
+    "max_read_result_payload_bytes": 67108864,
+    "execution_batch_rows": 256,
+    "execution_batch_payload_bytes": 16777216,
+    "blocking_operator_bytes": 67108864,
+    "segment_cache_capacity_bytes": 268435456
+  },
+  "measurement_runs": 5,
+  "process_limits": {
+    "min_canonical_artifact_bytes": 268435457,
+    "max_steady_resident_bytes": 2147483648,
+    "max_peak_resident_bytes": 2147483648,
+    "max_total_page_faults": null,
+    "max_minor_page_faults": null,
+    "max_major_page_faults": null,
+    "require_fully_streamed": true
+  },
+  "cases": [
+    {
+      "class": "node_equality",
+      "cypher": "MATCH (m:Memory) WHERE m.id = $id RETURN m.id",
+      "parameters": {
+        "id": "replace-with-memory-id"
+      },
+      "query_limits": {
+        "max_intermediate_rows": 100000,
+        "max_intermediate_payload_bytes": 67108864,
+        "max_output_rows": 1000,
+        "max_output_payload_bytes": 16777216
+      },
+      "reference_output_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "reference_output_rows": 1,
+      "max_blocks_read_per_run": 256,
+      "max_bytes_read_per_run": 16777216,
+      "max_cancellation_latency_micros": 1000000
+    },
+    {
+      "class": "node_range",
+      "cypher": "MATCH (m:Memory) WHERE m.created_at >= $lower AND m.created_at <= $upper RETURN m.id ORDER BY m.created_at, m.id LIMIT $limit",
+      "parameters": {
+        "lower": 0,
+        "upper": 1,
+        "limit": 100
+      },
+      "query_limits": {
+        "max_intermediate_rows": 100000,
+        "max_intermediate_payload_bytes": 67108864,
+        "max_output_rows": 1000,
+        "max_output_payload_bytes": 16777216
+      },
+      "reference_output_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "reference_output_rows": 1,
+      "max_blocks_read_per_run": 256,
+      "max_bytes_read_per_run": 16777216,
+      "max_cancellation_latency_micros": 1000000
+    },
+    {
+      "class": "node_full_text",
+      "cypher": "MATCH (m:Memory) WHERE m.content CONTAINS $needle RETURN m.id ORDER BY m.id LIMIT $limit",
+      "parameters": {
+        "needle": "replace-with-search-term",
+        "limit": 100
+      },
+      "query_limits": {
+        "max_intermediate_rows": 100000,
+        "max_intermediate_payload_bytes": 67108864,
+        "max_output_rows": 1000,
+        "max_output_payload_bytes": 16777216
+      },
+      "reference_output_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "reference_output_rows": 1,
+      "max_blocks_read_per_run": 256,
+      "max_bytes_read_per_run": 16777216,
+      "max_cancellation_latency_micros": 1000000
+    },
+    {
+      "class": "node_composite_equality",
+      "cypher": "MATCH (m:Memory) WHERE m.space_id = $space_id AND m.lifecycle_state = $lifecycle_state RETURN m.id ORDER BY m.id LIMIT $limit",
+      "parameters": {
+        "space_id": "default",
+        "lifecycle_state": "active",
+        "limit": 100
+      },
+      "query_limits": {
+        "max_intermediate_rows": 100000,
+        "max_intermediate_payload_bytes": 67108864,
+        "max_output_rows": 1000,
+        "max_output_payload_bytes": 16777216
+      },
+      "reference_output_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "reference_output_rows": 1,
+      "max_blocks_read_per_run": 256,
+      "max_bytes_read_per_run": 16777216,
+      "max_cancellation_latency_micros": 1000000
+    },
+    {
+      "class": "relationship_equality",
+      "cypher": "MATCH (m:Memory)-[r:MENTIONS]->(e:Entity) WHERE m.id = $memory_id AND r.weight = $weight RETURN e.id ORDER BY e.id LIMIT $limit",
+      "parameters": {
+        "memory_id": "replace-with-memory-id",
+        "weight": 1,
+        "limit": 100
+      },
+      "query_limits": {
+        "max_intermediate_rows": 100000,
+        "max_intermediate_payload_bytes": 67108864,
+        "max_output_rows": 1000,
+        "max_output_payload_bytes": 16777216
+      },
+      "reference_output_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "reference_output_rows": 1,
+      "max_blocks_read_per_run": 256,
+      "max_bytes_read_per_run": 16777216,
+      "max_cancellation_latency_micros": 1000000
+    },
+    {
+      "class": "relationship_range",
+      "cypher": "MATCH (m:Memory)-[r:MENTIONS]->(e:Entity) WHERE m.id = $memory_id AND r.weight >= $lower AND r.weight <= $upper RETURN e.id ORDER BY e.id LIMIT $limit",
+      "parameters": {
+        "memory_id": "replace-with-memory-id",
+        "lower": 0,
+        "upper": 1,
+        "limit": 100
+      },
+      "query_limits": {
+        "max_intermediate_rows": 100000,
+        "max_intermediate_payload_bytes": 67108864,
+        "max_output_rows": 1000,
+        "max_output_payload_bytes": 16777216
+      },
+      "reference_output_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "reference_output_rows": 1,
+      "max_blocks_read_per_run": 256,
+      "max_bytes_read_per_run": 16777216,
+      "max_cancellation_latency_micros": 1000000
+    },
+    {
+      "class": "forward_adjacency",
+      "cypher": "MATCH (m:Memory)-[:MENTIONS]->(e:Entity) WHERE m.id = $memory_id RETURN e.id ORDER BY e.id LIMIT $limit",
+      "parameters": {
+        "memory_id": "replace-with-memory-id",
+        "limit": 100
+      },
+      "query_limits": {
+        "max_intermediate_rows": 100000,
+        "max_intermediate_payload_bytes": 67108864,
+        "max_output_rows": 1000,
+        "max_output_payload_bytes": 16777216
+      },
+      "reference_output_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "reference_output_rows": 1,
+      "max_blocks_read_per_run": 256,
+      "max_bytes_read_per_run": 16777216,
+      "max_cancellation_latency_micros": 1000000
+    },
+    {
+      "class": "reverse_adjacency",
+      "cypher": "MATCH (m:Memory)-[:MENTIONS]->(e:Entity) WHERE e.id = $entity_id RETURN m.id ORDER BY m.id LIMIT $limit",
+      "parameters": {
+        "entity_id": "replace-with-entity-id",
+        "limit": 100
+      },
+      "query_limits": {
+        "max_intermediate_rows": 100000,
+        "max_intermediate_payload_bytes": 67108864,
+        "max_output_rows": 1000,
+        "max_output_payload_bytes": 16777216
+      },
+      "reference_output_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "reference_output_rows": 1,
+      "max_blocks_read_per_run": 256,
+      "max_bytes_read_per_run": 16777216,
+      "max_cancellation_latency_micros": 1000000
+    }
+  ]
+}
