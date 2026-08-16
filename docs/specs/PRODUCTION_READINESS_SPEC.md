@@ -278,6 +278,38 @@ evidence.
 The operational invocation and bounded plan shape are documented in
 [`PRODUCTION_CONTENT_STORE_QUALIFICATION.md`](../PRODUCTION_CONTENT_STORE_QUALIFICATION.md).
 
+`skein-content-store-mutation-qualification` is the corresponding thin
+developer and evidence collector for the writable matrix. It accepts the
+read-only source and the four 1/4/8/10-writer replica paths separately from one
+bounded `skein-production-content-store-mutation-plan-v1` JSON document. The
+wrapper MUST NOT copy, create, or migrate a replica. The caller MUST provide
+four distinct existing disposable database directories, each separate from
+the source and initialized from the exact expected generation. The typed
+runner canonicalizes and validates those paths before opening any replica for
+mutation.
+
+The mutation plan MUST list cases in exact 1, 4, 8, and 10 writer order, contain
+one explicit worker definition per writer, and retain explicit frozen statement
+names, parameters, conflict domains, verification digests, latency limits, and
+the accepted latency-reference identity. It MUST also contain the complete WAL
+group-commit activation evidence. The wrapper MUST construct group commit only
+through the evidence-validating Skein constructors; a JSON boolean or policy
+name alone cannot activate it. Unknown fields, incomplete writer matrices,
+invalid numeric bounds, and WAL evidence rejected by the engine MUST fail
+before mutation begins.
+
+The wrapper derives writable `OutOfCore + Authoritative` database
+configuration. It MUST retain the fixed resource-profile identity and process
+RSS/page-fault limits but MUST NOT claim that the mutation runner owns a
+runtime-governor permit. `desktop_bound_8_gib` declares 8 GiB of available
+memory and caps accepted peak RSS at 2 GiB; `capability_512_mib` is the separate
+explicit low-memory capability run. A configured workload MUST declare a
+non-zero available-memory envelope. Paths, parameters, and rows MUST NOT enter
+retained evidence.
+
+The operational invocation and parser-tested plan are documented in
+[`PRODUCTION_CONTENT_STORE_QUALIFICATION.md`](../PRODUCTION_CONTENT_STORE_QUALIFICATION.md).
+
 Every query result path MUST have explicit row and payload limits. Every
 blocking operator MUST do one of the following before exceeding its admitted
 memory:

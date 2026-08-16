@@ -36,7 +36,11 @@ and algorithms outside active routes are not implied backlog items.
     replay-open, checkpoint, and manifest-only-open evidence, and rejects more
     than 5% regression against same-shape accepted-revision references. Run the
     matrix on disposable copies of the representative import; synthetic matrix
-    coverage is contract evidence only.
+    coverage is contract evidence only. The
+    `skein-content-store-mutation-qualification` binary now binds four
+    caller-owned replica paths to a strict, parser-tested plan without copying
+    the source or retaining paths and parameters; retain this item until the
+    resulting representative matrix artifact is checked in.
   - The typed graph runner now retains every ordered cold/warm resource run,
     its recomputed aggregate, and lifecycle process memory. The final bundle
     rejects missing, truncated, reordered, over-budget, or inconsistent run

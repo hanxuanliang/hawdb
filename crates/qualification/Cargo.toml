@@ -34,6 +34,10 @@ path = "src/bin/content_store_contract.rs"
 name = "skein-content-store-read-qualification"
 path = "src/bin/content_store_read_qualification.rs"
 
+[[bin]]
+name = "skein-content-store-mutation-qualification"
+path = "src/bin/content_store_mutation_qualification.rs"
+
 # The aarch64 hardware SHA-256 backend is only reachable through this feature;
 # x86 already detects SHA-NI at runtime and needs nothing here. `sha2-asm`
 # ships GNU-syntax `.S` sources, which MSVC cannot assemble, so the activation

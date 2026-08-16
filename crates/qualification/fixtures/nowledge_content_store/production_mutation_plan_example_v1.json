@@ -1,0 +1,602 @@
+{
+  "protocol": "skein-production-content-store-mutation-plan-v1",
+  "evidence_binding": {
+    "identity": {
+      "source_revision": "replace-with-skein-revision",
+      "rust_toolchain": "rustc 1.xx.x",
+      "target_os": "macos",
+      "target_arch": "aarch64",
+      "enabled_features": [],
+      "durable_format_version": 1,
+      "schema_version": 1,
+      "configuration_digest": "sha256:replace-with-qualified-config",
+      "deployment_profile": "desktop-bound-8-gib",
+      "dataset_fingerprint": "sha256:replace-with-offline-dataset-digest",
+      "canonical_graph_commit_epoch": 1,
+      "policy_version": 1
+    },
+    "generated_at_unix_seconds": 1
+  },
+  "expected_identity": {
+    "source_revision": "replace-with-skein-revision",
+    "rust_toolchain": "rustc 1.xx.x",
+    "target_os": "macos",
+    "target_arch": "aarch64",
+    "enabled_features": [],
+    "durable_format_version": 1,
+    "schema_version": 1,
+    "configuration_digest": "sha256:replace-with-qualified-config",
+    "deployment_profile": "desktop-bound-8-gib",
+    "dataset_fingerprint": "sha256:replace-with-offline-dataset-digest",
+    "canonical_graph_commit_epoch": 1,
+    "policy_version": 1
+  },
+  "resource_profile": "desktop_bound_8_gib",
+  "database": {
+    "max_read_result_rows": 100000,
+    "max_read_result_payload_bytes": 67108864,
+    "execution_batch_rows": 256,
+    "execution_batch_payload_bytes": 16777216,
+    "blocking_operator_bytes": 67108864,
+    "segment_cache_capacity_bytes": 268435456,
+    "max_relational_index_read_bytes": 67108864,
+    "max_relational_hydration_bytes": 67108864
+  },
+  "wal_group_commit": {
+    "delay_policy": "fixed",
+    "max_entries": 16,
+    "max_bytes": 1048576,
+    "max_delay_micros": 250,
+    "evidence": {
+      "measurement_rounds": 9,
+      "commit_count": 16,
+      "baseline_elapsed_micros": 200,
+      "baseline_fsync_count": 16,
+      "grouped_elapsed_micros": 100,
+      "grouped_fsync_count": 2,
+      "concurrent_tail_latency": {
+        "commit_count": 16,
+        "paired_p95_regression_micros": 1,
+        "paired_p95_mad_micros": 1,
+        "max_accepted_p95_regression_micros": 10
+      },
+      "single_writer_tail_latency": {
+        "commit_count": 16,
+        "paired_p95_regression_micros": 1,
+        "paired_p95_mad_micros": 1,
+        "max_accepted_p95_regression_micros": 10
+      },
+      "single_writer_max_coalescing_wait_count": 0,
+      "single_writer_max_observed_group_entries": 1,
+      "adaptive_cold_start_behavior": null,
+      "adaptive_steady_state_behavior": null,
+      "strict_recovery_verified": true,
+      "wal_order_verified": true
+    }
+  },
+  "resource_limits": {
+    "max_steady_resident_bytes": 2147483648,
+    "max_peak_resident_bytes": 2147483648,
+    "max_total_page_faults_per_case": null,
+    "max_minor_page_faults_per_case": null,
+    "max_major_page_faults_per_case": null
+  },
+  "max_commit_p95_regression_per_million": 50000,
+  "latency_reference": {
+    "source_revision": "replace-with-accepted-reference-revision",
+    "configuration_digest": "sha256:replace-with-qualified-config",
+    "dataset_fingerprint": "sha256:replace-with-offline-dataset-digest",
+    "generated_at_unix_seconds": 1
+  },
+  "cases": [
+    {
+      "writer_count": 1,
+      "workers": [
+        {
+          "conflict_domain": "writer-0",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-1-0",
+                "thread",
+                "replace-with-owner-1-0",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        }
+      ],
+      "verification_cases": [
+        {
+          "case_name": "verify-1-writer-result",
+          "statement_name": "thread_owned_document_ids",
+          "parameters": [
+            "replace-with-owner-1-0"
+          ],
+          "expected_output_rows": 1,
+          "expected_output_sha256": "replace-with-offline-result-digest"
+        }
+      ],
+      "reference_commit_p95_micros": 1000000,
+      "max_commit_p95_micros": 1000000
+    },
+    {
+      "writer_count": 4,
+      "workers": [
+        {
+          "conflict_domain": "writer-0",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-4-0",
+                "thread",
+                "replace-with-owner-4-0",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        },
+        {
+          "conflict_domain": "writer-1",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-4-1",
+                "thread",
+                "replace-with-owner-4-1",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        },
+        {
+          "conflict_domain": "writer-2",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-4-2",
+                "thread",
+                "replace-with-owner-4-2",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        },
+        {
+          "conflict_domain": "writer-3",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-4-3",
+                "thread",
+                "replace-with-owner-4-3",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        }
+      ],
+      "verification_cases": [
+        {
+          "case_name": "verify-4-writer-result",
+          "statement_name": "thread_owned_document_ids",
+          "parameters": [
+            "replace-with-owner-4-0"
+          ],
+          "expected_output_rows": 1,
+          "expected_output_sha256": "replace-with-offline-result-digest"
+        }
+      ],
+      "reference_commit_p95_micros": 1000000,
+      "max_commit_p95_micros": 1000000
+    },
+    {
+      "writer_count": 8,
+      "workers": [
+        {
+          "conflict_domain": "writer-0",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-8-0",
+                "thread",
+                "replace-with-owner-8-0",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        },
+        {
+          "conflict_domain": "writer-1",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-8-1",
+                "thread",
+                "replace-with-owner-8-1",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        },
+        {
+          "conflict_domain": "writer-2",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-8-2",
+                "thread",
+                "replace-with-owner-8-2",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        },
+        {
+          "conflict_domain": "writer-3",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-8-3",
+                "thread",
+                "replace-with-owner-8-3",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        },
+        {
+          "conflict_domain": "writer-4",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-8-4",
+                "thread",
+                "replace-with-owner-8-4",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        },
+        {
+          "conflict_domain": "writer-5",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-8-5",
+                "thread",
+                "replace-with-owner-8-5",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        },
+        {
+          "conflict_domain": "writer-6",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-8-6",
+                "thread",
+                "replace-with-owner-8-6",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        },
+        {
+          "conflict_domain": "writer-7",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-8-7",
+                "thread",
+                "replace-with-owner-8-7",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        }
+      ],
+      "verification_cases": [
+        {
+          "case_name": "verify-8-writer-result",
+          "statement_name": "thread_owned_document_ids",
+          "parameters": [
+            "replace-with-owner-8-0"
+          ],
+          "expected_output_rows": 1,
+          "expected_output_sha256": "replace-with-offline-result-digest"
+        }
+      ],
+      "reference_commit_p95_micros": 1000000,
+      "max_commit_p95_micros": 1000000
+    },
+    {
+      "writer_count": 10,
+      "workers": [
+        {
+          "conflict_domain": "writer-0",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-10-0",
+                "thread",
+                "replace-with-owner-10-0",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        },
+        {
+          "conflict_domain": "writer-1",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-10-1",
+                "thread",
+                "replace-with-owner-10-1",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        },
+        {
+          "conflict_domain": "writer-2",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-10-2",
+                "thread",
+                "replace-with-owner-10-2",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        },
+        {
+          "conflict_domain": "writer-3",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-10-3",
+                "thread",
+                "replace-with-owner-10-3",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        },
+        {
+          "conflict_domain": "writer-4",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-10-4",
+                "thread",
+                "replace-with-owner-10-4",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        },
+        {
+          "conflict_domain": "writer-5",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-10-5",
+                "thread",
+                "replace-with-owner-10-5",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        },
+        {
+          "conflict_domain": "writer-6",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-10-6",
+                "thread",
+                "replace-with-owner-10-6",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        },
+        {
+          "conflict_domain": "writer-7",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-10-7",
+                "thread",
+                "replace-with-owner-10-7",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        },
+        {
+          "conflict_domain": "writer-8",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-10-8",
+                "thread",
+                "replace-with-owner-10-8",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        },
+        {
+          "conflict_domain": "writer-9",
+          "operations": [
+            {
+              "statement_name": "upsert_content_document",
+              "parameters": [
+                "replace-with-document-10-9",
+                "thread",
+                "replace-with-owner-10-9",
+                "default",
+                "application/x-nowledge-thread",
+                1,
+                "2026-08-16T00:00:00Z",
+                "2026-08-16T00:00:00Z"
+              ],
+              "kind": "insert"
+            }
+          ]
+        }
+      ],
+      "verification_cases": [
+        {
+          "case_name": "verify-10-writer-result",
+          "statement_name": "thread_owned_document_ids",
+          "parameters": [
+            "replace-with-owner-10-0"
+          ],
+          "expected_output_rows": 1,
+          "expected_output_sha256": "replace-with-offline-result-digest"
+        }
+      ],
+      "reference_commit_p95_micros": 1000000,
+      "max_commit_p95_micros": 1000000
+    }
+  ]
+}

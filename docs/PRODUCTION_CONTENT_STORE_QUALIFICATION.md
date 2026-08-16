@@ -1,8 +1,8 @@
 # Production Content Store Qualification
 
-This runbook collects read-only storage evidence from an already imported,
-representative Skein database. It does not import SQLite, create replicas, or
-derive an oracle from Skein itself.
+This runbook collects read-only and isolated mutation storage evidence from an
+already imported, representative Skein database. It does not import SQLite,
+create replicas, or derive an oracle from Skein itself.
 
 ## Preconditions
 
@@ -130,3 +130,51 @@ execution failed.
 Retain the plan, evidence JSON, exact binary revision, and offline oracle
 artifact together. A successful local run is not a release gate until those
 artifacts are reviewed and included in the production qualification bundle.
+
+## Writable Mutation Matrix
+
+The mutation collector requires the read-only source plus four caller-created,
+disposable replicas of the same imported generation. The collector never copies
+the source. Each replica is consumed by exactly one writer-count case and will
+be mutated, recovered from non-empty WAL, checkpointed, and reopened. Never
+point a replica argument at live data or reuse one directory for multiple
+cases.
+
+Start from the parser-tested
+[`production_mutation_plan_example_v1.json`](../crates/qualification/fixtures/nowledge_content_store/production_mutation_plan_example_v1.json).
+Its protocol is `skein-production-content-store-mutation-plan-v1`. Replace
+every placeholder, including all per-writer operation parameters, offline
+verification digests, the accepted commit-latency reference, and the complete
+WAL group-commit evidence. The cases and their workers must be explicit and
+ordered exactly as 1, 4, 8, and 10 writers. Plan parsing rejects unknown fields
+and files larger than 32 MiB.
+
+The resource profiles have the same meaning as for the read collector. The
+desktop profile declares an 8 GiB environment and enforces a peak RSS ceiling
+no greater than 2 GiB. The 512 MiB capability profile is a separate explicitly
+configured run, not the desktop default or a universal capacity limit.
+
+```bash
+cargo run -p skein-qualification \
+  --bin skein-content-store-mutation-qualification -- \
+  --source-database-path /path/to/read-only-representative.skein \
+  --replica-1 /path/to/disposable-writers-1.skein \
+  --replica-4 /path/to/disposable-writers-4.skein \
+  --replica-8 /path/to/disposable-writers-8.skein \
+  --replica-10 /path/to/disposable-writers-10.skein \
+  --plan-json /path/to/content-store-mutation-plan.json \
+  > content-store-mutation-evidence.json
+```
+
+The wrapper constructs writable `OutOfCore + Authoritative` database
+configuration and passes the plan to
+`run_production_content_store_mutation_qualification`. The typed runner
+canonicalizes all directories before mutation, rejects source/replica aliases,
+and verifies that every replica starts at the expected serving identity. Local
+paths, SQL parameters, and result rows are absent from retained evidence. Exit
+codes have the same meaning as the read collector.
+
+Retain the source-generation manifest, replica construction record, plan,
+evidence JSON, accepted latency artifact, exact binary revision, and offline
+oracle together. A parser-tested example or synthetic matrix is contract
+evidence only; neither can satisfy the representative production gate.
