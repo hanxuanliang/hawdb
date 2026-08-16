@@ -1427,6 +1427,22 @@ Consequently, a fast normal open is not a full-media scrub. A checksum failure
 during query execution poisons the handle and fails closed. Explicit
 doctor/deep-scrub mode visits every reachable page and projection artifact.
 
+Graph manifest open is separately admitted. The canonical segment, property
+spill, adjacency, and property-projection manifests share one aggregate encoded
+byte budget for an open or manifest installation. Each file MUST be rejected
+from its durable binding and filesystem metadata before allocation when either
+the aggregate configured budget, its format limit, or its exact selected length
+would be exceeded. Length, CRC32C, and SHA-256 verification MUST consume the
+same bounded byte image that is decoded; a verifier MUST NOT reopen the path.
+The configured limit is a storage-subsystem budget and MUST NOT be derived by
+assuming that 512 MiB is the default process limit.
+
+This bound is a fail-closed transition guard, not proof that graph metadata
+residency is independent of graph size. Until block descriptors move behind a
+demand-paged root, production qualification MUST report both the configured
+aggregate limit and selected encoded manifest bytes, and MUST reject a selected
+generation that exceeds the limit.
+
 ## Demand paging and cache ownership
 
 1. Skein manages page-in/page-out through its own byte-bounded cache. OS swap

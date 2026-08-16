@@ -256,6 +256,9 @@ pub struct DatabaseConfig {
     pub max_checkpoint_encoded_bytes: Option<u64>,
     pub max_checkpoint_decoded_bytes: Option<u64>,
     pub segment_cache_capacity_bytes: u64,
+    /// Aggregate encoded graph-manifest bytes allowed during database open.
+    /// Payload pages remain governed separately by the segment cache.
+    pub max_graph_manifest_open_bytes: u64,
     pub max_relational_index_read_bytes: NonZeroUsize,
     pub max_relational_hydration_bytes: NonZeroUsize,
     pub storage_residency_mode: skein_storage::StorageResidencyMode,
@@ -394,6 +397,7 @@ impl Default for DatabaseConfig {
             max_checkpoint_encoded_bytes: Some(skein_storage::DEFAULT_MAX_CHECKPOINT_ENCODED_BYTES),
             max_checkpoint_decoded_bytes: Some(skein_storage::DEFAULT_MAX_CHECKPOINT_DECODED_BYTES),
             segment_cache_capacity_bytes: skein_storage::DEFAULT_SEGMENT_CACHE_CAPACITY_BYTES,
+            max_graph_manifest_open_bytes: skein_storage::DEFAULT_MAX_GRAPH_MANIFEST_OPEN_BYTES,
             max_relational_index_read_bytes: NonZeroUsize::new(
                 skein_storage::DEFAULT_RELATIONAL_INDEX_READ_BYTES,
             )
@@ -797,6 +801,7 @@ impl Database {
             max_checkpoint_encoded_bytes: config.max_checkpoint_encoded_bytes,
             max_checkpoint_decoded_bytes: config.max_checkpoint_decoded_bytes,
             segment_cache_capacity_bytes: config.segment_cache_capacity_bytes,
+            max_graph_manifest_open_bytes: config.max_graph_manifest_open_bytes,
             residency_mode: config.storage_residency_mode,
             auto_materialize_checkpoint_bytes: config.auto_materialize_checkpoint_bytes,
             max_out_of_core_delta_bytes: config.max_out_of_core_delta_bytes,

@@ -912,6 +912,13 @@ impl GraphStore {
             .map(CanonicalSegmentReader::manifest);
         let estimated_delta_resident_bytes = self.estimated_delta_resident_bytes();
         let cache = self.segment_cache_snapshot().unwrap_or_default();
+        let (graph_manifest_open_budget_bytes, graph_manifest_encoded_bytes) =
+            self.durable.as_ref().map_or((0, 0), |durable| {
+                (
+                    durable.graph_manifest_open_budget_bytes(),
+                    durable.graph_manifest_encoded_bytes(),
+                )
+            });
         StorageResidencyReport {
             out_of_core: self.canonical_base_out_of_core,
             canonical_generation: manifest.map(|manifest| manifest.generation.0),
@@ -940,6 +947,8 @@ impl GraphStore {
             checkpoint_statistics_complete: self.checkpoint_statistics.advanced_statistics_complete,
             checkpoint_statistics_stale: !self.checkpoint_statistics.advanced_statistics_complete
                 || self.checkpoint_statistics.computed_at_commit_epoch < self.commit_epoch,
+            graph_manifest_open_budget_bytes,
+            graph_manifest_encoded_bytes,
             segment_cache_capacity_bytes: cache.capacity_bytes,
             segment_cache_resident_bytes: cache.resident_bytes,
             segment_cache_pinned_bytes: cache.pinned_bytes,

@@ -91,7 +91,7 @@ use durable::{
     artifact_metadata_presence_consistent, load_published_canonical_adjacency,
     load_published_property_projection, BackupFileEntry, BackupManifest, CheckpointImage,
     CheckpointManifestArtifacts, DerivedArtifactBuildConfig, DurableArtifactMetadata,
-    DurableManifest, DurableOpenMode, DurableStore,
+    DurableManifest, DurableOpenMode, DurableStore, GraphManifestOpenBudget,
 };
 use graph_columnar_shadow::ColumnarShadowState;
 pub use graph_columnar_shadow::{
@@ -1062,6 +1062,8 @@ pub struct StorageResidencyReport {
     pub checkpoint_statistics_commit_epoch: u64,
     pub checkpoint_statistics_complete: bool,
     pub checkpoint_statistics_stale: bool,
+    pub graph_manifest_open_budget_bytes: u64,
+    pub graph_manifest_encoded_bytes: u64,
     pub segment_cache_capacity_bytes: u64,
     pub segment_cache_resident_bytes: u64,
     pub segment_cache_pinned_bytes: u64,
@@ -1866,6 +1868,7 @@ impl GraphStore {
                 path.as_ref(),
                 durability,
                 replay_config.segment_cache_capacity_bytes,
+                replay_config.max_graph_manifest_open_bytes,
                 replay_config.max_bytes,
                 replay_config.max_record_bytes,
                 replay_config.max_batch_operations,
@@ -1874,6 +1877,7 @@ impl GraphStore {
                 path.as_ref(),
                 durability,
                 replay_config.segment_cache_capacity_bytes,
+                replay_config.max_graph_manifest_open_bytes,
                 replay_config.max_bytes,
                 replay_config.max_record_bytes,
                 replay_config.max_batch_operations,
@@ -2006,6 +2010,7 @@ impl GraphStore {
             path,
             DurabilityPolicy::default(),
             replay_config.segment_cache_capacity_bytes,
+            replay_config.max_graph_manifest_open_bytes,
             replay_config.max_bytes,
             replay_config.max_record_bytes,
             replay_config.max_batch_operations,
@@ -5735,19 +5740,19 @@ fn estimated_value_bytes(value: &Value) -> u64 {
 mod tests {
     use super::{
         canonical_adjacency_artifact_generation_file, canonical_adjacency_manifest_generation_file,
-        checksum_bytes, compute_statistics, encode_durable_text,
-        property_projection_artifact_generation_file, property_spill_artifact_generation_file,
-        read_durable_text, restore_storage_backup, retain_supported_property_statistics,
-        set_checkpoint_failpoint, set_wal_apply_failpoint, source_scan, AdjacencyConsolidationPlan,
-        AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, CheckpointPublishStage,
-        ConnectedNodesCreate, CowSegmentedMap, DatabaseDoctor, DegreeStatisticsEntry,
-        DegreeStatisticsKey, DurableCompression, GraphScanControl, GraphStore, NodeId, NodeRecord,
-        NodeSetAssignment, NodeSetValue, OrderedAdjacencyEntry, PersistentGraphIndexClass,
-        ProjectedGraphDefinition, PropertyFilter, RelId, RelRecord, RelTypeId,
-        RelationshipDeleteRequest, ScanPruningStrategy, ScanPruningTargetKind,
-        SearchProjectionGraphChange, SourceScanCandidateRead, WalDoctorOptions,
-        COW_MAP_TARGET_SEGMENT_BYTES, DENSE_ADJACENCY_DEGREE_THRESHOLD, DURABLE_COMPRESSION_HEADER,
-        MANIFEST_FILE,
+        canonical_manifest_generation_file, checksum_bytes, compute_statistics,
+        encode_durable_text, property_projection_artifact_generation_file,
+        property_spill_artifact_generation_file, read_durable_text, restore_storage_backup,
+        retain_supported_property_statistics, set_checkpoint_failpoint, set_wal_apply_failpoint,
+        source_scan, AdjacencyConsolidationPlan, AdjacencyDirection, AdjacencyGroupStats,
+        AdjacencyLayout, CheckpointPublishStage, ConnectedNodesCreate, CowSegmentedMap,
+        DatabaseDoctor, DegreeStatisticsEntry, DegreeStatisticsKey, DurableCompression,
+        DurableManifest, GraphScanControl, GraphStore, NodeId, NodeRecord, NodeSetAssignment,
+        NodeSetValue, OrderedAdjacencyEntry, PersistentGraphIndexClass, ProjectedGraphDefinition,
+        PropertyFilter, RelId, RelRecord, RelTypeId, RelationshipDeleteRequest,
+        ScanPruningStrategy, ScanPruningTargetKind, SearchProjectionGraphChange,
+        SourceScanCandidateRead, WalDoctorOptions, COW_MAP_TARGET_SEGMENT_BYTES,
+        DENSE_ADJACENCY_DEGREE_THRESHOLD, DURABLE_COMPRESSION_HEADER, MANIFEST_FILE,
     };
     use crate::schema::{Catalog, GraphStatistics, LabelId, PropertyType, TableKind};
     use crate::value::Value;
@@ -6667,6 +6672,174 @@ mod tests {
                 store.node(NodeId(1)).cloned()
             );
         }
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn graph_manifest_open_budget_is_aggregate_across_published_roots() {
+        let path = unique_test_dir("graph_manifest_open_budget");
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+            let source = store
+                .create_node(&mut catalog, "Memory", BTreeMap::new())
+                .unwrap();
+            let target = store
+                .create_node(&mut catalog, "Entity", BTreeMap::new())
+                .unwrap();
+            store
+                .create_relationship(&mut catalog, source, target, "MENTIONS", BTreeMap::new())
+                .unwrap();
+            store.checkpoint(&catalog).unwrap();
+        }
+
+        let canonical_manifest_bytes =
+            fs::metadata(path.join(canonical_manifest_generation_file(1)))
+                .unwrap()
+                .len();
+        {
+            let mut catalog = Catalog::default();
+            let store = GraphStore::open(&path, &mut catalog).unwrap();
+            let residency = store.storage_residency_report();
+            assert_eq!(
+                residency.graph_manifest_open_budget_bytes,
+                skein_storage::DEFAULT_MAX_GRAPH_MANIFEST_OPEN_BYTES
+            );
+            assert!(residency.graph_manifest_encoded_bytes > canonical_manifest_bytes);
+        }
+        let replay_config = WalReplayConfig {
+            max_graph_manifest_open_bytes: canonical_manifest_bytes,
+            ..WalReplayConfig::default()
+        };
+        let mut catalog = Catalog::default();
+        let error = GraphStore::open_with_durability_and_replay_config(
+            &path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            replay_config,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("aggregate encoded graph manifest bytes during open"),
+            "unexpected graph manifest admission error: {error}"
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn zero_graph_manifest_open_budget_is_rejected_before_initialization() {
+        let path = unique_test_dir("zero_graph_manifest_open_budget");
+        let replay_config = WalReplayConfig {
+            max_graph_manifest_open_bytes: 0,
+            ..WalReplayConfig::default()
+        };
+        let mut catalog = Catalog::default();
+        let error = GraphStore::open_with_durability_and_replay_config(
+            &path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            replay_config,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("max_graph_manifest_open_bytes must be non-zero"));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn checkpoint_rejects_graph_manifest_budget_before_selecting_candidate() {
+        let path = unique_test_dir("checkpoint_graph_manifest_budget");
+        let replay_config = WalReplayConfig {
+            max_graph_manifest_open_bytes: 64 * 1024,
+            ..WalReplayConfig::default()
+        };
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::open_with_durability_and_replay_config(
+            &path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            replay_config,
+        )
+        .unwrap();
+        store
+            .commit_mutations(
+                &mut catalog,
+                vec![GraphMutation::MergeConnectedNodes(ConnectedNodesCreate {
+                    source_label: "Memory".to_string(),
+                    source_properties: properties([("id", Value::String("source-0".to_string()))]),
+                    rel_type: "MENTIONS".to_string(),
+                    rel_properties: BTreeMap::new(),
+                    target_label: "Entity".to_string(),
+                    target_properties: properties([("id", Value::String("target-0".to_string()))]),
+                })],
+            )
+            .unwrap();
+        store.checkpoint(&catalog).unwrap();
+        assert_eq!(store.durable.as_ref().unwrap().checkpoint_epoch, 1);
+
+        let mutations = (1..=512)
+            .map(|ordinal| {
+                GraphMutation::MergeConnectedNodes(ConnectedNodesCreate {
+                    source_label: "Memory".to_string(),
+                    source_properties: properties([(
+                        "id",
+                        Value::String(format!("source-{ordinal}")),
+                    )]),
+                    rel_type: "MENTIONS".to_string(),
+                    rel_properties: BTreeMap::new(),
+                    target_label: "Entity".to_string(),
+                    target_properties: properties([(
+                        "id",
+                        Value::String(format!("target-{ordinal}")),
+                    )]),
+                })
+            })
+            .collect();
+        store.commit_mutations(&mut catalog, mutations).unwrap();
+        let error = store.checkpoint(&catalog).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("aggregate encoded graph manifest bytes during open"),
+            "unexpected graph manifest checkpoint admission error: {error}"
+        );
+        assert_eq!(store.durable.as_ref().unwrap().checkpoint_epoch, 1);
+        let selected_manifest = DurableManifest::load(&path.join(MANIFEST_FILE)).unwrap();
+        assert_eq!(selected_manifest.checkpoint_epoch, 1);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn graph_manifest_growth_is_rejected_before_unbounded_read() {
+        let path = unique_test_dir("graph_manifest_growth");
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+            store
+                .create_node(&mut catalog, "Memory", BTreeMap::new())
+                .unwrap();
+            store.checkpoint(&catalog).unwrap();
+        }
+
+        let manifest_path = path.join(canonical_manifest_generation_file(1));
+        let original_len = fs::metadata(&manifest_path).unwrap().len();
+        OpenOptions::new()
+            .write(true)
+            .open(&manifest_path)
+            .unwrap()
+            .set_len(original_len.saturating_add(1024 * 1024))
+            .unwrap();
+
+        let mut catalog = Catalog::default();
+        let error = GraphStore::open(&path, &mut catalog).unwrap_err();
+        assert!(
+            error.to_string().contains("exceeding its admitted bound"),
+            "unexpected graph manifest growth error: {error}"
+        );
         std::fs::remove_dir_all(path).unwrap();
     }
 

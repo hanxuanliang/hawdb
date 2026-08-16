@@ -25,6 +25,12 @@ pub const DEFAULT_MAX_WAL_BATCH_OPERATIONS: usize = 100_000;
 pub const DEFAULT_MAX_CHECKPOINT_ENCODED_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 pub const DEFAULT_MAX_CHECKPOINT_DECODED_BYTES: u64 = 4 * 1024 * 1024 * 1024 * 1024;
 pub const DEFAULT_SEGMENT_CACHE_CAPACITY_BYTES: u64 = 256 * 1024 * 1024;
+/// Aggregate encoded graph-manifest bytes admitted during one database open.
+///
+/// Graph payload pages remain demand-paged. This separate bound prevents the
+/// non-evictable descriptor manifests from consuming the storage cache or the
+/// process memory budget before a query is admitted.
+pub const DEFAULT_MAX_GRAPH_MANIFEST_OPEN_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_AUTO_MATERIALIZE_CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_OUT_OF_CORE_DELTA_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -82,6 +88,7 @@ pub struct WalReplayConfig {
     pub max_checkpoint_encoded_bytes: Option<u64>,
     pub max_checkpoint_decoded_bytes: Option<u64>,
     pub segment_cache_capacity_bytes: u64,
+    pub max_graph_manifest_open_bytes: u64,
     pub residency_mode: StorageResidencyMode,
     pub auto_materialize_checkpoint_bytes: u64,
     pub max_out_of_core_delta_bytes: Option<u64>,
@@ -104,6 +111,7 @@ impl Default for WalReplayConfig {
             max_checkpoint_encoded_bytes: Some(DEFAULT_MAX_CHECKPOINT_ENCODED_BYTES),
             max_checkpoint_decoded_bytes: Some(DEFAULT_MAX_CHECKPOINT_DECODED_BYTES),
             segment_cache_capacity_bytes: DEFAULT_SEGMENT_CACHE_CAPACITY_BYTES,
+            max_graph_manifest_open_bytes: DEFAULT_MAX_GRAPH_MANIFEST_OPEN_BYTES,
             residency_mode: StorageResidencyMode::Auto,
             auto_materialize_checkpoint_bytes: DEFAULT_AUTO_MATERIALIZE_CHECKPOINT_BYTES,
             max_out_of_core_delta_bytes: Some(DEFAULT_MAX_OUT_OF_CORE_DELTA_BYTES),
@@ -150,6 +158,10 @@ mod tests {
         assert_eq!(
             replay.max_out_of_core_delta_bytes,
             Some(DEFAULT_MAX_OUT_OF_CORE_DELTA_BYTES)
+        );
+        assert_eq!(
+            replay.max_graph_manifest_open_bytes,
+            DEFAULT_MAX_GRAPH_MANIFEST_OPEN_BYTES
         );
     }
 }

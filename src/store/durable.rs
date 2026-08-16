@@ -55,7 +55,7 @@ use skein_storage::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -111,6 +111,7 @@ pub(super) struct DurableStore {
     source_scan_descriptor_checksum: Option<u64>,
     store_id: StoreId,
     pub(super) segment_cache: Arc<SegmentCache>,
+    max_graph_manifest_open_bytes: u64,
     pub(super) canonical_segments: Option<CanonicalSegmentReader>,
     pub(super) canonical_adjacency: Option<CanonicalAdjacencyReader>,
     pub(super) persistent_property_projection: Option<PersistentPropertyProjectionReader>,
@@ -215,9 +216,42 @@ struct DurableStoreOpenOptions {
     initialize_if_empty: bool,
     load_rebuildable_artifacts: bool,
     segment_cache_capacity_bytes: u64,
+    max_graph_manifest_open_bytes: u64,
     max_wal_bytes: Option<u64>,
     max_record_bytes: Option<usize>,
     max_batch_operations: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct GraphManifestOpenBudget {
+    max_encoded_bytes: u64,
+    admitted_encoded_bytes: u64,
+}
+
+impl GraphManifestOpenBudget {
+    pub(super) const fn new(max_encoded_bytes: u64) -> Self {
+        Self {
+            max_encoded_bytes,
+            admitted_encoded_bytes: 0,
+        }
+    }
+
+    fn admit(&mut self, encoded_bytes: u64, artifact: &str) -> Result<()> {
+        let required = self
+            .admitted_encoded_bytes
+            .checked_add(encoded_bytes)
+            .ok_or_else(|| {
+                SkeinError::Storage("aggregate graph manifest open bytes overflow u64".to_string())
+            })?;
+        if required > self.max_encoded_bytes {
+            return Err(SkeinError::Storage(format!(
+                "{artifact} requires {required} aggregate encoded graph manifest bytes during open, exceeding configured limit {}",
+                self.max_encoded_bytes
+            )));
+        }
+        self.admitted_encoded_bytes = required;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,10 +312,16 @@ impl DurableStore {
         path: &Path,
         durability: DurabilityPolicy,
         segment_cache_capacity_bytes: u64,
+        max_graph_manifest_open_bytes: u64,
         max_wal_bytes: Option<u64>,
         max_record_bytes: Option<usize>,
         max_batch_operations: Option<usize>,
     ) -> Result<Self> {
+        if max_graph_manifest_open_bytes == 0 {
+            return Err(SkeinError::Storage(
+                "max_graph_manifest_open_bytes must be non-zero".to_string(),
+            ));
+        }
         fs::create_dir_all(path)?;
         Self::open_existing(
             path,
@@ -291,6 +331,7 @@ impl DurableStore {
                 initialize_if_empty: true,
                 load_rebuildable_artifacts: true,
                 segment_cache_capacity_bytes,
+                max_graph_manifest_open_bytes,
                 max_wal_bytes,
                 max_record_bytes,
                 max_batch_operations,
@@ -302,6 +343,7 @@ impl DurableStore {
         path: &Path,
         durability: DurabilityPolicy,
         segment_cache_capacity_bytes: u64,
+        max_graph_manifest_open_bytes: u64,
         max_wal_bytes: Option<u64>,
         max_record_bytes: Option<usize>,
         max_batch_operations: Option<usize>,
@@ -326,6 +368,7 @@ impl DurableStore {
                 initialize_if_empty: false,
                 load_rebuildable_artifacts: true,
                 segment_cache_capacity_bytes,
+                max_graph_manifest_open_bytes,
                 max_wal_bytes,
                 max_record_bytes,
                 max_batch_operations,
@@ -337,6 +380,7 @@ impl DurableStore {
         path: &Path,
         durability: DurabilityPolicy,
         segment_cache_capacity_bytes: u64,
+        max_graph_manifest_open_bytes: u64,
         max_wal_bytes: Option<u64>,
         max_record_bytes: Option<usize>,
         max_batch_operations: Option<usize>,
@@ -355,6 +399,7 @@ impl DurableStore {
                 initialize_if_empty: false,
                 load_rebuildable_artifacts: false,
                 segment_cache_capacity_bytes,
+                max_graph_manifest_open_bytes,
                 max_wal_bytes,
                 max_record_bytes,
                 max_batch_operations,
@@ -372,10 +417,16 @@ impl DurableStore {
             initialize_if_empty,
             load_rebuildable_artifacts,
             segment_cache_capacity_bytes,
+            max_graph_manifest_open_bytes,
             max_wal_bytes,
             max_record_bytes,
             max_batch_operations,
         } = options;
+        if max_graph_manifest_open_bytes == 0 {
+            return Err(SkeinError::Storage(
+                "max_graph_manifest_open_bytes must be non-zero".to_string(),
+            ));
+        }
         let directory_lease = DatabaseDirectoryLease::acquire(path)
             .map_err(|error| SkeinError::Storage(error.to_string()))?;
         doctor::reject_pending_wal_doctor_repair(path)?;
@@ -409,11 +460,13 @@ impl DurableStore {
             .unwrap_or_default();
         let segment_cache = Arc::new(SegmentCache::new(segment_cache_capacity_bytes));
         let store_id = store_id_for_path(path)?;
+        let mut graph_manifest_budget = GraphManifestOpenBudget::new(max_graph_manifest_open_bytes);
         let canonical_segments = load_published_canonical_segments(
             path,
             manifest,
             Arc::clone(&segment_cache),
             store_id,
+            &mut graph_manifest_budget,
         )?;
         let canonical_adjacency = load_rebuildable_artifacts
             .then(|| {
@@ -422,6 +475,7 @@ impl DurableStore {
                     manifest,
                     Arc::clone(&segment_cache),
                     store_id,
+                    &mut graph_manifest_budget,
                 )
             })
             .transpose()?
@@ -433,6 +487,7 @@ impl DurableStore {
                     manifest,
                     Arc::clone(&segment_cache),
                     store_id,
+                    &mut graph_manifest_budget,
                 )
             })
             .transpose()?
@@ -505,6 +560,7 @@ impl DurableStore {
             source_scan_descriptor_checksum: manifest.source_scan_descriptor_checksum,
             store_id,
             segment_cache,
+            max_graph_manifest_open_bytes,
             canonical_segments,
             canonical_adjacency,
             persistent_property_projection,
@@ -525,6 +581,59 @@ impl DurableStore {
 
     pub(super) fn store_id(&self) -> StoreId {
         self.store_id
+    }
+
+    pub(super) const fn graph_manifest_open_budget_bytes(&self) -> u64 {
+        self.max_graph_manifest_open_bytes
+    }
+
+    pub(super) fn graph_manifest_encoded_bytes(&self) -> u64 {
+        [
+            self.canonical_manifest_encoded_len,
+            self.canonical_adjacency_manifest_encoded_len,
+            self.property_spill_manifest_encoded_len,
+            self.property_projection_manifest_encoded_len,
+        ]
+        .into_iter()
+        .flatten()
+        .fold(0u64, u64::saturating_add)
+    }
+
+    fn admit_graph_manifest_artifacts(
+        &self,
+        artifacts: &CheckpointManifestArtifacts,
+    ) -> Result<()> {
+        let mut budget = GraphManifestOpenBudget::new(self.max_graph_manifest_open_bytes);
+        for (artifact, metadata, format_max_bytes) in [
+            (
+                "canonical manifest",
+                artifacts.canonical_manifest,
+                CANONICAL_MANIFEST_MAX_BYTES,
+            ),
+            (
+                "property spill manifest",
+                artifacts.property_spill_manifest,
+                PROPERTY_SPILL_MANIFEST_MAX_BYTES,
+            ),
+            (
+                "canonical adjacency manifest",
+                artifacts.canonical_adjacency_manifest,
+                CANONICAL_ADJACENCY_MANIFEST_MAX_BYTES,
+            ),
+            (
+                "property projection manifest",
+                artifacts.property_projection_manifest,
+                PROPERTY_PROJECTION_MANIFEST_MAX_BYTES,
+            ),
+        ] {
+            admit_graph_manifest_binding(
+                metadata.encoded_len,
+                format_max_bytes,
+                artifact,
+                &mut budget,
+            )?;
+        }
+        Ok(())
     }
 
     pub(super) fn begin_wal_sync_group(&mut self) -> Result<bool> {
@@ -2264,6 +2373,7 @@ impl DurableStore {
         oldest_reader_commit_epoch: Option<u64>,
         source_scan_publication: Option<source_scan::SourceScanPublication>,
     ) -> Result<()> {
+        self.admit_graph_manifest_artifacts(&artifacts)?;
         let safe_reclaim_commit_epoch =
             safe_reclaim_commit_epoch(checkpoint_commit_epoch, oldest_reader_commit_epoch);
         let source_scan_commit_epoch = source_scan_publication.map(|value| value.graph_epoch());
@@ -2373,23 +2483,28 @@ impl DurableStore {
         self.wal_commit_epoch = manifest.checkpoint_commit_epoch;
         self.source_scan_commit_epoch = manifest.source_scan_commit_epoch;
         self.source_scan_descriptor_checksum = manifest.source_scan_descriptor_checksum;
+        let mut graph_manifest_budget =
+            GraphManifestOpenBudget::new(self.max_graph_manifest_open_bytes);
         self.canonical_segments = load_published_canonical_segments(
             &self.root_path,
             manifest,
             Arc::clone(&self.segment_cache),
             self.store_id,
+            &mut graph_manifest_budget,
         )?;
         self.canonical_adjacency = load_published_canonical_adjacency(
             &self.root_path,
             manifest,
             Arc::clone(&self.segment_cache),
             self.store_id,
+            &mut graph_manifest_budget,
         )?;
         self.persistent_property_projection = load_published_property_projection(
             &self.root_path,
             manifest,
             Arc::clone(&self.segment_cache),
             self.store_id,
+            &mut graph_manifest_budget,
         )?;
         if let (Some(canonical), Some(adjacency)) =
             (&self.canonical_segments, &self.canonical_adjacency)
@@ -3487,11 +3602,65 @@ impl DurableManifest {
     }
 }
 
+fn admit_graph_manifest_binding(
+    expected_len: u64,
+    format_max_bytes: u64,
+    artifact: &str,
+    open_budget: &mut GraphManifestOpenBudget,
+) -> Result<()> {
+    if expected_len > format_max_bytes {
+        return Err(SkeinError::Storage(format!(
+            "{artifact} exceeds format limit {format_max_bytes} bytes"
+        )));
+    }
+    open_budget.admit(expected_len, artifact)
+}
+
+fn read_bound_graph_manifest(
+    path: &Path,
+    expected_len: u64,
+    expected_checksum: u64,
+    expected_sha256: Sha256Digest,
+    format_max_bytes: u64,
+    artifact: &str,
+    open_budget: &mut GraphManifestOpenBudget,
+) -> Result<Vec<u8>> {
+    admit_graph_manifest_binding(expected_len, format_max_bytes, artifact, open_budget)?;
+    let read_limit = expected_len
+        .checked_add(1)
+        .ok_or_else(|| SkeinError::Storage(format!("{artifact} read limit overflows u64")))?;
+    let file = File::open(path)?;
+    let actual_len = file.metadata()?.len();
+    if actual_len > expected_len {
+        return Err(SkeinError::Storage(format!(
+            "{artifact} contains {actual_len} bytes, exceeding its admitted bound {expected_len}"
+        )));
+    }
+    let capacity = usize::try_from(actual_len)
+        .map_err(|_| SkeinError::Storage(format!("{artifact} length does not fit usize")))?;
+    let mut encoded = Vec::with_capacity(capacity);
+    file.take(read_limit).read_to_end(&mut encoded)?;
+    if encoded.len() as u64 > expected_len {
+        return Err(SkeinError::Storage(format!(
+            "{artifact} grew beyond its admitted bound {expected_len} during open"
+        )));
+    }
+    verify_integrity(
+        &encoded,
+        expected_len,
+        expected_checksum,
+        expected_sha256,
+        artifact,
+    )?;
+    Ok(encoded)
+}
+
 fn load_published_canonical_segments(
     root: &Path,
     durable_manifest: DurableManifest,
     cache: Arc<SegmentCache>,
     store_id: StoreId,
+    open_budget: &mut GraphManifestOpenBudget,
 ) -> Result<Option<CanonicalSegmentReader>> {
     let (Some(expected_len), Some(expected_checksum), Some(expected_sha256)) = (
         durable_manifest.canonical_manifest_encoded_len,
@@ -3500,24 +3669,20 @@ fn load_published_canonical_segments(
     ) else {
         return Ok(None);
     };
-    if expected_len > CANONICAL_MANIFEST_MAX_BYTES {
-        return Err(SkeinError::Storage(format!(
-            "canonical manifest exceeds {CANONICAL_MANIFEST_MAX_BYTES} bytes"
-        )));
-    }
     let generation = durable_manifest.checkpoint_generation.ok_or_else(|| {
         SkeinError::Storage(
             "canonical manifest metadata requires a checkpoint generation".to_string(),
         )
     })?;
     let manifest_path = root.join(canonical_manifest_generation_file(generation));
-    let encoded = fs::read(&manifest_path)?;
-    verify_integrity(
-        &encoded,
+    let encoded = read_bound_graph_manifest(
+        &manifest_path,
         expected_len,
         expected_checksum,
         expected_sha256,
+        CANONICAL_MANIFEST_MAX_BYTES,
         "canonical manifest",
+        open_budget,
     )?;
     let text = std::str::from_utf8(&encoded).map_err(|error| {
         SkeinError::Storage(format!("canonical manifest is not UTF-8: {error}"))
@@ -3538,8 +3703,13 @@ fn load_published_canonical_segments(
             .max(config.max_record_bytes.get().saturating_add(64)),
     )
     .expect("canonical segment maximum is non-zero");
-    let property_spills =
-        load_published_property_spills(root, durable_manifest, Arc::clone(&cache), store_id)?;
+    let property_spills = load_published_property_spills(
+        root,
+        durable_manifest,
+        Arc::clone(&cache),
+        store_id,
+        open_budget,
+    )?;
     match property_spills {
         Some(property_spills) => CanonicalSegmentReader::open_with_property_spills(
             root.join(canonical_artifact_generation_file(generation)),
@@ -3566,6 +3736,7 @@ fn load_published_property_spills(
     durable_manifest: DurableManifest,
     cache: Arc<SegmentCache>,
     store_id: StoreId,
+    open_budget: &mut GraphManifestOpenBudget,
 ) -> Result<Option<PropertySpillReader>> {
     let (Some(expected_len), Some(expected_checksum), Some(expected_sha256)) = (
         durable_manifest.property_spill_manifest_encoded_len,
@@ -3574,22 +3745,18 @@ fn load_published_property_spills(
     ) else {
         return Ok(None);
     };
-    if expected_len > PROPERTY_SPILL_MANIFEST_MAX_BYTES {
-        return Err(SkeinError::Storage(format!(
-            "property spill manifest exceeds {PROPERTY_SPILL_MANIFEST_MAX_BYTES} bytes"
-        )));
-    }
     let generation = durable_manifest.checkpoint_generation.ok_or_else(|| {
         SkeinError::Storage("property spill metadata requires a checkpoint generation".to_string())
     })?;
     let manifest_path = root.join(property_spill_manifest_generation_file(generation));
-    let encoded = fs::read(&manifest_path)?;
-    verify_integrity(
-        &encoded,
+    let encoded = read_bound_graph_manifest(
+        &manifest_path,
         expected_len,
         expected_checksum,
         expected_sha256,
+        PROPERTY_SPILL_MANIFEST_MAX_BYTES,
         "property spill manifest",
+        open_budget,
     )?;
     let text = std::str::from_utf8(&encoded).map_err(|error| {
         SkeinError::Storage(format!("property spill manifest is not UTF-8: {error}"))
@@ -3626,6 +3793,7 @@ pub(super) fn load_published_property_projection(
     durable_manifest: DurableManifest,
     cache: Arc<SegmentCache>,
     store_id: StoreId,
+    open_budget: &mut GraphManifestOpenBudget,
 ) -> Result<Option<PersistentPropertyProjectionReader>> {
     let (Some(expected_len), Some(expected_checksum), Some(expected_sha256)) = (
         durable_manifest.property_projection_manifest_encoded_len,
@@ -3634,24 +3802,20 @@ pub(super) fn load_published_property_projection(
     ) else {
         return Ok(None);
     };
-    if expected_len > PROPERTY_PROJECTION_MANIFEST_MAX_BYTES {
-        return Err(SkeinError::Storage(format!(
-            "property projection manifest exceeds {PROPERTY_PROJECTION_MANIFEST_MAX_BYTES} bytes"
-        )));
-    }
     let generation = durable_manifest.checkpoint_generation.ok_or_else(|| {
         SkeinError::Storage(
             "property projection metadata requires a checkpoint generation".to_string(),
         )
     })?;
     let manifest_path = root.join(property_projection_manifest_generation_file(generation));
-    let encoded = fs::read(&manifest_path)?;
-    verify_integrity(
-        &encoded,
+    let encoded = read_bound_graph_manifest(
+        &manifest_path,
         expected_len,
         expected_checksum,
         expected_sha256,
+        PROPERTY_PROJECTION_MANIFEST_MAX_BYTES,
         "property projection manifest",
+        open_budget,
     )?;
     let text = std::str::from_utf8(&encoded).map_err(|error| {
         SkeinError::Storage(format!(
@@ -3692,6 +3856,7 @@ pub(super) fn load_published_canonical_adjacency(
     durable_manifest: DurableManifest,
     cache: Arc<SegmentCache>,
     store_id: StoreId,
+    open_budget: &mut GraphManifestOpenBudget,
 ) -> Result<Option<CanonicalAdjacencyReader>> {
     let (Some(expected_len), Some(expected_checksum), Some(expected_sha256)) = (
         durable_manifest.canonical_adjacency_manifest_encoded_len,
@@ -3700,24 +3865,20 @@ pub(super) fn load_published_canonical_adjacency(
     ) else {
         return Ok(None);
     };
-    if expected_len > CANONICAL_ADJACENCY_MANIFEST_MAX_BYTES {
-        return Err(SkeinError::Storage(format!(
-            "canonical adjacency manifest exceeds {CANONICAL_ADJACENCY_MANIFEST_MAX_BYTES} bytes"
-        )));
-    }
     let generation = durable_manifest.checkpoint_generation.ok_or_else(|| {
         SkeinError::Storage(
             "canonical adjacency metadata requires a checkpoint generation".to_string(),
         )
     })?;
     let manifest_path = root.join(canonical_adjacency_manifest_generation_file(generation));
-    let encoded = fs::read(&manifest_path)?;
-    verify_integrity(
-        &encoded,
+    let encoded = read_bound_graph_manifest(
+        &manifest_path,
         expected_len,
         expected_checksum,
         expected_sha256,
+        CANONICAL_ADJACENCY_MANIFEST_MAX_BYTES,
         "canonical adjacency manifest",
+        open_budget,
     )?;
     let text = std::str::from_utf8(&encoded).map_err(|error| {
         SkeinError::Storage(format!(

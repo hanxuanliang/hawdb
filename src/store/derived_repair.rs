@@ -2,8 +2,8 @@ use super::doctor::DatabaseDoctor;
 use super::{
     file_checksum, load_published_canonical_adjacency, load_published_property_projection,
     store_id_for_path, CanonicalAdjacencyConfig, DerivedArtifactBuildConfig, DurableManifest,
-    GraphStore, PersistentPropertyProjectionConfig, RecoveryMode, SegmentCache,
-    StorageResidencyMode, WalReplayConfig, MANIFEST_FILE,
+    GraphManifestOpenBudget, GraphStore, PersistentPropertyProjectionConfig, RecoveryMode,
+    SegmentCache, StorageResidencyMode, WalReplayConfig, MANIFEST_FILE,
 };
 use crate::error::{Result, SkeinError};
 use serde::{Deserialize, Serialize};
@@ -66,6 +66,7 @@ pub struct DerivedArtifactRebuildOptions {
     pub max_spill_runs: usize,
     pub max_generated_property_entries: u64,
     pub segment_cache_capacity_bytes: u64,
+    pub max_graph_manifest_open_bytes: u64,
     pub max_wal_replay_bytes: u64,
     pub max_wal_replay_entries: usize,
 }
@@ -80,6 +81,7 @@ impl Default for DerivedArtifactRebuildOptions {
             max_spill_runs: 4_096,
             max_generated_property_entries: 100_000_000,
             segment_cache_capacity_bytes: 64 * 1024 * 1024,
+            max_graph_manifest_open_bytes: skein_storage::DEFAULT_MAX_GRAPH_MANIFEST_OPEN_BYTES,
             max_wal_replay_bytes: DEFAULT_MAX_WAL_REPLAY_BYTES,
             max_wal_replay_entries: skein_storage::DEFAULT_MAX_WAL_REPLAY_ENTRIES,
         }
@@ -227,6 +229,7 @@ fn inspect(path: &Path, options: DerivedArtifactRebuildOptions) -> Result<Derive
         max_entries: Some(options.max_wal_replay_entries),
         max_bytes: Some(options.max_wal_replay_bytes),
         segment_cache_capacity_bytes: options.segment_cache_capacity_bytes,
+        max_graph_manifest_open_bytes: options.max_graph_manifest_open_bytes,
         residency_mode: StorageResidencyMode::OutOfCore,
         max_out_of_core_delta_bytes: Some(options.max_source_logical_bytes),
         ..WalReplayConfig::default()
@@ -236,7 +239,7 @@ fn inspect(path: &Path, options: DerivedArtifactRebuildOptions) -> Result<Derive
     manifest.validate()?;
     let (node_count, relationship_count, logical_bytes) =
         validate_canonical_source(&store, options)?;
-    let artifacts = assess_artifacts(path, &store, manifest, options.segment_cache_capacity_bytes);
+    let artifacts = assess_artifacts(path, &store, manifest, options);
     let repair_required = artifacts
         .iter()
         .any(|artifact| artifact.state == DerivedArtifactHealthState::RepairRequired);
@@ -298,7 +301,7 @@ fn assess_artifacts(
     path: &Path,
     store: &GraphStore,
     manifest: DurableManifest,
-    cache_bytes: u64,
+    options: DerivedArtifactRebuildOptions,
 ) -> Vec<DerivedArtifactHealth> {
     if manifest.checkpoint_generation.is_none() {
         return Vec::new();
@@ -310,12 +313,15 @@ fn assess_artifacts(
         .unwrap_or_default();
     vec![
         assess_one(DerivedArtifactKind::CanonicalAdjacency, || {
-            let cache = Arc::new(SegmentCache::new(cache_bytes));
+            let cache = Arc::new(SegmentCache::new(options.segment_cache_capacity_bytes));
+            let mut open_budget =
+                GraphManifestOpenBudget::new(options.max_graph_manifest_open_bytes);
             let reader = load_published_canonical_adjacency(
                 path,
                 manifest,
                 cache,
                 store_id_for_path(path)?,
+                &mut open_budget,
             )?
             .ok_or_else(|| {
                 SkeinError::Storage("canonical adjacency publication is missing".to_string())
@@ -334,12 +340,15 @@ fn assess_artifacts(
             )
         }),
         assess_one(DerivedArtifactKind::PersistentPropertyProjection, || {
-            let cache = Arc::new(SegmentCache::new(cache_bytes));
+            let cache = Arc::new(SegmentCache::new(options.segment_cache_capacity_bytes));
+            let mut open_budget =
+                GraphManifestOpenBudget::new(options.max_graph_manifest_open_bytes);
             let reader = load_published_property_projection(
                 path,
                 manifest,
                 cache,
                 store_id_for_path(path)?,
+                &mut open_budget,
             )?
             .ok_or_else(|| {
                 SkeinError::Storage(
@@ -451,6 +460,7 @@ fn validate_options(options: DerivedArtifactRebuildOptions) -> Result<()> {
         || options.max_spill_runs == 0
         || options.max_generated_property_entries == 0
         || options.segment_cache_capacity_bytes == 0
+        || options.max_graph_manifest_open_bytes == 0
         || options.max_wal_replay_bytes == 0
         || options.max_wal_replay_entries == 0
     {

@@ -270,6 +270,13 @@ crash; read-only recovery remains fail closed.
     representative artifacts are checked in; synthetic fixtures and policy
     reports alone do not prove peak RSS.
 - [ ] Differentially qualify and production-activate persistent graph indexes.
+  - Normal open now admits the aggregate encoded canonical, spill, adjacency,
+    and property-projection manifest bytes before allocation, verifies each
+    selected manifest from one bounded byte image, and exposes the configured
+    limit plus selected bytes. This is the fail-closed guard for constrained
+    profiles, not the final scale property. Move graph block descriptors behind
+    bounded demand-paged roots before claiming that startup metadata residency
+    is independent of graph/index entry count.
   - The independent general graph-storage release artifact now has a bounded
     `skein-graph-storage-qualification` collector over the existing typed
     runner. It binds one caller-owned read-only database to a strict plan,

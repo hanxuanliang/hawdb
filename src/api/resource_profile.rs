@@ -167,6 +167,8 @@ impl StorageResourceProfileReport {
                 ),
                 "estimated_delta_resident_bytes": self.after.estimated_delta_resident_bytes,
                 "max_out_of_core_delta_bytes": self.after.max_out_of_core_delta_bytes,
+                "graph_manifest_open_budget_bytes": self.after.graph_manifest_open_budget_bytes,
+                "graph_manifest_encoded_bytes": self.after.graph_manifest_encoded_bytes,
                 "delta_within_budget": self.after.delta_within_budget,
             },
             "execution": {
