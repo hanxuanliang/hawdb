@@ -472,6 +472,24 @@ an explicit present or missing entry. An unhydrated mutation key or required
 constraint posting fails closed before metadata merge. Constraint-support rows
 that remain unchanged contribute zero to the detached row-count delta.
 
+Candidate discovery is also storage-owned. First,
+`RelationalState::plan_sparse_transaction_hydration` derives direct primary-key
+point reads, predicate tables that require a bounded complete range read, and
+generation-pinned UPSERT conflict probes from the schema and logical
+transaction. Direct keys retain explicit absence; point reads covered by a
+predicate table scan are deduplicated. Second,
+`RelationalState::prepare_sparse_transaction_for_authoritative_live` replays
+the transaction without publishing it and returns the exact replay-access set
+plus all unique-key, foreign-key-target, and parent-delete referrer probes
+derived from the real row and index change captures. A primary-key rewrite may
+therefore add a missing destination key after the first preparation pass.
+Callers MUST demand-hydrate every newly discovered replay key and every posting
+returned by those probes, repeat preparation until the set is closed, and
+enforce one cumulative entry/read/resident-byte budget across all passes.
+Preparation never changes detached counts, appends WAL, or publishes a live
+view. The final authoritative live stage remains the only semantic validation
+whose captures may cross the durability boundary.
+
 This primitive does not by itself enable metadata-only writable open. The
 `GraphStore` selector MUST continue loading the materialized recovery state until
 both WAL replay and later live commits hydrate their mutation candidates through

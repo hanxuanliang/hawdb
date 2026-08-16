@@ -845,6 +845,245 @@ fn sparse_live_staging_hydrates_authoritative_unique_conflicts() {
 }
 
 #[test]
+fn sparse_mutation_hydration_plan_separates_points_scans_and_upsert_probes() {
+    let state = RelationalState::default()
+        .stage_transaction(
+            create_content_tables(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("create content tables")
+        .stage_transaction(
+            create_upsert_table(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("create upsert table");
+    let transaction = RelationalTransaction {
+        writes: vec![
+            RelationalWrite::Insert {
+                table: "content_anchors".to_string(),
+                rows: vec![anchor_row("anchor-1", "doc-1")],
+                mode: RelationalInsertMode::Error,
+            },
+            RelationalWrite::Upsert {
+                table: "documents".to_string(),
+                rows: vec![upsert_row("id-2", "owner-1", "new")],
+                conflict_columns: vec!["owner".to_string()],
+                action: RelationalConflictAction::DoNothing,
+            },
+            RelationalWrite::UpdateWhere {
+                table: "documents".to_string(),
+                assignments: vec![RelationalUpdateAssignment {
+                    column: "payload".to_string(),
+                    value: RelationalUpdateValue::Value(RelationalValue::Text(
+                        "updated".to_string(),
+                    )),
+                }],
+                predicate: RelationalPredicate::Compare {
+                    column: "owner".to_string(),
+                    op: RelationalComparisonOp::Eq,
+                    value: RelationalValue::Text("owner-1".to_string()),
+                },
+            },
+        ],
+    };
+
+    let plan = state
+        .plan_sparse_transaction_hydration(&transaction)
+        .expect("derive sparse mutation hydration plan");
+    assert_eq!(
+        plan.point_access(),
+        &[RelationalReplayAccess {
+            table: "content_anchors".to_string(),
+            primary_key: RelationalKey(vec![RelationalValue::Text("anchor-1".to_string())]),
+        }]
+    );
+    assert_eq!(plan.scan_tables(), &["documents".to_string()]);
+    assert_eq!(
+        plan.index_probes(),
+        &[RelationalSparseIndexProbe {
+            table: "documents".to_string(),
+            index: relational_unique_index_name(0),
+            index_key: RelationalKey(vec![RelationalValue::Text("owner-1".to_string())]),
+        }]
+    );
+}
+
+#[test]
+fn sparse_live_preparation_discovers_foreign_key_constraint_probes() {
+    let base = RelationalState::default()
+        .stage_transaction(
+            create_content_tables(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("create content tables")
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![
+                    RelationalWrite::Insert {
+                        table: "content_documents".to_string(),
+                        rows: vec![document_row("doc-1")],
+                        mode: RelationalInsertMode::Error,
+                    },
+                    RelationalWrite::Insert {
+                        table: "content_anchors".to_string(),
+                        rows: vec![anchor_row("anchor-1", "doc-1")],
+                        mode: RelationalInsertMode::Error,
+                    },
+                ],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("seed content rows");
+    let (directory, metadata) = canonical_metadata_state(&base, "live-preparation-fk");
+    let document_key = RelationalKey(vec![RelationalValue::Text("doc-1".to_string())]);
+    let delete = RelationalTransaction {
+        writes: vec![RelationalWrite::DeleteByPrimaryKey {
+            table: "content_documents".to_string(),
+            keys: vec![document_key.clone()],
+        }],
+    };
+    let delete_preparation = metadata
+        .prepare_sparse_transaction_for_authoritative_live(RelationalSparseLivePreparationStage {
+            transaction: delete,
+            hydrated_workspace: vec![RelationalSparseRecoveryRow {
+                table: "content_documents".to_string(),
+                primary_key: document_key.clone(),
+                row: base.row("content_documents", &document_key).cloned(),
+            }],
+            mutation_limits: RelationalMutationLimits::default(),
+            overflow_config: RelationalOverflowConfig::default(),
+            index_capture_limits: RelationalIndexChangeCaptureLimits::default(),
+            row_capture_limits: RelationalRowChangeCaptureLimits::default(),
+        })
+        .expect("prepare sparse parent deletion");
+    assert_eq!(
+        delete_preparation.replay_access().entries(),
+        &[RelationalReplayAccess {
+            table: "content_documents".to_string(),
+            primary_key: document_key.clone(),
+        }]
+    );
+    assert_eq!(
+        delete_preparation.constraint_probes(),
+        &[
+            RelationalSparseIndexProbe {
+                table: "content_anchors".to_string(),
+                index: relational_foreign_key_index_name(0),
+                index_key: document_key.clone(),
+            },
+            RelationalSparseIndexProbe {
+                table: "content_documents".to_string(),
+                index: RELATIONAL_PRIMARY_INDEX_NAME.to_string(),
+                index_key: document_key.clone(),
+            },
+        ]
+    );
+
+    let anchor_2 = RelationalKey(vec![RelationalValue::Text("anchor-2".to_string())]);
+    let insert_preparation = metadata
+        .prepare_sparse_transaction_for_authoritative_live(RelationalSparseLivePreparationStage {
+            transaction: RelationalTransaction {
+                writes: vec![RelationalWrite::Insert {
+                    table: "content_anchors".to_string(),
+                    rows: vec![anchor_row("anchor-2", "doc-1")],
+                    mode: RelationalInsertMode::Error,
+                }],
+            },
+            hydrated_workspace: vec![RelationalSparseRecoveryRow {
+                table: "content_anchors".to_string(),
+                primary_key: anchor_2,
+                row: None,
+            }],
+            mutation_limits: RelationalMutationLimits::default(),
+            overflow_config: RelationalOverflowConfig::default(),
+            index_capture_limits: RelationalIndexChangeCaptureLimits::default(),
+            row_capture_limits: RelationalRowChangeCaptureLimits::default(),
+        })
+        .expect("prepare sparse child insertion");
+    assert!(insert_preparation
+        .constraint_probes()
+        .contains(&RelationalSparseIndexProbe {
+            table: "content_documents".to_string(),
+            index: RELATIONAL_PRIMARY_INDEX_NAME.to_string(),
+            index_key: document_key,
+        }));
+    std::fs::remove_dir_all(directory).expect("remove live preparation fixture");
+}
+
+#[test]
+fn sparse_live_preparation_exposes_new_primary_key_hydration() {
+    let base = RelationalState::default()
+        .stage_transaction(
+            create_upsert_table(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("create table")
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::Insert {
+                    table: "documents".to_string(),
+                    rows: vec![upsert_row("id-1", "owner-1", "old")],
+                    mode: RelationalInsertMode::Error,
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("seed row");
+    let (directory, metadata) = canonical_metadata_state(&base, "live-preparation-primary-key");
+    let id_1 = RelationalKey(vec![RelationalValue::Text("id-1".to_string())]);
+    let id_2 = RelationalKey(vec![RelationalValue::Text("id-2".to_string())]);
+    let preparation = metadata
+        .prepare_sparse_transaction_for_authoritative_live(RelationalSparseLivePreparationStage {
+            transaction: RelationalTransaction {
+                writes: vec![RelationalWrite::UpdateWhere {
+                    table: "documents".to_string(),
+                    assignments: vec![RelationalUpdateAssignment {
+                        column: "id".to_string(),
+                        value: RelationalUpdateValue::Value(RelationalValue::Text(
+                            "id-2".to_string(),
+                        )),
+                    }],
+                    predicate: RelationalPredicate::Compare {
+                        column: "owner".to_string(),
+                        op: RelationalComparisonOp::Eq,
+                        value: RelationalValue::Text("owner-1".to_string()),
+                    },
+                }],
+            },
+            hydrated_workspace: vec![RelationalSparseRecoveryRow {
+                table: "documents".to_string(),
+                primary_key: id_1.clone(),
+                row: base.row("documents", &id_1).cloned(),
+            }],
+            mutation_limits: RelationalMutationLimits::default(),
+            overflow_config: RelationalOverflowConfig::default(),
+            index_capture_limits: RelationalIndexChangeCaptureLimits::default(),
+            row_capture_limits: RelationalRowChangeCaptureLimits::default(),
+        })
+        .expect("prepare primary-key update");
+    assert_eq!(
+        preparation.replay_access().entries(),
+        &[
+            RelationalReplayAccess {
+                table: "documents".to_string(),
+                primary_key: id_1,
+            },
+            RelationalReplayAccess {
+                table: "documents".to_string(),
+                primary_key: id_2,
+            },
+        ]
+    );
+    std::fs::remove_dir_all(directory).expect("remove primary-key fixture");
+}
+
+#[test]
 fn authoritative_constraint_staging_merges_transaction_local_unique_changes() {
     let empty = RelationalState::default()
         .stage_transaction(
@@ -4356,6 +4595,30 @@ fn text_column(name: &str, nullable: bool) -> RelationalColumnSchema {
         nullable,
         default: None,
     }
+}
+
+fn canonical_metadata_state(
+    state: &RelationalState,
+    fixture: &str,
+) -> (std::path::PathBuf, RelationalState) {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory =
+        std::env::temp_dir().join(format!("skein-{fixture}-{}-{nonce}", std::process::id()));
+    let config = RelationalRowPagePublicationConfig::default();
+    let deltas = state
+        .row_page_snapshot_deltas(1, 1, config)
+        .expect("pack canonical row pages");
+    RelationalRowPagePublisher::new(config)
+        .publish(&directory, 1, 1, None, deltas)
+        .expect("publish canonical row root");
+    let root = RelationalRowPageRootReader::open_generation(&directory, 1, config)
+        .expect("open canonical row root");
+    let metadata = RelationalState::from_canonical_row_root(root.manifest())
+        .expect("mount canonical row metadata");
+    (directory, metadata)
 }
 
 fn document_row(id: &str) -> RelationalRow {

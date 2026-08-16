@@ -41,6 +41,7 @@ _STORAGE_MODELS = [
     "SkeinRuntimeAdmission",
     "SkeinSourceSegmentPublication",
     "SkeinSparseRelationalRecovery",
+    "SkeinSparseRelationalLivePreparation",
     "SkeinSparseRelationalLiveStage",
     "SkeinSparseWritableRelationalRecovery",
     "SkeinStableIdentityPublication",

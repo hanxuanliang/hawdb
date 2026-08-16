@@ -525,6 +525,70 @@ pub struct RelationalSparseLiveStage<'a> {
     pub constraint_index: &'a dyn RelationalConstraintIndex,
 }
 
+/// One exact persistent-index probe required while preparing a bounded live
+/// relational workspace.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RelationalSparseIndexProbe {
+    pub table: String,
+    pub index: String,
+    pub index_key: RelationalKey,
+}
+
+/// Schema-derived hydration needed before a live transaction can be prepared.
+///
+/// Point accesses include explicit absence checks for direct keys. Predicate
+/// tables require a bounded canonical range scan because every evaluated row
+/// belongs to the authenticated WAL access set. UPSERT conflict probes are
+/// resolved through the generation-pinned authoritative index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationalSparseMutationHydrationPlan {
+    point_access: Vec<RelationalReplayAccess>,
+    scan_tables: Vec<String>,
+    index_probes: Vec<RelationalSparseIndexProbe>,
+}
+
+impl RelationalSparseMutationHydrationPlan {
+    pub fn point_access(&self) -> &[RelationalReplayAccess] {
+        &self.point_access
+    }
+
+    pub fn scan_tables(&self) -> &[String] {
+        &self.scan_tables
+    }
+
+    pub fn index_probes(&self) -> &[RelationalSparseIndexProbe] {
+        &self.index_probes
+    }
+}
+
+#[derive(Debug)]
+pub struct RelationalSparseLivePreparationStage {
+    pub transaction: RelationalTransaction,
+    pub hydrated_workspace: Vec<RelationalSparseRecoveryRow>,
+    pub mutation_limits: RelationalMutationLimits,
+    pub overflow_config: RelationalOverflowConfig,
+    pub index_capture_limits: RelationalIndexChangeCaptureLimits,
+    pub row_capture_limits: RelationalRowChangeCaptureLimits,
+}
+
+/// Exact access and constraint probes discovered by replaying one live
+/// transaction in a bounded, unpublished workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationalSparseLivePreparation {
+    replay_access: RelationalReplayAccessSet,
+    constraint_probes: Vec<RelationalSparseIndexProbe>,
+}
+
+impl RelationalSparseLivePreparation {
+    pub fn replay_access(&self) -> &RelationalReplayAccessSet {
+        &self.replay_access
+    }
+
+    pub fn constraint_probes(&self) -> &[RelationalSparseIndexProbe] {
+        &self.constraint_probes
+    }
+}
+
 impl RelationalReplayAccessSet {
     pub fn entries(&self) -> &[RelationalReplayAccess] {
         &self.entries
@@ -1885,6 +1949,140 @@ impl RelationalState {
         Ok((metadata, index_capture, row_capture))
     }
 
+    /// Derives the canonical reads required to begin bounded live staging.
+    ///
+    /// This plan is intentionally incomplete with respect to constraints whose
+    /// keys depend on existing row values. After these reads are hydrated, the
+    /// caller must use [`Self::prepare_sparse_transaction_for_authoritative_live`]
+    /// and close every returned replay access and constraint probe before WAL.
+    pub fn plan_sparse_transaction_hydration(
+        &self,
+        transaction: &RelationalTransaction,
+    ) -> Result<RelationalSparseMutationHydrationPlan, RelationalError> {
+        if transaction.changes_index_schema() {
+            return Err(RelationalError::Admission(
+                "sparse relational live staging rejects schema-changing transactions until a new canonical row and index generation is published"
+                    .to_string(),
+            ));
+        }
+        let mut point_access = BTreeSet::new();
+        let mut scan_tables = BTreeSet::new();
+        let mut index_probes = BTreeSet::new();
+        for write in &transaction.writes {
+            match write {
+                RelationalWrite::Insert { table, rows, .. } => {
+                    let schema = self.sparse_plan_table_schema(table)?;
+                    let primary_key = column_positions(schema, &schema.primary_key)?;
+                    for row in rows {
+                        validate_row(schema, row)?;
+                        point_access.insert(RelationalReplayAccess {
+                            table: table.clone(),
+                            primary_key: row_key(row, &primary_key),
+                        });
+                    }
+                }
+                RelationalWrite::Upsert {
+                    table,
+                    rows,
+                    conflict_columns,
+                    ..
+                } => {
+                    let schema = self.sparse_plan_table_schema(table)?;
+                    let primary_key = column_positions(schema, &schema.primary_key)?;
+                    let conflict_positions = column_positions(schema, conflict_columns)?;
+                    let conflict_definition = schema
+                        .unique_index_definition(conflict_columns)
+                        .ok_or_else(|| {
+                            RelationalError::Schema(format!(
+                                "UPSERT conflict target on table {table} must name a primary or unique key"
+                            ))
+                        })?;
+                    for row in rows {
+                        validate_row(schema, row)?;
+                        point_access.insert(RelationalReplayAccess {
+                            table: table.clone(),
+                            primary_key: row_key(row, &primary_key),
+                        });
+                        let conflict_key = row_key(row, &conflict_positions);
+                        if !key_contains_null(&conflict_key) {
+                            index_probes.insert(RelationalSparseIndexProbe {
+                                table: table.clone(),
+                                index: conflict_definition.name.clone(),
+                                index_key: conflict_key,
+                            });
+                        }
+                    }
+                }
+                RelationalWrite::DeleteByPrimaryKey { table, keys } => {
+                    self.sparse_plan_table_schema(table)?;
+                    point_access.extend(keys.iter().cloned().map(|primary_key| {
+                        RelationalReplayAccess {
+                            table: table.clone(),
+                            primary_key,
+                        }
+                    }));
+                }
+                RelationalWrite::DeleteWhere { table, .. }
+                | RelationalWrite::UpdateWhere { table, .. } => {
+                    self.sparse_plan_table_schema(table)?;
+                    scan_tables.insert(table.clone());
+                }
+                RelationalWrite::CreateTable(_)
+                | RelationalWrite::AddColumn { .. }
+                | RelationalWrite::CreateIndex { .. } => {
+                    unreachable!("schema-changing transactions were rejected above")
+                }
+            }
+        }
+        point_access.retain(|access| !scan_tables.contains(&access.table));
+        Ok(RelationalSparseMutationHydrationPlan {
+            point_access: point_access.into_iter().collect(),
+            scan_tables: scan_tables.into_iter().collect(),
+            index_probes: index_probes.into_iter().collect(),
+        })
+    }
+
+    /// Replays one schema-stable transaction without constraint publication to
+    /// discover its exact WAL access set and the persistent postings required
+    /// by the final authoritative validation pass.
+    ///
+    /// The caller must hydrate newly discovered replay keys and every posting
+    /// returned by the listed probes, then repeat preparation until the input
+    /// set is closed. No detached counts or canonical state change here.
+    pub fn prepare_sparse_transaction_for_authoritative_live(
+        &self,
+        stage: RelationalSparseLivePreparationStage,
+    ) -> Result<RelationalSparseLivePreparation, RelationalError> {
+        let RelationalSparseLivePreparationStage {
+            transaction,
+            hydrated_workspace,
+            mutation_limits,
+            overflow_config,
+            index_capture_limits,
+            row_capture_limits,
+        } = stage;
+        self.require_sparse_workspace_source("sparse relational live preparation")?;
+        let (workspace, _) = self.sparse_workspace(
+            hydrated_workspace,
+            row_capture_limits,
+            "sparse relational live preparation",
+        )?;
+        let (staged, index_capture, row_capture, replay_access) = workspace
+            .prepare_transaction_for_authoritative_live_with_replay_access(
+                transaction,
+                mutation_limits,
+                overflow_config,
+                index_capture_limits,
+                row_capture_limits,
+            )?;
+        let constraint_probes =
+            staged.sparse_authoritative_constraint_probes(&index_capture, &row_capture)?;
+        Ok(RelationalSparseLivePreparation {
+            replay_access,
+            constraint_probes,
+        })
+    }
+
     /// Stages one live authoritative transaction without attaching checkpoint
     /// rows to the canonical metadata-only state.
     ///
@@ -2089,6 +2287,159 @@ impl RelationalState {
             )));
         }
         Ok(())
+    }
+
+    fn sparse_plan_table_schema(
+        &self,
+        table: &str,
+    ) -> Result<&RelationalTableSchema, RelationalError> {
+        self.table_schema(table)
+            .ok_or_else(|| RelationalError::Schema(format!("unknown table {table}")))
+    }
+
+    fn prepare_transaction_for_authoritative_live_with_replay_access(
+        &self,
+        transaction: RelationalTransaction,
+        limits: RelationalMutationLimits,
+        overflow_config: RelationalOverflowConfig,
+        index_capture_limits: RelationalIndexChangeCaptureLimits,
+        row_capture_limits: RelationalRowChangeCaptureLimits,
+    ) -> Result<
+        (
+            Self,
+            RelationalIndexChangeCapture,
+            RelationalRowChangeCapture,
+            RelationalReplayAccessSet,
+        ),
+        RelationalError,
+    > {
+        self.require_materialized_rows("relational live preparation")?;
+        admit_transaction(&transaction, limits)?;
+        if transaction.changes_index_schema() {
+            return Err(RelationalError::Admission(
+                "authoritative relational live preparation rejects schema-changing transactions"
+                    .to_string(),
+            ));
+        }
+        let TransactionApplyResult {
+            state,
+            index_capture,
+            row_capture,
+            replay_access,
+        } = apply_transaction_inner(
+            self,
+            transaction,
+            limits,
+            overflow_config,
+            TransactionApplyOptions {
+                index_capture_limits: Some(index_capture_limits),
+                row_capture_limits: Some(row_capture_limits),
+                replay_access_limits: Some(row_capture_limits),
+                constraint_index: None,
+                index_mode: TransactionIndexMode::AuthoritativeRecovery,
+            },
+        )?;
+        Ok((
+            state,
+            index_capture.expect("index capture was requested for live preparation"),
+            row_capture.expect("row capture was requested for live preparation"),
+            replay_access.expect("replay access was requested for live preparation"),
+        ))
+    }
+
+    fn sparse_authoritative_constraint_probes(
+        &self,
+        index_capture: &RelationalIndexChangeCapture,
+        row_capture: &RelationalRowChangeCapture,
+    ) -> Result<Vec<RelationalSparseIndexProbe>, RelationalError> {
+        let mut probes = BTreeSet::new();
+        for change in index_capture.changes()? {
+            let schema = self.sparse_plan_table_schema(&change.table)?;
+            let definition = schema
+                .required_index_definitions()
+                .into_iter()
+                .find(|definition| definition.name == change.index)
+                .ok_or_else(|| {
+                    RelationalError::Corruption(format!(
+                        "relational live preparation captured unknown index {}.{}",
+                        change.table, change.index
+                    ))
+                })?;
+            if !definition.role.is_unique() {
+                continue;
+            }
+            probes.insert(RelationalSparseIndexProbe {
+                table: change.table.clone(),
+                index: change.index.clone(),
+                index_key: change.index_key.clone(),
+            });
+            if change.kind != RelationalIndexChangeKind::Delete {
+                continue;
+            }
+            for referencing_schema in self.table_schemas() {
+                for (ordinal, foreign_key) in referencing_schema.foreign_keys.iter().enumerate() {
+                    if foreign_key.referenced_table == change.table
+                        && foreign_key.referenced_columns == definition.columns
+                    {
+                        probes.insert(RelationalSparseIndexProbe {
+                            table: referencing_schema.name.clone(),
+                            index: relational_foreign_key_index_name(ordinal),
+                            index_key: change.index_key.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        let row_changes = match row_capture {
+            RelationalRowChangeCapture::Captured { changes, .. } => changes,
+            RelationalRowChangeCapture::RequiresCheckpoint { tables } => {
+                return Err(RelationalError::Admission(format!(
+                    "relational live preparation requires a checkpoint for tables {}",
+                    tables.join(",")
+                )));
+            }
+            RelationalRowChangeCapture::Invalidated { reason } => {
+                return Err(RelationalError::Admission(format!(
+                    "relational live preparation row capture is unavailable: {reason}"
+                )));
+            }
+        };
+        for change in row_changes {
+            let Some(row) = &change.row else {
+                continue;
+            };
+            let schema = self.sparse_plan_table_schema(&change.table)?;
+            for foreign_key in &schema.foreign_keys {
+                let positions = column_positions(schema, &foreign_key.columns)?;
+                let index_key = row_key(row, &positions);
+                if key_contains_null(&index_key) {
+                    continue;
+                }
+                let referenced_schema = self
+                    .table_schema(&foreign_key.referenced_table)
+                    .ok_or_else(|| {
+                        RelationalError::Schema(format!(
+                            "foreign key references unknown table {}",
+                            foreign_key.referenced_table
+                        ))
+                    })?;
+                let definition = referenced_schema
+                    .unique_index_definition(&foreign_key.referenced_columns)
+                    .ok_or_else(|| {
+                        RelationalError::Schema(format!(
+                            "foreign key target {} is not unique",
+                            foreign_key.referenced_table
+                        ))
+                    })?;
+                probes.insert(RelationalSparseIndexProbe {
+                    table: foreign_key.referenced_table.clone(),
+                    index: definition.name,
+                    index_key,
+                });
+            }
+        }
+        Ok(probes.into_iter().collect())
     }
 
     fn merge_sparse_recovery_workspace(
