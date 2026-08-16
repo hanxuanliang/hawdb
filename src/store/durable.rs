@@ -43,18 +43,19 @@ use skein_storage::{
     GraphDescriptorTreeGenerationArtifacts, GraphDescriptorTreePaths,
     GraphDescriptorTreeRootReader, ManifestGeneration, NodeId, NodeRecord,
     PersistentPropertyProjectionConfig, PersistentPropertyProjectionDefinition,
-    PersistentPropertyProjectionManifest, PersistentPropertyProjectionReader,
-    PersistentPropertyProjectionRecord, PersistentPropertyProjectionWriter,
-    ProjectedGraphDefinition, PropertySpillConfig, PropertySpillManifest, PropertySpillReader,
-    RelId, RelRecord, RelationalDecodeLimits, RelationalIndexArtifactMetadata,
-    RelationalIndexGenerationArtifacts, RelationalOverflowArtifactMetadata,
-    RelationalOverflowGenerationArtifacts, RelationalRowPageArtifactMetadata,
-    RelationalRowPageGenerationArtifacts, RelationalState, ScanSegmentManifest,
-    SearchProjectionGraphChange, SegmentCache, StableIdentityKey, StableIdentityMappingConfig,
-    StableIdentityMappingError, StableIdentityMappingReader, StableIdentityMappingWriter,
-    StableIdentityMaterializeLimits, StorageBackupReport, StorageDebtController,
-    StoragePressureSignals, StorageScrubReport, StoreId, StoreStableIdMapping, WalReplayConfig,
-    WalSyncGroupFlush, WalSyncGroupProgress, WalSyncGroupState,
+    PersistentPropertyProjectionDescriptorTree, PersistentPropertyProjectionManifest,
+    PersistentPropertyProjectionReader, PersistentPropertyProjectionRecord,
+    PersistentPropertyProjectionWriter, ProjectedGraphDefinition, PropertySpillConfig,
+    PropertySpillManifest, PropertySpillReader, RelId, RelRecord, RelationalDecodeLimits,
+    RelationalIndexArtifactMetadata, RelationalIndexGenerationArtifacts,
+    RelationalOverflowArtifactMetadata, RelationalOverflowGenerationArtifacts,
+    RelationalRowPageArtifactMetadata, RelationalRowPageGenerationArtifacts, RelationalState,
+    ScanSegmentManifest, SearchProjectionGraphChange, SegmentCache, StableIdentityKey,
+    StableIdentityMappingConfig, StableIdentityMappingError, StableIdentityMappingReader,
+    StableIdentityMappingWriter, StableIdentityMaterializeLimits, StorageBackupReport,
+    StorageDebtController, StoragePressureSignals, StorageScrubReport, StoreId,
+    StoreStableIdMapping, WalReplayConfig, WalSyncGroupFlush, WalSyncGroupProgress,
+    WalSyncGroupState,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -1240,6 +1241,54 @@ impl DurableStore {
                 artifact.artifact_sha256,
                 "property projection artifact",
             )?;
+            let descriptor_paths = GraphDescriptorTreePaths::new(
+                self.root_path
+                    .join(skein_storage::property_projection_descriptor_page_file(
+                        generation,
+                    )),
+                self.root_path
+                    .join(skein_storage::property_projection_descriptor_root_file(
+                        generation,
+                    )),
+            );
+            scrub.verify_path(
+                &descriptor_paths.root_manifest,
+                artifact.descriptor_root_artifact.encoded_len,
+                u64::from(artifact.descriptor_root_artifact.encoded_crc32c),
+                artifact.descriptor_root_artifact.encoded_sha256,
+                "property projection descriptor root",
+            )?;
+            let descriptor_root = GraphDescriptorTreeRootReader::open_bound(
+                descriptor_paths.clone(),
+                artifact.descriptor_generation_artifacts(),
+                GraphDescriptorTreeBuildConfig::default(),
+            )
+            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+            scrub.verify_path(
+                &descriptor_paths.page_artifact,
+                descriptor_root.root().page_artifact_len,
+                descriptor_root.root().page_artifact_crc32c.as_u64(),
+                descriptor_root.root().page_artifact_sha256,
+                "property projection descriptor pages",
+            )?;
+            let reader = self
+                .persistent_property_projection
+                .as_ref()
+                .ok_or_else(|| {
+                    SkeinError::Storage(
+                        "property projection publication exists without a selected reader during scrub"
+                            .to_string(),
+                    )
+                })?;
+            if reader.manifest() != &artifact {
+                return Err(SkeinError::Storage(
+                    "selected property projection reader does not match the durable manifest"
+                        .to_string(),
+                ));
+            }
+            reader
+                .deep_scrub()
+                .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
         }
 
         match (
@@ -1822,21 +1871,19 @@ impl DurableStore {
                 )),
         );
         let output = PersistentPropertyProjectionWriter::new(config)
-            .write_fallible_with_descriptor_tree(
+            .write_fallible(
                 &artifact_path,
                 ManifestGeneration(generation),
                 source_commit_epoch,
                 definitions,
                 nodes,
-                descriptor_paths,
-                GraphDescriptorTreeBuildConfig::default(),
+                PersistentPropertyProjectionDescriptorTree::new(
+                    descriptor_paths,
+                    GraphDescriptorTreeBuildConfig::default(),
+                ),
             )
             .map_err(|error| SkeinError::Storage(error.to_string()))?;
-        let descriptor_tree = output.descriptor_tree.as_ref().ok_or_else(|| {
-            SkeinError::Storage(
-                "property projection checkpoint omitted its descriptor root".to_string(),
-            )
-        })?;
+        let descriptor_tree = &output.descriptor_tree;
         if descriptor_tree.root.kind != GraphDescriptorKind::PropertyProjection
             || descriptor_tree.root.generation != generation
             || descriptor_tree.root.source_commit_epoch != source_commit_epoch
@@ -4133,6 +4180,17 @@ pub(super) fn load_published_property_projection(
     PersistentPropertyProjectionReader::open(
         root.join(property_projection_artifact_generation_file(generation)),
         manifest,
+        PersistentPropertyProjectionDescriptorTree::new(
+            GraphDescriptorTreePaths::new(
+                root.join(skein_storage::property_projection_descriptor_page_file(
+                    generation,
+                )),
+                root.join(skein_storage::property_projection_descriptor_root_file(
+                    generation,
+                )),
+            ),
+            GraphDescriptorTreeBuildConfig::default(),
+        ),
         cache,
         store_id,
         max_block_bytes,

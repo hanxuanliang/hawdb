@@ -49,6 +49,12 @@ pub struct GraphIndexReadMetricsSnapshot {
     cache_miss_counts: [u64; PersistentGraphIndexClass::ALL.len()],
     pub property_blocks_considered: u64,
     pub property_blocks_pruned: u64,
+    pub property_descriptor_pages_visited: u64,
+    pub property_descriptor_page_bytes_decoded: u64,
+    pub property_descriptor_storage_bytes_read: u64,
+    pub property_descriptor_cache_hits: u64,
+    pub property_descriptor_cache_misses: u64,
+    pub property_descriptor_cache_admission_rejections: u64,
     pub property_blocks_read: u64,
     pub property_bytes_read: u64,
     pub property_entries_decoded: u64,
@@ -129,6 +135,24 @@ impl GraphIndexReadMetricsSnapshot {
             property_blocks_pruned: self
                 .property_blocks_pruned
                 .saturating_sub(before.property_blocks_pruned),
+            property_descriptor_pages_visited: self
+                .property_descriptor_pages_visited
+                .saturating_sub(before.property_descriptor_pages_visited),
+            property_descriptor_page_bytes_decoded: self
+                .property_descriptor_page_bytes_decoded
+                .saturating_sub(before.property_descriptor_page_bytes_decoded),
+            property_descriptor_storage_bytes_read: self
+                .property_descriptor_storage_bytes_read
+                .saturating_sub(before.property_descriptor_storage_bytes_read),
+            property_descriptor_cache_hits: self
+                .property_descriptor_cache_hits
+                .saturating_sub(before.property_descriptor_cache_hits),
+            property_descriptor_cache_misses: self
+                .property_descriptor_cache_misses
+                .saturating_sub(before.property_descriptor_cache_misses),
+            property_descriptor_cache_admission_rejections: self
+                .property_descriptor_cache_admission_rejections
+                .saturating_sub(before.property_descriptor_cache_admission_rejections),
             property_blocks_read: self
                 .property_blocks_read
                 .saturating_sub(before.property_blocks_read),
@@ -190,6 +214,12 @@ pub(super) struct GraphIndexReadMetrics {
     cache_miss_counts: [AtomicU64; PersistentGraphIndexClass::ALL.len()],
     property_blocks_considered: AtomicU64,
     property_blocks_pruned: AtomicU64,
+    property_descriptor_pages_visited: AtomicU64,
+    property_descriptor_page_bytes_decoded: AtomicU64,
+    property_descriptor_storage_bytes_read: AtomicU64,
+    property_descriptor_cache_hits: AtomicU64,
+    property_descriptor_cache_misses: AtomicU64,
+    property_descriptor_cache_admission_rejections: AtomicU64,
     property_blocks_read: AtomicU64,
     property_bytes_read: AtomicU64,
     property_entries_decoded: AtomicU64,
@@ -216,13 +246,43 @@ impl GraphIndexReadMetrics {
     ) {
         self.operation_counts[class as usize].fetch_add(1, Ordering::Relaxed);
         self.block_read_counts[class as usize].fetch_add(report.blocks_read, Ordering::Relaxed);
-        self.byte_read_counts[class as usize].fetch_add(report.bytes_read, Ordering::Relaxed);
-        self.cache_hit_counts[class as usize].fetch_add(report.cache_hits, Ordering::Relaxed);
-        self.cache_miss_counts[class as usize].fetch_add(report.cache_misses, Ordering::Relaxed);
+        self.byte_read_counts[class as usize].fetch_add(
+            report
+                .bytes_read
+                .saturating_add(report.descriptor_storage_bytes_read),
+            Ordering::Relaxed,
+        );
+        self.cache_hit_counts[class as usize].fetch_add(
+            report
+                .cache_hits
+                .saturating_add(report.descriptor_cache_hits),
+            Ordering::Relaxed,
+        );
+        self.cache_miss_counts[class as usize].fetch_add(
+            report
+                .cache_misses
+                .saturating_add(report.descriptor_cache_misses),
+            Ordering::Relaxed,
+        );
         self.property_blocks_considered
             .fetch_add(report.blocks_considered, Ordering::Relaxed);
         self.property_blocks_pruned
             .fetch_add(report.blocks_pruned, Ordering::Relaxed);
+        self.property_descriptor_pages_visited
+            .fetch_add(report.descriptor_pages_visited, Ordering::Relaxed);
+        self.property_descriptor_page_bytes_decoded
+            .fetch_add(report.descriptor_page_bytes_decoded, Ordering::Relaxed);
+        self.property_descriptor_storage_bytes_read
+            .fetch_add(report.descriptor_storage_bytes_read, Ordering::Relaxed);
+        self.property_descriptor_cache_hits
+            .fetch_add(report.descriptor_cache_hits, Ordering::Relaxed);
+        self.property_descriptor_cache_misses
+            .fetch_add(report.descriptor_cache_misses, Ordering::Relaxed);
+        self.property_descriptor_cache_admission_rejections
+            .fetch_add(
+                report.descriptor_cache_admission_rejections,
+                Ordering::Relaxed,
+            );
         self.property_blocks_read
             .fetch_add(report.blocks_read, Ordering::Relaxed);
         self.property_bytes_read
@@ -313,6 +373,24 @@ impl GraphIndexReadMetrics {
             cache_miss_counts,
             property_blocks_considered: self.property_blocks_considered.load(Ordering::Relaxed),
             property_blocks_pruned: self.property_blocks_pruned.load(Ordering::Relaxed),
+            property_descriptor_pages_visited: self
+                .property_descriptor_pages_visited
+                .load(Ordering::Relaxed),
+            property_descriptor_page_bytes_decoded: self
+                .property_descriptor_page_bytes_decoded
+                .load(Ordering::Relaxed),
+            property_descriptor_storage_bytes_read: self
+                .property_descriptor_storage_bytes_read
+                .load(Ordering::Relaxed),
+            property_descriptor_cache_hits: self
+                .property_descriptor_cache_hits
+                .load(Ordering::Relaxed),
+            property_descriptor_cache_misses: self
+                .property_descriptor_cache_misses
+                .load(Ordering::Relaxed),
+            property_descriptor_cache_admission_rejections: self
+                .property_descriptor_cache_admission_rejections
+                .load(Ordering::Relaxed),
             property_blocks_read: self.property_blocks_read.load(Ordering::Relaxed),
             property_bytes_read: self.property_bytes_read.load(Ordering::Relaxed),
             property_entries_decoded: self.property_entries_decoded.load(Ordering::Relaxed),

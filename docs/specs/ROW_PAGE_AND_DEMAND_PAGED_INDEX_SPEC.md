@@ -1441,9 +1441,9 @@ This bound remains a fail-closed transition guard for selected graph manifests.
 Canonical adjacency descriptors are no longer part of that graph-size-dependent
 manifest image: the outer durable manifest binds one compact descriptor root,
 and normal open admits and verifies only that root while page payloads remain
-cold. Property-projection block descriptors now also have a publish-last shadow
-root, but production serving still uses the selected resident manifest until a
-separate activation contract binds that root through the outer manifest. Other
+cold. Property-projection block descriptors follow the same rule: the selected
+compact property manifest contains bounded definitions plus the exact
+descriptor-root identity, never the per-block descriptor vector. Other
 manifest-backed graph structures MUST still report both the configured
 aggregate limit and selected encoded manifest bytes, and MUST reject a selected
 generation that exceeds the limit.
@@ -1481,10 +1481,10 @@ remain cold until a prefix scan or explicit deep scrub reads them. Page payloads
 are admitted independently of the graph-manifest open budget and use the shared
 byte-bounded storage cache.
 
-### Property-projection shadow descriptor root v1
+### Property-projection demand descriptor root v1
 
-Every property-projection checkpoint now writes a second, non-serving
-descriptor representation for equality, range, full-text, composite equality,
+Every property-projection checkpoint writes the production descriptor
+representation for equality, range, full-text, composite equality,
 relationship equality, and relationship range blocks:
 
 - the leaf key is `(kind order, label or relationship-type id, escaped UTF-8
@@ -1501,21 +1501,40 @@ relationship equality, and relationship range blocks:
   tree builder. The data artifact is synchronized and atomically replaced
   before the immutable page artifact and root are published. Existing
   same-generation page or root destinations are never overwritten;
-- the shadow root binds `PropertyProjection`, generation, source commit epoch,
+- the descriptor root binds `PropertyProjection`, generation, source commit epoch,
   exact page-artifact integrity, descriptor count, page counts, height, and the
   root-page reference. Backup validation, derived-repair quarantine,
   checkpoint discard, orphan cleanup, and generation reclamation treat its
   pages and root as the same generation as the selected projection artifact;
-- production lookup behavior deliberately remains unchanged in this step. The
-  selected text manifest still contains the resident block vector, and the
-  outer manifest does not bind or activate the shadow root. A crash may leave
-  an unselected shadow candidate, but cannot make it query-visible.
+- the compact selected property manifest binds the data artifact and exact
+  descriptor-root length, CRC32C, and SHA-256. The outer durable manifest binds
+  that compact manifest. Normal open verifies this chain and the descriptor
+  page-artifact length without reading page payloads;
+- production lookup and candidate estimation scan only the ordered descriptor
+  prefix under independent page, page-byte, descriptor-count, and tree-height
+  limits. Selected block ranges and CRC32C identities are verified before
+  decode. Estimates return their descriptor-read report and propagate physical
+  failure instead of silently choosing a plan from corrupt metadata;
+- descriptor and selected data pages share the byte-bounded cache but use
+  distinct representation identities. Warm-cache hits do not waive logical
+  traversal admissions. Read reports separate descriptor storage/decode/cache
+  costs from selected block storage/decode/cache costs. Descriptor estimation
+  remains observable when it selects the cheaper adjacency fallback, so query
+  accounting cannot hide I/O performed before the final access-path choice;
+- physical descriptor, range, digest, or data corruption poisons the shared
+  reader. Admission and cache-capacity rejection remain request-local;
+- explicit deep scrub bypasses descriptor and data caches, hashes both complete
+  artifacts, visits every reachable descriptor, decodes every block, and
+  requires contiguous block ids and byte ranges with exact descriptor, block,
+  entry, and artifact-byte counts. Backup validation and derived-artifact
+  health use this full closure.
 
 `SkeinGraphDescriptorPaging.tla` is instantiated once per descriptor class.
-For this shadow stage, the Rust refinement covers candidate creation, durable
-page completion, publish-last root publication, and crash cleanup; its serving
-activation transition remains disabled until the next property-projection
-contract removes resident block descriptors and supplies demand-read evidence.
+For property projection, the Rust refinement now covers candidate creation,
+durable page completion, publish-last root publication, atomic outer-manifest
+selection, pinned demand readers, bounded page residency, corruption poison,
+and crash cleanup. The same activation transition used by canonical adjacency
+is therefore enabled for this descriptor class.
 
 ### Canonical adjacency demand descriptor root v1
 

@@ -131,9 +131,10 @@ pub use property_projection::{
     property_projection_descriptor_root_file, PersistentPropertyProjectionBlockDescriptor,
     PersistentPropertyProjectionBuildReport, PersistentPropertyProjectionConfig,
     PersistentPropertyProjectionDefinition, PersistentPropertyProjectionDefinitionAdmission,
-    PersistentPropertyProjectionError, PersistentPropertyProjectionKind,
-    PersistentPropertyProjectionManifest, PersistentPropertyProjectionReadReport,
-    PersistentPropertyProjectionReader, PersistentPropertyProjectionRecord,
+    PersistentPropertyProjectionDescriptorTree, PersistentPropertyProjectionError,
+    PersistentPropertyProjectionKind, PersistentPropertyProjectionManifest,
+    PersistentPropertyProjectionReadReport, PersistentPropertyProjectionReader,
+    PersistentPropertyProjectionRecord, PersistentPropertyProjectionScrubReport,
     PersistentPropertyProjectionWriteOutput, PersistentPropertyProjectionWriter,
 };
 pub use property_spill::{

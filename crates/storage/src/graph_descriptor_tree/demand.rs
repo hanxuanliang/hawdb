@@ -114,6 +114,9 @@ impl GraphDescriptorTreeDemandReader {
             GraphDescriptorKind::CanonicalAdjacency => {
                 RepresentationKind::CanonicalAdjacencyDescriptorPage
             }
+            GraphDescriptorKind::PropertyProjection => {
+                RepresentationKind::PropertyProjectionDescriptorPage
+            }
             kind => {
                 return Err(admission(format!(
                     "graph descriptor demand reader has no cache representation for {kind:?}"

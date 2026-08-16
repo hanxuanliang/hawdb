@@ -30,11 +30,12 @@ Files:
   `property-index.<generation>.manifest.skein`,
   `property-index-descriptors-<generation>.pages.skein`, and
   `property-index-descriptors-<generation>.root.skein`: rebuildable,
-  generation-bound persistent property projection. The descriptor tree is a
-  publish-last shadow representation; production reads still select the
-  manifest until the separate demand-serving activation. The property spill
-  artifact remains part of canonical checkpoint input and is not eligible for
-  derived repair.
+  generation-bound persistent property projection. Its compact manifest binds
+  the exact descriptor root instead of retaining one descriptor per data
+  block. Production reads demand-traverse the ordered descriptor prefix and
+  fetch only selected data blocks through the shared bounded cache. The
+  property spill artifact remains part of canonical checkpoint input and is
+  not eligible for derived repair.
 - `wal.<generation>.skein`: append-only committed mutation records beginning at
   the replay LSN published by the manifest. The only v1 encoding uses binary
   fragment framing with the `SKWALB01` file header. Text WAL bytes and unknown
@@ -299,10 +300,23 @@ Explicit deep scrub bypasses the cache and verifies the complete descriptor and
 adjacency closure. Backup, restore, repair, and reclamation retain the data,
 descriptor pages, and root together.
 
-`DatabaseDoctor::derived_artifact_health` verifies the full-file CRC32C and
-SHA-256 identity of the active adjacency and persistent property projection
-against their manifests. `plan_derived_artifact_rebuild` then validates the
-canonical segment stream and WAL replay under explicit source-record,
+Persistent property projections use the same descriptor demand boundary for
+equality, range, full-text, composite-equality, relationship-equality, and
+relationship-range indexes. Normal open reads the bounded definition directory
+and descriptor root only; the number of data blocks does not determine startup
+RSS. Candidate estimates traverse descriptors under the same page, byte,
+descriptor, and height admissions as execution and propagate corruption rather
+than hiding it behind a scalar estimate. Read reports include descriptor
+storage, decoded bytes, and cache outcomes separately from selected projection
+blocks. Deep scrub hashes the complete data and descriptor artifacts, decodes
+every block, and requires a contiguous block-id/range closure with exact block
+and entry counts. Backup validation and derived repair run that exhaustive
+closure check rather than validating only top-level file identities.
+
+`DatabaseDoctor::derived_artifact_health` verifies the complete data,
+descriptor-page, descriptor-root, and block closure of the active adjacency and
+persistent property projection. `plan_derived_artifact_rebuild` then validates
+the canonical segment stream and WAL replay under explicit source-record,
 source-byte, replay, temporary-byte, memory, generated-entry, and spill-run
 limits. It returns a generation- and source-identity-bound dry-run plan without
 changing the database. Canonical segment, checkpoint, property spill, manifest,

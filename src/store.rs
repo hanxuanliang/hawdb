@@ -196,7 +196,7 @@ const BACKUP_MANIFEST_FILE: &str = "backup.skein";
 const BACKUP_HEADER_V1: &str = "SKEIN_BACKUP_V1";
 const CANONICAL_MANIFEST_MAX_BYTES: u64 = 256 * 1024 * 1024;
 const PROPERTY_SPILL_MANIFEST_MAX_BYTES: u64 = 256 * 1024 * 1024;
-const PROPERTY_PROJECTION_MANIFEST_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+const PROPERTY_PROJECTION_MANIFEST_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const CHECKPOINT_TEMPORARY_SPACE_MULTIPLIER: u64 = 4;
 const MIN_CHECKPOINT_TEMPORARY_SPACE_BYTES: u64 = 64 * 1024;
 const MIN_PROPERTY_HISTOGRAM_VALUES: usize = 128;
@@ -5769,6 +5769,18 @@ mod tests {
     use std::io::Write;
     use std::num::{NonZeroU64, NonZeroUsize};
 
+    fn property_projection_block_corrupt_offset(path: &std::path::Path, kind_tag: u8) -> u64 {
+        let encoded = fs::read(path).unwrap();
+        encoded
+            .windows(8)
+            .enumerate()
+            .find_map(|(offset, header)| {
+                (header == b"SKNIDX01" && encoded.get(offset.saturating_add(24)) == Some(&kind_tag))
+                    .then_some(offset.saturating_add(25) as u64)
+            })
+            .expect("selected property projection block exists")
+    }
+
     #[test]
     fn snapshot_shares_segments_until_the_live_store_mutates_them() {
         let mut catalog = Catalog::default();
@@ -7319,12 +7331,10 @@ mod tests {
             assert!(manifest.supports_composite_equality(label_id, &composite_properties));
             let graph_index_reads_before = store.storage_residency_report().graph_index_reads;
             let read_snapshot = store.snapshot();
-            corrupt_offset = manifest
-                .blocks
-                .iter()
-                .find(|block| block.kind == PersistentPropertyProjectionKind::CompositeEquality)
-                .map(|block| block.offset + block.length.get() - 1)
-                .unwrap();
+            corrupt_offset = property_projection_block_corrupt_offset(
+                &path.join(property_projection_artifact_generation_file(1)),
+                4,
+            );
 
             let lower = (Value::Int(15), true);
             let upper = (Value::Int(25), true);
@@ -7676,16 +7686,10 @@ mod tests {
                 PersistentPropertyProjectionKind::RelationshipRange,
             ));
             let graph_index_reads_before = store.storage_residency_report().graph_index_reads;
-            corrupt_offset = manifest
-                .blocks
-                .iter()
-                .find(|block| {
-                    block.kind == PersistentPropertyProjectionKind::RelationshipEquality
-                        && block.min_key <= Value::Int(20)
-                        && Value::Int(20) <= block.max_key
-                })
-                .map(|block| block.offset + block.length.get() - 1)
-                .unwrap();
+            corrupt_offset = property_projection_block_corrupt_offset(
+                &path.join(property_projection_artifact_generation_file(1)),
+                5,
+            );
 
             let mut ids = Vec::new();
             let (_, report) = store
@@ -8221,6 +8225,101 @@ mod tests {
         assert!(reads.adjacency_bytes_read > 0);
 
         drop(oracle);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn relationship_projection_estimate_fallback_reports_descriptor_io() {
+        let path = unique_test_dir("relationship_projection_estimate_fallback");
+        let replay_config = WalReplayConfig {
+            residency_mode: StorageResidencyMode::OutOfCore,
+            ..WalReplayConfig::default()
+        };
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::open_with_durability_and_replay_config(
+            &path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            replay_config,
+        )
+        .unwrap();
+        let narrow_source = store
+            .create_node(&mut catalog, "Entity", BTreeMap::new())
+            .unwrap();
+        let wide_source = store
+            .create_node(&mut catalog, "Entity", BTreeMap::new())
+            .unwrap();
+        let targets = (0..5)
+            .map(|_| {
+                store
+                    .create_node(&mut catalog, "Entity", BTreeMap::new())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let expected = store
+            .create_relationship(
+                &mut catalog,
+                narrow_source,
+                targets[0],
+                "LINKS_TO",
+                properties([("weight", Value::Int(20))]),
+            )
+            .unwrap();
+        for target in &targets[1..] {
+            store
+                .create_relationship(
+                    &mut catalog,
+                    wide_source,
+                    *target,
+                    "LINKS_TO",
+                    properties([("weight", Value::Int(20))]),
+                )
+                .unwrap();
+        }
+        store.checkpoint(&catalog).unwrap();
+
+        let rel_type = catalog.rel_type_id("LINKS_TO").unwrap();
+        let before = store.storage_residency_report().graph_index_reads;
+        let mut relationships = Vec::new();
+        store
+            .visit_adjacent_relationships_with_filter_owned(
+                narrow_source,
+                Some(rel_type),
+                AdjacencyDirection::Outgoing,
+                &PropertyFilter::Eq {
+                    property: "weight".to_string(),
+                    value: Value::Int(20),
+                },
+                |relationship| {
+                    relationships.push(relationship.id);
+                    GraphScanControl::Continue
+                },
+            )
+            .unwrap();
+        assert_eq!(relationships, vec![expected]);
+
+        let reads = store
+            .storage_residency_report()
+            .graph_index_reads
+            .delta_since(before);
+        assert_eq!(
+            reads.operation_count(PersistentGraphIndexClass::RelationshipEquality),
+            1
+        );
+        assert_eq!(
+            reads.blocks_read(PersistentGraphIndexClass::RelationshipEquality),
+            0
+        );
+        assert!(reads.property_descriptor_pages_visited > 0);
+        assert!(reads.property_descriptor_storage_bytes_read > 0);
+        assert_eq!(reads.property_blocks_read, 0);
+        assert_eq!(
+            reads.operation_count(PersistentGraphIndexClass::ForwardAdjacency),
+            1
+        );
+        assert!(reads.blocks_read(PersistentGraphIndexClass::ForwardAdjacency) > 0);
+
         drop(store);
         std::fs::remove_dir_all(path).unwrap();
     }

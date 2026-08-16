@@ -352,13 +352,10 @@ fn assess_artifacts(
                     "persistent property projection publication is missing".to_string(),
                 )
             })?;
-            let published = reader.manifest();
-            validate_artifact_file_identity(
-                reader.path(),
-                published.artifact_len,
-                published.artifact_digest.0,
-                &published.artifact_sha256.to_string(),
-            )
+            reader
+                .deep_scrub()
+                .map(|_| ())
+                .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))
         }),
     ]
 }
@@ -379,21 +376,6 @@ fn assess_one(
             reason_code: Some("artifact_missing_corrupt_or_inconsistent".to_string()),
         },
     }
-}
-
-fn validate_artifact_file_identity(
-    path: &Path,
-    expected_len: u64,
-    expected_crc32c: u64,
-    expected_sha256: &str,
-) -> Result<()> {
-    let (len, crc32c, sha256) = file_checksum(path)?;
-    if len != expected_len || crc32c != expected_crc32c || sha256.to_string() != expected_sha256 {
-        return Err(SkeinError::Storage(
-            "derived artifact identity mismatch".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 fn plan_from_inspection(

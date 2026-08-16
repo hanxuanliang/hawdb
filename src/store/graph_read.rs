@@ -1262,11 +1262,22 @@ impl GraphStore {
                 }
             });
         };
-        let seed_token = query_tokens
-            .iter()
-            .min_by_key(|token| {
-                projection.estimate_full_text_token_entries(label_id, property, token)
-            })
+        let mut seed_token = None;
+        let mut estimate_report = skein_storage::PersistentPropertyProjectionReadReport::default();
+        for token in &query_tokens {
+            let (estimated_entries, report) = projection
+                .estimate_full_text_token_entries(label_id, property, token)
+                .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+            accumulate_property_projection_report(&mut estimate_report, report);
+            if seed_token
+                .as_ref()
+                .is_none_or(|(_, current_entries)| estimated_entries < *current_entries)
+            {
+                seed_token = Some((token, estimated_entries));
+            }
+        }
+        let seed_token = seed_token
+            .map(|(token, _)| token)
             .expect("non-empty full-text query has a seed token");
         let mut graph_control = GraphScanControl::Continue;
         let (report, projection_control) = projection
@@ -1290,8 +1301,9 @@ impl GraphStore {
                 Ok(CanonicalScanControl::Continue)
             })
             .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+        accumulate_property_projection_report(&mut estimate_report, report);
         self.graph_index_read_metrics
-            .record_property(PersistentGraphIndexClass::NodeFullText, report);
+            .record_property(PersistentGraphIndexClass::NodeFullText, estimate_report);
         if projection_control == CanonicalScanControl::Stop {
             return Ok(graph_control);
         }
@@ -1461,7 +1473,9 @@ impl GraphStore {
                 consumer,
             );
         };
-        let Some(probe) = relationship_projection_probe(projection, rel_type, filter) else {
+        let Some(probe) = relationship_projection_probe(projection, rel_type, filter)
+            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?
+        else {
             return self.visit_adjacent_relationships_filter_fallback(
                 node_id,
                 Some(rel_type),
@@ -1474,6 +1488,8 @@ impl GraphStore {
             .estimate_endpoint_entries(node_id, direction, Some(rel_type))
             .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
         if probe.estimated_entries() > adjacency_entries {
+            self.graph_index_read_metrics
+                .record_property(probe.index_class(), probe.estimate_report());
             return self.visit_adjacent_relationships_filter_fallback(
                 node_id,
                 Some(rel_type),
@@ -2425,6 +2441,7 @@ enum RelationshipProjectionProbe<'a> {
         property: &'a str,
         values: Vec<&'a Value>,
         estimated_entries: u64,
+        estimate_report: skein_storage::PersistentPropertyProjectionReadReport,
     },
     Range {
         rel_type: RelTypeId,
@@ -2432,6 +2449,7 @@ enum RelationshipProjectionProbe<'a> {
         lower: Option<&'a (Value, bool)>,
         upper: Option<&'a (Value, bool)>,
         estimated_entries: u64,
+        estimate_report: skein_storage::PersistentPropertyProjectionReadReport,
     },
 }
 
@@ -2444,6 +2462,31 @@ impl RelationshipProjectionProbe<'_> {
             | Self::Range {
                 estimated_entries, ..
             } => *estimated_entries,
+        }
+    }
+
+    fn estimate_report(&self) -> skein_storage::PersistentPropertyProjectionReadReport {
+        match self {
+            Self::Equality {
+                estimate_report, ..
+            }
+            | Self::Range {
+                estimate_report, ..
+            } => *estimate_report,
+        }
+    }
+
+    fn replace_estimate_report(
+        &mut self,
+        report: skein_storage::PersistentPropertyProjectionReadReport,
+    ) {
+        match self {
+            Self::Equality {
+                estimate_report, ..
+            }
+            | Self::Range {
+                estimate_report, ..
+            } => *estimate_report = report,
         }
     }
 
@@ -2513,7 +2556,7 @@ impl RelationshipProjectionProbe<'_> {
                 values,
                 ..
             } => {
-                let mut total = skein_storage::PersistentPropertyProjectionReadReport::default();
+                let mut total = self.estimate_report();
                 for value in values {
                     let (report, control) = projection.scan_relationship_equality_candidates(
                         *rel_type,
@@ -2534,8 +2577,14 @@ impl RelationshipProjectionProbe<'_> {
                 lower,
                 upper,
                 ..
-            } => projection
-                .scan_relationship_range_candidates(*rel_type, property, *lower, *upper, consumer),
+            } => {
+                let mut total = self.estimate_report();
+                let (report, control) = projection.scan_relationship_range_candidates(
+                    *rel_type, property, *lower, *upper, consumer,
+                )?;
+                accumulate_property_projection_report(&mut total, report);
+                Ok((total, control))
+            }
         }
     }
 }
@@ -2544,12 +2593,35 @@ fn accumulate_property_projection_report(
     total: &mut skein_storage::PersistentPropertyProjectionReadReport,
     report: skein_storage::PersistentPropertyProjectionReadReport,
 ) {
+    total.descriptor_pages_visited = total
+        .descriptor_pages_visited
+        .saturating_add(report.descriptor_pages_visited);
+    total.descriptor_page_bytes_decoded = total
+        .descriptor_page_bytes_decoded
+        .saturating_add(report.descriptor_page_bytes_decoded);
+    total.descriptor_storage_bytes_read = total
+        .descriptor_storage_bytes_read
+        .saturating_add(report.descriptor_storage_bytes_read);
+    total.descriptors_examined = total
+        .descriptors_examined
+        .saturating_add(report.descriptors_examined);
+    total.descriptor_cache_hits = total
+        .descriptor_cache_hits
+        .saturating_add(report.descriptor_cache_hits);
+    total.descriptor_cache_misses = total
+        .descriptor_cache_misses
+        .saturating_add(report.descriptor_cache_misses);
+    total.descriptor_cache_admission_rejections = total
+        .descriptor_cache_admission_rejections
+        .saturating_add(report.descriptor_cache_admission_rejections);
     total.blocks_considered = total
         .blocks_considered
         .saturating_add(report.blocks_considered);
     total.blocks_pruned = total.blocks_pruned.saturating_add(report.blocks_pruned);
     total.blocks_read = total.blocks_read.saturating_add(report.blocks_read);
     total.bytes_read = total.bytes_read.saturating_add(report.bytes_read);
+    total.cache_hits = total.cache_hits.saturating_add(report.cache_hits);
+    total.cache_misses = total.cache_misses.saturating_add(report.cache_misses);
     total.entries_decoded = total.entries_decoded.saturating_add(report.entries_decoded);
     total.candidates_returned = total
         .candidates_returned
@@ -2560,76 +2632,113 @@ fn relationship_projection_probe<'a>(
     projection: &PersistentPropertyProjectionReader,
     rel_type: RelTypeId,
     filter: &'a PropertyFilter,
-) -> Option<RelationshipProjectionProbe<'a>> {
+) -> std::result::Result<Option<RelationshipProjectionProbe<'a>>, PersistentPropertyProjectionError>
+{
     match filter {
-        PropertyFilter::And(filters) => filters
-            .iter()
-            .filter_map(|filter| relationship_projection_probe(projection, rel_type, filter))
-            .min_by_key(RelationshipProjectionProbe::estimated_entries),
-        PropertyFilter::Eq { property, value } => projection
-            .manifest()
-            .supports_relationship(
+        PropertyFilter::And(filters) => {
+            let mut best = None;
+            let mut selection_report =
+                skein_storage::PersistentPropertyProjectionReadReport::default();
+            for filter in filters {
+                let Some(candidate) = relationship_projection_probe(projection, rel_type, filter)?
+                else {
+                    continue;
+                };
+                accumulate_property_projection_report(
+                    &mut selection_report,
+                    candidate.estimate_report(),
+                );
+                if best
+                    .as_ref()
+                    .is_none_or(|current: &RelationshipProjectionProbe<'_>| {
+                        candidate.estimated_entries() < current.estimated_entries()
+                    })
+                {
+                    best = Some(candidate);
+                }
+            }
+            if let Some(best) = &mut best {
+                best.replace_estimate_report(selection_report);
+            }
+            Ok(best)
+        }
+        PropertyFilter::Eq { property, value } => {
+            if !projection.manifest().supports_relationship(
                 rel_type,
                 property,
                 PersistentPropertyProjectionKind::RelationshipEquality,
-            )
-            .then(|| RelationshipProjectionProbe::Equality {
+            ) {
+                return Ok(None);
+            }
+            let (estimated_entries, estimate_report) =
+                projection.estimate_relationship_equality_entries(rel_type, property, value)?;
+            Ok(Some(RelationshipProjectionProbe::Equality {
                 rel_type,
                 property,
                 values: vec![value],
-                estimated_entries: projection
-                    .estimate_relationship_equality_entries(rel_type, property, value),
-            }),
-        PropertyFilter::In { property, values } => projection
-            .manifest()
-            .supports_relationship(
+                estimated_entries,
+                estimate_report,
+            }))
+        }
+        PropertyFilter::In { property, values } => {
+            if !projection.manifest().supports_relationship(
                 rel_type,
                 property,
                 PersistentPropertyProjectionKind::RelationshipEquality,
-            )
-            .then(|| {
-                let values = values
-                    .iter()
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                let estimated_entries = values.iter().fold(0u64, |entries, value| {
-                    entries.saturating_add(
-                        projection
-                            .estimate_relationship_equality_entries(rel_type, property, value),
-                    )
-                });
-                RelationshipProjectionProbe::Equality {
-                    rel_type,
-                    property,
-                    values,
-                    estimated_entries,
-                }
-            }),
+            ) {
+                return Ok(None);
+            }
+            let values = values
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let mut estimated_entries = 0u64;
+            let mut estimate_report =
+                skein_storage::PersistentPropertyProjectionReadReport::default();
+            for value in &values {
+                let (entries, report) =
+                    projection.estimate_relationship_equality_entries(rel_type, property, value)?;
+                estimated_entries = estimated_entries.saturating_add(entries);
+                accumulate_property_projection_report(&mut estimate_report, report);
+            }
+            Ok(Some(RelationshipProjectionProbe::Equality {
+                rel_type,
+                property,
+                values,
+                estimated_entries,
+                estimate_report,
+            }))
+        }
         PropertyFilter::Range {
             property,
             lower,
             upper,
-        } if lower.is_some() || upper.is_some() => projection
-            .manifest()
-            .supports_relationship(
+        } if lower.is_some() || upper.is_some() => {
+            if !projection.manifest().supports_relationship(
                 rel_type,
                 property,
                 PersistentPropertyProjectionKind::RelationshipRange,
-            )
-            .then(|| RelationshipProjectionProbe::Range {
-                rel_type,
-                property,
-                lower: lower.as_ref(),
-                upper: upper.as_ref(),
-                estimated_entries: projection.estimate_relationship_range_entries(
+            ) {
+                return Ok(None);
+            }
+            let (estimated_entries, estimate_report) = projection
+                .estimate_relationship_range_entries(
                     rel_type,
                     property,
                     lower.as_ref(),
                     upper.as_ref(),
-                ),
-            }),
-        _ => None,
+                )?;
+            Ok(Some(RelationshipProjectionProbe::Range {
+                rel_type,
+                property,
+                lower: lower.as_ref(),
+                upper: upper.as_ref(),
+                estimated_entries,
+                estimate_report,
+            }))
+        }
+        _ => Ok(None),
     }
 }
 

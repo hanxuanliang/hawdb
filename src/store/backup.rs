@@ -15,7 +15,7 @@ use super::{
     relational_checkpoint_generation_file, relational_checkpoint_metadata, source_scan,
     split_checkpoint_checksum, store_id_for_path, sync_parent_dir, wal_generation_file,
     BackupFileEntry, BackupManifest, DurableManifest, BACKUP_HEADER_V1, BACKUP_MANIFEST_FILE,
-    MANIFEST_FILE, STABLE_ID_MAPPING_FILE,
+    MANIFEST_FILE, PROPERTY_PROJECTION_MANIFEST_MAX_BYTES, STABLE_ID_MAPPING_FILE,
 };
 use crate::error::{Result, SkeinError};
 use skein_integrity::{IntegrityHasher, Sha256Digest};
@@ -24,9 +24,11 @@ use skein_storage::{
     CanonicalAdjacencyReader, CanonicalSegmentManifest, GraphDescriptorKind,
     GraphDescriptorTreeBuildConfig, GraphDescriptorTreeGenerationArtifacts,
     GraphDescriptorTreePaths, GraphDescriptorTreeRootReader, ManifestGeneration,
-    PersistentPropertyProjectionManifest, PropertySpillManifest, RelationalDecodeLimits,
-    RelationalIndexArtifactMetadata, RelationalIndexGenerationIdentity,
-    RelationalIndexShadowConfig, RelationalIndexShadowReader, SegmentCache, StorageRestoreReport,
+    PersistentPropertyProjectionConfig, PersistentPropertyProjectionDescriptorTree,
+    PersistentPropertyProjectionManifest, PersistentPropertyProjectionReader,
+    PropertySpillManifest, RelationalDecodeLimits, RelationalIndexArtifactMetadata,
+    RelationalIndexGenerationIdentity, RelationalIndexShadowConfig, RelationalIndexShadowReader,
+    SegmentCache, StorageRestoreReport,
 };
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
@@ -632,6 +634,12 @@ pub(super) fn validate_backup_files(
                     .to_string(),
             ));
         }
+        if encoded_manifest.encoded_len > PROPERTY_PROJECTION_MANIFEST_MAX_BYTES {
+            return Err(SkeinError::Storage(format!(
+                "backup property projection manifest contains {} bytes, exceeding the {} byte format limit",
+                encoded_manifest.encoded_len, PROPERTY_PROJECTION_MANIFEST_MAX_BYTES
+            )));
+        }
         let projection_manifest_text = fs::read_to_string(root.join(&projection_manifest_name))?;
         let projection_manifest =
             PersistentPropertyProjectionManifest::decode(&projection_manifest_text)
@@ -655,15 +663,16 @@ pub(super) fn validate_backup_files(
             root.join(&descriptor_page_name),
             root.join(&descriptor_root_name),
         );
-        let descriptor_root = GraphDescriptorTreeRootReader::open(
-            descriptor_paths,
+        let descriptor_root = GraphDescriptorTreeRootReader::open_bound(
+            descriptor_paths.clone(),
+            projection_manifest.descriptor_generation_artifacts(),
             GraphDescriptorTreeBuildConfig::default(),
         )
         .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
         if descriptor_root.root().kind != GraphDescriptorKind::PropertyProjection
             || descriptor_root.root().generation != generation
             || descriptor_root.root().source_commit_epoch != manifest.checkpoint_commit_epoch
-            || descriptor_root.root().descriptor_count != projection_manifest.blocks.len() as u64
+            || descriptor_root.root().descriptor_count != projection_manifest.block_count
         {
             return Err(SkeinError::Storage(
                 "backup property projection descriptor root identity is inconsistent".to_string(),
@@ -682,6 +691,27 @@ pub(super) fn validate_backup_files(
                 "backup property projection descriptor pages do not match their root".to_string(),
             ));
         }
+        let config = PersistentPropertyProjectionConfig::default();
+        let max_block_bytes = NonZeroU64::new(
+            config
+                .target_block_bytes
+                .get()
+                .max(config.max_index_key_bytes.get().saturating_add(1024)),
+        )
+        .expect("property projection maximum block size is non-zero");
+        PersistentPropertyProjectionReader::open(
+            root.join(&projection_artifact_name),
+            projection_manifest,
+            PersistentPropertyProjectionDescriptorTree::new(
+                descriptor_paths,
+                GraphDescriptorTreeBuildConfig::default(),
+            ),
+            Arc::new(SegmentCache::new(0)),
+            store_id_for_path(root)?,
+            max_block_bytes,
+        )
+        .and_then(|reader| reader.deep_scrub())
+        .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
     }
     Ok(())
 }

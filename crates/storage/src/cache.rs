@@ -28,6 +28,7 @@ pub enum RepresentationKind {
     RelationalRowPageSlot,
     StableIdentityPageSlot,
     CanonicalAdjacencyDescriptorPage,
+    PropertyProjectionDescriptorPage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
