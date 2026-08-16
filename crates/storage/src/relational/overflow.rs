@@ -164,9 +164,18 @@ pub(super) fn hydrate_projected_row(
         return Ok(());
     }
     runtime_checkpoint(task_context)?;
-    let canonical = state.row(table, &row.primary_key).ok_or_else(|| {
+    let canonical = if state.canonical_row_metadata_only() {
+        None
+    } else {
+        Some(state.row(table, &row.primary_key).ok_or_else(|| {
+            RelationalError::Corruption(format!(
+                "projected overflow resolver cannot find row in table {table}"
+            ))
+        })?)
+    };
+    let schema = state.table_schema(table).ok_or_else(|| {
         RelationalError::Corruption(format!(
-            "projected overflow resolver cannot find row in table {table}"
+            "projected overflow resolver cannot find schema for table {table}"
         ))
     })?;
     let mut staged_budget = *budget;
@@ -181,17 +190,25 @@ pub(super) fn hydrate_projected_row(
         let RelationalValue::Overflow(reference) = &field.value else {
             continue;
         };
-        let canonical_value = canonical.values().get(field.ordinal).ok_or_else(|| {
+        let _column = schema.columns.get(field.ordinal).ok_or_else(|| {
             RelationalError::Corruption(format!(
                 "projected field {} is outside the canonical row shape for table {table}",
                 field.ordinal
             ))
         })?;
-        if canonical_value != &RelationalValue::Overflow(*reference) {
-            return Err(RelationalError::Corruption(format!(
-                "projected overflow reference at field {} differs from the canonical row in table {table}",
-                field.ordinal
-            )));
+        if let Some(canonical) = canonical {
+            let canonical_value = canonical.values().get(field.ordinal).ok_or_else(|| {
+                RelationalError::Corruption(format!(
+                    "projected field {} is outside the canonical row shape for table {table}",
+                    field.ordinal
+                ))
+            })?;
+            if canonical_value != &RelationalValue::Overflow(*reference) {
+                return Err(RelationalError::Corruption(format!(
+                    "projected overflow reference at field {} differs from the canonical row in table {table}",
+                    field.ordinal
+                )));
+            }
         }
         let segment = state
             .overflow_segments

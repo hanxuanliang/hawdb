@@ -251,6 +251,89 @@ fn read_only_out_of_core_open_validates_system_schema_through_canonical_rows() {
 }
 
 #[test]
+fn writable_metadata_only_transaction_checkpoints_rows_and_indexes() {
+    let path = unique_test_dir("writable_metadata_only_transaction");
+    let config = DatabaseConfig {
+        storage_residency_mode: skein_storage::StorageResidencyMode::OutOfCore,
+        relational_index_mode: skein_storage::RelationalIndexMode::Authoritative,
+        ..DatabaseConfig::default()
+    };
+    {
+        let mut db = Database::open_with_config(
+            &path,
+            DatabaseConfig {
+                relational_index_mode: skein_storage::RelationalIndexMode::Shadow,
+                ..DatabaseConfig::default()
+            },
+        )
+        .unwrap();
+        db.apply_system_schema_registry(&registry_v1()).unwrap();
+        db.query_sql("INSERT INTO content_documents (id, body) VALUES ('doc-1', 'base')")
+            .unwrap();
+        db.checkpoint().unwrap();
+    }
+
+    let committed_epoch = {
+        let mut db = Database::open_with_config(&path, config.clone()).unwrap();
+        assert!(db.store.relational_state().canonical_row_metadata_only());
+        let mut transaction = db.begin_transaction();
+        transaction
+            .query_sql("INSERT INTO content_documents (id, body) VALUES ('doc-2', 'private')")
+            .unwrap();
+        let private = transaction
+            .query_sql("SELECT body FROM content_documents WHERE id = 'doc-2'")
+            .unwrap();
+        assert_eq!(
+            private.rows[0]["body"],
+            Value::String("private".to_string())
+        );
+        let duplicate = transaction
+            .query_sql("INSERT INTO content_documents (id, body) VALUES ('doc-2', 'rejected')")
+            .unwrap_err();
+        assert!(
+            duplicate.to_string().contains("duplicate primary key"),
+            "unexpected duplicate-key error: {duplicate}"
+        );
+        let after_rejection = transaction
+            .query_sql("SELECT body FROM content_documents WHERE id = 'doc-2'")
+            .unwrap();
+        assert_eq!(after_rejection.rows, private.rows);
+        transaction.commit().unwrap();
+        let committed_epoch = db.commit_epoch();
+        db.checkpoint().unwrap();
+        committed_epoch
+    };
+
+    let incompatible = match Database::open(&path) {
+        Ok(_) => panic!("metadata-only checkpoint unexpectedly reopened in materialized mode"),
+        Err(error) => error,
+    };
+    assert!(incompatible
+        .to_string()
+        .contains("reopen requires OutOfCore residency with Authoritative relational indexes"));
+
+    let mut reopened = Database::open_with_config(&path, config).unwrap();
+    assert_eq!(reopened.commit_epoch(), committed_epoch);
+    assert!(reopened
+        .store
+        .relational_state()
+        .canonical_row_metadata_only());
+    let rows = reopened
+        .query_sql("SELECT id, body FROM content_documents ORDER BY id")
+        .unwrap();
+    assert_eq!(rows.rows.len(), 2);
+    assert_eq!(rows.rows[0]["id"], Value::String("doc-1".to_string()));
+    assert_eq!(rows.rows[1]["id"], Value::String("doc-2".to_string()));
+    let validation = reopened
+        .apply_system_schema_registry(&registry_v1())
+        .unwrap();
+    assert!(validation.applied_versions.is_empty());
+
+    drop(reopened);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn application_system_schema_upgrades_and_reopens_idempotently() {
     let path = unique_test_dir("application_system_schema_upgrade");
     {

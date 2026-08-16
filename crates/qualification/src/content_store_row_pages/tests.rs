@@ -612,7 +612,7 @@ fn initial_content_store_tables_are_qualified_through_canonical_row_pages() {
     );
     assert_eq!(
         report.multi_statement_transaction.row_runtime_path,
-        "canonical_memory"
+        "snapshot_rows"
     );
     assert!(report.multi_statement_transaction.rejected_statement_atomic);
     assert_eq!(

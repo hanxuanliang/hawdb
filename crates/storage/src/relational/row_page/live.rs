@@ -590,7 +590,13 @@ impl RelationalRowPageReadView {
     /// structure before dirty-page admission.
     pub fn checkpoint_capture(
         &self,
-        mut current_row: impl FnMut(&str, &RelationalKey) -> Option<crate::relational::RelationalRow>,
+        mut current_row: impl FnMut(
+            &str,
+            &RelationalKey,
+        ) -> Result<
+            Option<crate::relational::RelationalRow>,
+            RelationalRowPageCheckpointError,
+        >,
         limits: RelationalRowChangeCaptureLimits,
     ) -> Result<RelationalRowChangeCapture, RelationalRowPageCheckpointError> {
         let mut keys = CheckpointChangeKeys::new(limits);
@@ -643,6 +649,29 @@ impl RelationalRowPageReadView {
         }
 
         keys.into_capture(&mut current_row)
+    }
+
+    /// Resolves one changed key from the complete recovery/live overlay.
+    /// Checkpoint planning uses this when canonical state intentionally owns
+    /// only schemas and counts.
+    pub fn checkpoint_overlay_row(
+        &self,
+        table: &str,
+        primary_key: &RelationalKey,
+    ) -> Result<Option<crate::relational::RelationalRow>, RelationalRowPageCheckpointError> {
+        self.overlay_value(table, primary_key)
+            .map_err(map_delta_checkpoint_error)?
+            .map_or_else(
+                || {
+                    Err(RelationalRowPageCheckpointError::Corrupt(format!(
+                        "checkpoint change key {table}/{primary_key:?} is missing from its overlay"
+                    )))
+                },
+                |value| match value {
+                    RelationalRowPageRecoveredValue::Present(row) => Ok(Some(row)),
+                    RelationalRowPageRecoveredValue::Deleted => Ok(None),
+                },
+            )
     }
 }
 
@@ -745,7 +774,13 @@ impl CheckpointChangeKeys {
 
     fn into_capture(
         self,
-        current_row: &mut impl FnMut(&str, &RelationalKey) -> Option<crate::relational::RelationalRow>,
+        current_row: &mut impl FnMut(
+            &str,
+            &RelationalKey,
+        ) -> Result<
+            Option<crate::relational::RelationalRow>,
+            RelationalRowPageCheckpointError,
+        >,
     ) -> Result<RelationalRowChangeCapture, RelationalRowPageCheckpointError> {
         let capture_vector_bytes = self
             .entry_count
@@ -776,7 +811,7 @@ impl CheckpointChangeKeys {
         for (table, primary_keys) in self.tables {
             for primary_key in primary_keys {
                 let change = RelationalRowChange {
-                    row: current_row(&table, &primary_key),
+                    row: current_row(&table, &primary_key)?,
                     table: table.clone(),
                     primary_key,
                 };
@@ -1035,7 +1070,7 @@ mod tests {
         let capture = keys
             .into_capture(&mut |_, primary_key| {
                 resolutions += 1;
-                (primary_key == &key(1)).then(|| row(1, "current"))
+                Ok((primary_key == &key(1)).then(|| row(1, "current")))
             })
             .unwrap();
         let RelationalRowChangeCapture::Captured {

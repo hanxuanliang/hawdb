@@ -64,6 +64,39 @@ impl RelationalOverflowPublisher {
                 source_commit_epoch,
                 base,
                 expected_previous_generation,
+                retain_unmentioned_base: false,
+                select_latest: false,
+                stop_after: None,
+            },
+            extents,
+        )
+    }
+
+    /// Persists a bounded delta while conservatively retaining every extent
+    /// reachable from the pinned base generation.
+    ///
+    /// Metadata-only row serving cannot prove the exact overflow closure
+    /// without scanning the whole row root. This mode keeps that checkpoint
+    /// operation access-proportional: newly observed extents are merged into
+    /// the base descriptor stream, while exact garbage collection remains a
+    /// separate full-scan maintenance operation.
+    pub fn persist_generation_retaining_base(
+        &self,
+        directory: &Path,
+        generation: u64,
+        source_commit_epoch: u64,
+        base: &RelationalOverflowRootReader,
+        expected_previous_generation: u64,
+        extents: Vec<RelationalOverflowExtentInput>,
+    ) -> Result<RelationalOverflowPublicationReport, RelationalOverflowPublicationError> {
+        self.persist_generation_inner(
+            GenerationPublication {
+                directory,
+                generation,
+                source_commit_epoch,
+                base: Some(base),
+                expected_previous_generation: Some(expected_previous_generation),
+                retain_unmentioned_base: true,
                 select_latest: false,
                 stop_after: None,
             },
@@ -88,6 +121,7 @@ impl RelationalOverflowPublisher {
                 source_commit_epoch,
                 base: base.as_ref(),
                 expected_previous_generation,
+                retain_unmentioned_base: false,
                 select_latest: true,
                 stop_after,
             },
@@ -106,6 +140,7 @@ impl RelationalOverflowPublisher {
             source_commit_epoch,
             base,
             expected_previous_generation,
+            retain_unmentioned_base,
             select_latest,
             stop_after,
         } = publication;
@@ -146,7 +181,7 @@ impl RelationalOverflowPublisher {
                 )));
             }
         }
-        preflight_root_capacity(base, &extents, self.config)?;
+        preflight_root_capacity(base, &extents, retain_unmentioned_base, self.config)?;
 
         let result = self.build_and_publish(PublicationBuild {
             paths: &paths,
@@ -155,6 +190,7 @@ impl RelationalOverflowPublisher {
             source_commit_epoch,
             expected_previous_generation,
             extents: &extents,
+            retain_unmentioned_base,
             select_latest,
             stop_after,
         });
@@ -175,6 +211,7 @@ impl RelationalOverflowPublisher {
             &build.paths.descriptor_tmp,
             build.base,
             build.extents,
+            build.retain_unmentioned_base,
             build.generation,
             self.config,
         )?;
@@ -270,6 +307,7 @@ struct GenerationPublication<'a> {
     source_commit_epoch: u64,
     base: Option<&'a RelationalOverflowRootReader>,
     expected_previous_generation: Option<u64>,
+    retain_unmentioned_base: bool,
     select_latest: bool,
     stop_after: Option<RelationalOverflowPublicationPhase>,
 }
@@ -281,6 +319,7 @@ struct PublicationBuild<'a> {
     source_commit_epoch: u64,
     expected_previous_generation: Option<u64>,
     extents: &'a [RelationalOverflowExtentInput],
+    retain_unmentioned_base: bool,
     select_latest: bool,
     stop_after: Option<RelationalOverflowPublicationPhase>,
 }
@@ -299,6 +338,7 @@ fn write_artifacts(
     descriptor_path: &Path,
     base: Option<&RelationalOverflowRootReader>,
     inputs: &[RelationalOverflowExtentInput],
+    retain_unmentioned_base: bool,
     generation: u64,
     config: RelationalOverflowPublicationConfig,
 ) -> Result<WrittenArtifacts, RelationalOverflowPublicationError> {
@@ -338,6 +378,9 @@ fn write_artifacts(
                         )?;
                     }
                     std::cmp::Ordering::Greater => {
+                        if retain_unmentioned_base {
+                            writer.emit_reused(existing)?;
+                        }
                         advance_base_descriptor(
                             base.expect("base descriptor exists only with a base reader"),
                             base_file.as_mut().expect("base descriptor file is open"),
@@ -351,7 +394,18 @@ fn write_artifacts(
                 writer.emit_input(input)?;
                 input_ordinal += 1;
             }
-            (None, Some(_)) => break,
+            (None, Some(existing)) => {
+                if !retain_unmentioned_base {
+                    break;
+                }
+                writer.emit_reused(existing)?;
+                advance_base_descriptor(
+                    base.expect("base descriptor exists only with a base reader"),
+                    base_file.as_mut().expect("base descriptor file is open"),
+                    &mut base_ordinal,
+                    &mut base_descriptor,
+                )?;
+            }
             (None, None) => break,
         }
     }
@@ -623,6 +677,7 @@ fn preflight_inputs(
 fn preflight_root_capacity(
     base: Option<&RelationalOverflowRootReader>,
     inputs: &[RelationalOverflowExtentInput],
+    retain_unmentioned_base: bool,
     config: RelationalOverflowPublicationConfig,
 ) -> Result<(), RelationalOverflowPublicationError> {
     let mut base_file = base
@@ -640,6 +695,11 @@ fn preflight_root_capacity(
         })
         .transpose()?;
     let mut new_extent_bytes = 0u64;
+    let mut retained_root_extent_count = if retain_unmentioned_base {
+        base.map_or(0, |reader| reader.manifest().extent_count)
+    } else {
+        0
+    };
     for input in inputs {
         if let RelationalOverflowExtentInput::Write { reference, encoded } = input {
             validate_encoded_extent(reference, encoded, config)?;
@@ -665,6 +725,14 @@ fn preflight_root_capacity(
                 )));
             }
         } else {
+            if retain_unmentioned_base {
+                retained_root_extent_count =
+                    retained_root_extent_count.checked_add(1).ok_or_else(|| {
+                        RelationalOverflowPublicationError::Admission(
+                            "overflow root extent count overflow".to_string(),
+                        )
+                    })?;
+            }
             match input {
                 RelationalOverflowExtentInput::Reuse(reference) => {
                     return Err(RelationalOverflowPublicationError::MissingExtent(
@@ -693,11 +761,15 @@ fn preflight_root_capacity(
             config.max_new_extent_bytes
         )));
     }
-    let root_extent_count = u64::try_from(inputs.len()).map_err(|_| {
-        RelationalOverflowPublicationError::Admission(
-            "overflow root extent count does not fit u64".to_string(),
-        )
-    })?;
+    let root_extent_count = if retain_unmentioned_base {
+        retained_root_extent_count
+    } else {
+        u64::try_from(inputs.len()).map_err(|_| {
+            RelationalOverflowPublicationError::Admission(
+                "overflow root extent count does not fit u64".to_string(),
+            )
+        })?
+    };
     if root_extent_count > config.max_extents.get() {
         return Err(RelationalOverflowPublicationError::Admission(format!(
             "overflow root contains {root_extent_count} extents, exceeding limit {}",

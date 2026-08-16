@@ -35,12 +35,12 @@ pub use index_shadow::{
     RelationalIndexReadLimits, RelationalIndexReadReport, RelationalIndexRecoveryBuilder,
     RelationalIndexRecoveryConfig, RelationalIndexRecoveryManifest,
     RelationalIndexRecoveryReadReport, RelationalIndexRecoveryReader,
-    RelationalIndexRecoveryReport, RelationalIndexRootDescriptor, RelationalIndexShadowBuildReport,
-    RelationalIndexShadowConfig, RelationalIndexShadowError, RelationalIndexShadowManifest,
-    RelationalIndexShadowReader, RelationalIndexShadowWriter, DEFAULT_RELATIONAL_INDEX_READ_BYTES,
-    DEFAULT_RELATIONAL_INDEX_READ_PAGES, DEFAULT_RELATIONAL_INDEX_READ_ROWS,
-    DEFAULT_RELATIONAL_INDEX_READ_TREE_HEIGHT, DEFAULT_RELATIONAL_INDEX_RECOVERY_DIRTY_BYTES,
-    DEFAULT_RELATIONAL_INDEX_RECOVERY_DIRTY_ENTRIES,
+    RelationalIndexRecoveryReport, RelationalIndexRootDescriptor, RelationalIndexRowSource,
+    RelationalIndexShadowBuildReport, RelationalIndexShadowConfig, RelationalIndexShadowError,
+    RelationalIndexShadowManifest, RelationalIndexShadowReader, RelationalIndexShadowWriter,
+    DEFAULT_RELATIONAL_INDEX_READ_BYTES, DEFAULT_RELATIONAL_INDEX_READ_PAGES,
+    DEFAULT_RELATIONAL_INDEX_READ_ROWS, DEFAULT_RELATIONAL_INDEX_READ_TREE_HEIGHT,
+    DEFAULT_RELATIONAL_INDEX_RECOVERY_DIRTY_BYTES, DEFAULT_RELATIONAL_INDEX_RECOVERY_DIRTY_ENTRIES,
     DEFAULT_RELATIONAL_INDEX_RECOVERY_MANIFEST_BYTES, DEFAULT_RELATIONAL_INDEX_RECOVERY_PAGES,
     DEFAULT_RELATIONAL_INDEX_SHADOW_BUILD_METADATA_BYTES,
     DEFAULT_RELATIONAL_INDEX_SHADOW_MANIFEST_BYTES, DEFAULT_RELATIONAL_INDEX_SHADOW_ROOTS,
@@ -1421,8 +1421,8 @@ impl RelationalState {
         self.materialized_index_postings_resident = false;
     }
 
-    /// Builds the read-only relational catalog directly from a validated
-    /// canonical row root without decoding the transitional row checkpoint.
+    /// Builds the canonical metadata-only relational catalog directly from a
+    /// validated row root without decoding the transitional row checkpoint.
     pub fn from_canonical_row_root(
         manifest: &RelationalRowPageRootManifest,
     ) -> Result<Self, RelationalError> {
@@ -1551,7 +1551,7 @@ impl RelationalState {
             return Ok(());
         }
         Err(RelationalError::Admission(format!(
-            "{context} requires materialized relational rows; this read-only out-of-core state is served by canonical row pages"
+            "{context} requires materialized relational rows; this out-of-core state is served by canonical row pages"
         )))
     }
 
@@ -3042,6 +3042,55 @@ impl RelationalState {
                     }
                 }
             })
+            .collect()
+    }
+
+    /// Collects only overflow references carried by bounded dirty row pages.
+    ///
+    /// The caller must publish these inputs with base retention enabled. A
+    /// reference absent from this metadata-only state is expected to resolve
+    /// from the pinned base generation; newly encoded values remain available
+    /// in the sparse state's inline overflow map.
+    pub fn overflow_delta_generation_inputs(
+        &self,
+        deltas: &[RelationalRowPageTableDelta],
+    ) -> Result<Vec<RelationalOverflowExtentInput>, RelationalError> {
+        self.require_sparse_workspace_source("relational overflow delta checkpoint")?;
+        let mut references = BTreeMap::new();
+        for row in deltas
+            .iter()
+            .flat_map(|delta| delta.dirty_pages.iter())
+            .flat_map(|page| page.rows.iter())
+        {
+            for value in row.row.values.iter() {
+                let RelationalValue::Overflow(reference) = value else {
+                    continue;
+                };
+                if let Some(previous) = references.insert(reference.digest, *reference)
+                    && previous != *reference
+                {
+                    return Err(RelationalError::Corruption(format!(
+                        "overflow digest {} has conflicting reference metadata",
+                        reference.digest
+                    )));
+                }
+            }
+        }
+        references
+            .into_iter()
+            .map(
+                |(digest, reference)| match self.overflow_segments.get(&digest) {
+                    Some(RelationalOverflowSegment::Inline(encoded)) => {
+                        Ok(RelationalOverflowExtentInput::Write {
+                            reference,
+                            encoded: Arc::clone(encoded),
+                        })
+                    }
+                    Some(RelationalOverflowSegment::FileRange { .. }) | None => {
+                        Ok(RelationalOverflowExtentInput::Reuse(reference))
+                    }
+                },
+            )
             .collect()
     }
 }

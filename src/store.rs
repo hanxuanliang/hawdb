@@ -114,6 +114,7 @@ pub use relational_index_shadow::{
 };
 pub use relational_row_pages::RelationalRowPageRecoveryStatus;
 use relational_row_pages::RelationalRowPageState;
+pub(crate) use relational_row_pages::RelationalTransactionRowView;
 use skein_storage::{
     available_storage_space, decode_relational_checkpoint_file_with_index_load,
     decode_relational_checkpoint_with_index_load, decode_relational_wal_batch,
@@ -1787,7 +1788,7 @@ impl GraphStore {
             )?,
         };
         let (mut store, _) = Self::finish_open(durable, catalog, replay_config)?;
-        store.activate_read_only_out_of_core_rows()?;
+        store.activate_out_of_core_relational_rows()?;
         Ok(store)
     }
 

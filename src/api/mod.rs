@@ -603,6 +603,8 @@ pub(super) struct DatabaseTransactionState {
     relational_state: skein_storage::RelationalState,
     relational_index:
         std::result::Result<Option<crate::store::RelationalTransactionIndexView>, String>,
+    relational_rows:
+        std::result::Result<Option<crate::store::RelationalTransactionRowView>, String>,
 }
 
 pub(super) struct GraphTransactionStatementOutcome {
@@ -18331,6 +18333,10 @@ impl DatabaseTransactionState {
                 .store
                 .begin_authoritative_relational_transaction_index()
                 .map_err(|error| error.to_string()),
+            relational_rows: db
+                .store
+                .begin_authoritative_relational_transaction_rows()
+                .map_err(|error| error.to_string()),
         }
     }
 
@@ -18338,6 +18344,7 @@ impl DatabaseTransactionState {
         self.graph_transaction.take();
         self.relational_transaction.writes.clear();
         self.relational_index = Ok(None);
+        self.relational_rows = Ok(None);
     }
 
     pub(crate) fn restore_graph_statement(&mut self, savepoint: GraphMutationSavepoint) {
@@ -18353,6 +18360,7 @@ impl DatabaseTransactionState {
             relational_transaction: std::mem::take(&mut self.relational_transaction),
             relational_state: std::mem::take(&mut self.relational_state),
             relational_index: std::mem::replace(&mut self.relational_index, Ok(None)),
+            relational_rows: std::mem::replace(&mut self.relational_rows, Ok(None)),
         }
     }
 
@@ -18368,6 +18376,55 @@ impl DatabaseTransactionState {
                 "authoritative transaction index view could not be pinned: {error}"
             ))),
         }
+    }
+
+    fn stage_sparse_authoritative_relational_statement(
+        &mut self,
+        transaction: skein_storage::RelationalTransaction,
+    ) -> Result<Option<skein_storage::RelationalState>> {
+        let rows = match &self.relational_rows {
+            Ok(Some(rows)) => rows,
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                return Err(SkeinError::StorageIntegrity(format!(
+                    "authoritative transaction row view could not be pinned: {error}"
+                )));
+            }
+        };
+        let index = match &mut self.relational_index {
+            Ok(Some(index)) => index,
+            Ok(None) => {
+                return Err(SkeinError::StorageIntegrity(
+                    "authoritative transaction index view is unavailable".to_string(),
+                ));
+            }
+            Err(error) => {
+                return Err(SkeinError::StorageIntegrity(format!(
+                    "authoritative transaction index view could not be pinned: {error}"
+                )));
+            }
+        };
+        let store = self
+            .graph_transaction
+            .as_ref()
+            .expect("database transaction must own a graph workspace")
+            .store();
+        let (next, index_capture, row_capture) = store
+            .stage_sparse_relational_transaction_statement(
+                &self.relational_state,
+                rows,
+                transaction,
+                index,
+            )
+            .map_err(map_transaction_relational_error)?;
+        let next_rows = rows
+            .stage_advance(row_capture)
+            .map_err(map_transaction_relational_error)?;
+        index
+            .append(index_capture)
+            .map_err(map_transaction_relational_error)?;
+        self.relational_rows = Ok(Some(next_rows));
+        Ok(Some(next))
     }
 }
 
@@ -18613,14 +18670,27 @@ fn execute_database_transaction_sql(
         } else {
             crate::relational_sql::RelationalIndexReadMode::Materialized
         };
+        let row_read_mode = match &state.relational_rows {
+            Ok(Some(rows)) => crate::relational_sql::RelationalRowReadMode::Transaction {
+                store: state
+                    .graph_transaction
+                    .as_ref()
+                    .expect("database transaction must own a graph workspace")
+                    .store(),
+                rows,
+            },
+            Ok(None) => crate::relational_sql::RelationalRowReadMode::CanonicalMemory,
+            Err(error) => {
+                return Err(SkeinError::StorageIntegrity(format!(
+                    "authoritative transaction row view could not be pinned: {error}"
+                )));
+            }
+        };
         let output = crate::relational_sql::execute_relational_query_sql_with_runtime(
             sql_text,
             parameters,
             &state.relational_state,
-            crate::relational_sql::RelationalQueryReadModes::new(
-                index_read_mode,
-                crate::relational_sql::RelationalRowReadMode::CanonicalMemory,
-            ),
+            crate::relational_sql::RelationalQueryReadModes::new(index_read_mode, row_read_mode),
             relational_query_limits(&runtime.config, runtime.config.max_read_result_rows),
             &runtime.config.execution_memory,
             None,
@@ -18645,33 +18715,39 @@ fn execute_database_transaction_sql(
         .relational_index_mode
         .requires_authoritative_indexes()
     {
-        let index = match &mut state.relational_index {
-            Ok(Some(index)) => index,
-            Ok(None) => {
-                return Err(SkeinError::StorageIntegrity(
-                    "authoritative transaction index view is unavailable".to_string(),
-                ));
-            }
-            Err(error) => {
-                return Err(SkeinError::StorageIntegrity(format!(
-                    "authoritative transaction index view could not be pinned: {error}"
-                )));
-            }
-        };
-        let (next, capture) = state
-            .relational_state
-            .stage_transaction_with_authoritative_index(
-                transaction.clone(),
-                skein_storage::RelationalMutationLimits::default(),
-                skein_storage::RelationalOverflowConfig::default(),
-                index.capture_limits(),
-                index,
-            )
-            .map_err(map_transaction_relational_error)?;
-        index
-            .append(capture)
-            .map_err(map_transaction_relational_error)?;
-        next
+        if let Some(next) =
+            state.stage_sparse_authoritative_relational_statement(transaction.clone())?
+        {
+            next
+        } else {
+            let index = match &mut state.relational_index {
+                Ok(Some(index)) => index,
+                Ok(None) => {
+                    return Err(SkeinError::StorageIntegrity(
+                        "authoritative transaction index view is unavailable".to_string(),
+                    ));
+                }
+                Err(error) => {
+                    return Err(SkeinError::StorageIntegrity(format!(
+                        "authoritative transaction index view could not be pinned: {error}"
+                    )));
+                }
+            };
+            let (next, capture) = state
+                .relational_state
+                .stage_transaction_with_authoritative_index(
+                    transaction.clone(),
+                    skein_storage::RelationalMutationLimits::default(),
+                    skein_storage::RelationalOverflowConfig::default(),
+                    index.capture_limits(),
+                    index,
+                )
+                .map_err(map_transaction_relational_error)?;
+            index
+                .append(capture)
+                .map_err(map_transaction_relational_error)?;
+            next
+        }
     } else {
         state
             .relational_state

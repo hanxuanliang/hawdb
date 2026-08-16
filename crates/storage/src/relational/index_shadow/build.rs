@@ -4,7 +4,7 @@ use super::{
 };
 use crate::relational::{
     column_positions, index_includes_key, row_key, RelationalIndexDefinition, RelationalIndexRole,
-    RelationalState, RelationalTableSchema,
+    RelationalIndexRowSource, RelationalTableSchema,
 };
 use skein_integrity::Crc32cHasher;
 use std::cmp::Reverse;
@@ -26,7 +26,7 @@ pub(super) struct IndexSortReport {
 }
 
 pub(super) struct IndexBuildInput<'a> {
-    pub state: &'a RelationalState,
+    pub source: &'a dyn RelationalIndexRowSource,
     pub table: &'a str,
     pub schema: &'a RelationalTableSchema,
     pub definition: &'a RelationalIndexDefinition,
@@ -72,7 +72,7 @@ pub(super) fn write_index_from_rows(
     input: IndexBuildInput<'_>,
 ) -> Result<IndexSortReport, RelationalIndexShadowError> {
     let IndexBuildInput {
-        state,
+        source,
         table,
         schema,
         definition,
@@ -89,11 +89,6 @@ pub(super) fn write_index_from_rows(
             definition.name
         ))
     })?;
-    let segment = state.segments.get(table).ok_or_else(|| {
-        RelationalIndexShadowError::Corrupt(format!(
-            "table {table} is missing its relational segment"
-        ))
-    })?;
     let mut sorter = IndexEntrySorter::new(
         spill_prefix,
         generation,
@@ -101,16 +96,16 @@ pub(super) fn write_index_from_rows(
         config,
         max_spill_bytes,
     );
-    for (primary_key, row) in segment.rows.iter() {
+    source.visit_rows(table, &mut |primary_key, row| {
         let index_key = row_key(row, &positions);
         if !index_includes_key(definition, &index_key) {
-            continue;
+            return Ok(());
         }
         sorter.push(EncodedIndexEntry {
             index_key: encode_relational_key(&index_key)?,
             row_id: encode_relational_key(primary_key)?,
-        })?;
-    }
+        })
+    })?;
     sorter.finish()?.write(tree, definition.role)
 }
 

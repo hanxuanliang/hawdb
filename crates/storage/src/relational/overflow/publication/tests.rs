@@ -163,6 +163,56 @@ fn incremental_root_reuses_content_and_keeps_pinned_generation_readable() {
 }
 
 #[test]
+fn metadata_only_delta_retains_unmentioned_base_extents() {
+    let directory = unique_test_dir("retain-base");
+    let config = RelationalOverflowPublicationConfig::default();
+    let publisher = RelationalOverflowPublisher::new(config);
+    let (first, first_reference) = encoded_input(RelationalScalarType::Text, b"first payload");
+    let (second, second_reference) = encoded_input(RelationalScalarType::Bytea, b"second payload");
+    publisher
+        .publish(&directory, 1, 10, None, vec![first, second])
+        .unwrap();
+    let base = RelationalOverflowRootReader::open_latest(&directory, config)
+        .unwrap()
+        .unwrap();
+    let (third, third_reference) = encoded_input(RelationalScalarType::Text, b"third payload");
+
+    let report = publisher
+        .persist_generation_retaining_base(&directory, 2, 11, &base, 1, vec![third])
+        .unwrap();
+
+    assert_eq!(report.extent_count, 3);
+    assert_eq!(report.new_extent_count, 1);
+    assert_eq!(report.reused_extent_count, 2);
+    let candidate = RelationalOverflowRootReader::open_generation(&directory, 2, config).unwrap();
+    assert!(candidate.contains(&first_reference).unwrap());
+    assert!(candidate.contains(&second_reference).unwrap());
+    assert!(candidate.contains(&third_reference).unwrap());
+    assert_eq!(
+        RelationalOverflowRootReader::open_latest(&directory, config)
+            .unwrap()
+            .unwrap()
+            .manifest()
+            .generation,
+        1
+    );
+
+    let report = publisher
+        .persist_generation_retaining_base(&directory, 3, 12, &candidate, 2, Vec::new())
+        .unwrap();
+    assert_eq!(report.extent_count, 3);
+    assert_eq!(report.new_extent_count, 0);
+    assert_eq!(report.reused_extent_count, 3);
+    let empty_delta_candidate =
+        RelationalOverflowRootReader::open_generation(&directory, 3, config).unwrap();
+    assert!(empty_delta_candidate.contains(&first_reference).unwrap());
+    assert!(empty_delta_candidate.contains(&second_reference).unwrap());
+    assert!(empty_delta_candidate.contains(&third_reference).unwrap());
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn stale_publication_is_rejected_before_candidate_creation() {
     let directory = unique_test_dir("stale");
     let config = RelationalOverflowPublicationConfig::default();

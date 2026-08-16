@@ -345,29 +345,56 @@ impl GraphStore {
                 .as_ref()
                 .map(|overflow| durable.open_bound_relational_row_pages(overflow))
                 .transpose()?;
+            let row_publication_config = RelationalRowPagePublicationConfig::default();
+            let row_plan = self.plan_relational_row_page_checkpoint(
+                previous_row,
+                generation,
+                commit_epoch,
+                row_publication_config,
+            )?;
             let max_materialized_overflow_bytes =
                 usize::try_from(overflow_publication_config.max_new_extent_bytes.get())
                     .unwrap_or(usize::MAX);
-            let overflow_inputs = self
-                .relational_state
-                .overflow_generation_inputs(
+            let metadata_only_rows = self.relational_state.canonical_row_metadata_only();
+            let overflow_inputs = if metadata_only_rows {
+                self.relational_state
+                    .overflow_delta_generation_inputs(&row_plan.deltas)
+            } else {
+                self.relational_state.overflow_generation_inputs(
                     previous_overflow.is_some(),
                     max_materialized_overflow_bytes,
                 )
-                .map_err(|error| SkeinError::Storage(error.to_string()))?;
-            let relational_overflow_report =
-                RelationalOverflowPublisher::new(overflow_publication_config)
-                    .persist_generation(
-                        durable.root_path(),
-                        generation,
-                        commit_epoch,
-                        previous_overflow.as_ref(),
-                        durable
-                            .relational_overflow_generation_artifacts
-                            .map(|binding| binding.generation),
-                        overflow_inputs,
+            }
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            let overflow_publisher = RelationalOverflowPublisher::new(overflow_publication_config);
+            let relational_overflow_report = if metadata_only_rows {
+                let base = previous_overflow.as_ref().ok_or_else(|| {
+                    SkeinError::StorageIntegrity(
+                        "metadata-only relational checkpoint requires a pinned overflow root"
+                            .to_string(),
                     )
-                    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                })?;
+                overflow_publisher.persist_generation_retaining_base(
+                    durable.root_path(),
+                    generation,
+                    commit_epoch,
+                    base,
+                    base.manifest().generation,
+                    overflow_inputs,
+                )
+            } else {
+                overflow_publisher.persist_generation(
+                    durable.root_path(),
+                    generation,
+                    commit_epoch,
+                    previous_overflow.as_ref(),
+                    durable
+                        .relational_overflow_generation_artifacts
+                        .map(|binding| binding.generation),
+                    overflow_inputs,
+                )
+            }
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
             let relational_overflow_root =
                 skein_storage::RelationalOverflowRootReader::open_generation(
                     durable.root_path(),
@@ -376,13 +403,6 @@ impl GraphStore {
                 )
                 .map_err(|error| SkeinError::Storage(error.to_string()))?;
 
-            let row_publication_config = RelationalRowPagePublicationConfig::default();
-            let row_plan = self.plan_relational_row_page_checkpoint(
-                previous_row,
-                generation,
-                commit_epoch,
-                row_publication_config,
-            )?;
             let relational_row_report = RelationalRowPagePublisher::new(row_publication_config)
                 .persist_generation(
                     RelationalRowPageGenerationRequest {

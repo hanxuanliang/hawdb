@@ -3,7 +3,7 @@ use crate::sql::{
     SelectProjection, SelectStatement, SqlColumnRef, SqlExpression, SqlFunctionArgument,
     SqlPredicate,
 };
-use crate::store::GraphStore;
+use crate::store::{GraphStore, RelationalTransactionRowView};
 use skein_core::RuntimeTaskContext;
 use skein_storage::{
     RelationalError, RelationalHydrationBudget, RelationalKey, RelationalProjectedField,
@@ -23,6 +23,10 @@ use std::sync::Arc;
 pub(crate) enum RelationalRowReadMode<'a> {
     CanonicalMemory,
     Store(&'a GraphStore),
+    Transaction {
+        store: &'a GraphStore,
+        rows: &'a RelationalTransactionRowView,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -106,6 +110,9 @@ impl<'a> RelationalRowRuntime<'a> {
                     RelationalRowBackend::Snapshot,
                 )
             }
+            RelationalRowReadMode::Transaction { store, rows } => RelationalRowBackend::Snapshot(
+                store.open_relational_transaction_row_snapshot_reader(rows)?,
+            ),
         };
         let runtime_path = match &backend {
             RelationalRowBackend::CanonicalMemory => "canonical_memory",

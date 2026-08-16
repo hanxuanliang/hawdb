@@ -393,12 +393,12 @@ missing optional query index, or admission rejection before provisional output
 uses the observable canonical materialized fallback. Corruption, durability or
 generation mismatch, view-identity drift within a statement, and a locator
 whose canonical row is missing fail closed. A writable authoritative
-transaction pins the committed index view at begin and appends every successful
-statement's index changes to a private overlay. Queries and constraint checks
-merge that pinned base with all prior statement batches, so
-read-your-own-writes never consults the pre-transaction view alone and never
-reconstructs database-sized posting maps. The private overlay has cumulative
-entry and encoded-byte limits, and all index reads share a transaction-wide
+transaction pins the committed row and index views at begin and appends every
+successful statement's row and index changes to private immutable overlays.
+Queries and constraint checks merge those pinned bases with all prior statement
+batches, so read-your-own-writes never consults the pre-transaction view alone
+and never reconstructs database-sized posting maps. The private overlay has
+cumulative entry and encoded-byte limits, and all index reads share a transaction-wide
 page/row/byte ledger. If staging, constraint validation, or overlay admission
 fails, the statement leaves the row workspace, accumulated WAL writes, and
 private index overlay unchanged. The observable runtime path is
@@ -422,23 +422,21 @@ cache outcomes, recovery-delta work, live-overlay work, and index rows. It
 distinguishes `demand_paged`, `authoritative`, canonical fallback, and mixed
 execution. Plain `EXPLAIN` remains history-independent. Authoritative
 activation changes constraint and fallback semantics and omits materialized
-postings. A read-only `OutOfCore` plus `Authoritative` open additionally drops
-the transitional materialized checkpoint rows after both the canonical row
-view and authoritative index view are validated at the current epoch. The
-writable transaction workspace remains materialized. Cold open constructs only
-schemas and exact row counts from the self-describing canonical row root and
-never decodes or constructs the transitional checkpoint rows. With a non-empty
-WAL, the read-only profile validates every frame and record but does not apply
-schema-stable relational DML to a materialized row oracle. It may serve only
-after both pre-published row and index recovery artifacts match the recomputed
-WAL generation, LSN interval, ordered-record digest, and recovered epoch. Exact
-final counts come from the row recovery manifest. Schema-changing or snapshot
-WAL, a missing artifact, or any identity drift rejects open. Writable recovery
-still uses the materialized recovery state until the demand-hydrated sparse
-mutation workspace is wired through both recovery and later live commits.
+postings. An `OutOfCore` plus `Authoritative` open constructs metadata-only
+relation state only after the canonical row view and authoritative index view
+are validated at the current epoch. Cold open constructs only schemas and
+exact row counts from the self-describing canonical row root and never decodes
+or constructs the transitional checkpoint rows. With a non-empty WAL, a
+read-only handle validates every frame and record without applying
+schema-stable relational DML to a row oracle, then reuses only exact
+pre-published row and index recovery artifacts. A writable handle instead
+replays every authenticated access set through bounded sparse row and index
+builders. Exact final counts come from the row recovery manifest. Both modes
+must reach the same recovered epoch before serving. Schema-changing or snapshot
+WAL, a missing required artifact, or any identity drift rejects open.
 
 The storage crate and `GraphStore` provide the writable sparse-recovery path
-without changing the production open selector. For every authenticated WAL
+used by that production selector. For every authenticated WAL
 access, `GraphStore::hydrate_sparse_relational_recovery_access` probes
 `RelationalRowDeltaBuilder::lookup_staged` first. The builder resolves the
 bounded dirty map before immutable recovery runs newest-first, using the same
@@ -455,9 +453,9 @@ temporary materialized workspace contains only those entries, reuses the
 existing logical transaction implementation as the differential oracle,
 compares the recomputed access set, advances exact detached row counts, retains
 only newly created content-addressed overflow segments, and is then discarded.
-Older unreachable recovery overflow segments may remain until checkpoint
-because proving them unreachable would require scanning rows outside the
-bounded workspace.
+Older unreachable recovery overflow segments may remain until an explicit
+full-scan overflow compaction because proving them unreachable would require
+scanning rows outside the bounded workspace.
 
 Live schema-stable DML uses the same metadata-only merge boundary through
 `RelationalState::stage_sparse_transaction_with_authoritative_replay_access`.
@@ -503,11 +501,46 @@ budget rejection before WAL leaves the prior state, WAL LSN, and read views
 unchanged. A crash after WAL may discard unpublished candidates; recovery must
 replay the durable transaction and reconstruct the same epoch.
 
-This live path does not by itself activate metadata-only writable open. The
-production-open selector MUST continue loading materialized recovery state
-until the sparse recovery and live-commit paths pass generation-bound recovery,
-constraint, budget, and representative-copy qualification. Selector activation
-is a separate commit and evidence decision.
+A multi-statement `DatabaseTransaction` pins the committed row and index views
+once. Each successful schema-stable statement first prepares a replacement
+metadata state, a private immutable row batch, and private authoritative index
+changes. The transaction installs the row batch and index ledger only after
+both pass cumulative entry and resident-byte admission. A rejected statement
+therefore leaves both private views and the accumulated logical transaction
+unchanged. Reads use the transaction row snapshot plus the transaction index
+workspace, so read-your-own-writes never requires a materialized database copy.
+Final commit revalidates the complete transaction against the then-current
+canonical views before the ordinary WAL-before-visibility boundary.
+
+A metadata-only checkpoint also remains bounded. Changed keys are resolved
+from the final recovery/live row overlay rather than the intentionally empty
+metadata state. Overflow publication streams and conservatively retains the
+complete pinned base descriptor set while merging only dirty-page references;
+exact unreachable-extent reclamation is a separate full-scan maintenance job.
+The row candidate is published next. Required indexes are then rebuilt by
+paging that new row root in bounded batches and feeding the existing
+memory-capped, spillable index sorter. The outer checkpoint manifest binds the
+row, overflow, and index candidates atomically. It does not emit the legacy
+full-row relational checkpoint, because doing so would require database-sized
+hydration. A later reopen with a residency/index mode that requires that legacy
+artifact fails closed instead of interpreting metadata-only state as empty.
+
+`OutOfCore` plus `Authoritative` is the production selector for canonical
+metadata-only relational rows. A checkpointed database MUST construct relation
+schema and exact detached counts from the self-describing row root without
+decoding checkpoint rows. Clean opens require current row and index views at the
+checkpoint epoch. WAL opens either reuse exact source-bound recovery artifacts
+for a read-only handle or replay every authenticated access through bounded
+sparse builders for a writable handle. Both views must match the final database
+epoch before open succeeds. Snapshot WAL and schema-changing WAL are rejected
+until a new canonical checkpoint exists. Other residency or index modes retain
+the materialized path only for checkpoints they created; mode switching after
+a metadata-only checkpoint is intentionally rejected in unreleased v1.
+
+Selector activation is implementation readiness, not deployment qualification.
+Representative-copy cold/warm latency, RSS, page-fault, cache, pin, WAL, and
+write-amplification evidence remains mandatory before a workload is declared
+production-qualified.
 
 ## Identities and terminology
 
@@ -883,22 +916,23 @@ artifact file lengths. It verifies row-to-overflow binding and table schemas,
 but does not read row-page slots or hash database-scale payload artifacts.
 Descriptor and page integrity checks remain demand-read or scrub obligations.
 
-A read-only `OutOfCore` plus `Authoritative` handle builds a metadata-only
+An `OutOfCore` plus `Authoritative` handle builds a metadata-only
 `RelationalState` directly from the validated row root. With an empty
 post-checkpoint WAL it pins the canonical row/index views directly. With a
-non-empty WAL it validates the complete source without applying relational DML
-and requires matching pre-published row and index recovery artifacts before it
-may advance the logical counts and visible epoch. An already decoded state may
-otherwise detach its checkpoint-row oracle only after the current canonical
-row snapshot reader and the current authoritative index view both open
-successfully. All paths keep
-the complete schemas, exact manifest-derived logical row counts, and overflow
-resolvers, while reporting zero materialized row count and bytes. SQL must then
-serve only through the pinned row pages and persistent indexes. Mutation,
-checkpoint preparation, differential qualification, and Skein Lightning export
-fail closed instead of treating detached rows as an empty database or silently
-falling back. Derived repair opens retain materialized rows until their writable
-repair phase completes.
+non-empty WAL, a read-only handle validates the complete source without
+applying relational DML and requires matching pre-published row and index
+recovery artifacts before it may adopt the recovered logical counts and visible
+epoch. A writable handle replays schema-stable DML through bounded sparse
+workspaces, publishes source-bound row and index recovery artifacts, and then
+opens those exact views. Both paths retain complete schemas, exact
+manifest-derived logical row counts, and overflow resolvers while reporting
+zero materialized row count and bytes. SQL, transaction-private reads, later
+schema-stable writable DML, and metadata-only checkpoints must then use the
+pinned row pages and persistent indexes. Differential qualification, Skein
+Lightning export, schema-changing WAL, and snapshot WAL fail closed until a
+complete canonical checkpoint can be published; they must not treat detached
+rows as an empty database or silently fall back. Derived repair opens retain
+materialized rows until their writable repair phase completes.
 
 Relational transaction apply derives exact primary-key changes from the
 authoritative before and after states. Multiple relational fragments in one
@@ -970,9 +1004,9 @@ row, missing digest, type mismatch, or different value at that key is
 corruption; admission or cancellation is non-poisoning. The status retains both the last
 visible and failed commit epochs and whether a schema checkpoint is mandatory.
 Already pinned snapshots retain their prior immutable view while a new root is
-published. Writable transaction
-workspaces continue to read the materialized staged state, so
-read-your-own-writes never consults a lagging read view.
+published. Metadata-only writable transactions read their bounded private row
+view, while materialized-mode transactions retain their staged-state path; in
+both cases read-your-own-writes never consults a lagging read view.
 
 SQL pins this view once per statement. Primary-key probes, secondary-index row
 fetches, full scans, join probes, blocking-operator locator replay, and aggregate
@@ -1594,8 +1628,9 @@ checkpoint binding, demand-read, lifecycle, or serving obligations.
   bounded dirty overlays, immutable candidate generations, crash recovery,
   schema invalidation, no partial replay visibility, and sound exact-key
   constraint qualification only from a current pinned view.
-- `SkeinTransactionIndexOverlay.tla`: one pinned committed index base, bounded
-  transaction-private row/index changes, rejected-statement atomicity,
+- `SkeinTransactionIndexOverlay.tla`: pinned committed row/index bases, bounded
+  transaction-private immutable row/index overlays, version agreement,
+  rejected-statement atomicity,
   read-your-own-writes, rollback, and durable-before-visible publication. The
   concrete Content Store qualification composes multiple SQL statements and
   verifies ordered merge, transaction-workspace routing, and failure atomicity;

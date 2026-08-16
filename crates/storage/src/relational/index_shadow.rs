@@ -451,6 +451,43 @@ pub struct RelationalIndexShadowWriter {
     config: RelationalIndexShadowConfig,
 }
 
+/// Repeatable row traversal used by the bounded relational index builder.
+///
+/// Implementations may read resident rows or page a canonical row root. The
+/// writer invokes the source once per logical index so secondary-key sorting
+/// retains its existing bounded spill discipline.
+pub trait RelationalIndexRowSource {
+    fn visit_rows(
+        &self,
+        table: &str,
+        visit: &mut dyn FnMut(
+            &RelationalKey,
+            &super::RelationalRow,
+        ) -> Result<(), RelationalIndexShadowError>,
+    ) -> Result<(), RelationalIndexShadowError>;
+}
+
+impl RelationalIndexRowSource for RelationalState {
+    fn visit_rows(
+        &self,
+        table: &str,
+        visit: &mut dyn FnMut(
+            &RelationalKey,
+            &super::RelationalRow,
+        ) -> Result<(), RelationalIndexShadowError>,
+    ) -> Result<(), RelationalIndexShadowError> {
+        let segment = self.segments.get(table).ok_or_else(|| {
+            RelationalIndexShadowError::Corrupt(format!(
+                "table {table} is missing its relational segment"
+            ))
+        })?;
+        for (primary_key, row) in segment.rows.iter() {
+            visit(primary_key, row)?;
+        }
+        Ok(())
+    }
+}
+
 impl RelationalIndexShadowWriter {
     pub const fn new(config: RelationalIndexShadowConfig) -> Self {
         Self { config }
@@ -525,9 +562,59 @@ impl RelationalIndexShadowWriter {
         result
     }
 
+    pub fn publish_generation_from_source(
+        &self,
+        directory: &Path,
+        state: &RelationalState,
+        source: &dyn RelationalIndexRowSource,
+        generation: u64,
+        source_commit_epoch: u64,
+    ) -> Result<RelationalIndexShadowBuildReport, RelationalIndexShadowError> {
+        if generation == 0 {
+            return Err(RelationalIndexShadowError::Admission(
+                "relational index generation must be non-zero".to_string(),
+            ));
+        }
+        let _lock = acquire_publication_lock(directory)?;
+        cleanup_stale_sort_runs(directory)?;
+        let paths = ShadowPublicationPaths::for_generation(directory, generation);
+        let result = self.build_and_publish_from_source(
+            state,
+            source,
+            generation,
+            source_commit_epoch,
+            None,
+            &paths,
+        );
+        if result.is_err() {
+            let _ = fs::remove_file(&paths.artifact_tmp);
+            let _ = fs::remove_file(&paths.manifest_tmp);
+        }
+        result
+    }
+
     fn build_and_publish(
         &self,
         state: &RelationalState,
+        generation: u64,
+        source_commit_epoch: u64,
+        expected_previous_generation: Option<Option<u64>>,
+        paths: &ShadowPublicationPaths,
+    ) -> Result<RelationalIndexShadowBuildReport, RelationalIndexShadowError> {
+        self.build_and_publish_from_source(
+            state,
+            state,
+            generation,
+            source_commit_epoch,
+            expected_previous_generation,
+            paths,
+        )
+    }
+
+    fn build_and_publish_from_source(
+        &self,
+        state: &RelationalState,
+        source: &dyn RelationalIndexRowSource,
         generation: u64,
         source_commit_epoch: u64,
         expected_previous_generation: Option<Option<u64>>,
@@ -553,11 +640,6 @@ impl RelationalIndexShadowWriter {
         let mut sort_spill_bytes = 0u64;
         let mut peak_sort_memory_bytes = 0usize;
         for (table, schema) in &state.schemas {
-            let segment = state.segments.get(table).ok_or_else(|| {
-                RelationalIndexShadowError::Corrupt(format!(
-                    "table {table} is missing its relational segment"
-                ))
-            })?;
             let schema_digest = relational_schema_digest(schema)?;
             for definition in schema.required_index_definitions() {
                 let identity = IndexIdentity {
@@ -572,13 +654,13 @@ impl RelationalIndexShadowWriter {
                     self.config.max_build_metadata_bytes.get(),
                 );
                 if definition.role == RelationalIndexRole::Primary {
-                    for (primary_key, _) in segment.rows.iter() {
+                    source.visit_rows(table, &mut |primary_key, _| {
                         let encoded = encode_ordered_relational_key(primary_key)?;
                         tree.push(IndexLeafEntry {
                             key: encoded.clone(),
                             posting: IndexLeafPosting::Inline(vec![IndexRowId::new(encoded)]),
-                        })?;
-                    }
+                        })
+                    })?;
                 } else {
                     let remaining_spill_bytes = self
                         .config
@@ -594,7 +676,7 @@ impl RelationalIndexShadowWriter {
                     let sort_report = build::write_index_from_rows(
                         &mut tree,
                         build::IndexBuildInput {
-                            state,
+                            source,
                             table,
                             schema,
                             definition: &definition,

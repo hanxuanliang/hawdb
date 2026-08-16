@@ -1641,7 +1641,13 @@ impl DurableStore {
         let path = self
             .root_path
             .join(relational_checkpoint_generation_file(generation));
-        if state.is_empty() {
+        // Canonical metadata-only state deliberately omits database-sized row
+        // and overflow residency. Its durable authority is the bound row and
+        // overflow roots written by the same checkpoint publication. Encoding
+        // it as a legacy full-row checkpoint would either require whole-store
+        // hydration or produce an incomplete artifact whose retained overflow
+        // segments appear unreachable.
+        if state.is_empty() || state.canonical_row_metadata_only() {
             match fs::remove_file(&path) {
                 Ok(()) => sync_parent_dir(&path)?,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

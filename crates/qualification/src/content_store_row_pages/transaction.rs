@@ -179,7 +179,7 @@ fn transaction_runtime_paths(explain: &QueryOutput) -> Result<TransactionRuntime
     let transaction_workspace_lookups = required_info_u64(info, "transaction_workspace")?;
     let canonical_fallback_lookups = required_info_u64(info, "canonical_fallback")?;
     if index_runtime_path != "transaction_workspace"
-        || row_runtime_path != "canonical_memory"
+        || row_runtime_path != "snapshot_rows"
         || transaction_workspace_lookups == 0
         || canonical_fallback_lookups != 0
     {

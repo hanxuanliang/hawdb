@@ -3,9 +3,9 @@
 use super::{GraphStore, RelationalRowStorageResidencyReport};
 use skein_storage::{
     RelationalConstraintIndex, RelationalError, RelationalHydrationBudget,
-    RelationalIndexChangeCaptureLimits, RelationalOverflowRootReader, RelationalProjectedRow,
-    RelationalRecoveryFence, RelationalRecoverySourceIdentity, RelationalReplayAccess,
-    RelationalReplayAccessSet, RelationalRow, RelationalRowChangeCapture,
+    RelationalIndexChangeCapture, RelationalIndexChangeCaptureLimits, RelationalOverflowRootReader,
+    RelationalProjectedRow, RelationalRecoveryFence, RelationalRecoverySourceIdentity,
+    RelationalReplayAccess, RelationalReplayAccessSet, RelationalRow, RelationalRowChangeCapture,
     RelationalRowChangeCaptureLimits, RelationalRowDeltaBuilder, RelationalRowDeltaConfig,
     RelationalRowDeltaError, RelationalRowDeltaReader, RelationalRowDeltaReport,
     RelationalRowPageDemandReadError, RelationalRowPageLiveError, RelationalRowPageMutationPlanner,
@@ -15,7 +15,7 @@ use skein_storage::{
     RelationalRowPageSnapshotRangeReport, RelationalRowPageSnapshotReadError,
     RelationalRowPageSnapshotReadLimits, RelationalRowPageSnapshotReader,
     RelationalRowPageSnapshotRowSource, RelationalRowPageTableDelta, RelationalSparseIndexProbe,
-    RelationalSparseLivePreparationStage, RelationalSparseRecoveryRow,
+    RelationalSparseLivePreparationStage, RelationalSparseLiveStage, RelationalSparseRecoveryRow,
     RelationalSparseWorkspaceBuilder, RelationalState, RelationalTransaction, SegmentCache,
     StorageResidencyMode, StoreId,
 };
@@ -96,6 +96,44 @@ struct RelationalRowPageServingResources {
 pub(super) struct RelationalRowPageCheckpointPlan {
     pub base: Option<Arc<RelationalRowPageRootReader>>,
     pub deltas: Vec<RelationalRowPageTableDelta>,
+}
+
+/// A bounded transaction-private row overlay pinned to the committed row view.
+///
+/// Successful statements append immutable row-change batches. Failed
+/// statements stage a replacement view first and therefore leave this view
+/// unchanged. The private visible epoch is only an ordering token; it is never
+/// published as a database commit epoch.
+#[derive(Debug)]
+pub(crate) struct RelationalTransactionRowView {
+    view: Arc<RelationalRowPageReadView>,
+    limits: RelationalRowChangeCaptureLimits,
+}
+
+impl RelationalTransactionRowView {
+    pub(crate) fn stage_advance(
+        &self,
+        capture: RelationalRowChangeCapture,
+    ) -> Result<Self, RelationalError> {
+        let next_epoch = self
+            .view
+            .identity()
+            .visible_commit_epoch
+            .checked_add(1)
+            .ok_or_else(|| {
+                RelationalError::Admission(
+                    "transaction-private row overlay epoch overflow".to_string(),
+                )
+            })?;
+        let view = self
+            .view
+            .advance(next_epoch, Some(capture), self.limits)
+            .map_err(map_transaction_row_live_error)?;
+        Ok(Self {
+            view: Arc::new(view),
+            limits: self.limits,
+        })
+    }
 }
 
 struct RelationalSparseLiveHydrator<'a> {
@@ -672,13 +710,8 @@ pub(super) struct RelationalRowLiveUnavailable {
 }
 
 impl GraphStore {
-    pub(super) fn activate_read_only_out_of_core_rows(&mut self) -> crate::error::Result<()> {
-        let read_only = self
-            .durable
-            .as_ref()
-            .is_some_and(|durable| durable.read_only);
-        if !read_only
-            || self.residency_mode != StorageResidencyMode::OutOfCore
+    pub(super) fn activate_out_of_core_relational_rows(&mut self) -> crate::error::Result<()> {
+        if self.residency_mode != StorageResidencyMode::OutOfCore
             || !matches!(
                 self.relational_checkpoint_index_load(),
                 skein_storage::RelationalCheckpointIndexLoad::OmitMaterializedPostings
@@ -689,8 +722,7 @@ impl GraphStore {
         }
         self.open_relational_row_snapshot_reader()?.ok_or_else(|| {
             crate::error::SkeinError::StorageIntegrity(
-                "read-only out-of-core relational activation requires a canonical row view"
-                    .to_string(),
+                "out-of-core relational activation requires a canonical row view".to_string(),
             )
         })?;
         if !self
@@ -699,7 +731,20 @@ impl GraphStore {
             .serving
         {
             return Err(crate::error::SkeinError::StorageIntegrity(
-                "read-only out-of-core relational activation requires an authoritative index view"
+                "out-of-core relational activation requires an authoritative index view"
+                    .to_string(),
+            ));
+        }
+        if self.relational_state.canonical_row_metadata_only() {
+            return Ok(());
+        }
+        let read_only = self
+            .durable
+            .as_ref()
+            .is_some_and(|durable| durable.read_only);
+        if !read_only {
+            return Err(crate::error::SkeinError::StorageIntegrity(
+                "writable out-of-core relational activation did not mount canonical metadata-only rows"
                     .to_string(),
             ));
         }
@@ -735,9 +780,16 @@ impl GraphStore {
                 base_manifest.root_set_digest,
             )));
         }
+        let metadata_only = self.relational_state.canonical_row_metadata_only();
         let capture = view
             .checkpoint_capture(
-                |table, primary_key| self.relational_state.row(table, primary_key).cloned(),
+                |table, primary_key| {
+                    if metadata_only {
+                        view.checkpoint_overlay_row(table, primary_key)
+                    } else {
+                        Ok(self.relational_state.row(table, primary_key).cloned())
+                    }
+                },
                 self.relational_row_pages.live_limits,
             )
             .map_err(|error| crate::error::SkeinError::Storage(error.to_string()))?;
@@ -1142,12 +1194,6 @@ impl GraphStore {
         row_capture_limits: RelationalRowChangeCaptureLimits,
         constraint_index: &dyn RelationalConstraintIndex,
     ) -> Result<Vec<RelationalSparseRecoveryRow>, RelationalError> {
-        if !self.relational_state.canonical_row_metadata_only() {
-            return Err(RelationalError::Admission(
-                "sparse relational live hydration requires canonical metadata-only state"
-                    .to_string(),
-            ));
-        }
         let reader = self
             .open_relational_row_snapshot_reader()
             .map_err(|error| RelationalError::Corruption(error.to_string()))?
@@ -1157,11 +1203,82 @@ impl GraphStore {
                         .to_string(),
                 )
             })?;
-        let plan = self
-            .relational_state
-            .plan_sparse_transaction_hydration(transaction)?;
-        let mut hydrator =
-            RelationalSparseLiveHydrator::new(&self.relational_state, reader, row_capture_limits);
+        self.hydrate_sparse_relational_workspace(
+            &self.relational_state,
+            reader,
+            transaction,
+            index_capture_limits,
+            row_capture_limits,
+            constraint_index,
+        )
+    }
+
+    pub(crate) fn stage_sparse_relational_transaction_statement(
+        &self,
+        state: &RelationalState,
+        rows: &RelationalTransactionRowView,
+        transaction: RelationalTransaction,
+        constraint_index: &dyn RelationalConstraintIndex,
+    ) -> Result<
+        (
+            RelationalState,
+            RelationalIndexChangeCapture,
+            RelationalRowChangeCapture,
+        ),
+        RelationalError,
+    > {
+        let index_capture_limits =
+            self.relational_index_live_capture_limits().ok_or_else(|| {
+                RelationalError::Corruption(
+                    "sparse relational transaction requires authoritative index limits".to_string(),
+                )
+            })?;
+        let row_capture_limits = self.relational_row_live_capture_limits().ok_or_else(|| {
+            RelationalError::Corruption(
+                "sparse relational transaction requires canonical row limits".to_string(),
+            )
+        })?;
+        let reader = self
+            .open_relational_transaction_row_snapshot_reader(rows)
+            .map_err(|error| RelationalError::Corruption(error.to_string()))?;
+        let hydrated_workspace = self.hydrate_sparse_relational_workspace(
+            state,
+            reader,
+            &transaction,
+            index_capture_limits,
+            row_capture_limits,
+            constraint_index,
+        )?;
+        state
+            .stage_sparse_transaction_with_authoritative_replay_access(RelationalSparseLiveStage {
+                transaction,
+                hydrated_workspace,
+                mutation_limits: self.relational_mutation_limits,
+                overflow_config: self.relational_overflow_config,
+                index_capture_limits,
+                row_capture_limits,
+                constraint_index,
+            })
+            .map(|(next, index_capture, row_capture, _)| (next, index_capture, row_capture))
+    }
+
+    fn hydrate_sparse_relational_workspace(
+        &self,
+        state: &RelationalState,
+        reader: RelationalRowPageSnapshotReader,
+        transaction: &RelationalTransaction,
+        index_capture_limits: RelationalIndexChangeCaptureLimits,
+        row_capture_limits: RelationalRowChangeCaptureLimits,
+        constraint_index: &dyn RelationalConstraintIndex,
+    ) -> Result<Vec<RelationalSparseRecoveryRow>, RelationalError> {
+        if !state.canonical_row_metadata_only() {
+            return Err(RelationalError::Admission(
+                "sparse relational live hydration requires canonical metadata-only state"
+                    .to_string(),
+            ));
+        }
+        let plan = state.plan_sparse_transaction_hydration(transaction)?;
+        let mut hydrator = RelationalSparseLiveHydrator::new(state, reader, row_capture_limits);
         for access in plan.point_access() {
             hydrator.hydrate_point(access)?;
         }
@@ -1174,18 +1291,16 @@ impl GraphStore {
 
         loop {
             let previous_entries = hydrator.workspace.len();
-            let preparation = self
-                .relational_state
-                .prepare_sparse_transaction_for_authoritative_live(
-                    RelationalSparseLivePreparationStage {
-                        transaction: transaction.clone(),
-                        hydrated_workspace: hydrator.workspace_snapshot(),
-                        mutation_limits: self.relational_mutation_limits,
-                        overflow_config: self.relational_overflow_config,
-                        index_capture_limits,
-                        row_capture_limits,
-                    },
-                )?;
+            let preparation = state.prepare_sparse_transaction_for_authoritative_live(
+                RelationalSparseLivePreparationStage {
+                    transaction: transaction.clone(),
+                    hydrated_workspace: hydrator.workspace_snapshot(),
+                    mutation_limits: self.relational_mutation_limits,
+                    overflow_config: self.relational_overflow_config,
+                    index_capture_limits,
+                    row_capture_limits,
+                },
+            )?;
             for access in preparation.replay_access().entries() {
                 hydrator.hydrate_point(access)?;
             }
@@ -1564,6 +1679,27 @@ impl GraphStore {
         self.relational_row_pages.recovery_report.as_ref()
     }
 
+    pub(crate) fn begin_authoritative_relational_transaction_rows(
+        &self,
+    ) -> crate::error::Result<Option<RelationalTransactionRowView>> {
+        if !self.relational_state.canonical_row_metadata_only() {
+            return Ok(None);
+        }
+        let view = self
+            .relational_row_pages
+            .current_read_view(self.commit_epoch)
+            .cloned()
+            .ok_or_else(|| {
+                crate::error::SkeinError::StorageIntegrity(
+                    "metadata-only transaction requires a current canonical row view".to_string(),
+                )
+            })?;
+        Ok(Some(RelationalTransactionRowView {
+            view,
+            limits: self.relational_row_pages.live_limits,
+        }))
+    }
+
     pub(crate) fn open_relational_row_snapshot_reader(
         &self,
     ) -> crate::error::Result<Option<RelationalRowPageSnapshotReader>> {
@@ -1580,6 +1716,40 @@ impl GraphStore {
                 ))),
             };
         };
+        self.open_relational_row_snapshot_reader_for_view(view)
+            .map(Some)
+    }
+
+    pub(crate) fn open_relational_transaction_row_snapshot_reader(
+        &self,
+        rows: &RelationalTransactionRowView,
+    ) -> crate::error::Result<RelationalRowPageSnapshotReader> {
+        let Some(committed) = self
+            .relational_row_pages
+            .current_read_view(self.commit_epoch)
+        else {
+            return Err(crate::error::SkeinError::StorageIntegrity(
+                "transaction-private row view lost its committed base".to_string(),
+            ));
+        };
+        let committed_identity = committed.identity();
+        let transaction_identity = rows.view.identity();
+        if committed_identity.base_generation != transaction_identity.base_generation
+            || committed_identity.base_commit_epoch != transaction_identity.base_commit_epoch
+            || committed_identity.root_set_digest != transaction_identity.root_set_digest
+            || committed_identity.delta_generation != transaction_identity.delta_generation
+        {
+            return Err(crate::error::SkeinError::StorageIntegrity(
+                "transaction-private row view differs from its committed base".to_string(),
+            ));
+        }
+        self.open_relational_row_snapshot_reader_for_view(Arc::clone(&rows.view))
+    }
+
+    fn open_relational_row_snapshot_reader_for_view(
+        &self,
+        view: Arc<RelationalRowPageReadView>,
+    ) -> crate::error::Result<RelationalRowPageSnapshotReader> {
         let resources = self
             .relational_row_pages
             .serving_resources
@@ -1596,7 +1766,6 @@ impl GraphStore {
             Arc::clone(&resources.cache),
             resources.store_id,
         )
-        .map(Some)
         .map_err(|error| {
             crate::error::SkeinError::StorageIntegrity(format!(
                 "canonical relational row reader could not open: {error}"
@@ -1623,6 +1792,20 @@ fn map_sparse_row_delta_error(error: RelationalRowDeltaError) -> RelationalError
         | RelationalRowDeltaError::StaleBase { .. }) => {
             RelationalError::Corruption(error.to_string())
         }
+    }
+}
+
+fn map_transaction_row_live_error(error: RelationalRowPageLiveError) -> RelationalError {
+    match error {
+        RelationalRowPageLiveError::Admission(message)
+        | RelationalRowPageLiveError::Invalidated(message) => RelationalError::Admission(message),
+        RelationalRowPageLiveError::RequiresCheckpoint { tables } => {
+            RelationalError::Admission(format!(
+                "transaction-private row overlay requires a canonical checkpoint for tables {}",
+                tables.join(",")
+            ))
+        }
+        RelationalRowPageLiveError::Corrupt(message) => RelationalError::Corruption(message),
     }
 }
 
@@ -1868,21 +2051,16 @@ mod tests {
             ..WalReplayConfig::default()
         };
         let path = seed_row_root("sparse-writable-hydration", seed);
-        let replay = WalReplayConfig {
-            residency_mode: StorageResidencyMode::OutOfCore,
-            relational_index_mode: RelationalIndexMode::Authoritative,
-            ..WalReplayConfig::default()
-        };
-        let mut catalog = Catalog::default();
-        let mut store = GraphStore::open_with_durability_and_replay_config(
+        let mut oracle_catalog = Catalog::default();
+        let oracle = GraphStore::open_with_durability_and_replay_config(
             &path,
-            &mut catalog,
+            &mut oracle_catalog,
             DurabilityPolicy::default(),
-            replay,
+            seed,
         )
         .unwrap();
-        let index_limits = store.relational_index_live_capture_limits().unwrap();
-        let row_limits = store.relational_row_live_capture_limits().unwrap();
+        let index_limits = oracle.relational_index_live_capture_limits().unwrap();
+        let row_limits = oracle.relational_row_live_capture_limits().unwrap();
         let first = RelationalTransaction {
             writes: vec![RelationalWrite::Insert {
                 table: "documents".to_string(),
@@ -1890,19 +2068,14 @@ mod tests {
                 mode: RelationalInsertMode::Error,
             }],
         };
-        let index = store
-            .authoritative_relational_constraint_index()
-            .unwrap()
-            .unwrap();
-        let (after_first, _, _, first_access) = store
+        let (after_first, _, _, first_access) = oracle
             .relational_state
-            .stage_transaction_with_authoritative_replay_access(
+            .stage_transaction_with_index_row_and_replay_access(
                 first.clone(),
-                store.relational_mutation_limits,
-                store.relational_overflow_config,
+                oracle.relational_mutation_limits,
+                oracle.relational_overflow_config,
                 index_limits,
                 row_limits,
-                &index,
             )
             .unwrap();
         let checkpoint_probe = RelationalTransaction {
@@ -1911,19 +2084,14 @@ mod tests {
                 keys: vec![key(1)],
             }],
         };
-        let index = store
-            .authoritative_relational_constraint_index()
-            .unwrap()
-            .unwrap();
-        let (_, _, _, checkpoint_access) = store
+        let (_, _, _, checkpoint_access) = oracle
             .relational_state
-            .stage_transaction_with_authoritative_replay_access(
+            .stage_transaction_with_index_row_and_replay_access(
                 checkpoint_probe,
-                store.relational_mutation_limits,
-                store.relational_overflow_config,
+                oracle.relational_mutation_limits,
+                oracle.relational_overflow_config,
                 index_limits,
                 row_limits,
-                &index,
             )
             .unwrap();
         let second = RelationalTransaction {
@@ -1942,30 +2110,33 @@ mod tests {
                 },
             }],
         };
-        let index = store
-            .authoritative_relational_constraint_index()
-            .unwrap()
-            .unwrap();
         let (expected, _, _, second_access) = after_first
-            .stage_transaction_with_authoritative_replay_access(
+            .stage_transaction_with_index_row_and_replay_access(
                 second.clone(),
-                store.relational_mutation_limits,
-                store.relational_overflow_config,
+                oracle.relational_mutation_limits,
+                oracle.relational_overflow_config,
                 index_limits,
                 row_limits,
-                &index,
             )
             .unwrap();
         assert_eq!(first_access.entries().len(), 1);
         assert_eq!(second_access.entries().len(), 2);
+        drop(oracle);
 
-        let base = store
-            .relational_row_pages
-            .read_view
-            .as_ref()
-            .unwrap()
-            .pinned_base();
-        store.relational_state = RelationalState::from_canonical_row_root(base.manifest()).unwrap();
+        let replay = WalReplayConfig {
+            residency_mode: StorageResidencyMode::OutOfCore,
+            relational_index_mode: RelationalIndexMode::Authoritative,
+            ..WalReplayConfig::default()
+        };
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::open_with_durability_and_replay_config(
+            &path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            replay,
+        )
+        .unwrap();
+        assert!(store.relational_state.canonical_row_metadata_only());
         store.mount_relational_row_pages_for_recovery().unwrap();
         store.mount_relational_index_shadow_for_recovery();
 
@@ -1978,10 +2149,13 @@ mod tests {
                 },
             )
             .unwrap_err();
-        assert!(matches!(
-            read_budget_error,
-            RelationalError::Admission(message) if message.contains("byte")
-        ));
+        assert!(
+            matches!(
+                &read_budget_error,
+                RelationalError::Admission(message) if message.contains("byte")
+            ),
+            "unexpected sparse recovery budget error: {read_budget_error:?}"
+        );
 
         store
             .stage_recovered_relational_transaction(first, Some(first_access), 2)
@@ -2094,13 +2268,7 @@ mod tests {
             replay,
         )
         .unwrap();
-        let base = store
-            .relational_row_pages
-            .read_view
-            .as_ref()
-            .unwrap()
-            .pinned_base();
-        store.relational_state = RelationalState::from_canonical_row_root(base.manifest()).unwrap();
+        assert!(store.relational_state.canonical_row_metadata_only());
 
         store
             .commit_relational_transaction(
@@ -2187,6 +2355,46 @@ mod tests {
         ));
 
         drop(store);
+        let mut reopened_catalog = Catalog::default();
+        let mut reopened = GraphStore::open_with_durability_and_replay_config(
+            &path,
+            &mut reopened_catalog,
+            DurabilityPolicy::default(),
+            replay,
+        )
+        .unwrap();
+        assert!(reopened.relational_state.canonical_row_metadata_only());
+        assert!(!reopened.relational_state.materialized_rows_resident());
+        assert_eq!(reopened.relational_state.row_count("documents"), 2);
+        assert!(matches!(
+            reopened.relational_row_page_recovery_status(),
+            RelationalRowPageRecoveryStatus::WalRecovered {
+                recovered_commit_epoch: 3,
+                ..
+            }
+        ));
+        reopened
+            .commit_relational_transaction(
+                &mut reopened_catalog,
+                RelationalTransaction {
+                    writes: vec![RelationalWrite::Insert {
+                        table: "documents".to_string(),
+                        rows: vec![row(4, "after-reopen")],
+                        mode: RelationalInsertMode::Error,
+                    }],
+                },
+            )
+            .unwrap();
+        assert_eq!(reopened.commit_epoch, 4);
+        assert_eq!(reopened.relational_state.row_count("documents"), 3);
+        assert!(matches!(
+            reopened.relational_row_page_recovery_status(),
+            RelationalRowPageRecoveryStatus::LiveCurrent {
+                visible_commit_epoch: 4,
+                ..
+            }
+        ));
+        drop(reopened);
         std::fs::remove_dir_all(path).unwrap();
     }
 
@@ -2210,13 +2418,7 @@ mod tests {
             replay,
         )
         .unwrap();
-        let base = store
-            .relational_row_pages
-            .read_view
-            .as_ref()
-            .unwrap()
-            .pinned_base();
-        store.relational_state = RelationalState::from_canonical_row_root(base.manifest()).unwrap();
+        assert!(store.relational_state.canonical_row_metadata_only());
         store.relational_row_pages.live_limits.max_entries = NonZeroUsize::new(1).unwrap();
         let commit_epoch = store.commit_epoch;
         let next_lsn = store.durable.as_ref().unwrap().next_lsn;
@@ -2305,13 +2507,7 @@ mod tests {
             replay,
         )
         .unwrap();
-        let base = store
-            .relational_row_pages
-            .read_view
-            .as_ref()
-            .unwrap()
-            .pinned_base();
-        store.relational_state = RelationalState::from_canonical_row_root(base.manifest()).unwrap();
+        assert!(store.relational_state.canonical_row_metadata_only());
 
         store
             .commit_relational_transaction(

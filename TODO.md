@@ -147,12 +147,20 @@ crash; read-only recovery remains fail closed.
     exact final per-table counts required to reconstruct that state after WAL.
     Row and index recovery manifests also bind the exact WAL generation, LSN
     interval, and ordered-record digest, so an epoch-only derived artifact
-    cannot be reused. A read-only `OutOfCore` plus `Authoritative` reopen now
-    avoids a database-sized mutation workspace when those exact row and index
-    recovery artifacts already exist: it validates the whole WAL source, keeps
-    only schema/count metadata, adopts row counts from the fenced row manifest,
-    and fails closed on DDL, missing artifacts, or source drift. Writable
-    recovery still materializes the full mutation state.
+    cannot be reused. An `OutOfCore` plus `Authoritative` reopen now avoids a
+    database-sized mutation workspace for both read-only and writable handles:
+    it validates the whole WAL source, keeps only schema/count metadata, adopts
+    row counts from the fenced row manifest, and fails closed on DDL, snapshot
+    WAL, missing artifacts, or source drift. Writable recovery sparsely hydrates
+    the exact replay access set into bounded row and index deltas, and later
+    schema-stable transactions use bounded private row and index overlays.
+  - Metadata-only checkpoints now resolve dirty keys from the final live
+    overlay, publish only dirty row pages, conservatively retain the pinned
+    overflow base, rebuild required indexes by batch-scanning the new row root
+    through the spillable index builder, and omit the legacy full-row artifact.
+    Add a separately admitted full-scan overflow compaction/GC operation and
+    production-copy evidence before claiming exact unreachable-extent reclaim
+    for repeated metadata-only checkpoints.
   - The typed runner now qualifies `content_documents`, `thread_messages`,
     `content_chunks`, and `content_anchors` using the frozen PostgreSQL statement
     corpus and graph-plus-relational commits that publish one shared epoch.
@@ -194,11 +202,13 @@ crash; read-only recovery remains fail closed.
     production replica's actual configured resource profile; 512 MiB is not a
     universal activation cutoff.
   - The authoritative transaction core now pins one persistent base and merges
-    a bounded private index overlay across SQL statements. The typed runner now
-    executes a Content Store-shaped message UPSERT, page read, rejected foreign
-    key statement, payload aggregate, and document-summary update as one group,
-    and proves transaction-workspace routing plus atomic publication. The same
-    runner now proves a cancelled Content Store point read is
+    bounded private row and index overlays across SQL statements. A rejected
+    statement leaves both overlays unchanged, while successful statements expose
+    read-your-own-writes without rematerializing checkpoint rows. The typed
+    runner executes a Content Store-shaped message UPSERT, page read, rejected
+    foreign key statement, payload aggregate, and document-summary update as one
+    group, and proves transaction-workspace routing plus atomic publication. The
+    same runner now proves a cancelled Content Store point read is
     non-poisoning and pin-clean, and that `FOR UPDATE` makes a same-key UPSERT
     time out and abort without changing the row or commit epoch. A disposable
     backup/restore probe now bit-flips the current row-page artifact, requires

@@ -701,9 +701,9 @@ impl GraphStore {
                 }
             }
             WalOp::RelationalSnapshot { record } => {
-                if self.uses_sparse_read_only_relational_recovery() {
+                if self.relational_state.canonical_row_metadata_only() {
                     return Err(SkeinError::Storage(
-                        "read-only sparse relational recovery rejects snapshot WAL until a new canonical checkpoint is published"
+                        "metadata-only relational recovery rejects snapshot WAL until a new canonical checkpoint is published"
                             .to_string(),
                     ));
                 }

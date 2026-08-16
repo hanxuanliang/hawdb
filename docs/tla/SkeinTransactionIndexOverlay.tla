@@ -2,10 +2,10 @@
 EXTENDS Naturals, Sequences, FiniteSets
 
 (***************************************************************************)
-(* One authoritative transaction pins the committed index view and applies *)
-(* successful statements to a bounded private overlay. Reads combine the   *)
-(* pinned base and overlay. Rejected statements are atomic, and canonical  *)
-(* visibility advances only after the complete workspace is durable.       *)
+(* One authoritative transaction pins committed row and index views and    *)
+(* applies successful statements to bounded private overlays. Reads combine*)
+(* the pinned bases and overlays. Rejected statements are atomic across     *)
+(* both overlays, and canonical visibility advances only after durability.  *)
 (***************************************************************************)
 
 CONSTANT MaxEpoch, MaxOverlayEntries
@@ -42,9 +42,15 @@ VARIABLES
     baseIndexState,
     workspaceState,
     workspaceIndexState,
-    overlayEntries,
+    rowOverlayEntries,
+    indexOverlayEntries,
+    rowOverlayVersion,
+    indexOverlayVersion,
     lastAcceptedState,
-    lastAcceptedEntries,
+    lastAcceptedRowEntries,
+    lastAcceptedIndexEntries,
+    lastAcceptedRowVersion,
+    lastAcceptedIndexVersion,
     statementRejected,
     workspaceRead,
     readState
@@ -58,9 +64,15 @@ vars == <<
     baseIndexState,
     workspaceState,
     workspaceIndexState,
-    overlayEntries,
+    rowOverlayEntries,
+    indexOverlayEntries,
+    rowOverlayVersion,
+    indexOverlayVersion,
     lastAcceptedState,
-    lastAcceptedEntries,
+    lastAcceptedRowEntries,
+    lastAcceptedIndexEntries,
+    lastAcceptedRowVersion,
+    lastAcceptedIndexVersion,
     statementRejected,
     workspaceRead,
     readState
@@ -75,9 +87,15 @@ Init ==
     /\ baseIndexState = BaseState
     /\ workspaceState = BaseState
     /\ workspaceIndexState = BaseState
-    /\ overlayEntries = 0
+    /\ rowOverlayEntries = 0
+    /\ indexOverlayEntries = 0
+    /\ rowOverlayVersion = 0
+    /\ indexOverlayVersion = 0
     /\ lastAcceptedState = BaseState
-    /\ lastAcceptedEntries = 0
+    /\ lastAcceptedRowEntries = 0
+    /\ lastAcceptedIndexEntries = 0
+    /\ lastAcceptedRowVersion = 0
+    /\ lastAcceptedIndexVersion = 0
     /\ statementRejected = FALSE
     /\ workspaceRead = FALSE
     /\ readState = BaseState
@@ -90,25 +108,42 @@ Begin ==
     /\ baseIndexState' = canonicalState
     /\ workspaceState' = canonicalState
     /\ workspaceIndexState' = canonicalState
-    /\ overlayEntries' = 0
+    /\ rowOverlayEntries' = 0
+    /\ indexOverlayEntries' = 0
+    /\ rowOverlayVersion' = 0
+    /\ indexOverlayVersion' = 0
     /\ lastAcceptedState' = canonicalState
-    /\ lastAcceptedEntries' = 0
+    /\ lastAcceptedRowEntries' = 0
+    /\ lastAcceptedIndexEntries' = 0
+    /\ lastAcceptedRowVersion' = 0
+    /\ lastAcceptedIndexVersion' = 0
     /\ statementRejected' = FALSE
     /\ workspaceRead' = FALSE
     /\ readState' = canonicalState
     /\ UNCHANGED <<canonicalState, commitEpoch, durableHistory>>
 
-StageStatement(key, present) ==
+StageStatement(key, present, rowCost, indexCost) ==
     /\ phase = "active"
     /\ key \in Keys
     /\ present \in BOOLEAN
-    /\ overlayEntries < MaxOverlayEntries
+    /\ rowCost \in 0..MaxOverlayEntries
+    /\ indexCost \in 0..MaxOverlayEntries
+    /\ rowOverlayVersion < MaxOverlayEntries
+    /\ indexOverlayVersion < MaxOverlayEntries
+    /\ rowOverlayEntries + rowCost <= MaxOverlayEntries
+    /\ indexOverlayEntries + indexCost <= MaxOverlayEntries
     /\ LET next == ApplyChange(workspaceState, key, present) IN
        /\ workspaceState' = next
        /\ workspaceIndexState' = next
        /\ lastAcceptedState' = next
-    /\ overlayEntries' = overlayEntries + 1
-    /\ lastAcceptedEntries' = overlayEntries + 1
+    /\ rowOverlayEntries' = rowOverlayEntries + rowCost
+    /\ indexOverlayEntries' = indexOverlayEntries + indexCost
+    /\ rowOverlayVersion' = rowOverlayVersion + 1
+    /\ indexOverlayVersion' = indexOverlayVersion + 1
+    /\ lastAcceptedRowEntries' = rowOverlayEntries + rowCost
+    /\ lastAcceptedIndexEntries' = indexOverlayEntries + indexCost
+    /\ lastAcceptedRowVersion' = rowOverlayVersion + 1
+    /\ lastAcceptedIndexVersion' = indexOverlayVersion + 1
     /\ statementRejected' = FALSE
     /\ workspaceRead' = FALSE
     /\ UNCHANGED <<
@@ -116,15 +151,23 @@ StageStatement(key, present) ==
         baseEpoch, baseIndexState, readState
        >>
 
-RejectStatement ==
+RejectStatement(rowCost, indexCost) ==
     /\ phase = "active"
-    /\ overlayEntries = MaxOverlayEntries
+    /\ rowCost \in 0..MaxOverlayEntries
+    /\ indexCost \in 0..MaxOverlayEntries
+    /\ \/ rowOverlayVersion = MaxOverlayEntries
+       \/ indexOverlayVersion = MaxOverlayEntries
+       \/ rowOverlayEntries + rowCost > MaxOverlayEntries
+       \/ indexOverlayEntries + indexCost > MaxOverlayEntries
     /\ statementRejected' = TRUE
     /\ workspaceRead' = FALSE
     /\ UNCHANGED <<
         canonicalState, commitEpoch, durableHistory, phase,
         baseEpoch, baseIndexState, workspaceState, workspaceIndexState,
-        overlayEntries, lastAcceptedState, lastAcceptedEntries, readState
+        rowOverlayEntries, indexOverlayEntries,
+        rowOverlayVersion, indexOverlayVersion, lastAcceptedState,
+        lastAcceptedRowEntries, lastAcceptedIndexEntries,
+        lastAcceptedRowVersion, lastAcceptedIndexVersion, readState
        >>
 
 WorkspaceRead ==
@@ -135,7 +178,10 @@ WorkspaceRead ==
     /\ UNCHANGED <<
         canonicalState, commitEpoch, durableHistory, phase,
         baseEpoch, baseIndexState, workspaceState, workspaceIndexState,
-        overlayEntries, lastAcceptedState, lastAcceptedEntries
+        rowOverlayEntries, indexOverlayEntries,
+        rowOverlayVersion, indexOverlayVersion, lastAcceptedState,
+        lastAcceptedRowEntries, lastAcceptedIndexEntries,
+        lastAcceptedRowVersion, lastAcceptedIndexVersion
        >>
 
 PrepareCommit ==
@@ -146,7 +192,10 @@ PrepareCommit ==
     /\ UNCHANGED <<
         canonicalState, commitEpoch, durableHistory,
         baseEpoch, baseIndexState, workspaceState, workspaceIndexState,
-        overlayEntries, lastAcceptedState, lastAcceptedEntries, readState
+        rowOverlayEntries, indexOverlayEntries,
+        rowOverlayVersion, indexOverlayVersion, lastAcceptedState,
+        lastAcceptedRowEntries, lastAcceptedIndexEntries,
+        lastAcceptedRowVersion, lastAcceptedIndexVersion, readState
        >>
 
 MakeDurable ==
@@ -155,9 +204,12 @@ MakeDurable ==
     /\ phase' = "durable"
     /\ UNCHANGED <<
         canonicalState, commitEpoch, baseEpoch, baseIndexState,
-        workspaceState, workspaceIndexState, overlayEntries,
-        lastAcceptedState, lastAcceptedEntries, statementRejected,
-        workspaceRead, readState
+        workspaceState, workspaceIndexState,
+        rowOverlayEntries, indexOverlayEntries,
+        rowOverlayVersion, indexOverlayVersion, lastAcceptedState,
+        lastAcceptedRowEntries, lastAcceptedIndexEntries,
+        lastAcceptedRowVersion, lastAcceptedIndexVersion,
+        statementRejected, workspaceRead, readState
        >>
 
 Publish ==
@@ -165,8 +217,14 @@ Publish ==
     /\ canonicalState' = workspaceState
     /\ commitEpoch' = commitEpoch + 1
     /\ phase' = "idle"
-    /\ overlayEntries' = 0
-    /\ lastAcceptedEntries' = 0
+    /\ rowOverlayEntries' = 0
+    /\ indexOverlayEntries' = 0
+    /\ rowOverlayVersion' = 0
+    /\ indexOverlayVersion' = 0
+    /\ lastAcceptedRowEntries' = 0
+    /\ lastAcceptedIndexEntries' = 0
+    /\ lastAcceptedRowVersion' = 0
+    /\ lastAcceptedIndexVersion' = 0
     /\ statementRejected' = FALSE
     /\ workspaceRead' = FALSE
     /\ UNCHANGED <<
@@ -179,9 +237,15 @@ Rollback ==
     /\ phase' = "idle"
     /\ workspaceState' = canonicalState
     /\ workspaceIndexState' = canonicalState
-    /\ overlayEntries' = 0
+    /\ rowOverlayEntries' = 0
+    /\ indexOverlayEntries' = 0
+    /\ rowOverlayVersion' = 0
+    /\ indexOverlayVersion' = 0
     /\ lastAcceptedState' = canonicalState
-    /\ lastAcceptedEntries' = 0
+    /\ lastAcceptedRowEntries' = 0
+    /\ lastAcceptedIndexEntries' = 0
+    /\ lastAcceptedRowVersion' = 0
+    /\ lastAcceptedIndexVersion' = 0
     /\ statementRejected' = FALSE
     /\ workspaceRead' = FALSE
     /\ readState' = canonicalState
@@ -199,9 +263,15 @@ CrashRecover ==
     /\ baseIndexState' = recoveredState
     /\ workspaceState' = recoveredState
     /\ workspaceIndexState' = recoveredState
-    /\ overlayEntries' = 0
+    /\ rowOverlayEntries' = 0
+    /\ indexOverlayEntries' = 0
+    /\ rowOverlayVersion' = 0
+    /\ indexOverlayVersion' = 0
     /\ lastAcceptedState' = recoveredState
-    /\ lastAcceptedEntries' = 0
+    /\ lastAcceptedRowEntries' = 0
+    /\ lastAcceptedIndexEntries' = 0
+    /\ lastAcceptedRowVersion' = 0
+    /\ lastAcceptedIndexVersion' = 0
     /\ statementRejected' = FALSE
     /\ workspaceRead' = FALSE
     /\ readState' = recoveredState
@@ -209,8 +279,13 @@ CrashRecover ==
 
 Next ==
     \/ Begin
-    \/ \E key \in Keys, present \in BOOLEAN: StageStatement(key, present)
-    \/ RejectStatement
+    \/ \E key \in Keys, present \in BOOLEAN,
+          rowCost \in 0..MaxOverlayEntries,
+          indexCost \in 0..MaxOverlayEntries:
+          StageStatement(key, present, rowCost, indexCost)
+    \/ \E rowCost \in 0..MaxOverlayEntries,
+          indexCost \in 0..MaxOverlayEntries:
+          RejectStatement(rowCost, indexCost)
     \/ WorkspaceRead
     \/ PrepareCommit
     \/ MakeDurable
@@ -230,9 +305,15 @@ TypeOK ==
     /\ baseIndexState \subseteq Keys
     /\ workspaceState \subseteq Keys
     /\ workspaceIndexState \subseteq Keys
-    /\ overlayEntries \in Nat
+    /\ rowOverlayEntries \in Nat
+    /\ indexOverlayEntries \in Nat
+    /\ rowOverlayVersion \in Nat
+    /\ indexOverlayVersion \in Nat
     /\ lastAcceptedState \subseteq Keys
-    /\ lastAcceptedEntries \in Nat
+    /\ lastAcceptedRowEntries \in Nat
+    /\ lastAcceptedIndexEntries \in Nat
+    /\ lastAcceptedRowVersion \in Nat
+    /\ lastAcceptedIndexVersion \in Nat
     /\ statementRejected \in BOOLEAN
     /\ workspaceRead \in BOOLEAN
     /\ readState \subseteq Keys
@@ -252,14 +333,23 @@ WorkspaceIndexMatchesRows ==
     phase \in {"active", "prepared", "durable"} =>
         workspaceIndexState = workspaceState
 
-WorkspaceOverlayIsBounded == overlayEntries <= MaxOverlayEntries
+WorkspaceOverlayIsBounded ==
+    /\ rowOverlayEntries <= MaxOverlayEntries
+    /\ indexOverlayEntries <= MaxOverlayEntries
+    /\ rowOverlayVersion <= MaxOverlayEntries
+    /\ indexOverlayVersion <= MaxOverlayEntries
+
+RowAndIndexOverlayVersionsMatch == rowOverlayVersion = indexOverlayVersion
 
 RejectedStatementIsAtomic ==
     statementRejected =>
         /\ phase = "active"
         /\ workspaceState = lastAcceptedState
         /\ workspaceIndexState = lastAcceptedState
-        /\ overlayEntries = lastAcceptedEntries
+        /\ rowOverlayEntries = lastAcceptedRowEntries
+        /\ indexOverlayEntries = lastAcceptedIndexEntries
+        /\ rowOverlayVersion = lastAcceptedRowVersion
+        /\ indexOverlayVersion = lastAcceptedIndexVersion
 
 ReadYourOwnWritesUsesOverlay ==
     workspaceRead =>
