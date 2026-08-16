@@ -253,6 +253,31 @@ budget is exceeded. Per-run page-fault limits MUST NOT be applied to the
 cumulative lifecycle profile. Synthetic runner tests validate this protocol
 but cannot produce representative-replica evidence.
 
+`skein-content-store-read-qualification` is a thin developer and evidence
+collector wrapper over the typed runner. It accepts an existing database path
+separately from one bounded `skein-production-content-store-read-plan-v1` JSON
+document. The plan fixes the evidence identity, frozen statement names and
+typed parameters, result oracle digests, read/I/O budgets, process limits, and
+one declared resource profile. Unknown fields, an unknown protocol, zero-sized
+database budgets, or values outside Skein's parameter domain MUST be rejected
+before the database is opened. The wrapper MUST derive `read_only + OutOfCore +
+Authoritative`; callers cannot weaken those selectors in JSON. The
+`capability_512_mib` profile installs an explicit 512 MiB runtime ceiling, while
+`desktop_bound_8_gib` retains the dynamic desktop governor with its 2 GiB
+capacity ceiling. A configured-workload ceiling MUST be non-zero and no larger
+than its declared available memory.
+
+The wrapper MUST NOT create, copy, migrate, or mutate the representative
+database, and the database path MUST NOT enter retained evidence. Replica
+creation remains caller-owned. A ready report exits successfully, a complete
+but blocked report exits unsuccessfully, and invalid input returns a distinct
+error status. This executable contract makes a production run reproducible; it
+does not turn a synthetic fixture or an unretained local run into release
+evidence.
+
+The operational invocation and bounded plan shape are documented in
+[`PRODUCTION_CONTENT_STORE_QUALIFICATION.md`](../PRODUCTION_CONTENT_STORE_QUALIFICATION.md).
+
 Every query result path MUST have explicit row and payload limits. Every
 blocking operator MUST do one of the following before exceeding its admitted
 memory:

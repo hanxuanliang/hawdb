@@ -25,7 +25,10 @@ and algorithms outside active routes are not implied backlog items.
     checkpoint/root, WAL-replay, post-replay, or total-open timing partitions,
     or explicit resource-budget violations. Run it against the imported
     representative Skein copy; its synthetic contract test is not production
-    evidence.
+    evidence. The `skein-content-store-read-qualification` binary now derives
+    the fixed read-only authoritative typed configuration from a bounded plan
+    while keeping the local path out of evidence; retain this item until the
+    resulting production-copy artifact is checked in.
   - The typed writable Content Store runner now requires four distinct
     disposable replicas separate from the read-only source, exercises frozen
     insert/update transactions at exactly 1, 4, 8, and 10 writers, retains
