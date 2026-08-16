@@ -1347,6 +1347,15 @@ Index startup has a stronger bound:
 - mandatory index residency MUST be bounded by catalog, root-descriptor, and
   dirty-recovery state, not index entry or leaf-page count.
 
+Production qualification makes that boundary observable. Before the first
+user query on each fresh open, the shared segment payload cache MUST report raw
+residency, pin, hit, miss, eviction, admission-rejection, and digest-mismatch
+counters. Mandatory system-schema validation MAY issue bounded canonical row
+reads, but the plan MUST cap their total cache requests and resident bytes.
+Exceeding either ceiling, or observing a pin, eviction, rejection, or digest
+mismatch, blocks release evidence. Manifest and WAL work remains visible in
+the separate open-phase timing report.
+
 `Materialized`, `Shadow`, and `DemandPaged` checkpoint decode retain
 `rebuild_indexes()` as the transitional differential oracle. `Authoritative`
 checkpoint decode omits those posting maps, requires the bound persistent view

@@ -332,11 +332,19 @@ digest, obtain one runtime-governor permit per measured read, and redact paths,
 parameters, and rows. The report MUST retain the governor's derived capacity,
 dynamic budget, and admission/completion deltas. Every open MUST retain the
 engine-measured durable-manifest, checkpoint/root, WAL-replay, post-replay, and
-total-open intervals. The four sequential phase intervals use one monotonic
-clock, their saturated sum MUST NOT exceed the total, and the engine total MUST
-NOT exceed the caller's enclosing open measurement. Release evaluation MUST
-recompute those relations from the raw fields rather than trusting a reported
-`consistent` value. A case is not ready when its
+total-open intervals. It MUST also retain the fresh instance's raw segment
+payload-cache capacity, residency, pin, hit, miss, eviction, admission-
+rejection, and digest-mismatch counters before the first user query. Startup
+may perform bounded mandatory system-schema validation through canonical rows,
+so the plan MUST declare non-zero request and resident-byte ceilings within the
+cache capacity. Requests and residency MUST remain within those ceilings;
+pins, evictions, admission rejections, and digest mismatches MUST remain zero.
+Manifest and WAL work is accounted by the open intervals. The four sequential
+phase intervals use one monotonic clock,
+their saturated sum MUST NOT exceed the total, and the engine total MUST NOT
+exceed the caller's enclosing open measurement. Release evaluation MUST
+recompute the timing relations and bounded payload-cache predicate from the
+raw fields rather than trusting reported booleans. A case is not ready when its
 selected generation changes across opens, row and index epochs diverge, either
 canonical artifact does not exceed the cache, an access wave is rejected by
 the cache, a pin leaks, or an explicit row, payload, I/O, RSS, or page-fault

@@ -887,6 +887,47 @@ fn open_rejects_manifest_corruption_and_wrong_artifact_lengths() {
     fs::remove_dir_all(artifact_directory).unwrap();
 }
 
+#[test]
+fn cold_open_defers_row_page_payload_io_until_demand_read() {
+    let directory = unique_test_dir("cold-page-payload");
+    let config = RelationalRowPagePublicationConfig::default();
+    RelationalRowPagePublisher::new(config)
+        .publish(
+            &directory,
+            1,
+            10,
+            None,
+            vec![table_delta(
+                "documents",
+                vec![page(1, 1, 10, 1, 2), page(2, 1, 10, 3, 4)],
+            )],
+        )
+        .unwrap();
+
+    let artifact = directory.join(relational_row_page_artifact_file(1));
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&artifact)
+        .unwrap();
+    file.seek(SeekFrom::Start(0)).unwrap();
+    file.write_all(&[0xff]).unwrap();
+    file.sync_all().unwrap();
+
+    let reader = RelationalRowPageRootReader::open_latest(&directory, config)
+        .expect("cold open must not read row-page payloads")
+        .expect("published row root exists");
+    let descriptor = reader
+        .read_table_page_descriptor("documents", 0)
+        .expect("root metadata remains readable");
+    assert!(matches!(
+        reader.read_page(&descriptor),
+        Err(RelationalRowPagePublicationError::Corrupt(_))
+    ));
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
 fn collect_descriptors(
     reader: &RelationalRowPageRootReader,
     table: &str,

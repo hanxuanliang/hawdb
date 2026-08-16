@@ -75,8 +75,15 @@ pub struct ProductionContentStoreStorageQualificationConfig {
     pub evidence_binding: ProductionEvidenceBinding,
     pub expected_identity: ProductionQualificationIdentity,
     pub measurement_runs: usize,
+    pub open_payload_cache_limits: ProductionContentStoreOpenCacheLimits,
     pub resource_limits: ProductionContentStoreResourceLimits,
     pub read_cases: Vec<ProductionContentStoreReadCase>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ProductionContentStoreOpenCacheLimits {
+    pub max_requests: u64,
+    pub max_resident_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -123,10 +130,24 @@ pub struct ProductionContentStoreOpenEvidence {
     pub case_name: String,
     pub latency_micros: u64,
     pub open_timings: ContentStoreOpenTimingEvidence,
+    pub payload_cache: ProductionContentStoreOpenCacheEvidence,
     pub recovered_commit_epoch: u64,
     pub replayed_wal_entries: usize,
     pub replayed_wal_bytes: u64,
     pub process: ContentStoreProcessResourceEvidence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ProductionContentStoreOpenCacheEvidence {
+    pub capacity_bytes: u64,
+    pub resident_bytes: u64,
+    pub pinned_bytes: u64,
+    pub hit_count: u64,
+    pub miss_count: u64,
+    pub eviction_count: u64,
+    pub admission_rejection_count: u64,
+    pub digest_mismatch_count: u64,
+    pub within_limits: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -186,6 +207,7 @@ pub struct ProductionContentStoreStorageQualificationReport {
     pub configured_available_memory_bytes: u64,
     pub max_relational_hydration_bytes: u64,
     pub measurement_runs: usize,
+    pub open_payload_cache_limits: ProductionContentStoreOpenCacheLimits,
     pub resource_limits: ProductionContentStoreResourceLimits,
     pub read_contracts: Vec<ProductionContentStoreReadContractEvidence>,
     pub runtime_memory: ContentStoreRuntimeMemoryEvidence,
@@ -212,6 +234,7 @@ impl ProductionContentStoreStorageQualificationReport {
             "configured_available_memory_bytes": self.configured_available_memory_bytes,
             "max_relational_hydration_bytes": self.max_relational_hydration_bytes,
             "measurement_runs": self.measurement_runs,
+            "open_payload_cache_limits": self.open_payload_cache_limits,
             "resource_limits": self.resource_limits,
             "read_contracts": self.read_contracts,
             "runtime_memory": self.runtime_memory,
@@ -287,10 +310,12 @@ pub fn run_production_content_store_storage_qualification(
         if !open_timings.consistent || open_timings.total_open_micros > open_latency_micros {
             blocker_codes.push("content_store_open_timing_invalid".to_string());
         }
-        let observed = residency_evidence(
-            database.commit_epoch(),
-            &database.storage_residency_report(),
-        );
+        let open_residency = database.storage_residency_report();
+        let observed = residency_evidence(database.commit_epoch(), &open_residency);
+        let payload_cache = open_cache_evidence(&open_residency, config.open_payload_cache_limits);
+        if !payload_cache.within_limits {
+            blocker_codes.push("content_store_open_payload_cache_unbounded".to_string());
+        }
         collect_residency_blockers(&observed, &config.expected_identity, &mut blocker_codes);
         if let Some(first) = initial_residency.as_ref() {
             if !same_storage_identity(first, &observed) {
@@ -304,6 +329,7 @@ pub fn run_production_content_store_storage_qualification(
             case_name: read_case.case_name.clone(),
             latency_micros: open_latency_micros,
             open_timings,
+            payload_cache,
             recovered_commit_epoch: recovery.recovered_commit_epoch,
             replayed_wal_entries: recovery.replayed_wal_entries,
             replayed_wal_bytes: recovery.replayed_wal_bytes,
@@ -452,6 +478,7 @@ pub fn run_production_content_store_storage_qualification(
         )
         .unwrap_or(u64::MAX),
         measurement_runs: config.measurement_runs,
+        open_payload_cache_limits: config.open_payload_cache_limits,
         resource_limits: config.resource_limits,
         read_contracts,
         runtime_memory,
@@ -462,6 +489,32 @@ pub fn run_production_content_store_storage_qualification(
         opens,
         runs,
     })
+}
+
+fn open_cache_evidence(
+    report: &StorageResidencyReport,
+    limits: ProductionContentStoreOpenCacheLimits,
+) -> ProductionContentStoreOpenCacheEvidence {
+    let requests = report
+        .segment_cache_hit_count
+        .saturating_add(report.segment_cache_miss_count);
+    let within_limits = report.segment_cache_resident_bytes <= limits.max_resident_bytes
+        && requests <= limits.max_requests
+        && report.segment_cache_pinned_bytes == 0
+        && report.segment_cache_eviction_count == 0
+        && report.segment_cache_admission_rejection_count == 0
+        && report.segment_cache_digest_mismatch_count == 0;
+    ProductionContentStoreOpenCacheEvidence {
+        capacity_bytes: report.segment_cache_capacity_bytes,
+        resident_bytes: report.segment_cache_resident_bytes,
+        pinned_bytes: report.segment_cache_pinned_bytes,
+        hit_count: report.segment_cache_hit_count,
+        miss_count: report.segment_cache_miss_count,
+        eviction_count: report.segment_cache_eviction_count,
+        admission_rejection_count: report.segment_cache_admission_rejection_count,
+        digest_mismatch_count: report.segment_cache_digest_mismatch_count,
+        within_limits,
+    }
 }
 
 fn validate_config(
@@ -493,6 +546,16 @@ fn validate_config(
     if config.database_config.segment_cache_capacity_bytes == 0 {
         return Err(SkeinError::Semantic(
             "production Content Store qualification requires a non-zero segment cache".to_string(),
+        ));
+    }
+    if config.open_payload_cache_limits.max_requests == 0
+        || config.open_payload_cache_limits.max_resident_bytes == 0
+        || config.open_payload_cache_limits.max_resident_bytes
+            > config.database_config.segment_cache_capacity_bytes
+    {
+        return Err(SkeinError::Semantic(
+            "production Content Store qualification requires non-zero open payload-cache limits within the segment-cache capacity"
+                .to_string(),
         ));
     }
     if config.measurement_runs < 2 || config.measurement_runs > 1024 {
@@ -1084,6 +1147,10 @@ mod tests {
                 },
                 expected_identity: identity.clone(),
                 measurement_runs: 2,
+                open_payload_cache_limits: ProductionContentStoreOpenCacheLimits {
+                    max_requests: 16,
+                    max_resident_bytes: 2 * 1024 * 1024,
+                },
                 resource_limits: ProductionContentStoreResourceLimits {
                     max_steady_resident_bytes: CONTENT_STORE_512_MIB_CAPABILITY_BYTES,
                     max_peak_resident_bytes: CONTENT_STORE_512_MIB_CAPABILITY_BYTES,
@@ -1126,6 +1193,9 @@ mod tests {
         assert_eq!(report.opens.len(), 1);
         assert!(report.opens[0].open_timings.consistent);
         assert!(report.opens[0].open_timings.total_open_micros <= report.opens[0].latency_micros);
+        assert!(report.opens[0].payload_cache.within_limits);
+        assert!(report.opens[0].payload_cache.miss_count > 0);
+        assert!(report.opens[0].payload_cache.resident_bytes > 0);
         assert_eq!(report.runs.len(), 2);
         assert_eq!(report.runtime_governor.admissions_delta, 2);
         assert_eq!(report.runtime_governor.completions_delta, 2);
@@ -1223,6 +1293,10 @@ mod tests {
                 },
                 expected_identity: identity,
                 measurement_runs: 2,
+                open_payload_cache_limits: ProductionContentStoreOpenCacheLimits {
+                    max_requests: 1,
+                    max_resident_bytes: 1,
+                },
                 resource_limits: ProductionContentStoreResourceLimits {
                     max_steady_resident_bytes: 1024,
                     max_peak_resident_bytes: 1024,

@@ -120,6 +120,9 @@ fn validate_read_storage(
         blockers.push("content_store_read_opens_missing".to_string());
         return deduplicate(blockers);
     };
+    let open_payload_cache_limits = artifact.pointer("/open_payload_cache_limits");
+    let expected_open_cache_capacity =
+        initial.and_then(|residency| unsigned(residency, "/segment_cache_capacity_bytes"));
     let mut open_names = BTreeSet::new();
     for open in opens {
         let Some(name) = string(open, "/case_name") else {
@@ -137,6 +140,12 @@ fn validate_read_storage(
             open,
             "/latency_micros",
             "content_store_read_open_timing_invalid",
+            &mut blockers,
+        );
+        validate_bounded_open_payload_cache(
+            open,
+            open_payload_cache_limits,
+            expected_open_cache_capacity,
             &mut blockers,
         );
     }
@@ -891,6 +900,49 @@ fn validate_open_timings(
             .is_some_and(|(internal, external)| internal <= external);
     if !valid {
         blockers.push(blocker.to_string());
+    }
+}
+
+fn validate_bounded_open_payload_cache(
+    evidence: &Value,
+    limits: Option<&Value>,
+    expected_capacity: Option<u64>,
+    blockers: &mut Vec<String>,
+) {
+    let (Some(cache), Some(limits)) = (evidence.pointer("/payload_cache"), limits) else {
+        blockers.push("content_store_read_open_payload_cache_invalid".to_string());
+        return;
+    };
+    let capacity = unsigned(cache, "/capacity_bytes");
+    let resident = unsigned(cache, "/resident_bytes");
+    let hits = unsigned(cache, "/hit_count");
+    let misses = unsigned(cache, "/miss_count");
+    let max_requests = unsigned(limits, "/max_requests");
+    let max_resident_bytes = unsigned(limits, "/max_resident_bytes");
+    let bounded = capacity.is_some_and(|capacity| capacity > 0)
+        && capacity == expected_capacity
+        && max_requests.is_some_and(|requests| requests > 0)
+        && max_resident_bytes
+            .zip(capacity)
+            .is_some_and(|(limit, capacity)| limit > 0 && limit <= capacity)
+        && resident
+            .zip(max_resident_bytes)
+            .is_some_and(|(resident, limit)| resident <= limit)
+        && hits
+            .zip(misses)
+            .zip(max_requests)
+            .is_some_and(|((hits, misses), limit)| hits.saturating_add(misses) <= limit)
+        && [
+            "/pinned_bytes",
+            "/eviction_count",
+            "/admission_rejection_count",
+            "/digest_mismatch_count",
+        ]
+        .into_iter()
+        .all(|pointer| unsigned(cache, pointer) == Some(0))
+        && boolean(cache, "/within_limits") == Some(true);
+    if !bounded {
+        blockers.push("content_store_read_open_payload_cache_invalid".to_string());
     }
 }
 

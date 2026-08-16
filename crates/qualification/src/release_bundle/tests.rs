@@ -286,6 +286,27 @@ fn content_store_release_gate_recomputes_open_timing_partitions() {
 }
 
 #[test]
+fn content_store_release_gate_recomputes_bounded_open_payload_cache() {
+    let expected = identity("linux", "x86_64");
+    let mut read = content_store_read(&expected);
+    read["opens"][0]["payload_cache"]["miss_count"] = serde_json::json!(16);
+    let report = evaluate_production_release_qualification_bundle(
+        ProductionReleaseQualificationArtifacts {
+            content_store_read: Some(read),
+            ..ProductionReleaseQualificationArtifacts::default()
+        },
+        expected,
+        ProductionReleaseQualificationPolicy::default(),
+    );
+
+    assert!(!report.content_store_read.ready);
+    assert!(report
+        .content_store_read
+        .blocker_codes
+        .contains(&"content_store_read_open_payload_cache_invalid".to_string()));
+}
+
+#[test]
 fn content_store_mutation_matrix_rejects_duplicate_writer_shapes() {
     let expected = identity("linux", "x86_64");
     let mut artifact = content_store_mutation_matrix(&expected);
@@ -790,6 +811,10 @@ fn content_store_read(identity: &ProductionQualificationIdentity) -> Value {
         "configured_available_memory_bytes": 67_108_864,
         "max_relational_hydration_bytes": 1_000,
         "measurement_runs": 2,
+        "open_payload_cache_limits": {
+            "max_requests": 16,
+            "max_resident_bytes": 1_024,
+        },
         "resource_limits": {
             "max_steady_resident_bytes": 10_000,
             "max_peak_resident_bytes": 20_000,
@@ -850,6 +875,17 @@ fn content_store_read(identity: &ProductionQualificationIdentity) -> Value {
             "case_name": "message_lookup",
             "latency_micros": 10,
             "open_timings": content_store_open_timings(8, 1),
+            "payload_cache": {
+                "capacity_bytes": 1_024,
+                "resident_bytes": 512,
+                "pinned_bytes": 0,
+                "hit_count": 1,
+                "miss_count": 1,
+                "eviction_count": 0,
+                "admission_rejection_count": 0,
+                "digest_mismatch_count": 0,
+                "within_limits": true,
+            },
             "recovered_commit_epoch": identity.canonical_graph_commit_epoch,
             "replayed_wal_entries": 0,
             "replayed_wal_bytes": 0,

@@ -13,7 +13,7 @@ use qualification_input::{read_bounded_json, EvidenceBindingInput, ProductionIde
 use relational_database_input::DatabaseInput;
 use serde::Deserialize;
 use skein_qualification::{
-    run_production_content_store_storage_qualification,
+    run_production_content_store_storage_qualification, ProductionContentStoreOpenCacheLimits,
     ProductionContentStoreStorageQualificationConfig,
     PRODUCTION_CONTENT_STORE_STORAGE_QUALIFICATION_PROTOCOL,
 };
@@ -117,8 +117,25 @@ struct ContentStoreReadQualificationPlan {
     resource_profile: ResourceProfileInput,
     database: DatabaseInput,
     measurement_runs: usize,
+    open_payload_cache_limits: OpenPayloadCacheLimitsInput,
     resource_limits: ResourceLimitsInput,
     read_cases: Vec<ReadCaseInput>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenPayloadCacheLimitsInput {
+    max_requests: u64,
+    max_resident_bytes: u64,
+}
+
+impl From<OpenPayloadCacheLimitsInput> for ProductionContentStoreOpenCacheLimits {
+    fn from(input: OpenPayloadCacheLimitsInput) -> Self {
+        Self {
+            max_requests: input.max_requests,
+            max_resident_bytes: input.max_resident_bytes,
+        }
+    }
 }
 
 impl ContentStoreReadQualificationPlan {
@@ -148,6 +165,7 @@ impl ContentStoreReadQualificationPlan {
             evidence_binding: self.evidence_binding.into(),
             expected_identity: self.expected_identity.into(),
             measurement_runs: self.measurement_runs,
+            open_payload_cache_limits: self.open_payload_cache_limits.into(),
             resource_limits: self.resource_limits.into(),
             read_cases,
         })
@@ -362,6 +380,10 @@ mod tests {
                 "max_relational_hydration_bytes": 1048576
             },
             "measurement_runs": 2,
+            "open_payload_cache_limits": {
+                "max_requests": 16,
+                "max_resident_bytes": 1048576
+            },
             "resource_limits": {
                 "max_steady_resident_bytes": CONTENT_STORE_512_MIB_CAPABILITY_BYTES,
                 "max_peak_resident_bytes": CONTENT_STORE_512_MIB_CAPABILITY_BYTES,

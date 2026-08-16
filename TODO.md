@@ -23,7 +23,9 @@ and algorithms outside active routes are not implied backlog items.
     warm runs, and rejects relational row/index generation drift, undersized
     artifacts, cache rejection, leaked pins, invalid engine-measured manifest,
     checkpoint/root, WAL-replay, post-replay, or total-open timing partitions,
-    or explicit resource-budget violations. Run it against the imported
+    unbounded segment payload-cache activity before the first user query, or
+    explicit resource-budget violations. The release validator recomputes the
+    bounded-cache predicate from raw counters. Run it against the imported
     representative Skein copy; its synthetic contract test is not production
     evidence. The `skein-content-store-read-qualification` binary now derives
     the fixed read-only authoritative typed configuration from a bounded plan

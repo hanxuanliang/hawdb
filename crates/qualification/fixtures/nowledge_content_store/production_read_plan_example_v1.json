@@ -43,6 +43,10 @@
     "max_relational_hydration_bytes": 67108864
   },
   "measurement_runs": 5,
+  "open_payload_cache_limits": {
+    "max_requests": 64,
+    "max_resident_bytes": 16777216
+  },
   "resource_limits": {
     "max_steady_resident_bytes": 2147483648,
     "max_peak_resident_bytes": 2147483648,

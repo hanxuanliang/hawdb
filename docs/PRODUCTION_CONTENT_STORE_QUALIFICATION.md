@@ -8,6 +8,11 @@ create replicas, or derive an oracle from Skein itself.
 
 - The database is a caller-owned representative copy, not the live Mem store.
 - Canonical row and index artifacts both exceed the configured segment cache.
+- Each fresh open records raw segment payload-cache activity before its first
+  user query. The plan bounds mandatory system-schema validation by cache
+  requests and resident bytes; pins, evictions, admission rejections, and
+  digest mismatches remain forbidden. Manifest and WAL work remain in the open
+  timing partition.
 - The database has a clean authoritative checkpoint and the expected canonical
   commit epoch.
 - Expected row counts and SHA-256 result digests come from an offline reference
@@ -70,6 +75,10 @@ is parser-tested and can be copied as the starting point.
     "max_relational_hydration_bytes": 67108864
   },
   "measurement_runs": 5,
+  "open_payload_cache_limits": {
+    "max_requests": 64,
+    "max_resident_bytes": 16777216
+  },
   "resource_limits": {
     "max_steady_resident_bytes": 2147483648,
     "max_peak_resident_bytes": 2147483648,
