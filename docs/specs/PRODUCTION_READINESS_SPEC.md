@@ -246,7 +246,10 @@ on Windows, where the split fields MUST remain absent.
 
 The Windows storage-platform CI job MUST retain a
 `storage-resource-windows-latest-<revision>` artifact containing the bound v2
-report and a runner manifest. The report MUST be production-ready for the
+report, the exact canonical row/overflow backup-reopen-reclaim test output, and
+a runner manifest with independent exit statuses for both probes. The manifest
+MUST bind the source revision and Windows runner identity; either non-zero
+probe status MUST fail the job. The report MUST be production-ready for the
 platform fixture, identify `target_os` as `windows`, expose resident-memory and
 total-page-fault capability, and leave Unix split page-fault fields absent.
 

@@ -865,7 +865,7 @@ jobs:
       - name: Test out-of-core search projection I/O
         run: cargo test -p skein --features acl --lib search::out_of_core::tests
 
-      - name: Capture Windows storage resource evidence
+      - name: Capture Windows storage lifecycle evidence
         if: matrix.os == 'windows-latest'
         shell: bash
         env:
@@ -874,14 +874,25 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p storage-resource-results
+          set +e
           cargo test -p skein --features acl --lib \
             api::tests::storage_recovery::platform_storage_resource_profile_emits_bound_evidence \
-            -- --exact --nocapture
-          printf '{"source_revision":"%s","runner_os":"%s","test_status":0}\n' \
-            "$GITHUB_SHA" "$RUNNER_OS" \
+            -- --exact --nocapture 2>&1 \
+            | tee storage-resource-results/resource-profile-test-output.txt
+          resource_status=${PIPESTATUS[0]}
+          cargo test -p skein --features acl --lib \
+            api::tests::storage_recovery::canonical_row_overflow_backup_reopen_and_reclaim_follow_physical_closure \
+            -- --exact --nocapture 2>&1 \
+            | tee storage-resource-results/row-overflow-lifecycle-test-output.txt
+          lifecycle_status=${PIPESTATUS[0]}
+          set -e
+          printf '{"protocol":"skein-windows-storage-lifecycle-evidence-v1","source_revision":"%s","runner_os":"%s","resource_profile_test_status":%s,"row_overflow_lifecycle_test_status":%s}\n' \
+            "$GITHUB_SHA" "$RUNNER_OS" "$resource_status" "$lifecycle_status" \
             > storage-resource-results/manifest.json
+          test "$resource_status" -eq 0
+          test "$lifecycle_status" -eq 0
 
-      - name: Upload Windows storage resource evidence
+      - name: Upload Windows storage lifecycle evidence
         if: always() && matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4
         with:

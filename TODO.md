@@ -138,6 +138,9 @@ crash; read-only recovery remains fail closed.
     macOS/Windows storage-platform test target.
   - [ ] Retain a green Windows CI artifact for this revision; local non-Windows
     execution and CI wiring do not substitute for Windows sharing semantics.
+    The workflow now retains the bound resource report, exact row/overflow
+    lifecycle output, and independent statuses in one revision-named artifact;
+    keep this open until the remote Windows run supplies that artifact.
 
 - [ ] Qualify canonical row pages for the first Mem relational tables.
   - The SQL runtime now selects one exact checkpoint/recovery/live snapshot
