@@ -8,6 +8,7 @@ use crate::relational::{
 use skein_integrity::{IntegrityDigest, Sha256Digest};
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use std::path::Path;
 
 mod builder;
 mod codec;
@@ -301,6 +302,16 @@ struct RowDeltaRunDescriptor {
     digest: IntegrityDigest,
     lower_bound: RowDeltaBound,
     upper_bound: RowDeltaBound,
+}
+
+#[derive(Clone, Copy)]
+struct RowDeltaRunContext<'a> {
+    directory: &'a Path,
+    base: RelationalRowDeltaBaseBinding,
+    delta_generation: u64,
+    schema_set_digest: Sha256Digest,
+    tables: &'a [RelationalRowDeltaTableMetadata],
+    config: RelationalRowDeltaConfig,
 }
 
 fn durability(context: &'static str) -> impl FnOnce(std::io::Error) -> RelationalRowDeltaError {

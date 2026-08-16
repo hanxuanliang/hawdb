@@ -483,6 +483,30 @@ pub struct RelationalReplayAccess {
     pub primary_key: RelationalKey,
 }
 
+/// One exactly authenticated WAL access after bounded row hydration.
+///
+/// Missing rows are explicit so a sparse recovery caller cannot accidentally
+/// omit a key that the durable transaction evaluated. Present rows must be
+/// fully hydrated logical values; the sparse workspace externalizes large
+/// values again only when replay mutates them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationalSparseRecoveryRow {
+    pub table: String,
+    pub primary_key: RelationalKey,
+    pub row: Option<RelationalRow>,
+}
+
+#[derive(Debug)]
+pub struct RelationalSparseRecoveryStage<'a> {
+    pub transaction: RelationalTransaction,
+    pub hydrated_access: Vec<RelationalSparseRecoveryRow>,
+    pub mutation_limits: RelationalMutationLimits,
+    pub overflow_config: RelationalOverflowConfig,
+    pub index_capture_limits: RelationalIndexChangeCaptureLimits,
+    pub row_capture_limits: RelationalRowChangeCaptureLimits,
+    pub expected_replay_access: &'a RelationalReplayAccessSet,
+}
+
 impl RelationalReplayAccessSet {
     pub fn entries(&self) -> &[RelationalReplayAccess] {
         &self.entries
@@ -776,6 +800,33 @@ fn relational_row_entry_bytes(key: &RelationalKey, row: &RelationalRow) -> usize
                 .sum::<usize>(),
         )
         .saturating_add(row.estimated_payload_bytes())
+}
+
+fn relational_sparse_recovery_entry_bytes(entry: &RelationalSparseRecoveryRow) -> Option<usize> {
+    let key_payload_bytes = entry
+        .primary_key
+        .0
+        .iter()
+        .try_fold(0usize, |bytes, value| {
+            bytes.checked_add(value.estimated_payload_bytes())
+        })?;
+    let key_bytes = std::mem::size_of::<RelationalKey>().checked_add(key_payload_bytes)?;
+    let row_bytes = entry.row.as_ref().map_or(Some(0), |row| {
+        let value_slots = row
+            .values()
+            .len()
+            .checked_mul(std::mem::size_of::<RelationalValue>())?;
+        let value_payload = row.values().iter().try_fold(0usize, |bytes, value| {
+            bytes.checked_add(value.estimated_payload_bytes())
+        })?;
+        std::mem::size_of::<RelationalRow>()
+            .checked_add(value_slots)?
+            .checked_add(value_payload)
+    })?;
+    std::mem::size_of::<RelationalSparseRecoveryRow>()
+        .checked_add(entry.table.len())?
+        .checked_add(key_bytes)?
+        .checked_add(row_bytes)
 }
 
 fn split_relational_row_page(
@@ -1755,6 +1806,231 @@ impl RelationalState {
         ))
     }
 
+    /// Replays one schema-stable WAL transaction in a bounded materialized
+    /// workspace containing exactly its authenticated access set.
+    ///
+    /// The receiver remains canonical metadata-only. The returned state
+    /// advances only exact logical row counts and retains content-addressed
+    /// overflow segments created by this transaction; checkpoint rows are
+    /// never attached to it. Stale overflow segments may remain until the next
+    /// checkpoint because removing them would require scanning prior recovery
+    /// rows and defeat the bounded workspace.
+    pub fn stage_sparse_transaction_for_authoritative_recovery_with_replay_access(
+        &self,
+        stage: RelationalSparseRecoveryStage<'_>,
+    ) -> Result<
+        (
+            Self,
+            RelationalIndexChangeCapture,
+            RelationalRowChangeCapture,
+        ),
+        RelationalError,
+    > {
+        let RelationalSparseRecoveryStage {
+            transaction,
+            hydrated_access,
+            mutation_limits,
+            overflow_config,
+            index_capture_limits,
+            row_capture_limits,
+            expected_replay_access,
+        } = stage;
+        let workspace = self.sparse_recovery_workspace(
+            hydrated_access,
+            expected_replay_access,
+            row_capture_limits,
+        )?;
+        let (staged, index_capture, row_capture) = workspace
+            .stage_transaction_for_authoritative_recovery_with_replay_access(
+                transaction,
+                mutation_limits,
+                overflow_config,
+                index_capture_limits,
+                row_capture_limits,
+                expected_replay_access,
+            )?;
+        let metadata = self.merge_sparse_recovery_workspace(&workspace, &staged)?;
+        Ok((metadata, index_capture, row_capture))
+    }
+
+    fn sparse_recovery_workspace(
+        &self,
+        hydrated_access: Vec<RelationalSparseRecoveryRow>,
+        expected_replay_access: &RelationalReplayAccessSet,
+        limits: RelationalRowChangeCaptureLimits,
+    ) -> Result<Self, RelationalError> {
+        if self.materialized_rows_resident || !self.canonical_row_metadata_only {
+            return Err(RelationalError::Admission(
+                "sparse relational recovery requires canonical metadata-only state".to_string(),
+            ));
+        }
+        if hydrated_access.len() != expected_replay_access.entries.len()
+            || hydrated_access
+                .iter()
+                .zip(&expected_replay_access.entries)
+                .any(|(hydrated, expected)| {
+                    hydrated.table != expected.table || hydrated.primary_key != expected.primary_key
+                })
+        {
+            return Err(RelationalError::Corruption(
+                "sparse relational recovery hydration does not exactly cover the authenticated WAL access set"
+                    .to_string(),
+            ));
+        }
+        if hydrated_access.len() > limits.max_entries.get() {
+            return Err(RelationalError::Admission(format!(
+                "sparse relational recovery workspace contains {} entries, exceeding limit {}",
+                hydrated_access.len(),
+                limits.max_entries
+            )));
+        }
+
+        let mut workspace_bytes = 0usize;
+        let mut segments = self
+            .schemas
+            .keys()
+            .map(|table| (table.clone(), Arc::new(RelationalTableSegment::default())))
+            .collect::<BTreeMap<_, _>>();
+        for hydrated in hydrated_access {
+            let entry_bytes =
+                relational_sparse_recovery_entry_bytes(&hydrated).ok_or_else(|| {
+                    RelationalError::Admission(
+                        "sparse relational recovery workspace byte count overflow".to_string(),
+                    )
+                })?;
+            workspace_bytes = workspace_bytes.checked_add(entry_bytes).ok_or_else(|| {
+                RelationalError::Admission(
+                    "sparse relational recovery workspace byte count overflow".to_string(),
+                )
+            })?;
+            if workspace_bytes > limits.max_bytes.get() {
+                return Err(RelationalError::Admission(format!(
+                    "sparse relational recovery workspace requires {workspace_bytes} bytes, exceeding limit {}",
+                    limits.max_bytes
+                )));
+            }
+            let schema = self.schemas.get(&hydrated.table).ok_or_else(|| {
+                RelationalError::Corruption(format!(
+                    "sparse relational recovery references unknown table {}",
+                    hydrated.table
+                ))
+            })?;
+            let Some(row) = hydrated.row else {
+                continue;
+            };
+            if row
+                .values()
+                .iter()
+                .any(|value| matches!(value, RelationalValue::Overflow(_)))
+            {
+                return Err(RelationalError::Admission(format!(
+                    "sparse relational recovery row {:?} in table {} was not fully hydrated",
+                    hydrated.primary_key, hydrated.table
+                )));
+            }
+            validate_row(schema, &row)?;
+            let primary_key_positions = column_positions(schema, &schema.primary_key)?;
+            if row_key(&row, &primary_key_positions) != hydrated.primary_key {
+                return Err(RelationalError::Corruption(format!(
+                    "sparse relational recovery row primary key differs from authenticated key in table {}",
+                    hydrated.table
+                )));
+            }
+            let segment = Arc::make_mut(
+                segments
+                    .get_mut(&hydrated.table)
+                    .expect("known sparse recovery table has a workspace segment"),
+            );
+            if segment.rows.insert(hydrated.primary_key, row).is_some() {
+                return Err(RelationalError::Corruption(
+                    "sparse relational recovery hydration repeats an authenticated key".to_string(),
+                ));
+            }
+        }
+
+        Ok(Self {
+            schemas: self.schemas.clone(),
+            segments,
+            overflow_segments: BTreeMap::new(),
+            materialized_index_postings_resident: false,
+            materialized_rows_resident: true,
+            canonical_row_metadata_only: false,
+            detached_row_counts: Arc::new(BTreeMap::new()),
+            detached_total_row_count: 0,
+            detached_row_bytes: 0,
+        })
+    }
+
+    fn merge_sparse_recovery_workspace(
+        &self,
+        before: &RelationalState,
+        after: &RelationalState,
+    ) -> Result<Self, RelationalError> {
+        if self.materialized_rows_resident
+            || !self.canonical_row_metadata_only
+            || !before.materialized_rows_resident
+            || !after.materialized_rows_resident
+            || before.schemas.keys().ne(self.schemas.keys())
+            || after.schemas.keys().ne(self.schemas.keys())
+        {
+            return Err(RelationalError::Corruption(
+                "invalid sparse relational recovery workspace merge".to_string(),
+            ));
+        }
+        let mut metadata = self.clone();
+        let counts = Arc::make_mut(&mut metadata.detached_row_counts);
+        for table in self.schemas.keys() {
+            let before_count = before
+                .segments
+                .get(table)
+                .expect("sparse recovery workspace covers every table")
+                .rows
+                .len();
+            let after_count = after
+                .segments
+                .get(table)
+                .expect("staged sparse recovery workspace covers every table")
+                .rows
+                .len();
+            let count = counts.get_mut(table).ok_or_else(|| {
+                RelationalError::Corruption(format!(
+                    "metadata-only relational state has no row count for table {table}"
+                ))
+            })?;
+            if after_count >= before_count {
+                *count = count
+                    .checked_add(after_count - before_count)
+                    .ok_or_else(|| {
+                        RelationalError::Admission(format!(
+                            "sparse relational recovery row count overflow for table {table}"
+                        ))
+                    })?;
+            } else {
+                *count = count
+                    .checked_sub(before_count - after_count)
+                    .ok_or_else(|| {
+                        RelationalError::Corruption(format!(
+                            "sparse relational recovery row count underflow for table {table}"
+                        ))
+                    })?;
+            }
+        }
+        metadata.detached_total_row_count = counts.values().try_fold(0usize, |total, count| {
+            total.checked_add(*count).ok_or_else(|| {
+                RelationalError::Admission(
+                    "sparse relational recovery total row count overflow".to_string(),
+                )
+            })
+        })?;
+        for (digest, segment) in &after.overflow_segments {
+            metadata
+                .overflow_segments
+                .entry(*digest)
+                .or_insert_with(|| segment.clone());
+        }
+        Ok(metadata)
+    }
+
     pub fn table_schema(&self, table: &str) -> Option<&RelationalTableSchema> {
         self.schemas.get(table).map(Arc::as_ref)
     }
@@ -2046,6 +2322,23 @@ impl RelationalState {
             return Ok(None);
         };
         overflow::hydrate_row(self, row, budget, task_context).map(Some)
+    }
+
+    /// Resolves overflow references in a row read from an unpublished recovery
+    /// delta. Unlike `hydrate_row_with_context`, the row is intentionally not
+    /// required to reside in this metadata-only state.
+    pub fn hydrate_sparse_recovery_row_with_context(
+        &self,
+        row: &RelationalRow,
+        budget: &mut RelationalHydrationBudget,
+        task_context: Option<&skein_core::RuntimeTaskContext>,
+    ) -> Result<RelationalRow, RelationalError> {
+        if self.materialized_rows_resident || !self.canonical_row_metadata_only {
+            return Err(RelationalError::Admission(
+                "sparse recovery row hydration requires canonical metadata-only state".to_string(),
+            ));
+        }
+        overflow::hydrate_row(self, row, budget, task_context)
     }
 
     /// Resolves only overflow references retained by one projected row.

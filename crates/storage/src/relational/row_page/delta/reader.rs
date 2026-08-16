@@ -2,7 +2,8 @@ use super::{
     codec, durability, relational_row_delta_manifest_generation_file,
     relational_row_delta_run_file, RelationalRowDeltaConfig, RelationalRowDeltaError,
     RelationalRowDeltaGeneration, RelationalRowDeltaManifest, RelationalRowDeltaReadReport,
-    RowDeltaRunDescriptor, RELATIONAL_ROW_DELTA_MANIFEST_FILE,
+    RelationalRowDeltaTableMetadata, RowDeltaRunContext, RowDeltaRunDescriptor, RowDeltaValue,
+    RELATIONAL_ROW_DELTA_MANIFEST_FILE,
 };
 use crate::relational::row_page::RelationalRowPageRecoveredValue;
 #[cfg(test)]
@@ -290,10 +291,15 @@ impl RelationalRowDeltaReader {
             }
             let mut callback_stopped = false;
             let _completed = visit_run(
-                &self.directory,
-                &self.manifest,
+                RowDeltaRunContext {
+                    directory: &self.directory,
+                    base: self.manifest.base,
+                    delta_generation: self.manifest.delta_generation,
+                    schema_set_digest: self.manifest.schema_set_digest,
+                    tables: &self.manifest.tables,
+                    config: self.config,
+                },
                 run,
-                self.config,
                 |candidate_table, candidate_key, value, epoch| {
                     match candidate_table.cmp(table) {
                         std::cmp::Ordering::Less => return Ok(true),
@@ -378,91 +384,108 @@ impl RelationalRowDeltaReader {
         ),
         RelationalRowDeltaError,
     > {
-        let Ok(table_ordinal) = self
-            .manifest
-            .tables
-            .binary_search_by(|candidate| candidate.table.as_str().cmp(table))
-        else {
-            return Ok((None, RelationalRowDeltaReadReport::default()));
-        };
-        let table_ordinal = u32::try_from(table_ordinal).map_err(|_| {
-            RelationalRowDeltaError::Corrupt("row delta table ordinal does not fit u32".to_string())
-        })?;
-        let encoded_key = encode_ordered_relational_key(primary_key).map_err(|error| {
-            RelationalRowDeltaError::Admission(format!(
-                "row delta lookup key cannot be encoded: {error}"
-            ))
-        })?;
-        if encoded_key.len() > self.config.row_limits.max_key_bytes.get() {
-            return Err(RelationalRowDeltaError::Admission(format!(
-                "row delta lookup key contains {} bytes, exceeding limit {}",
-                encoded_key.len(),
-                self.config.row_limits.max_key_bytes
-            )));
+        lookup_runs(
+            RowDeltaRunContext {
+                directory: &self.directory,
+                base: self.manifest.base,
+                delta_generation: self.manifest.delta_generation,
+                schema_set_digest: self.manifest.schema_set_digest,
+                tables: &self.manifest.tables,
+                config: self.config,
+            },
+            &self.manifest.runs,
+            table,
+            primary_key,
+        )
+    }
+}
+
+pub(super) fn lookup_runs(
+    context: RowDeltaRunContext<'_>,
+    runs: &[RowDeltaRunDescriptor],
+    table: &str,
+    primary_key: &RelationalKey,
+) -> Result<
+    (
+        Option<RelationalRowPageRecoveredValue>,
+        RelationalRowDeltaReadReport,
+    ),
+    RelationalRowDeltaError,
+> {
+    let Ok(table_ordinal) = context
+        .tables
+        .binary_search_by(|candidate| candidate.table.as_str().cmp(table))
+    else {
+        return Ok((None, RelationalRowDeltaReadReport::default()));
+    };
+    let table_ordinal = u32::try_from(table_ordinal).map_err(|_| {
+        RelationalRowDeltaError::Corrupt("row delta table ordinal does not fit u32".to_string())
+    })?;
+    let encoded_key = encode_ordered_relational_key(primary_key).map_err(|error| {
+        RelationalRowDeltaError::Admission(format!(
+            "row delta lookup key cannot be encoded: {error}"
+        ))
+    })?;
+    if encoded_key.len() > context.config.row_limits.max_key_bytes.get() {
+        return Err(RelationalRowDeltaError::Admission(format!(
+            "row delta lookup key contains {} bytes, exceeding limit {}",
+            encoded_key.len(),
+            context.config.row_limits.max_key_bytes
+        )));
+    }
+
+    let target = (table_ordinal, encoded_key.as_slice());
+    let mut report = RelationalRowDeltaReadReport::default();
+    for run in runs.iter().rev() {
+        let lower = (
+            run.lower_bound.table_ordinal,
+            run.lower_bound.encoded_primary_key.as_slice(),
+        );
+        let upper = (
+            run.upper_bound.table_ordinal,
+            run.upper_bound.encoded_primary_key.as_slice(),
+        );
+        if target < lower || target > upper {
+            continue;
         }
 
-        let target = (table_ordinal, encoded_key.as_slice());
-        let mut report = RelationalRowDeltaReadReport::default();
-        for run in self.manifest.runs.iter().rev() {
-            let lower = (
-                run.lower_bound.table_ordinal,
-                run.lower_bound.encoded_primary_key.as_slice(),
-            );
-            let upper = (
-                run.upper_bound.table_ordinal,
-                run.upper_bound.encoded_primary_key.as_slice(),
-            );
-            if target < lower || target > upper {
-                continue;
-            }
-
-            let mut found = None;
-            let completed = visit_run(
-                &self.directory,
-                &self.manifest,
-                run,
-                self.config,
-                |candidate_table, candidate_key, value, _| {
-                    report.entries_visited =
-                        report.entries_visited.checked_add(1).ok_or_else(|| {
-                            RelationalRowDeltaError::Admission(
-                                "row delta lookup entry counter overflow".to_string(),
-                            )
-                        })?;
-                    match candidate_table
-                        .cmp(table)
-                        .then_with(|| candidate_key.cmp(primary_key))
-                    {
-                        std::cmp::Ordering::Less => Ok(true),
-                        std::cmp::Ordering::Equal => {
-                            found = Some(value.clone());
-                            Ok(false)
-                        }
-                        std::cmp::Ordering::Greater => Ok(false),
-                    }
-                },
-            )?;
-            report.runs_read = report.runs_read.checked_add(1).ok_or_else(|| {
+        let mut found = None;
+        let completed = visit_run(context, run, |candidate_table, candidate_key, value, _| {
+            report.entries_visited = report.entries_visited.checked_add(1).ok_or_else(|| {
                 RelationalRowDeltaError::Admission(
-                    "row delta lookup run counter overflow".to_string(),
+                    "row delta lookup entry counter overflow".to_string(),
                 )
             })?;
-            report.bytes_read = report
-                .bytes_read
-                .checked_add(run.encoded_len)
-                .and_then(|bytes| bytes.checked_add(run.descriptor_bytes))
-                .ok_or_else(|| {
-                    RelationalRowDeltaError::Admission(
-                        "row delta lookup byte counter overflow".to_string(),
-                    )
-                })?;
-            report.stopped_early |= !completed;
-            if found.is_some() {
-                return Ok((found, report));
+            match candidate_table
+                .cmp(table)
+                .then_with(|| candidate_key.cmp(primary_key))
+            {
+                std::cmp::Ordering::Less => Ok(true),
+                std::cmp::Ordering::Equal => {
+                    found = Some(value.clone());
+                    Ok(false)
+                }
+                std::cmp::Ordering::Greater => Ok(false),
             }
+        })?;
+        report.runs_read = report.runs_read.checked_add(1).ok_or_else(|| {
+            RelationalRowDeltaError::Admission("row delta lookup run counter overflow".to_string())
+        })?;
+        report.bytes_read = report
+            .bytes_read
+            .checked_add(run.encoded_len)
+            .and_then(|bytes| bytes.checked_add(run.descriptor_bytes))
+            .ok_or_else(|| {
+                RelationalRowDeltaError::Admission(
+                    "row delta lookup byte counter overflow".to_string(),
+                )
+            })?;
+        report.stopped_early |= !completed;
+        if found.is_some() {
+            return Ok((found, report));
         }
-        Ok((None, report))
     }
+    Ok((None, report))
 }
 
 fn encode_range_bound(
@@ -629,10 +652,15 @@ fn visit_manifest_entries(
     let mut report = RelationalRowDeltaReadReport::default();
     for run in &manifest.runs {
         let completed = visit_run(
-            directory,
-            manifest,
+            RowDeltaRunContext {
+                directory,
+                base: manifest.base,
+                delta_generation: manifest.delta_generation,
+                schema_set_digest: manifest.schema_set_digest,
+                tables: &manifest.tables,
+                config,
+            },
             run,
-            config,
             |table, key, value, epoch| {
                 report.entries_visited =
                     report.entries_visited.checked_add(1).ok_or_else(|| {
@@ -662,10 +690,8 @@ fn visit_manifest_entries(
 }
 
 fn visit_run(
-    directory: &Path,
-    manifest: &RelationalRowDeltaManifest,
+    context: RowDeltaRunContext<'_>,
     run: &RowDeltaRunDescriptor,
-    config: RelationalRowDeltaConfig,
     mut visit: impl FnMut(
         &str,
         &RelationalKey,
@@ -673,9 +699,9 @@ fn visit_run(
         u64,
     ) -> Result<bool, RelationalRowDeltaError>,
 ) -> Result<bool, RelationalRowDeltaError> {
-    let path = directory.join(relational_row_delta_run_file(
-        manifest.base.generation,
-        manifest.delta_generation,
+    let path = context.directory.join(relational_row_delta_run_file(
+        context.base.generation,
+        context.delta_generation,
         run.ordinal,
     ));
     codec::validate_artifact_length(&path, run.encoded_len)?;
@@ -684,7 +710,13 @@ fn visit_run(
     descriptor_file
         .read_exact(&mut header)
         .map_err(durability("read row delta run header"))?;
-    let decoded_header = codec::decode_run_header(&header, manifest, run)?;
+    let decoded_header = codec::decode_run_header(
+        &header,
+        context.base,
+        context.delta_generation,
+        context.schema_set_digest,
+        run,
+    )?;
     let mut content_hasher = IntegrityHasher::new();
     content_hasher.update(codec::run_integrity_prefix(&header));
     let mut artifact_hasher = IntegrityHasher::new();
@@ -718,8 +750,8 @@ fn visit_run(
             .read_exact(&mut descriptor)
             .map_err(durability("read row delta entry descriptor"))?;
         let decoded = codec::decode_entry_descriptor(&descriptor)?;
-        if decoded.table_ordinal as usize >= manifest.tables.len()
-            || decoded.last_modified_epoch <= manifest.base.source_commit_epoch
+        if decoded.table_ordinal as usize >= context.tables.len()
+            || decoded.last_modified_epoch <= context.base.source_commit_epoch
             || decoded.last_modified_epoch < run.start_epoch
             || decoded.last_modified_epoch > run.end_epoch
             || decoded.key_offset != expected_payload_offset
@@ -733,8 +765,8 @@ fn visit_run(
                         )
                     })?
             || decoded.key_len == 0
-            || decoded.key_len as usize > config.row_limits.max_key_bytes.get()
-            || decoded.row_len as usize > config.row_limits.max_row_bytes.get()
+            || decoded.key_len as usize > context.config.row_limits.max_key_bytes.get()
+            || decoded.row_len as usize > context.config.row_limits.max_row_bytes.get()
             || (decoded.kind == 0) != (decoded.row_len == 0)
         {
             return Err(RelationalRowDeltaError::Corrupt(format!(
@@ -764,8 +796,8 @@ fn visit_run(
         entry_hasher.update(&encoded_row);
         let entry_crc32c = entry_hasher.finish().crc32c.get();
         let expected_binding = codec::entry_binding(
-            manifest.base,
-            manifest.delta_generation,
+            context.base,
+            context.delta_generation,
             run.ordinal,
             entry_ordinal,
             &descriptor[..48],
@@ -810,12 +842,12 @@ fn visit_run(
         let value = decode_value(
             decoded.kind,
             &encoded_row,
-            &manifest.tables[decoded.table_ordinal as usize],
-            config,
+            &context.tables[decoded.table_ordinal as usize],
+            context.config,
         )?;
         previous_key = Some((decoded.table_ordinal, encoded_key));
         if !visit(
-            &manifest.tables[decoded.table_ordinal as usize].table,
+            &context.tables[decoded.table_ordinal as usize].table,
             &primary_key,
             &value,
             decoded.last_modified_epoch,
@@ -839,6 +871,19 @@ fn visit_run(
         ));
     }
     Ok(true)
+}
+
+pub(super) fn decode_staged_value(
+    value: &RowDeltaValue,
+    table: &RelationalRowDeltaTableMetadata,
+    config: RelationalRowDeltaConfig,
+) -> Result<RelationalRowPageRecoveredValue, RelationalRowDeltaError> {
+    decode_value(
+        u8::from(value.is_present),
+        &value.encoded_row,
+        table,
+        config,
+    )
 }
 
 fn decode_value(

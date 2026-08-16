@@ -1020,7 +1020,9 @@ pub(super) struct DecodedRunHeader {
 
 pub(super) fn decode_run_header(
     encoded: &[u8; RUN_HEADER_BYTES],
-    manifest: &RelationalRowDeltaManifest,
+    base: RelationalRowDeltaBaseBinding,
+    delta_generation: u64,
+    schema_set_digest: Sha256Digest,
     descriptor: &RowDeltaRunDescriptor,
 ) -> Result<DecodedRunHeader, RelationalRowDeltaError> {
     if &encoded[..8] != RUN_MAGIC {
@@ -1032,17 +1034,17 @@ pub(super) fn decode_run_header(
     let flags = read_u16(&encoded[10..12]);
     if version != FORMAT_VERSION
         || flags != 0
-        || read_u64(&encoded[12..20]) != manifest.base.generation
-        || read_u64(&encoded[20..28]) != manifest.delta_generation
-        || read_u64(&encoded[28..36]) != manifest.base.source_commit_epoch
+        || read_u64(&encoded[12..20]) != base.generation
+        || read_u64(&encoded[20..28]) != delta_generation
+        || read_u64(&encoded[28..36]) != base.source_commit_epoch
         || read_u32(&encoded[36..40]) != descriptor.ordinal
         || read_u64(&encoded[40..48]) != descriptor.start_epoch
         || read_u64(&encoded[48..56]) != descriptor.end_epoch
         || read_u32(&encoded[56..60]) != descriptor.entry_count
         || read_u64(&encoded[60..68]) != descriptor.descriptor_bytes
         || read_u64(&encoded[68..76]) != descriptor.payload_bytes
-        || &encoded[76..108] != manifest.base.root_set_digest.as_bytes()
-        || &encoded[108..140] != manifest.schema_set_digest.as_bytes()
+        || &encoded[76..108] != base.root_set_digest.as_bytes()
+        || &encoded[108..140] != schema_set_digest.as_bytes()
     {
         return Err(RelationalRowDeltaError::Corrupt(
             "row delta run fence disagrees with its manifest".to_string(),

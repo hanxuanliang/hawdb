@@ -2,13 +2,14 @@ use super::{
     codec, durability, relational_row_delta_manifest_generation_file,
     relational_row_delta_run_file, RelationalRowDeltaBaseBinding, RelationalRowDeltaConfig,
     RelationalRowDeltaError, RelationalRowDeltaGeneration, RelationalRowDeltaManifest,
-    RelationalRowDeltaPublicationPhase, RelationalRowDeltaReport, RelationalRowDeltaTableMetadata,
-    RowDeltaKey, RowDeltaRunDescriptor, RowDeltaValue, COMPLETE_PUBLICATION_TRACE,
-    RELATIONAL_ROW_DELTA_MANIFEST_FILE, RELATIONAL_ROW_DELTA_PUBLICATION_LOCK_FILE,
+    RelationalRowDeltaPublicationPhase, RelationalRowDeltaReadReport, RelationalRowDeltaReport,
+    RelationalRowDeltaTableMetadata, RowDeltaKey, RowDeltaRunContext, RowDeltaRunDescriptor,
+    RowDeltaValue, COMPLETE_PUBLICATION_TRACE, RELATIONAL_ROW_DELTA_MANIFEST_FILE,
+    RELATIONAL_ROW_DELTA_PUBLICATION_LOCK_FILE,
 };
-use crate::relational::row_page::RelationalRowPageRootReader;
+use crate::relational::row_page::{RelationalRowPageRecoveredValue, RelationalRowPageRootReader};
 use crate::relational::{
-    ordered_key::encode_ordered_relational_key, RelationalOverflowRootReader,
+    ordered_key::encode_ordered_relational_key, RelationalKey, RelationalOverflowRootReader,
     RelationalRecoverySourceIdentity, RelationalRowChange, RelationalRowChangeCapture,
     RelationalRowChangeCaptureLimits, RelationalRowPagePublicationConfig, RelationalState,
 };
@@ -217,6 +218,78 @@ impl RelationalRowDeltaBuilder {
 
     pub const fn visible_commit_epoch(&self) -> u64 {
         self.visible_commit_epoch
+    }
+
+    /// Looks up the newest value already staged by this unpublished builder.
+    ///
+    /// The bounded dirty map takes precedence over immutable runs. Run reads
+    /// use the same checksummed decoder as a published delta reader, allowing
+    /// WAL recovery to hydrate one later transaction without retaining all
+    /// earlier recovered rows in memory.
+    pub fn lookup_staged(
+        &self,
+        table: &str,
+        primary_key: &RelationalKey,
+    ) -> Result<
+        (
+            Option<RelationalRowPageRecoveredValue>,
+            RelationalRowDeltaReadReport,
+        ),
+        RelationalRowDeltaError,
+    > {
+        self.require_available()?;
+        let Ok(table_ordinal) = self
+            .tables
+            .binary_search_by(|candidate| candidate.table.as_str().cmp(table))
+        else {
+            return Ok((None, RelationalRowDeltaReadReport::default()));
+        };
+        let table_ordinal = u32::try_from(table_ordinal).map_err(|_| {
+            RelationalRowDeltaError::Corrupt("row delta table ordinal does not fit u32".to_string())
+        })?;
+        let encoded_primary_key = encode_ordered_relational_key(primary_key).map_err(|error| {
+            RelationalRowDeltaError::Admission(format!(
+                "row delta lookup key cannot be encoded: {error}"
+            ))
+        })?;
+        if encoded_primary_key.len() > self.config.row_limits.max_key_bytes.get() {
+            return Err(RelationalRowDeltaError::Admission(format!(
+                "row delta lookup key contains {} bytes, exceeding limit {}",
+                encoded_primary_key.len(),
+                self.config.row_limits.max_key_bytes
+            )));
+        }
+        let key = RowDeltaKey {
+            table_ordinal,
+            encoded_primary_key,
+        };
+        if let Some(value) = self.dirty.get(&key) {
+            let value = super::reader::decode_staged_value(
+                value,
+                &self.tables[table_ordinal as usize],
+                self.config,
+            )?;
+            return Ok((
+                Some(value),
+                RelationalRowDeltaReadReport {
+                    entries_visited: 1,
+                    ..RelationalRowDeltaReadReport::default()
+                },
+            ));
+        }
+        super::reader::lookup_runs(
+            RowDeltaRunContext {
+                directory: &self.directory,
+                base: self.base,
+                delta_generation: self.delta_generation,
+                schema_set_digest: self.schema_set_digest,
+                tables: &self.tables,
+                config: self.config,
+            },
+            &self.runs,
+            table,
+            primary_key,
+        )
     }
 
     pub fn record(

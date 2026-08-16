@@ -107,6 +107,38 @@ fn dirty_run_coalesces_repeated_keys_to_the_latest_epoch() {
 }
 
 #[test]
+fn unpublished_lookup_prefers_dirty_values_then_newest_immutable_run() {
+    let directory = unique_test_dir("unpublished-lookup");
+    let base = publish_and_open_base(&directory);
+    let config = RelationalRowDeltaConfig {
+        max_dirty_entries: NonZeroUsize::new(1).unwrap(),
+        ..RelationalRowDeltaConfig::default()
+    };
+    let mut builder = builder(&directory, &base, 1, None, config);
+
+    builder.record(2, capture(2, Some("two-v2"))).unwrap();
+    let (dirty, dirty_report) = builder.lookup_staged("documents", &key(2)).unwrap();
+    assert_eq!(dirty.as_ref().and_then(present_text), Some("two-v2"));
+    assert_eq!(dirty_report.entries_visited, 1);
+    assert_eq!(dirty_report.runs_read, 0);
+
+    builder.record(3, capture(1, Some("one-v3"))).unwrap();
+    let (flushed, flushed_report) = builder.lookup_staged("documents", &key(2)).unwrap();
+    assert_eq!(flushed.as_ref().and_then(present_text), Some("two-v2"));
+    assert!(flushed_report.runs_read > 0);
+
+    builder.record(4, capture(2, None)).unwrap();
+    let (deleted, deleted_report) = builder.lookup_staged("documents", &key(2)).unwrap();
+    assert!(matches!(
+        deleted,
+        Some(RelationalRowPageRecoveredValue::Deleted)
+    ));
+    assert_eq!(deleted_report.runs_read, 0);
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn delta_schema_must_match_the_base_root_column_count() {
     let directory = unique_test_dir("column-count-fence");
     let base = publish_and_open_base(&directory);

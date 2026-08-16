@@ -441,6 +441,147 @@ fn authoritative_constraint_staging_derives_index_and_row_batches_once() {
 }
 
 #[test]
+fn sparse_authoritative_recovery_matches_materialized_predicate_replay() {
+    let base = RelationalState::default()
+        .stage_transaction(
+            create_upsert_table(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("create upsert table")
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::Insert {
+                    table: "documents".to_string(),
+                    rows: vec![
+                        upsert_row("id-1", "owner-1", "keep"),
+                        upsert_row("id-2", "owner-2", "drop"),
+                        upsert_row("id-3", "owner-3", "keep"),
+                    ],
+                    mode: RelationalInsertMode::Error,
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("seed rows");
+    let transaction = RelationalTransaction {
+        writes: vec![RelationalWrite::DeleteWhere {
+            table: "documents".to_string(),
+            predicate: RelationalPredicate::Compare {
+                column: "payload".to_string(),
+                op: RelationalComparisonOp::Eq,
+                value: RelationalValue::Text("drop".to_string()),
+            },
+        }],
+    };
+    let index = TestConstraintIndex::from_state(&base);
+    let (materialized, expected_index_capture, expected_row_capture, access) = base
+        .stage_transaction_with_authoritative_replay_access(
+            transaction.clone(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            RelationalIndexChangeCaptureLimits::default(),
+            RelationalRowChangeCaptureLimits::default(),
+            &index,
+        )
+        .expect("materialized staging derives the authenticated access set");
+    assert_eq!(access.entries().len(), 3);
+
+    let hydrated = access
+        .entries()
+        .iter()
+        .map(|entry| RelationalSparseRecoveryRow {
+            table: entry.table.clone(),
+            primary_key: entry.primary_key.clone(),
+            row: base.row(&entry.table, &entry.primary_key).cloned(),
+        })
+        .collect::<Vec<_>>();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "skein-sparse-relational-recovery-{}-{nonce}",
+        std::process::id()
+    ));
+    let row_page_config = RelationalRowPagePublicationConfig::default();
+    let deltas = base
+        .row_page_snapshot_deltas(1, 1, row_page_config)
+        .expect("pack canonical row pages");
+    RelationalRowPagePublisher::new(row_page_config)
+        .publish(&directory, 1, 1, None, deltas)
+        .expect("publish canonical row root");
+    let row_root = RelationalRowPageRootReader::open_generation(&directory, 1, row_page_config)
+        .expect("open canonical row root");
+    let metadata = RelationalState::from_canonical_row_root(row_root.manifest())
+        .expect("mount canonical row metadata");
+    let (recovered, index_capture, row_capture) = metadata
+        .stage_sparse_transaction_for_authoritative_recovery_with_replay_access(
+            RelationalSparseRecoveryStage {
+                transaction: transaction.clone(),
+                hydrated_access: hydrated.clone(),
+                mutation_limits: RelationalMutationLimits::default(),
+                overflow_config: RelationalOverflowConfig::default(),
+                index_capture_limits: RelationalIndexChangeCaptureLimits::default(),
+                row_capture_limits: RelationalRowChangeCaptureLimits::default(),
+                expected_replay_access: &access,
+            },
+        )
+        .expect("sparse recovery replays the exact authenticated workspace");
+    assert!(!recovered.materialized_rows_resident());
+    assert!(recovered.canonical_row_metadata_only());
+    assert_eq!(recovered.materialized_row_count(), 0);
+    assert_eq!(
+        recovered.row_count("documents"),
+        materialized.row_count("documents")
+    );
+    assert_eq!(recovered.total_row_count(), materialized.total_row_count());
+    assert_eq!(index_capture, expected_index_capture);
+    assert_eq!(row_capture, expected_row_capture);
+
+    let missing = metadata
+        .stage_sparse_transaction_for_authoritative_recovery_with_replay_access(
+            RelationalSparseRecoveryStage {
+                transaction: transaction.clone(),
+                hydrated_access: hydrated[..2].to_vec(),
+                mutation_limits: RelationalMutationLimits::default(),
+                overflow_config: RelationalOverflowConfig::default(),
+                index_capture_limits: RelationalIndexChangeCaptureLimits::default(),
+                row_capture_limits: RelationalRowChangeCaptureLimits::default(),
+                expected_replay_access: &access,
+            },
+        )
+        .expect_err("sparse recovery rejects an incomplete hydration set");
+    assert!(matches!(
+        missing,
+        RelationalError::Corruption(message) if message.contains("does not exactly cover")
+    ));
+
+    let over_budget = metadata
+        .stage_sparse_transaction_for_authoritative_recovery_with_replay_access(
+            RelationalSparseRecoveryStage {
+                transaction,
+                hydrated_access: hydrated,
+                mutation_limits: RelationalMutationLimits::default(),
+                overflow_config: RelationalOverflowConfig::default(),
+                index_capture_limits: RelationalIndexChangeCaptureLimits::default(),
+                row_capture_limits: RelationalRowChangeCaptureLimits {
+                    max_entries: std::num::NonZeroUsize::new(3).unwrap(),
+                    max_bytes: std::num::NonZeroUsize::new(1).unwrap(),
+                },
+                expected_replay_access: &access,
+            },
+        )
+        .expect_err("sparse recovery enforces its resident-byte budget");
+    assert!(matches!(
+        over_budget,
+        RelationalError::Admission(message) if message.contains("workspace requires")
+    ));
+    std::fs::remove_dir_all(directory).expect("remove sparse recovery fixture");
+}
+
+#[test]
 fn authoritative_constraint_staging_merges_transaction_local_unique_changes() {
     let empty = RelationalState::default()
         .stage_transaction(

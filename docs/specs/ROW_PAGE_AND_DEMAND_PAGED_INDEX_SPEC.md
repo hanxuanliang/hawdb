@@ -434,8 +434,30 @@ after both pre-published row and index recovery artifacts match the recomputed
 WAL generation, LSN interval, ordered-record digest, and recovered epoch. Exact
 final counts come from the row recovery manifest. Schema-changing or snapshot
 WAL, a missing artifact, or any identity drift rejects open. Writable recovery
-still uses the materialized recovery state until a demand-hydrated sparse
-mutation workspace is implemented.
+still uses the materialized recovery state until the demand-hydrated sparse
+mutation workspace is wired through both recovery and later live commits.
+
+The storage crate provides the first writable sparse-recovery boundary without
+changing the production open selector. `RelationalRowDeltaBuilder::lookup_staged`
+resolves a primary key from the bounded dirty map first and then from immutable
+recovery runs newest-first, using the same checksummed decoder as a published
+reader. `RelationalState::stage_sparse_transaction_for_authoritative_recovery_with_replay_access`
+accepts one explicit hydrated result for every authenticated access-set entry,
+including explicit absence. It rejects missing, reordered, duplicate, unknown,
+unhydrated, oversized, or byte-over-budget input before replay. The temporary
+materialized workspace contains only those entries, reuses the existing logical
+transaction implementation as the differential oracle, compares the recomputed
+access set, advances exact detached row counts, retains only newly created
+content-addressed overflow segments, and is then discarded. Older unreachable
+recovery overflow segments may remain until checkpoint because proving them
+unreachable would require scanning rows outside the bounded workspace.
+
+This primitive does not by itself enable metadata-only writable open. The
+`GraphStore` selector MUST continue loading the materialized recovery state until
+both WAL replay and later live commits hydrate their mutation candidates through
+the same bounded path. Activating only recovery would return a writable handle
+whose next transaction requires rows that are no longer resident, which is not
+an admissible intermediate production state.
 
 ## Identities and terminology
 
