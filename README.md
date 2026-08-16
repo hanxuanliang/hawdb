@@ -93,6 +93,10 @@ bazel build //:skein
 bazel test --test_output=errors //...
 ```
 
+The repository configuration selects Bazel's hermetic `remotejdk_21` runtime
+for Java-backed rules, including `rules_tla`; callers do not need to configure
+`JAVA_HOME`.
+
 The Bazel graph covers the root library and CLI tests plus every Cargo workspace
 crate, including the Tokio runtime, Linux cgroup parser, optimizer fuzz library,
 vector projection, and synthetic qualification workload. CI checks that every

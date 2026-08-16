@@ -6,8 +6,10 @@ activated. They are executable specifications checked over bounded state spaces
 by TLC.
 
 Run every model through the hermetic `rules_tla` Bazel targets. Bazel resolves
-the pinned TLA+ Tools artifact and Java runtime; `--jobs=1` bounds outer model
-parallelism because each TLC process already owns an internal worker pool:
+the pinned TLA+ Tools artifact and the `remotejdk_21` runtime selected by the
+repository `.bazelrc`; callers do not need `JAVA_HOME`. `--jobs=1` bounds outer
+model parallelism because each TLC process already owns an internal worker
+pool:
 
 ```bash
 bazel test //docs/tla:storage_models --jobs=1 --test_output=errors

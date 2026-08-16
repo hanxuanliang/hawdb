@@ -1,0 +1,3 @@
+# Keep Java-backed rules independent of the host JDK and JAVA_HOME.
+build --java_runtime_version=remotejdk_21
+build --tool_java_runtime_version=remotejdk_21
