@@ -87,7 +87,7 @@ fn measure(name: &str, segment_bytes: u64) -> serde_json::Value {
             Vec::new(),
         )
         .expect("benchmark artifact must be writable");
-    let segment_count = manifest.segments.len();
+    let segment_count = manifest.segment_count as usize;
     let artifact_len = manifest.artifact_len;
     // Sized to hold the whole artifact, so the measurement is the search and
     // the decode rather than the file system.

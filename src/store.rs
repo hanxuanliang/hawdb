@@ -7221,9 +7221,8 @@ mod tests {
             );
             corrupt_offset = 40;
             let canonical_manifest = store.canonical_segment_manifest().unwrap();
-            assert!(canonical_manifest
-                .node_segments()
-                .all(|segment| segment.length.get() < 16 * 1024));
+            assert!(canonical_manifest.artifact_len < 16 * 1024);
+            assert_eq!(canonical_manifest.node_segment_count, 1);
             assert_eq!(
                 store.node_owned(node_id).unwrap().unwrap().properties["content"],
                 Value::String(content.clone())

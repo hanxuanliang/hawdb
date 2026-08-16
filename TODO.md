@@ -296,12 +296,14 @@ crash; read-only recovery remains fail closed.
     lower-bound seeks one descriptor under independent limits, reads one block,
     exposes descriptor/data cache and I/O accounting, and uses exhaustive
     uncached deep scrub with sticky physical-failure poison. Canonical segment
-    checkpoints now shadow-publish an order-preserving descriptor tree after
-    the data artifact, bind its exact root through the selected resident
-    manifest, verify only the bounded root on normal open, and compare the full
-    uncached tree with the resident vector during scrub and backup. Next remove
-    that resident vector and activate bounded point/prefix demand reads in an
-    independent change. Collect representative
+    checkpoints now publish an order-preserving descriptor tree after the data
+    artifact and bind its exact root through a compact selected manifest.
+    Normal open verifies only the bounded root. Point lookup lower-bound seeks
+    one descriptor, scans advance through fixed-size bounded descriptor
+    batches, and reports separate descriptor/data cache and I/O. Deep scrub and
+    backup hash the complete uncached tree and canonical artifact, decode every
+    segment, prove aggregate count/range closure, and sticky-poison physical
+    failure without poisoning admission. Collect representative
     production-copy evidence before claiming that all graph/index startup
     metadata residency is independent of entry count.
   - The independent general graph-storage release artifact now has a bounded

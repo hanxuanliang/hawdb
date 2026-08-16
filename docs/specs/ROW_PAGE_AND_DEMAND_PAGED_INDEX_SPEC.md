@@ -1444,9 +1444,9 @@ and normal open admits and verifies only that root while page payloads remain
 cold. Property-projection block descriptors follow the same rule: the selected
 compact property manifest contains bounded definitions plus the exact
 descriptor-root identity, never the per-block descriptor vector. Canonical
-segment descriptors are now published into the same page format and the
-resident manifest binds their root, but the resident vector remains the serving
-oracle until the independent demand-reader activation. Other manifest-backed
+segment descriptors use the same page format. The compact manifest binds their
+root and aggregate per-kind counts without retaining a descriptor vector; point
+and scan execution use the selected demand reader. Other manifest-backed
 graph structures MUST still report both the configured aggregate limit and
 selected encoded manifest bytes, and MUST reject a selected generation that
 exceeds the limit.
@@ -1484,45 +1484,53 @@ remain cold until a prefix scan or explicit deep scrub reads them. Page payloads
 are admitted independently of the graph-manifest open budget and use the shared
 byte-bounded storage cache.
 
-### Canonical segment descriptor shadow v1
+### Canonical segment demand descriptor root v1
 
-Every canonical checkpoint now publishes a descriptor-tree shadow beside the
-resident canonical segment manifest:
+Every canonical checkpoint publishes and activates a descriptor tree beside the
+compact canonical segment manifest:
 
 - the leaf key is `(kind tag, big-endian maximum record id, big-endian segment
   id)`. Node keys sort before relationship keys, ranges within one kind follow
-  record order, and a future point reader can lower-bound seek by `(kind,
-  requested id)` without scanning preceding descriptors;
+  record order, and point readers lower-bound seek by `(kind, requested id)`
+  without scanning preceding descriptors;
 - the value carries an eight-byte magic, version, zero flags, segment id, kind,
   exact artifact range, CRC32C, inclusive record bounds, non-zero record count,
   and three length-delimited binary Bloom filters. Every Bloom filter carries a
   non-zero hash count and bounded word count. Encode and decode require the key
   and value identities to agree, and the default 448 KiB descriptor admission
   accommodates the three independently bounded Bloom filters;
-- segment flush streams each descriptor into `GraphDescriptorTreeBuilder` while
-  retaining the existing manifest vector. Retaining that vector is intentional
-  in this shadow stage: durable representation publication and serving-path
-  activation remain independently reviewable contracts;
+- segment flush streams each descriptor into `GraphDescriptorTreeBuilder` and
+  retains only aggregate node/relationship record and segment counts. Manifest
+  residency is therefore independent of segment count;
 - the canonical data artifact is synchronized and published before descriptor
   pages and the bounded root. The canonical manifest then binds the exact source
   commit epoch, segment count, and root length, CRC32C, and SHA-256; the outer
   checkpoint manifest selects that canonical manifest last;
 - normal open verifies the manifest-to-root identity, descriptor count, root
   integrity, and page-artifact length without reading any descriptor page
-  payload. It still uses the resident vector for point and scan execution;
-- explicit shadow verification hashes and decodes the complete descriptor-page
-  closure without warming the shared cache, compares every ordered tree entry
-  with the resident manifest oracle, and rejects missing, additional, reordered,
-  or corrupt entries;
+  payload. Point lookup performs one bounded lower-bound seek and reads at most
+  one selected canonical segment;
+- scans advance through fixed-size descriptor batches. Each batch independently
+  admits pages, page bytes, descriptor count, and tree height, then releases its
+  traversal state before the next lower bound. Node/relationship iterators retain
+  at most one decoded canonical segment and never materialize all descriptors;
+- read reports separate descriptor page/cache/I/O work from canonical segment
+  cache/I/O work. Bloom pruning remains descriptor-local. A physical descriptor
+  or canonical data failure sticky-poisons the reader, while segment-size or
+  descriptor-resource admission remains retryable and non-poisoning;
+- explicit deep scrub hashes both complete artifacts without warming the shared
+  cache, decodes every descriptor and record framing, validates property value
+  shape, and proves contiguous physical ranges, strictly increasing segment ids,
+  grouped kinds, disjoint per-kind record ranges, and exact aggregate counts;
 - backup, restore, storage scrub, checkpoint discard, abandoned-candidate
-  cleanup, and generation reclamation treat canonical data, resident manifest,
+  cleanup, and generation reclamation treat canonical data, compact manifest,
   descriptor pages, and root as one physical closure.
 
-The shadow publication refines the candidate-data, candidate-page, and
-publish-root transitions of `SkeinGraphDescriptorPaging.tla`. The later compact
-manifest and demand-reader change MUST use the separate activation transition;
-this stage does not claim that canonical descriptor residency is independent of
-segment count.
+Publication refines the candidate-data, candidate-page, and publish-root
+transitions of `SkeinGraphDescriptorPaging.tla`; installing the compact manifest
+refines the separate activation transition. `RejectDemandAdmission` models the
+non-poisoning resource boundary, while physical corruption follows the modeled
+fail-closed poison transition.
 
 ### Property-spill demand descriptor root v1
 

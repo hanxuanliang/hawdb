@@ -1182,7 +1182,7 @@ impl DurableStore {
                 self.store_id,
                 max_segment_bytes,
             )
-            .and_then(|reader| reader.verify_descriptor_shadow())
+            .and_then(|reader| reader.deep_scrub())
             .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
         }
 

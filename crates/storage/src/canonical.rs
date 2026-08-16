@@ -1,15 +1,16 @@
 use crate::graph_descriptor_tree::demand::{
-    GraphDescriptorTreeDemandReader, GraphDescriptorTreeScanControl,
+    GraphDescriptorTreeDemandReader, GraphDescriptorTreeReadLimits, GraphDescriptorTreeReadReport,
+    GraphDescriptorTreeScanControl,
 };
 use crate::{
     content_digest, durable_replace_file, wire, ContentDigest, FileSegmentRangeReader,
-    GraphDescriptorKind, GraphDescriptorTreeArtifactMetadata, GraphDescriptorTreeBuildConfig,
-    GraphDescriptorTreeBuilder, GraphDescriptorTreeError, GraphDescriptorTreeGenerationArtifacts,
-    GraphDescriptorTreePaths, GraphDescriptorTreeRootReader, ManifestGeneration, NodeId,
-    NodeRecord, PreparedGraphDescriptorTree, PropertySpillError, PropertySpillManifest,
-    PropertySpillReader, PropertySpillWriteOptions, PropertySpillWriteOutput, PropertySpillWriter,
-    RelId, RelRecord, SegmentCache, SegmentRangeReader, SegmentReadError, SegmentReadRange,
-    StoreId,
+    GraphDescriptorKind, GraphDescriptorPageError, GraphDescriptorTreeArtifactMetadata,
+    GraphDescriptorTreeBuildConfig, GraphDescriptorTreeBuilder, GraphDescriptorTreeError,
+    GraphDescriptorTreeGenerationArtifacts, GraphDescriptorTreePaths,
+    GraphDescriptorTreeRootReader, ManifestGeneration, NodeId, NodeRecord,
+    PreparedGraphDescriptorTree, PropertySpillError, PropertySpillManifest, PropertySpillReader,
+    PropertySpillWriteOptions, PropertySpillWriteOutput, PropertySpillWriter, RelId, RelRecord,
+    SegmentCache, SegmentRangeRead, SegmentReadError, SegmentReadRange, StoreId,
 };
 use skein_core::{LabelId, RelTypeId, Value};
 use skein_integrity::{IntegrityHasher, Sha256Digest};
@@ -18,9 +19,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 const ARTIFACT_HEADER: &[u8; 16] = b"SKEINCANONICAL01";
@@ -35,6 +37,7 @@ const BLOOM_HASHES: u8 = 7;
 const DESCRIPTOR_VALUE_MAGIC: &[u8; 8] = b"SKCNSDS1";
 const DESCRIPTOR_VALUE_VERSION: u16 = 1;
 const DESCRIPTOR_VALUE_FIXED_BYTES: usize = 80;
+const DESCRIPTOR_SCAN_BATCH: u64 = 256;
 pub const CANONICAL_SEGMENT_DESCRIPTOR_ARTIFACT_ID: u64 = 0x534b_4341_4e44_5331;
 
 pub fn canonical_segment_descriptor_page_file(generation: u64) -> String {
@@ -127,48 +130,6 @@ impl CanonicalEndpointBloom {
             return 0.0;
         }
         (set_bits as f64 / self.bit_len() as f64).powi(i32::from(self.hash_count))
-    }
-
-    fn encode(&self) -> String {
-        format!("{:02x}", self.hash_count)
-            + &self
-                .words
-                .iter()
-                .map(|word| format!("{word:016x}"))
-                .collect::<String>()
-    }
-
-    fn decode(value: &str) -> Result<Self, CanonicalSegmentError> {
-        if value.len() < 18 || !(value.len() - 2).is_multiple_of(16) {
-            return Err(CanonicalSegmentError::Corrupt(
-                "canonical endpoint bloom has an invalid length".to_string(),
-            ));
-        }
-        let hash_count = u8::from_str_radix(&value[..2], 16).map_err(|_| {
-            CanonicalSegmentError::Corrupt(
-                "canonical endpoint bloom has an invalid hash count".to_string(),
-            )
-        })?;
-        let words = &value[2..];
-        let word_count = words.len() / 16;
-        if hash_count == 0 || word_count == 0 || word_count > BLOOM_MAX_WORDS {
-            return Err(CanonicalSegmentError::Corrupt(
-                "canonical endpoint bloom exceeds its format bounds".to_string(),
-            ));
-        }
-        let mut decoded = vec![0u64; word_count];
-        for (index, word) in decoded.iter_mut().enumerate() {
-            let start = index * 16;
-            *word = u64::from_str_radix(&words[start..start + 16], 16).map_err(|_| {
-                CanonicalSegmentError::Corrupt(
-                    "canonical endpoint bloom contains invalid hexadecimal data".to_string(),
-                )
-            })?;
-        }
-        Ok(Self {
-            words: decoded.into_boxed_slice(),
-            hash_count,
-        })
     }
 
     fn encode_descriptor_bytes(&self) -> Result<Vec<u8>, CanonicalSegmentError> {
@@ -452,11 +413,12 @@ pub struct CanonicalSegmentManifest {
     pub node_count: u64,
     pub relationship_count: u64,
     pub segment_count: u64,
+    pub node_segment_count: u64,
+    pub relationship_segment_count: u64,
     pub descriptor_root_artifact: GraphDescriptorTreeArtifactMetadata,
     /// The record property key table. Record payloads encode `u32` ids into
     /// this manifest-owned table; no inline-key compatibility layout exists.
     pub property_keys: Vec<String>,
-    pub segments: Vec<CanonicalSegmentDescriptor>,
 }
 
 impl CanonicalSegmentManifest {
@@ -469,26 +431,11 @@ impl CanonicalSegmentManifest {
         }
     }
 
-    /// The segments of one kind, as a slice.
-    ///
-    /// Segments are grouped by kind and ordered by record id within a kind —
-    /// both checked by `validate` — which is what lets a lookup binary search
-    /// instead of walking every descriptor.
-    pub fn segments_of_kind(&self, kind: CanonicalSegmentKind) -> &[CanonicalSegmentDescriptor] {
-        let start = self.segments.partition_point(|segment| segment.kind < kind);
-        let end = self
-            .segments
-            .partition_point(|segment| segment.kind <= kind);
-        &self.segments[start..end]
-    }
-
-    pub fn node_segments(&self) -> impl Iterator<Item = &CanonicalSegmentDescriptor> {
-        self.segments_of_kind(CanonicalSegmentKind::Nodes).iter()
-    }
-
-    pub fn relationship_segments(&self) -> impl Iterator<Item = &CanonicalSegmentDescriptor> {
-        self.segments_of_kind(CanonicalSegmentKind::Relationships)
-            .iter()
+    pub const fn segment_count_for_kind(&self, kind: CanonicalSegmentKind) -> u64 {
+        match kind {
+            CanonicalSegmentKind::Nodes => self.node_segment_count,
+            CanonicalSegmentKind::Relationships => self.relationship_segment_count,
+        }
     }
 
     pub fn validate(&self) -> Result<(), CanonicalSegmentError> {
@@ -498,7 +445,20 @@ impl CanonicalSegmentManifest {
             ));
         }
         u32_len(self.property_keys.len(), "canonical property key table")?;
-        if self.segment_count != self.segments.len() as u64
+        let declared_segment_count = self
+            .node_segment_count
+            .checked_add(self.relationship_segment_count)
+            .ok_or_else(|| {
+                CanonicalSegmentError::Corrupt(
+                    "canonical manifest segment count overflows u64".to_string(),
+                )
+            })?;
+        if self.artifact_len < ARTIFACT_HEADER.len() as u64 + 8
+            || self.segment_count != declared_segment_count
+            || self.node_segment_count > self.node_count
+            || self.relationship_segment_count > self.relationship_count
+            || (self.node_count == 0) != (self.node_segment_count == 0)
+            || (self.relationship_count == 0) != (self.relationship_segment_count == 0)
             || self.descriptor_root_artifact.encoded_len == 0
         {
             return Err(CanonicalSegmentError::Corrupt(
@@ -513,84 +473,13 @@ impl CanonicalSegmentManifest {
                 ));
             }
         }
-        let mut previous_end = ARTIFACT_HEADER.len() as u64 + 8;
-        let mut previous_id = None;
-        let mut node_count = 0u64;
-        let mut relationship_count = 0u64;
-        let mut previous_node_max: Option<u64> = None;
-        let mut previous_relationship_max: Option<u64> = None;
-        let mut previous_kind: Option<CanonicalSegmentKind> = None;
-        for segment in &self.segments {
-            segment.validate_identity()?;
-            // Grouped by kind, so `segments_of_kind` can slice rather than filter.
-            if previous_kind.is_some_and(|previous| segment.kind < previous) {
-                return Err(CanonicalSegmentError::Corrupt(
-                    "canonical segments are not grouped by kind".to_string(),
-                ));
-            }
-            previous_kind = Some(segment.kind);
-            if segment.offset < previous_end {
-                return Err(CanonicalSegmentError::Corrupt(
-                    "canonical segment ranges overlap or are out of order".to_string(),
-                ));
-            }
-            if previous_id.is_some_and(|id| segment.segment_id <= id) {
-                return Err(CanonicalSegmentError::Corrupt(
-                    "canonical segment ids are not strictly increasing".to_string(),
-                ));
-            }
-            if segment.record_count == 0 || segment.min_record_id > segment.max_record_id {
-                return Err(CanonicalSegmentError::Corrupt(format!(
-                    "canonical segment {} has invalid record bounds",
-                    segment.segment_id
-                )));
-            }
-            previous_end = segment
-                .offset
-                .checked_add(segment.length.get())
-                .ok_or_else(|| {
-                    CanonicalSegmentError::Corrupt(
-                        "canonical segment range overflows u64".to_string(),
-                    )
-                })?;
-            previous_id = Some(segment.segment_id);
-            let previous_max = match segment.kind {
-                CanonicalSegmentKind::Nodes => {
-                    node_count = node_count.saturating_add(u64::from(segment.record_count));
-                    &mut previous_node_max
-                }
-                CanonicalSegmentKind::Relationships => {
-                    relationship_count =
-                        relationship_count.saturating_add(u64::from(segment.record_count));
-                    &mut previous_relationship_max
-                }
-            };
-            // A kind's segments own disjoint record ranges in ascending order.
-            // Lookups binary search on that, so it is checked here rather than
-            // left as a property the writer happens to have.
-            if previous_max.is_some_and(|previous| segment.min_record_id <= previous) {
-                return Err(CanonicalSegmentError::Corrupt(format!(
-                    "canonical segment {} record ranges overlap or are out of order",
-                    segment.segment_id
-                )));
-            }
-            *previous_max = Some(segment.max_record_id);
-        }
-        if previous_end != self.artifact_len
-            || node_count != self.node_count
-            || relationship_count != self.relationship_count
-        {
-            return Err(CanonicalSegmentError::Corrupt(
-                "canonical manifest counts or artifact length are inconsistent".to_string(),
-            ));
-        }
         Ok(())
     }
 
     pub fn encode(&self) -> Result<String, CanonicalSegmentError> {
         self.validate()?;
         let mut body = format!(
-            "{MANIFEST_HEADER_V1}\nrecord_layout\tproperty_key_ids\ngeneration\t{}\nsource_commit_epoch\t{}\nartifact_id\t{}\nartifact_len\t{}\nartifact_digest\t{}\nartifact_sha256\t{}\nnode_count\t{}\nrelationship_count\t{}\nsegment_count\t{}\ndescriptor_root_len\t{}\ndescriptor_root_crc32c\t{}\ndescriptor_root_sha256\t{}\n",
+            "{MANIFEST_HEADER_V1}\nrecord_layout\tproperty_key_ids\ngeneration\t{}\nsource_commit_epoch\t{}\nartifact_id\t{}\nartifact_len\t{}\nartifact_digest\t{}\nartifact_sha256\t{}\nnode_count\t{}\nrelationship_count\t{}\nsegment_count\t{}\nnode_segment_count\t{}\nrelationship_segment_count\t{}\ndescriptor_root_len\t{}\ndescriptor_root_crc32c\t{}\ndescriptor_root_sha256\t{}\n",
             self.generation.0,
             self.source_commit_epoch,
             self.artifact_id,
@@ -600,6 +489,8 @@ impl CanonicalSegmentManifest {
             self.node_count,
             self.relationship_count,
             self.segment_count,
+            self.node_segment_count,
+            self.relationship_segment_count,
             self.descriptor_root_artifact.encoded_len,
             self.descriptor_root_artifact.encoded_crc32c,
             self.descriptor_root_artifact.encoded_sha256
@@ -608,22 +499,6 @@ impl CanonicalSegmentManifest {
             body.push_str(&format!(
                 "property_key\t{id}\t{}\n",
                 encode_property_key_hex(key)
-            ));
-        }
-        for segment in &self.segments {
-            body.push_str(&format!(
-                "segment\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-                segment.segment_id,
-                segment.kind.tag(),
-                segment.offset,
-                segment.length,
-                segment.content_digest.0,
-                segment.min_record_id,
-                segment.max_record_id,
-                segment.record_count,
-                segment.source_endpoint_bloom.encode(),
-                segment.target_endpoint_bloom.encode(),
-                segment.node_property_bloom.encode()
             ));
         }
         let checksum = content_digest(body.as_bytes()).0;
@@ -662,11 +537,12 @@ impl CanonicalSegmentManifest {
         let mut node_count = None;
         let mut relationship_count = None;
         let mut segment_count = None;
+        let mut node_segment_count = None;
+        let mut relationship_segment_count = None;
         let mut descriptor_root_len = None;
         let mut descriptor_root_crc32c = None;
         let mut descriptor_root_sha256 = None;
         let mut property_keys = Vec::new();
-        let mut segments = Vec::new();
         let mut saw_header = false;
         let mut saw_record_layout = false;
         for line in body.lines() {
@@ -738,6 +614,16 @@ impl CanonicalSegmentManifest {
                     parse_u64(value, "segment count")?,
                     "segment count",
                 )?,
+                ["node_segment_count", value] => set_once(
+                    &mut node_segment_count,
+                    parse_u64(value, "node segment count")?,
+                    "node segment count",
+                )?,
+                ["relationship_segment_count", value] => set_once(
+                    &mut relationship_segment_count,
+                    parse_u64(value, "relationship segment count")?,
+                    "relationship segment count",
+                )?,
                 ["descriptor_root_len", value] => set_once(
                     &mut descriptor_root_len,
                     parse_u64(value, "descriptor root length")?,
@@ -764,28 +650,6 @@ impl CanonicalSegmentManifest {
                         ));
                     }
                     property_keys.push(decode_property_key_hex(key)?);
-                }
-                ["segment", id, kind, offset, length, digest, min_id, max_id, count, source_bloom, target_bloom, property_bloom] =>
-                {
-                    segments.push(CanonicalSegmentDescriptor {
-                        segment_id: parse_u64(id, "segment id")?,
-                        kind: CanonicalSegmentKind::from_tag(parse_u8(kind, "segment kind")?)?,
-                        offset: parse_u64(offset, "segment offset")?,
-                        length: NonZeroU64::new(parse_u64(length, "segment length")?).ok_or_else(
-                            || {
-                                CanonicalSegmentError::Corrupt(
-                                    "canonical segment length must be non-zero".to_string(),
-                                )
-                            },
-                        )?,
-                        content_digest: ContentDigest(parse_u64(digest, "segment digest")?),
-                        min_record_id: parse_u64(min_id, "minimum record id")?,
-                        max_record_id: parse_u64(max_id, "maximum record id")?,
-                        record_count: parse_u32(count, "segment record count")?,
-                        source_endpoint_bloom: CanonicalEndpointBloom::decode(source_bloom)?,
-                        target_endpoint_bloom: CanonicalEndpointBloom::decode(target_bloom)?,
-                        node_property_bloom: CanonicalEndpointBloom::decode(property_bloom)?,
-                    });
                 }
                 [""] => {}
                 _ => {
@@ -815,13 +679,17 @@ impl CanonicalSegmentManifest {
             node_count: required(node_count, "node count")?,
             relationship_count: required(relationship_count, "relationship count")?,
             segment_count: required(segment_count, "segment count")?,
+            node_segment_count: required(node_segment_count, "node segment count")?,
+            relationship_segment_count: required(
+                relationship_segment_count,
+                "relationship segment count",
+            )?,
             descriptor_root_artifact: GraphDescriptorTreeArtifactMetadata {
                 encoded_len: required(descriptor_root_len, "descriptor root length")?,
                 encoded_crc32c: required(descriptor_root_crc32c, "descriptor root CRC32C")?,
                 encoded_sha256: required(descriptor_root_sha256, "descriptor root SHA-256 digest")?,
             },
             property_keys,
-            segments,
         };
         manifest.validate()?;
         Ok(manifest)
@@ -847,20 +715,32 @@ impl Default for CanonicalSegmentConfig {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CanonicalReadReport {
+    pub generation: u64,
+    pub descriptor_pages_visited: u64,
+    pub descriptor_page_bytes_decoded: u64,
+    pub descriptor_storage_bytes_read: u64,
+    pub descriptors_examined: u64,
+    pub descriptor_cache_hits: u64,
+    pub descriptor_cache_misses: u64,
+    pub descriptor_cache_admission_rejections: u64,
     pub segments_considered: u64,
     pub segments_pruned: u64,
     pub segments_read: u64,
     pub bytes_read: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
     pub records_decoded: u64,
     pub peak_segment_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct CanonicalDescriptorShadowReport {
-    pub root_bytes_read: u64,
-    pub checked_pages: u64,
-    pub checked_descriptors: u64,
-    pub page_artifact_bytes: u64,
+pub struct CanonicalSegmentScrubReport {
+    pub descriptor_pages_checked: u64,
+    pub descriptors_checked: u64,
+    pub descriptor_bytes_checked: u64,
+    pub segments_checked: u64,
+    pub records_checked: u64,
+    pub canonical_bytes_hashed: u64,
 }
 
 #[derive(Debug)]
@@ -1093,7 +973,8 @@ impl CanonicalSegmentWriter {
         write_hashed(&mut file, &mut artifact_digest, &generation.0.to_le_bytes())?;
         let mut artifact_len = ARTIFACT_HEADER.len() as u64 + 8;
         let mut segment_id = 1u64;
-        let mut segments = Vec::new();
+        let mut node_segment_count = 0u64;
+        let mut relationship_segment_count = 0u64;
         let mut node_count = 0u64;
         let mut relationship_count = 0u64;
         let mut property_keys = PropertyKeyDictionary::default();
@@ -1120,7 +1001,11 @@ impl CanonicalSegmentWriter {
                     descriptor.descriptor_tree_key(),
                     descriptor.encode_descriptor_tree_value()?,
                 )?;
-                segments.push(descriptor);
+                node_segment_count = node_segment_count.checked_add(1).ok_or_else(|| {
+                    CanonicalSegmentError::Corrupt(
+                        "canonical node segment count overflow".to_string(),
+                    )
+                })?;
                 segment_id = segment_id.saturating_add(1);
                 accumulator = SegmentAccumulator::new(
                     CanonicalSegmentKind::Nodes,
@@ -1140,7 +1025,9 @@ impl CanonicalSegmentWriter {
                 descriptor.descriptor_tree_key(),
                 descriptor.encode_descriptor_tree_value()?,
             )?;
-            segments.push(descriptor);
+            node_segment_count = node_segment_count.checked_add(1).ok_or_else(|| {
+                CanonicalSegmentError::Corrupt("canonical node segment count overflow".to_string())
+            })?;
             segment_id = segment_id.saturating_add(1);
         }
 
@@ -1168,7 +1055,12 @@ impl CanonicalSegmentWriter {
                     descriptor.descriptor_tree_key(),
                     descriptor.encode_descriptor_tree_value()?,
                 )?;
-                segments.push(descriptor);
+                relationship_segment_count =
+                    relationship_segment_count.checked_add(1).ok_or_else(|| {
+                        CanonicalSegmentError::Corrupt(
+                            "canonical relationship segment count overflow".to_string(),
+                        )
+                    })?;
                 segment_id = segment_id.saturating_add(1);
                 accumulator = SegmentAccumulator::new(
                     CanonicalSegmentKind::Relationships,
@@ -1192,7 +1084,12 @@ impl CanonicalSegmentWriter {
                 descriptor.descriptor_tree_key(),
                 descriptor.encode_descriptor_tree_value()?,
             )?;
-            segments.push(descriptor);
+            relationship_segment_count =
+                relationship_segment_count.checked_add(1).ok_or_else(|| {
+                    CanonicalSegmentError::Corrupt(
+                        "canonical relationship segment count overflow".to_string(),
+                    )
+                })?;
         }
         file.sync_all()?;
         let artifact_integrity = artifact_digest.finish();
@@ -1206,8 +1103,9 @@ impl CanonicalSegmentWriter {
             artifact_sha256: artifact_integrity.sha256,
             node_count,
             relationship_count,
+            node_segment_count,
+            relationship_segment_count,
             property_keys: property_keys.into_keys(),
-            segments,
             descriptor_tree,
         })
     }
@@ -1246,8 +1144,9 @@ struct PreparedCanonicalSegmentArtifact {
     artifact_sha256: Sha256Digest,
     node_count: u64,
     relationship_count: u64,
+    node_segment_count: u64,
+    relationship_segment_count: u64,
     property_keys: Vec<String>,
-    segments: Vec<CanonicalSegmentDescriptor>,
     descriptor_tree: PreparedGraphDescriptorTree,
 }
 
@@ -1262,15 +1161,23 @@ impl PreparedCanonicalSegmentArtifact {
             artifact_sha256,
             node_count,
             relationship_count,
+            node_segment_count,
+            relationship_segment_count,
             property_keys,
-            segments,
             descriptor_tree,
         } = self;
+        let segment_count = node_segment_count
+            .checked_add(relationship_segment_count)
+            .ok_or_else(|| {
+                CanonicalSegmentError::Corrupt(
+                    "canonical descriptor count overflows u64".to_string(),
+                )
+            })?;
         let descriptor_tree = descriptor_tree.publish()?;
         if descriptor_tree.root.kind != GraphDescriptorKind::CanonicalSegment
             || descriptor_tree.root.generation != generation.0
             || descriptor_tree.root.source_commit_epoch != source_commit_epoch
-            || descriptor_tree.root.descriptor_count != segments.len() as u64
+            || descriptor_tree.root.descriptor_count != segment_count
         {
             return Err(CanonicalSegmentError::Corrupt(
                 "canonical descriptor root does not match its data artifact".to_string(),
@@ -1285,10 +1192,11 @@ impl PreparedCanonicalSegmentArtifact {
             artifact_sha256,
             node_count,
             relationship_count,
-            segment_count: segments.len() as u64,
+            segment_count,
+            node_segment_count,
+            relationship_segment_count,
             descriptor_root_artifact: descriptor_tree.root_artifact,
             property_keys,
-            segments,
         };
         manifest.validate()?;
         Ok(manifest)
@@ -1431,15 +1339,19 @@ impl SegmentAccumulator {
     }
 }
 
+type CanonicalDescriptorSelection = Option<(Vec<u8>, CanonicalSegmentDescriptor)>;
+type CanonicalDescriptorSeekResult =
+    Result<(CanonicalDescriptorSelection, GraphDescriptorTreeReadReport), CanonicalSegmentError>;
+
 #[derive(Debug, Clone)]
 pub struct CanonicalSegmentReader {
     path: PathBuf,
     manifest: CanonicalSegmentManifest,
     range_reader: FileSegmentRangeReader,
-    descriptor_root: GraphDescriptorTreeRootReader,
     descriptor_reader: GraphDescriptorTreeDemandReader,
     property_spills: Option<PropertySpillReader>,
     max_segment_bytes: NonZeroU64,
+    poisoned: Arc<AtomicBool>,
 }
 
 impl CanonicalSegmentReader {
@@ -1528,14 +1440,6 @@ impl CanonicalSegmentReader {
                 manifest.generation.0
             )));
         }
-        for segment in &manifest.segments {
-            if segment.length.get() > max_segment_bytes.get() {
-                return Err(CanonicalSegmentError::SegmentTooLarge {
-                    segment_bytes: segment.length.get(),
-                    max_bytes: max_segment_bytes.get(),
-                });
-            }
-        }
         let mut range_reader =
             FileSegmentRangeReader::new().with_cache(cache, store_id, manifest.generation);
         range_reader.register(manifest.artifact_id, path.clone());
@@ -1543,10 +1447,10 @@ impl CanonicalSegmentReader {
             path,
             manifest,
             range_reader,
-            descriptor_root,
             descriptor_reader,
             property_spills,
             max_segment_bytes,
+            poisoned: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -1564,39 +1468,190 @@ impl CanonicalSegmentReader {
             .map(PropertySpillReader::manifest)
     }
 
-    pub fn verify_descriptor_shadow(
-        &self,
-    ) -> Result<CanonicalDescriptorShadowReport, CanonicalSegmentError> {
-        let mut next = 0usize;
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
+            || self.descriptor_reader.is_poisoned()
+            || self
+                .property_spills
+                .as_ref()
+                .is_some_and(PropertySpillReader::is_poisoned)
+    }
+
+    pub fn deep_scrub(&self) -> Result<CanonicalSegmentScrubReport, CanonicalSegmentError> {
+        self.ensure_healthy()?;
+        let result = self.deep_scrub_inner();
+        self.poison_on_physical_failure(&result);
+        result
+    }
+
+    fn deep_scrub_inner(&self) -> Result<CanonicalSegmentScrubReport, CanonicalSegmentError> {
+        let canonical_bytes_hashed = self.verify_whole_artifact()?;
+        let mut artifact = File::open(&self.path)?;
+        let mut expected_offset = (ARTIFACT_HEADER.len() + 8) as u64;
+        let mut expected_segment_id = 1u64;
+        let mut previous_kind = None;
+        let mut previous_node_max = None;
+        let mut previous_relationship_max = None;
+        let mut node_segments = 0u64;
+        let mut relationship_segments = 0u64;
+        let mut nodes = 0u64;
+        let mut relationships = 0u64;
+        let mut visit_error = None;
         let scrub = self.descriptor_reader.deep_visit(|key, value| {
-            let descriptor =
-                CanonicalSegmentDescriptor::decode_descriptor_tree_entry(key, value)
-                    .map_err(|error| GraphDescriptorTreeError::Corrupt(error.to_string()))?;
-            let expected = self.manifest.segments.get(next).ok_or_else(|| {
-                GraphDescriptorTreeError::Corrupt(
-                    "canonical descriptor tree contains more entries than its manifest".to_string(),
-                )
-            })?;
-            if &descriptor != expected {
-                return Err(GraphDescriptorTreeError::Corrupt(format!(
-                    "canonical descriptor tree entry {next} does not match its manifest"
-                )));
+            let step = CanonicalSegmentDescriptor::decode_descriptor_tree_entry(key, value)
+                .and_then(|descriptor| {
+                    self.validate_selected_descriptor(&descriptor)?;
+                    if descriptor.offset != expected_offset
+                        || descriptor.segment_id != expected_segment_id
+                        || previous_kind.is_some_and(|kind| descriptor.kind < kind)
+                    {
+                        return Err(CanonicalSegmentError::Corrupt(format!(
+                            "canonical descriptor closure is not contiguous at segment {}",
+                            descriptor.segment_id
+                        )));
+                    }
+                    let (segment_count, record_count, previous_max) = match descriptor.kind {
+                        CanonicalSegmentKind::Nodes => {
+                            (&mut node_segments, &mut nodes, &mut previous_node_max)
+                        }
+                        CanonicalSegmentKind::Relationships => (
+                            &mut relationship_segments,
+                            &mut relationships,
+                            &mut previous_relationship_max,
+                        ),
+                    };
+                    if previous_max.is_some_and(|maximum| descriptor.min_record_id <= maximum) {
+                        return Err(CanonicalSegmentError::Corrupt(format!(
+                            "canonical segment {} record ranges overlap or are out of order",
+                            descriptor.segment_id
+                        )));
+                    }
+                    let encoded = read_canonical_segment_uncached(
+                        &mut artifact,
+                        &descriptor,
+                        self.max_segment_bytes,
+                    )?;
+                    let mut decoded = 0u64;
+                    decode_segment_records(
+                        &encoded,
+                        self.manifest.generation,
+                        &descriptor,
+                        |_, payload| {
+                            validate_canonical_record_payload(
+                                descriptor.kind,
+                                payload,
+                                self.property_keys(),
+                                self.property_spill_manifest()
+                                    .map(|manifest| manifest.value_count),
+                            )?;
+                            decoded = decoded.checked_add(1).ok_or_else(|| {
+                                CanonicalSegmentError::Corrupt(
+                                    "canonical scrub record count overflow".to_string(),
+                                )
+                            })?;
+                            Ok(())
+                        },
+                    )?;
+                    if decoded != u64::from(descriptor.record_count) {
+                        return Err(CanonicalSegmentError::Corrupt(format!(
+                            "canonical segment {} decoded record count is inconsistent",
+                            descriptor.segment_id
+                        )));
+                    }
+                    *segment_count = segment_count.checked_add(1).ok_or_else(|| {
+                        CanonicalSegmentError::Corrupt(
+                            "canonical scrub segment count overflow".to_string(),
+                        )
+                    })?;
+                    *record_count = record_count.checked_add(decoded).ok_or_else(|| {
+                        CanonicalSegmentError::Corrupt(
+                            "canonical scrub total record count overflow".to_string(),
+                        )
+                    })?;
+                    *previous_max = Some(descriptor.max_record_id);
+                    previous_kind = Some(descriptor.kind);
+                    expected_offset = expected_offset
+                        .checked_add(descriptor.length.get())
+                        .ok_or_else(|| {
+                            CanonicalSegmentError::Corrupt(
+                                "canonical scrub artifact offset overflow".to_string(),
+                            )
+                        })?;
+                    expected_segment_id = expected_segment_id.checked_add(1).ok_or_else(|| {
+                        CanonicalSegmentError::Corrupt(
+                            "canonical scrub segment id overflow".to_string(),
+                        )
+                    })?;
+                    Ok(())
+                });
+            match step {
+                Ok(()) => Ok(GraphDescriptorTreeScanControl::Continue),
+                Err(error) => {
+                    visit_error = Some(error);
+                    Ok(GraphDescriptorTreeScanControl::Stop)
+                }
             }
-            next = next.saturating_add(1);
-            Ok(GraphDescriptorTreeScanControl::Continue)
-        })?;
-        if next != self.manifest.segments.len() {
+        });
+        let scrub = match (scrub, visit_error) {
+            (_, Some(error)) => return Err(error),
+            (Err(error), None) => return Err(error.into()),
+            (Ok(report), None) => report,
+        };
+        if expected_offset != self.manifest.artifact_len
+            || node_segments != self.manifest.node_segment_count
+            || relationship_segments != self.manifest.relationship_segment_count
+            || nodes != self.manifest.node_count
+            || relationships != self.manifest.relationship_count
+            || scrub.checked_descriptors != self.manifest.segment_count
+        {
             return Err(CanonicalSegmentError::Corrupt(format!(
-                "canonical descriptor tree contains {next} entries but its manifest contains {}",
-                self.manifest.segments.len()
+                "canonical scrub closure bytes/segments/records {expected_offset}/{node_segments}/{relationship_segments}/{nodes}/{relationships} do not match {}/{}/{}/{}/{}",
+                self.manifest.artifact_len,
+                self.manifest.node_segment_count,
+                self.manifest.relationship_segment_count,
+                self.manifest.node_count,
+                self.manifest.relationship_count
             )));
         }
-        Ok(CanonicalDescriptorShadowReport {
-            root_bytes_read: self.descriptor_root.report().root_bytes_read,
-            checked_pages: scrub.checked_pages,
-            checked_descriptors: scrub.checked_descriptors,
-            page_artifact_bytes: scrub.artifact_bytes_hashed,
+        Ok(CanonicalSegmentScrubReport {
+            descriptor_pages_checked: scrub.checked_pages,
+            descriptors_checked: scrub.checked_descriptors,
+            descriptor_bytes_checked: scrub.page_bytes_decoded,
+            segments_checked: node_segments.saturating_add(relationship_segments),
+            records_checked: nodes.saturating_add(relationships),
+            canonical_bytes_hashed,
         })
+    }
+
+    fn verify_whole_artifact(&self) -> Result<u64, CanonicalSegmentError> {
+        let mut file = File::open(&self.path)?;
+        if file.metadata()?.len() != self.manifest.artifact_len {
+            return Err(CanonicalSegmentError::Corrupt(
+                "canonical artifact length changed after open".to_string(),
+            ));
+        }
+        let mut hasher = IntegrityHasher::new();
+        let mut buffer = vec![0u8; 64 * 1024];
+        let mut total = 0u64;
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            total = total.checked_add(read as u64).ok_or_else(|| {
+                CanonicalSegmentError::Corrupt("canonical scrub byte count overflow".to_string())
+            })?;
+        }
+        let digest = hasher.finish();
+        if digest.crc32c.as_u64() != self.manifest.artifact_digest.0
+            || digest.sha256 != self.manifest.artifact_sha256
+        {
+            return Err(CanonicalSegmentError::Corrupt(
+                "canonical artifact checksum mismatch during scrub".to_string(),
+            ));
+        }
+        Ok(total)
     }
 
     fn property_keys(&self) -> &[String] {
@@ -1604,40 +1659,74 @@ impl CanonicalSegmentReader {
     }
 
     pub fn get_node(&self, id: NodeId) -> Result<Option<NodeRecord>, CanonicalSegmentError> {
-        let Some(segment) = find_segment(
-            self.manifest.segments_of_kind(CanonicalSegmentKind::Nodes),
-            id.0,
-        ) else {
-            return Ok(None);
-        };
-        let bytes = self.read_segment(segment)?;
-        decode_node_by_id(
-            &bytes,
-            self.manifest.generation,
-            segment,
-            id.0,
-            self.property_spills.as_ref(),
-            Some(self.property_keys()),
-        )
+        self.get_node_with_report(id).map(|(node, _)| node)
+    }
+
+    pub fn get_node_with_report(
+        &self,
+        id: NodeId,
+    ) -> Result<(Option<NodeRecord>, CanonicalReadReport), CanonicalSegmentError> {
+        self.ensure_healthy()?;
+        let result = (|| {
+            let mut report = self.empty_read_report();
+            let (segment, descriptor_report) =
+                self.find_descriptor_for_id(CanonicalSegmentKind::Nodes, id.0)?;
+            report.record_descriptor_read(descriptor_report);
+            let Some(segment) = segment else {
+                return Ok((None, report));
+            };
+            report.segments_considered = 1;
+            let read = self.read_segment_with_report(&segment)?;
+            update_report_for_segment(&mut report, &read);
+            let node = decode_node_by_id(
+                &read.payload,
+                self.manifest.generation,
+                &segment,
+                id.0,
+                self.property_spills.as_ref(),
+                Some(self.property_keys()),
+            )?;
+            report.records_decoded = u64::from(node.is_some());
+            Ok((node, report))
+        })();
+        self.poison_on_physical_failure(&result);
+        result
     }
 
     pub fn get_relationship(&self, id: RelId) -> Result<Option<RelRecord>, CanonicalSegmentError> {
-        let Some(segment) = find_segment(
-            self.manifest
-                .segments_of_kind(CanonicalSegmentKind::Relationships),
-            id.0,
-        ) else {
-            return Ok(None);
-        };
-        let bytes = self.read_segment(segment)?;
-        decode_relationship_by_id(
-            &bytes,
-            self.manifest.generation,
-            segment,
-            id.0,
-            self.property_spills.as_ref(),
-            Some(self.property_keys()),
-        )
+        self.get_relationship_with_report(id)
+            .map(|(relationship, _)| relationship)
+    }
+
+    pub fn get_relationship_with_report(
+        &self,
+        id: RelId,
+    ) -> Result<(Option<RelRecord>, CanonicalReadReport), CanonicalSegmentError> {
+        self.ensure_healthy()?;
+        let result = (|| {
+            let mut report = self.empty_read_report();
+            let (segment, descriptor_report) =
+                self.find_descriptor_for_id(CanonicalSegmentKind::Relationships, id.0)?;
+            report.record_descriptor_read(descriptor_report);
+            let Some(segment) = segment else {
+                return Ok((None, report));
+            };
+            report.segments_considered = 1;
+            let read = self.read_segment_with_report(&segment)?;
+            update_report_for_segment(&mut report, &read);
+            let relationship = decode_relationship_by_id(
+                &read.payload,
+                self.manifest.generation,
+                &segment,
+                id.0,
+                self.property_spills.as_ref(),
+                Some(self.property_keys()),
+            )?;
+            report.records_decoded = u64::from(relationship.is_some());
+            Ok((relationship, report))
+        })();
+        self.poison_on_physical_failure(&result);
+        result
     }
 
     pub fn node_records(&self) -> CanonicalNodeIterator {
@@ -1663,13 +1752,14 @@ impl CanonicalSegmentReader {
         &self,
         mut consumer: impl FnMut(NodeRecord) -> Result<CanonicalScanControl, CanonicalSegmentError>,
     ) -> Result<(CanonicalReadReport, CanonicalScanControl), CanonicalSegmentError> {
-        let mut report = CanonicalReadReport::default();
-        for descriptor in self.manifest.node_segments() {
+        self.ensure_healthy()?;
+        let mut report = self.empty_read_report();
+        let result = self.scan_descriptor_kind(CanonicalSegmentKind::Nodes, |descriptor| {
             report.segments_considered = report.segments_considered.saturating_add(1);
-            let bytes = self.read_segment(descriptor)?;
-            update_report_for_segment(&mut report, bytes.len());
-            let control = decode_segment_records_control(
-                &bytes,
+            let read = self.read_segment_with_report(descriptor)?;
+            update_report_for_segment(&mut report, &read);
+            decode_segment_records_control(
+                &read.payload,
                 self.manifest.generation,
                 descriptor,
                 |id, payload| {
@@ -1682,12 +1772,14 @@ impl CanonicalSegmentReader {
                     report.records_decoded = report.records_decoded.saturating_add(1);
                     Ok(control)
                 },
-            )?;
-            if control == CanonicalScanControl::Stop {
-                return Ok((report, control));
-            }
-        }
-        Ok((report, CanonicalScanControl::Continue))
+            )
+        });
+        let result = result.map(|(descriptor_report, control)| {
+            report.record_descriptor_read(descriptor_report);
+            (report, control)
+        });
+        self.poison_on_physical_failure(&result);
+        result
     }
 
     pub fn scan_relationships(
@@ -1705,13 +1797,14 @@ impl CanonicalSegmentReader {
         &self,
         mut consumer: impl FnMut(RelRecord) -> Result<CanonicalScanControl, CanonicalSegmentError>,
     ) -> Result<(CanonicalReadReport, CanonicalScanControl), CanonicalSegmentError> {
-        let mut report = CanonicalReadReport::default();
-        for descriptor in self.manifest.relationship_segments() {
+        self.ensure_healthy()?;
+        let mut report = self.empty_read_report();
+        let result = self.scan_descriptor_kind(CanonicalSegmentKind::Relationships, |descriptor| {
             report.segments_considered = report.segments_considered.saturating_add(1);
-            let bytes = self.read_segment(descriptor)?;
-            update_report_for_segment(&mut report, bytes.len());
-            let control = decode_segment_records_control(
-                &bytes,
+            let read = self.read_segment_with_report(descriptor)?;
+            update_report_for_segment(&mut report, &read);
+            decode_segment_records_control(
+                &read.payload,
                 self.manifest.generation,
                 descriptor,
                 |id, payload| {
@@ -1724,12 +1817,14 @@ impl CanonicalSegmentReader {
                     report.records_decoded = report.records_decoded.saturating_add(1);
                     Ok(control)
                 },
-            )?;
-            if control == CanonicalScanControl::Stop {
-                return Ok((report, control));
-            }
-        }
-        Ok((report, CanonicalScanControl::Continue))
+            )
+        });
+        let result = result.map(|(descriptor_report, control)| {
+            report.record_descriptor_read(descriptor_report);
+            (report, control)
+        });
+        self.poison_on_physical_failure(&result);
+        result
     }
 
     pub fn scan_relationships_for_endpoint_control(
@@ -1739,8 +1834,9 @@ impl CanonicalSegmentReader {
         rel_type: Option<RelTypeId>,
         mut consumer: impl FnMut(RelRecord) -> Result<CanonicalScanControl, CanonicalSegmentError>,
     ) -> Result<(CanonicalReadReport, CanonicalScanControl), CanonicalSegmentError> {
-        let mut report = CanonicalReadReport::default();
-        for descriptor in self.manifest.relationship_segments() {
+        self.ensure_healthy()?;
+        let mut report = self.empty_read_report();
+        let result = self.scan_descriptor_kind(CanonicalSegmentKind::Relationships, |descriptor| {
             report.segments_considered = report.segments_considered.saturating_add(1);
             let might_contain = match direction {
                 CanonicalEndpointDirection::Source => &descriptor.source_endpoint_bloom,
@@ -1749,13 +1845,13 @@ impl CanonicalSegmentReader {
             .might_contain(node_id.0);
             if !might_contain {
                 report.segments_pruned = report.segments_pruned.saturating_add(1);
-                continue;
+                return Ok(CanonicalScanControl::Continue);
             }
-            let bytes = self.read_segment(descriptor)?;
-            update_report_for_segment(&mut report, bytes.len());
+            let read = self.read_segment_with_report(descriptor)?;
+            update_report_for_segment(&mut report, &read);
             let mut control = CanonicalScanControl::Continue;
             decode_segment_records(
-                &bytes,
+                &read.payload,
                 self.manifest.generation,
                 descriptor,
                 |id, payload| {
@@ -1781,11 +1877,14 @@ impl CanonicalSegmentReader {
                     Ok(())
                 },
             )?;
-            if control == CanonicalScanControl::Stop {
-                return Ok((report, control));
-            }
-        }
-        Ok((report, CanonicalScanControl::Continue))
+            Ok(control)
+        });
+        let result = result.map(|(descriptor_report, control)| {
+            report.record_descriptor_read(descriptor_report);
+            (report, control)
+        });
+        self.poison_on_physical_failure(&result);
+        result
     }
 
     pub fn scan_nodes_by_property_control(
@@ -1795,19 +1894,20 @@ impl CanonicalSegmentReader {
         value: &Value,
         mut consumer: impl FnMut(NodeRecord) -> Result<CanonicalScanControl, CanonicalSegmentError>,
     ) -> Result<(CanonicalReadReport, CanonicalScanControl), CanonicalSegmentError> {
+        self.ensure_healthy()?;
         let bloom_key = node_property_bloom_key(label_id, property, value)?;
-        let mut report = CanonicalReadReport::default();
-        for descriptor in self.manifest.node_segments() {
+        let mut report = self.empty_read_report();
+        let result = self.scan_descriptor_kind(CanonicalSegmentKind::Nodes, |descriptor| {
             report.segments_considered = report.segments_considered.saturating_add(1);
             if !descriptor.node_property_bloom.might_contain(bloom_key) {
                 report.segments_pruned = report.segments_pruned.saturating_add(1);
-                continue;
+                return Ok(CanonicalScanControl::Continue);
             }
-            let bytes = self.read_segment(descriptor)?;
-            update_report_for_segment(&mut report, bytes.len());
+            let read = self.read_segment_with_report(descriptor)?;
+            update_report_for_segment(&mut report, &read);
             let mut control = CanonicalScanControl::Continue;
             decode_segment_records(
-                &bytes,
+                &read.payload,
                 self.manifest.generation,
                 descriptor,
                 |id, payload| {
@@ -1829,25 +1929,242 @@ impl CanonicalSegmentReader {
                     Ok(())
                 },
             )?;
-            if control == CanonicalScanControl::Stop {
-                return Ok((report, control));
-            }
-        }
-        Ok((report, CanonicalScanControl::Continue))
+            Ok(control)
+        });
+        let result = result.map(|(descriptor_report, control)| {
+            report.record_descriptor_read(descriptor_report);
+            (report, control)
+        });
+        self.poison_on_physical_failure(&result);
+        result
     }
 
-    fn read_segment(
+    fn scan_descriptor_kind(
+        &self,
+        kind: CanonicalSegmentKind,
+        mut consumer: impl FnMut(
+            &CanonicalSegmentDescriptor,
+        ) -> Result<CanonicalScanControl, CanonicalSegmentError>,
+    ) -> Result<(GraphDescriptorTreeReadReport, CanonicalScanControl), CanonicalSegmentError> {
+        let expected = self.manifest.segment_count_for_kind(kind);
+        let mut emitted = 0u64;
+        let mut lower_bound = vec![kind.tag()];
+        let mut aggregate = GraphDescriptorTreeReadReport::default();
+        loop {
+            let mut batch_emitted = 0u64;
+            let mut last_key = None;
+            let mut reached_kind_end = false;
+            let mut control = CanonicalScanControl::Continue;
+            let mut scan_error = None;
+            let descriptor_result = self.descriptor_reader.scan_from(
+                &lower_bound,
+                GraphDescriptorTreeReadLimits {
+                    max_descriptors: NonZeroU64::new(DESCRIPTOR_SCAN_BATCH + 1)
+                        .expect("canonical descriptor batch limit is non-zero"),
+                    ..GraphDescriptorTreeReadLimits::default()
+                },
+                |key, value| {
+                    let step = CanonicalSegmentDescriptor::decode_descriptor_tree_entry(key, value)
+                        .and_then(|descriptor| {
+                            if descriptor.kind > kind {
+                                reached_kind_end = true;
+                                return Ok(CanonicalScanControl::Stop);
+                            }
+                            if descriptor.kind < kind {
+                                return Err(CanonicalSegmentError::Corrupt(
+                                    "canonical descriptor scan moved backwards across kinds"
+                                        .to_string(),
+                                ));
+                            }
+                            emitted = emitted.checked_add(1).ok_or_else(|| {
+                                CanonicalSegmentError::Corrupt(
+                                    "canonical descriptor scan count overflow".to_string(),
+                                )
+                            })?;
+                            batch_emitted = batch_emitted.checked_add(1).ok_or_else(|| {
+                                CanonicalSegmentError::Corrupt(
+                                    "canonical descriptor batch count overflow".to_string(),
+                                )
+                            })?;
+                            if emitted > expected {
+                                return Err(CanonicalSegmentError::Corrupt(format!(
+                                    "canonical descriptor kind {:?} contains more than the declared {expected} segments",
+                                    kind
+                                )));
+                            }
+                            self.validate_selected_descriptor(&descriptor)?;
+                            last_key = Some(key.to_vec());
+                            consumer(&descriptor)
+                        });
+                    match step {
+                        Ok(next) => {
+                            control = next;
+                            Ok(if next == CanonicalScanControl::Stop
+                                || batch_emitted == DESCRIPTOR_SCAN_BATCH
+                            {
+                                GraphDescriptorTreeScanControl::Stop
+                            } else {
+                                GraphDescriptorTreeScanControl::Continue
+                            })
+                        }
+                        Err(error) => {
+                            scan_error = Some(error);
+                            Ok(GraphDescriptorTreeScanControl::Stop)
+                        }
+                    }
+                },
+            );
+            let (batch_report, tree_control) = match (descriptor_result, scan_error) {
+                (_, Some(error)) => return Err(error),
+                (Err(error), None) => return Err(error.into()),
+                (Ok(result), None) => result,
+            };
+            aggregate_descriptor_report(&mut aggregate, batch_report);
+            if control == CanonicalScanControl::Stop && !reached_kind_end {
+                return Ok((aggregate, control));
+            }
+            if reached_kind_end || tree_control == GraphDescriptorTreeScanControl::Continue {
+                if emitted != expected {
+                    return Err(CanonicalSegmentError::Corrupt(format!(
+                        "canonical descriptor kind {:?} contains {emitted} segments, expected {expected}",
+                        kind
+                    )));
+                }
+                return Ok((aggregate, CanonicalScanControl::Continue));
+            }
+            let key = last_key.ok_or_else(|| {
+                CanonicalSegmentError::Corrupt(
+                    "canonical descriptor batch stopped without a selected key".to_string(),
+                )
+            })?;
+            let Some(next) = lexicographic_successor(&key) else {
+                if emitted != expected {
+                    return Err(CanonicalSegmentError::Corrupt(format!(
+                        "canonical descriptor key space ended after {emitted} of {expected} entries"
+                    )));
+                }
+                return Ok((aggregate, CanonicalScanControl::Continue));
+            };
+            lower_bound = next;
+        }
+    }
+
+    fn find_descriptor_for_id(
+        &self,
+        kind: CanonicalSegmentKind,
+        id: u64,
+    ) -> Result<
+        (
+            Option<CanonicalSegmentDescriptor>,
+            GraphDescriptorTreeReadReport,
+        ),
+        CanonicalSegmentError,
+    > {
+        let mut lower_bound = Vec::with_capacity(9);
+        lower_bound.push(kind.tag());
+        lower_bound.extend_from_slice(&id.to_be_bytes());
+        let (selected, report) = self.next_descriptor_from(kind, &lower_bound)?;
+        let descriptor = selected.and_then(|(_, descriptor)| {
+            (descriptor.min_record_id <= id && id <= descriptor.max_record_id).then_some(descriptor)
+        });
+        Ok((descriptor, report))
+    }
+
+    fn next_descriptor_from(
+        &self,
+        kind: CanonicalSegmentKind,
+        lower_bound: &[u8],
+    ) -> CanonicalDescriptorSeekResult {
+        let limits = GraphDescriptorTreeReadLimits {
+            max_descriptors: NonZeroU64::new(1)
+                .expect("canonical descriptor seek emits at most one segment"),
+            ..GraphDescriptorTreeReadLimits::default()
+        };
+        let mut selected = None;
+        let mut decode_error = None;
+        let descriptor_result =
+            self.descriptor_reader
+                .scan_from(lower_bound, limits, |key, value| {
+                    match CanonicalSegmentDescriptor::decode_descriptor_tree_entry(key, value) {
+                        Ok(descriptor) => selected = Some((key.to_vec(), descriptor)),
+                        Err(error) => decode_error = Some(error),
+                    }
+                    Ok(GraphDescriptorTreeScanControl::Stop)
+                });
+        let report = match (descriptor_result, decode_error) {
+            (_, Some(error)) => return Err(error),
+            (Err(error), None) => return Err(error.into()),
+            (Ok((report, _)), None) => report,
+        };
+        let selected = match selected {
+            Some((key, descriptor)) if descriptor.kind == kind => {
+                self.validate_selected_descriptor(&descriptor)?;
+                Some((key, descriptor))
+            }
+            Some((_, descriptor)) if descriptor.kind < kind => {
+                return Err(CanonicalSegmentError::Corrupt(
+                    "canonical descriptor seek moved backwards across kinds".to_string(),
+                ));
+            }
+            Some(_) | None => None,
+        };
+        Ok((selected, report))
+    }
+
+    fn validate_selected_descriptor(
         &self,
         descriptor: &CanonicalSegmentDescriptor,
-    ) -> Result<Arc<[u8]>, CanonicalSegmentError> {
+    ) -> Result<(), CanonicalSegmentError> {
+        descriptor.validate_identity()?;
+        let minimum_offset = (ARTIFACT_HEADER.len() + 8) as u64;
+        let end = descriptor
+            .offset
+            .checked_add(descriptor.length.get())
+            .ok_or_else(|| {
+                CanonicalSegmentError::Corrupt(
+                    "canonical descriptor range overflows u64".to_string(),
+                )
+            })?;
+        if descriptor.segment_id > self.manifest.segment_count
+            || descriptor.offset < minimum_offset
+            || end > self.manifest.artifact_len
+        {
+            return Err(CanonicalSegmentError::Corrupt(format!(
+                "canonical segment {} is outside its selected artifact",
+                descriptor.segment_id
+            )));
+        }
         if descriptor.length.get() > self.max_segment_bytes.get() {
             return Err(CanonicalSegmentError::SegmentTooLarge {
                 segment_bytes: descriptor.length.get(),
                 max_bytes: self.max_segment_bytes.get(),
             });
         }
+        Ok(())
+    }
+
+    fn empty_read_report(&self) -> CanonicalReadReport {
+        CanonicalReadReport {
+            generation: self.manifest.generation.0,
+            ..CanonicalReadReport::default()
+        }
+    }
+
+    fn read_segment(
+        &self,
+        descriptor: &CanonicalSegmentDescriptor,
+    ) -> Result<Arc<[u8]>, CanonicalSegmentError> {
+        self.read_segment_with_report(descriptor)
+            .map(|read| read.payload)
+    }
+
+    fn read_segment_with_report(
+        &self,
+        descriptor: &CanonicalSegmentDescriptor,
+    ) -> Result<SegmentRangeRead, CanonicalSegmentError> {
+        self.validate_selected_descriptor(descriptor)?;
         self.range_reader
-            .read_range(
+            .read_range_with_report(
                 &SegmentReadRange::new(
                     self.manifest.artifact_id,
                     descriptor.segment_id,
@@ -1858,31 +2175,44 @@ impl CanonicalSegmentReader {
             )
             .map_err(Into::into)
     }
+
+    fn ensure_healthy(&self) -> Result<(), CanonicalSegmentError> {
+        if self.is_poisoned() {
+            return Err(CanonicalSegmentError::Corrupt(
+                "canonical segment reader is poisoned by an earlier physical failure".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn poison_on_physical_failure<T>(&self, result: &Result<T, CanonicalSegmentError>) {
+        if result.as_ref().is_err_and(canonical_error_requires_poison) {
+            self.poisoned.store(true, Ordering::Release);
+        }
+    }
+
+    fn poison_error(&self, error: &CanonicalSegmentError) {
+        if canonical_error_requires_poison(error) {
+            self.poisoned.store(true, Ordering::Release);
+        }
+    }
 }
 
 pub struct CanonicalNodeIterator {
     reader: CanonicalSegmentReader,
-    descriptors: Vec<usize>,
-    next_descriptor: usize,
+    cursor: CanonicalDescriptorCursor,
     current: std::vec::IntoIter<NodeRecord>,
     failed: bool,
 }
 
 impl CanonicalNodeIterator {
     fn new(reader: CanonicalSegmentReader) -> Self {
-        let descriptors = reader
+        let expected = reader
             .manifest
-            .segments
-            .iter()
-            .enumerate()
-            .filter_map(|(index, descriptor)| {
-                (descriptor.kind == CanonicalSegmentKind::Nodes).then_some(index)
-            })
-            .collect();
+            .segment_count_for_kind(CanonicalSegmentKind::Nodes);
         Self {
             reader,
-            descriptors,
-            next_descriptor: 0,
+            cursor: CanonicalDescriptorCursor::new(CanonicalSegmentKind::Nodes, expected),
             current: Vec::new().into_iter(),
             failed: false,
         }
@@ -1897,14 +2227,22 @@ impl Iterator for CanonicalNodeIterator {
             if let Some(node) = self.current.next() {
                 return Some(Ok(node));
             }
-            if self.failed || self.next_descriptor == self.descriptors.len() {
+            if self.failed {
                 return None;
             }
-            let descriptor = &self.reader.manifest.segments[self.descriptors[self.next_descriptor]];
-            self.next_descriptor += 1;
-            let bytes = match self.reader.read_segment(descriptor) {
+            let descriptor = match self.cursor.next(&self.reader) {
+                Ok(Some(descriptor)) => descriptor,
+                Ok(None) => return None,
+                Err(error) => {
+                    self.reader.poison_error(&error);
+                    self.failed = true;
+                    return Some(Err(error));
+                }
+            };
+            let bytes = match self.reader.read_segment(&descriptor) {
                 Ok(bytes) => bytes,
                 Err(error) => {
+                    self.reader.poison_error(&error);
                     self.failed = true;
                     return Some(Err(error));
                 }
@@ -1913,7 +2251,7 @@ impl Iterator for CanonicalNodeIterator {
             if let Err(error) = decode_segment_records(
                 &bytes,
                 self.reader.manifest.generation,
-                descriptor,
+                &descriptor,
                 |id, payload| {
                     records.push(decode_node_with_property_spills(
                         id,
@@ -1924,6 +2262,7 @@ impl Iterator for CanonicalNodeIterator {
                     Ok(())
                 },
             ) {
+                self.reader.poison_error(&error);
                 self.failed = true;
                 return Some(Err(error));
             }
@@ -1934,27 +2273,19 @@ impl Iterator for CanonicalNodeIterator {
 
 pub struct CanonicalRelationshipIterator {
     reader: CanonicalSegmentReader,
-    descriptors: Vec<usize>,
-    next_descriptor: usize,
+    cursor: CanonicalDescriptorCursor,
     current: std::vec::IntoIter<RelRecord>,
     failed: bool,
 }
 
 impl CanonicalRelationshipIterator {
     fn new(reader: CanonicalSegmentReader) -> Self {
-        let descriptors = reader
+        let expected = reader
             .manifest
-            .segments
-            .iter()
-            .enumerate()
-            .filter_map(|(index, descriptor)| {
-                (descriptor.kind == CanonicalSegmentKind::Relationships).then_some(index)
-            })
-            .collect();
+            .segment_count_for_kind(CanonicalSegmentKind::Relationships);
         Self {
             reader,
-            descriptors,
-            next_descriptor: 0,
+            cursor: CanonicalDescriptorCursor::new(CanonicalSegmentKind::Relationships, expected),
             current: Vec::new().into_iter(),
             failed: false,
         }
@@ -1969,14 +2300,22 @@ impl Iterator for CanonicalRelationshipIterator {
             if let Some(relationship) = self.current.next() {
                 return Some(Ok(relationship));
             }
-            if self.failed || self.next_descriptor == self.descriptors.len() {
+            if self.failed {
                 return None;
             }
-            let descriptor = &self.reader.manifest.segments[self.descriptors[self.next_descriptor]];
-            self.next_descriptor += 1;
-            let bytes = match self.reader.read_segment(descriptor) {
+            let descriptor = match self.cursor.next(&self.reader) {
+                Ok(Some(descriptor)) => descriptor,
+                Ok(None) => return None,
+                Err(error) => {
+                    self.reader.poison_error(&error);
+                    self.failed = true;
+                    return Some(Err(error));
+                }
+            };
+            let bytes = match self.reader.read_segment(&descriptor) {
                 Ok(bytes) => bytes,
                 Err(error) => {
+                    self.reader.poison_error(&error);
                     self.failed = true;
                     return Some(Err(error));
                 }
@@ -1985,7 +2324,7 @@ impl Iterator for CanonicalRelationshipIterator {
             if let Err(error) = decode_segment_records(
                 &bytes,
                 self.reader.manifest.generation,
-                descriptor,
+                &descriptor,
                 |id, payload| {
                     records.push(decode_relationship_with_property_spills(
                         id,
@@ -1996,6 +2335,7 @@ impl Iterator for CanonicalRelationshipIterator {
                     Ok(())
                 },
             ) {
+                self.reader.poison_error(&error);
                 self.failed = true;
                 return Some(Err(error));
             }
@@ -2004,19 +2344,82 @@ impl Iterator for CanonicalRelationshipIterator {
     }
 }
 
-/// Locates the segment whose record range covers `id`, or `None` when no
-/// segment does — including when `id` falls in a gap left by deleted records.
-///
-/// The ranges are disjoint and ascending, so the first segment whose
-/// `max_record_id` reaches `id` is the only candidate.
-fn find_segment(
-    segments: &[CanonicalSegmentDescriptor],
-    id: u64,
-) -> Option<&CanonicalSegmentDescriptor> {
-    let position = segments.partition_point(|segment| segment.max_record_id < id);
-    segments
-        .get(position)
-        .filter(|segment| segment.min_record_id <= id)
+struct CanonicalDescriptorCursor {
+    kind: CanonicalSegmentKind,
+    next_lower_bound: Option<Vec<u8>>,
+    descriptors_seen: u64,
+    expected_descriptors: u64,
+    finished: bool,
+}
+
+impl CanonicalDescriptorCursor {
+    fn new(kind: CanonicalSegmentKind, expected_descriptors: u64) -> Self {
+        Self {
+            kind,
+            next_lower_bound: Some(vec![kind.tag()]),
+            descriptors_seen: 0,
+            expected_descriptors,
+            finished: false,
+        }
+    }
+
+    fn next(
+        &mut self,
+        reader: &CanonicalSegmentReader,
+    ) -> Result<Option<CanonicalSegmentDescriptor>, CanonicalSegmentError> {
+        reader.ensure_healthy()?;
+        if self.finished {
+            return Ok(None);
+        }
+        let Some(lower_bound) = self.next_lower_bound.as_deref() else {
+            if self.descriptors_seen == self.expected_descriptors {
+                self.finished = true;
+                return Ok(None);
+            }
+            return Err(CanonicalSegmentError::Corrupt(
+                "canonical descriptor key space ended before its declared count".to_string(),
+            ));
+        };
+        let (selected, _) = reader.next_descriptor_from(self.kind, lower_bound)?;
+        if self.descriptors_seen == self.expected_descriptors {
+            self.finished = true;
+            if selected.is_some() {
+                return Err(CanonicalSegmentError::Corrupt(format!(
+                    "canonical descriptor kind {:?} contains more than the declared {} segments",
+                    self.kind, self.expected_descriptors
+                )));
+            }
+            return Ok(None);
+        }
+        let (key, descriptor) = selected.ok_or_else(|| {
+            CanonicalSegmentError::Corrupt(format!(
+                "canonical descriptor kind {:?} ended after {} of {} segments",
+                self.kind, self.descriptors_seen, self.expected_descriptors
+            ))
+        })?;
+        self.descriptors_seen = self.descriptors_seen.checked_add(1).ok_or_else(|| {
+            CanonicalSegmentError::Corrupt("canonical descriptor cursor count overflow".to_string())
+        })?;
+        self.next_lower_bound = lexicographic_successor(&key);
+        if self.next_lower_bound.is_none() && self.descriptors_seen != self.expected_descriptors {
+            return Err(CanonicalSegmentError::Corrupt(
+                "canonical descriptor key space ended before its declared count".to_string(),
+            ));
+        }
+        Ok(Some(descriptor))
+    }
+}
+
+fn lexicographic_successor(key: &[u8]) -> Option<Vec<u8>> {
+    let mut next = key.to_vec();
+    for index in (0..next.len()).rev() {
+        if next[index] != u8::MAX {
+            next[index] = next[index].saturating_add(1);
+            next.truncate(index + 1);
+            return Some(next);
+        }
+    }
+    None
 }
 
 fn endpoint_bloom_hash(id: u64, seed: u64) -> u64 {
@@ -2038,10 +2441,213 @@ fn node_property_bloom_key(
     Ok(content_digest(&bytes).0)
 }
 
-fn update_report_for_segment(report: &mut CanonicalReadReport, bytes: usize) {
+fn update_report_for_segment(report: &mut CanonicalReadReport, read: &SegmentRangeRead) {
     report.segments_read = report.segments_read.saturating_add(1);
-    report.bytes_read = report.bytes_read.saturating_add(bytes as u64);
-    report.peak_segment_bytes = report.peak_segment_bytes.max(bytes as u64);
+    report.bytes_read = report.bytes_read.saturating_add(read.payload.len() as u64);
+    report.cache_hits = report.cache_hits.saturating_add(u64::from(read.cache_hit));
+    report.cache_misses = report
+        .cache_misses
+        .saturating_add(u64::from(read.cache_miss));
+    report.peak_segment_bytes = report.peak_segment_bytes.max(read.payload.len() as u64);
+}
+
+impl CanonicalReadReport {
+    fn record_descriptor_read(&mut self, report: GraphDescriptorTreeReadReport) {
+        self.descriptor_pages_visited = report.pages_visited;
+        self.descriptor_page_bytes_decoded = report.page_bytes_decoded;
+        self.descriptor_storage_bytes_read = report.storage_bytes_read;
+        self.descriptors_examined = report.descriptors_emitted;
+        self.descriptor_cache_hits = report.cache_hits;
+        self.descriptor_cache_misses = report.cache_misses;
+        self.descriptor_cache_admission_rejections = report.cache_admission_rejections;
+    }
+}
+
+fn aggregate_descriptor_report(
+    aggregate: &mut GraphDescriptorTreeReadReport,
+    batch: GraphDescriptorTreeReadReport,
+) {
+    aggregate.pages_visited = aggregate.pages_visited.saturating_add(batch.pages_visited);
+    aggregate.page_bytes_decoded = aggregate
+        .page_bytes_decoded
+        .saturating_add(batch.page_bytes_decoded);
+    aggregate.storage_bytes_read = aggregate
+        .storage_bytes_read
+        .saturating_add(batch.storage_bytes_read);
+    aggregate.leaf_entries_examined = aggregate
+        .leaf_entries_examined
+        .saturating_add(batch.leaf_entries_examined);
+    aggregate.descriptors_emitted = aggregate
+        .descriptors_emitted
+        .saturating_add(batch.descriptors_emitted);
+    aggregate.cache_hits = aggregate.cache_hits.saturating_add(batch.cache_hits);
+    aggregate.cache_misses = aggregate.cache_misses.saturating_add(batch.cache_misses);
+    aggregate.cache_admission_rejections = aggregate
+        .cache_admission_rejections
+        .saturating_add(batch.cache_admission_rejections);
+    aggregate.maximum_depth = aggregate.maximum_depth.max(batch.maximum_depth);
+}
+
+fn read_canonical_segment_uncached(
+    file: &mut File,
+    descriptor: &CanonicalSegmentDescriptor,
+    max_segment_bytes: NonZeroU64,
+) -> Result<Vec<u8>, CanonicalSegmentError> {
+    if descriptor.length.get() > max_segment_bytes.get() {
+        return Err(CanonicalSegmentError::SegmentTooLarge {
+            segment_bytes: descriptor.length.get(),
+            max_bytes: max_segment_bytes.get(),
+        });
+    }
+    let length = usize::try_from(descriptor.length.get()).map_err(|_| {
+        CanonicalSegmentError::SegmentTooLarge {
+            segment_bytes: descriptor.length.get(),
+            max_bytes: usize::MAX as u64,
+        }
+    })?;
+    file.seek(SeekFrom::Start(descriptor.offset))?;
+    let mut encoded = vec![0u8; length];
+    file.read_exact(&mut encoded)?;
+    if content_digest(&encoded) != descriptor.content_digest {
+        return Err(CanonicalSegmentError::Corrupt(format!(
+            "canonical segment {} failed content digest verification",
+            descriptor.segment_id
+        )));
+    }
+    Ok(encoded)
+}
+
+fn validate_canonical_record_payload(
+    kind: CanonicalSegmentKind,
+    payload: &[u8],
+    property_keys: &[String],
+    property_spill_count: Option<u64>,
+) -> Result<(), CanonicalSegmentError> {
+    let mut cursor = SliceCursor::new(payload);
+    match kind {
+        CanonicalSegmentKind::Nodes => {
+            let label_count = cursor.read_u32()?;
+            for _ in 0..label_count {
+                cursor.read_u32()?;
+            }
+        }
+        CanonicalSegmentKind::Relationships => {
+            cursor.read_u64()?;
+            cursor.read_u64()?;
+            cursor.read_u32()?;
+        }
+    }
+    validate_record_property_payload(&mut cursor, property_keys, property_spill_count)?;
+    if !cursor.is_empty() {
+        return Err(CanonicalSegmentError::Corrupt(
+            "canonical record has trailing bytes during scrub".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_record_property_payload(
+    cursor: &mut SliceCursor<'_>,
+    property_keys: &[String],
+    property_spill_count: Option<u64>,
+) -> Result<(), CanonicalSegmentError> {
+    let property_count = cursor.read_u32()?;
+    let mut seen = BTreeSet::new();
+    for _ in 0..property_count {
+        let key_id = cursor.read_u32()?;
+        if property_keys.get(key_id as usize).is_none() || !seen.insert(key_id) {
+            return Err(CanonicalSegmentError::Corrupt(format!(
+                "canonical record has an unknown or duplicate property key id {key_id}"
+            )));
+        }
+        validate_encoded_value(cursor, 1, property_spill_count)?;
+    }
+    Ok(())
+}
+
+fn validate_encoded_value(
+    cursor: &mut SliceCursor<'_>,
+    depth: usize,
+    property_spill_count: Option<u64>,
+) -> Result<(), CanonicalSegmentError> {
+    ensure_depth(depth)?;
+    match cursor.read_u8()? {
+        0 => Ok(()),
+        1 => match cursor.read_u8()? {
+            0 | 1 => Ok(()),
+            value => Err(CanonicalSegmentError::Corrupt(format!(
+                "invalid canonical boolean {value}"
+            ))),
+        },
+        2 | 3 => {
+            cursor.read_u64()?;
+            Ok(())
+        }
+        4 => validate_encoded_string(cursor),
+        5 => {
+            let count = cursor.read_u32()?;
+            for _ in 0..count {
+                validate_encoded_value(cursor, depth.saturating_add(1), property_spill_count)?;
+            }
+            Ok(())
+        }
+        6 => {
+            let count = cursor.read_u32()?;
+            let mut seen = BTreeSet::new();
+            for _ in 0..count {
+                let key = read_encoded_string(cursor)?;
+                if !seen.insert(key) {
+                    return Err(CanonicalSegmentError::Corrupt(
+                        "canonical nested property map has duplicate keys".to_string(),
+                    ));
+                }
+                validate_encoded_value(cursor, depth.saturating_add(2), property_spill_count)?;
+            }
+            Ok(())
+        }
+        7 => {
+            let spill_id = cursor.read_u64()?;
+            if property_spill_count.is_some_and(|count| spill_id >= count) {
+                return Err(CanonicalSegmentError::Corrupt(format!(
+                    "canonical record references property spill {spill_id} outside its selected artifact"
+                )));
+            }
+            Ok(())
+        }
+        tag => Err(CanonicalSegmentError::Corrupt(format!(
+            "unknown canonical value tag {tag}"
+        ))),
+    }
+}
+
+fn validate_encoded_string(cursor: &mut SliceCursor<'_>) -> Result<(), CanonicalSegmentError> {
+    read_encoded_string(cursor).map(|_| ())
+}
+
+fn read_encoded_string(cursor: &mut SliceCursor<'_>) -> Result<String, CanonicalSegmentError> {
+    let length = cursor.read_u32()? as usize;
+    let encoded = cursor.read_exact(length)?;
+    std::str::from_utf8(encoded)
+        .map(str::to_owned)
+        .map_err(|_| CanonicalSegmentError::Corrupt("canonical string is not UTF-8".to_string()))
+}
+
+fn canonical_error_requires_poison(error: &CanonicalSegmentError) -> bool {
+    match error {
+        CanonicalSegmentError::Io(_)
+        | CanonicalSegmentError::Read(_)
+        | CanonicalSegmentError::Corrupt(_) => true,
+        CanonicalSegmentError::DescriptorTree(error) => matches!(
+            error,
+            GraphDescriptorTreeError::Io(_)
+                | GraphDescriptorTreeError::Page(GraphDescriptorPageError::Corrupt(_))
+                | GraphDescriptorTreeError::Corrupt(_)
+        ),
+        CanonicalSegmentError::PropertySpill(_)
+        | CanonicalSegmentError::RecordTooLarge { .. }
+        | CanonicalSegmentError::SegmentTooLarge { .. }
+        | CanonicalSegmentError::Source(_) => false,
+    }
 }
 
 fn decode_node_by_id(
@@ -2872,12 +3478,6 @@ fn decode_property_key_hex(value: &str) -> Result<String, CanonicalSegmentError>
     })
 }
 
-fn parse_u8(value: &str, name: &str) -> Result<u8, CanonicalSegmentError> {
-    value
-        .parse()
-        .map_err(|_| CanonicalSegmentError::Corrupt(format!("invalid canonical {name}: {value}")))
-}
-
 fn set_once<T>(target: &mut Option<T>, value: T, name: &str) -> Result<(), CanonicalSegmentError> {
     if target.replace(value).is_some() {
         return Err(CanonicalSegmentError::Corrupt(format!(
@@ -2966,6 +3566,53 @@ fn write_hashed(
 mod tests {
     use super::*;
 
+    fn collect_descriptors(
+        reader: &CanonicalSegmentReader,
+        kind: CanonicalSegmentKind,
+    ) -> Vec<CanonicalSegmentDescriptor> {
+        let mut descriptors = Vec::new();
+        let (_, control) = reader
+            .scan_descriptor_kind(kind, |descriptor| {
+                descriptors.push(descriptor.clone());
+                Ok(CanonicalScanControl::Continue)
+            })
+            .unwrap();
+        assert_eq!(control, CanonicalScanControl::Continue);
+        descriptors
+    }
+
+    fn replace_descriptor_tree(
+        path: &Path,
+        manifest: &mut CanonicalSegmentManifest,
+        mut descriptors: Vec<CanonicalSegmentDescriptor>,
+    ) {
+        descriptors.sort_by_key(CanonicalSegmentDescriptor::descriptor_tree_key);
+        let tree =
+            PersistentCanonicalSegmentDescriptorTree::for_artifact(path, manifest.generation);
+        let (paths, config) = tree.into_parts();
+        let _ = std::fs::remove_file(&paths.page_artifact);
+        let _ = std::fs::remove_file(&paths.root_manifest);
+        let mut builder = GraphDescriptorTreeBuilder::create(
+            paths,
+            GraphDescriptorKind::CanonicalSegment,
+            manifest.generation.0,
+            manifest.source_commit_epoch,
+            CANONICAL_SEGMENT_DESCRIPTOR_ARTIFACT_ID,
+            config,
+        )
+        .unwrap();
+        for descriptor in descriptors {
+            builder
+                .push(
+                    descriptor.descriptor_tree_key(),
+                    descriptor.encode_descriptor_tree_value().unwrap(),
+                )
+                .unwrap();
+        }
+        let output = builder.finish().unwrap().publish().unwrap();
+        manifest.descriptor_root_artifact = output.root_artifact;
+    }
+
     #[test]
     fn canonical_segments_round_trip_with_bounded_cache() {
         let path = unique_path("round_trip");
@@ -2999,7 +3646,8 @@ mod tests {
             CanonicalSegmentManifest::decode(&manifest.encode().unwrap()).unwrap(),
             manifest
         );
-        assert!(manifest.segments.len() > 2);
+        assert!(manifest.segment_count > 2);
+        assert!(!manifest.encode().unwrap().contains("\nsegment\t"));
         let cache = Arc::new(SegmentCache::new(8192));
         let reader = CanonicalSegmentReader::open(
             &path,
@@ -3031,7 +3679,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_descriptor_shadow_is_bound_lazy_and_exhaustively_verified() {
+    fn canonical_descriptor_demand_reader_is_lazy_and_exhaustively_scrubbed() {
         let path = unique_path("descriptor_shadow");
         let nodes = (0..96)
             .map(|id| NodeRecord {
@@ -3056,15 +3704,6 @@ mod tests {
             )
             .unwrap();
         assert!(manifest.segment_count > 1);
-        for descriptor in &manifest.segments {
-            let key = descriptor.descriptor_tree_key();
-            let value = descriptor.encode_descriptor_tree_value().unwrap();
-            assert_eq!(
-                CanonicalSegmentDescriptor::decode_descriptor_tree_entry(&key, &value).unwrap(),
-                *descriptor
-            );
-        }
-
         let cache = Arc::new(SegmentCache::new(8 * 1024 * 1024));
         let reader = CanonicalSegmentReader::open(
             &path,
@@ -3075,12 +3714,33 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cache.snapshot().resident_bytes, 0);
-        let report = reader.verify_descriptor_shadow().unwrap();
-        assert_eq!(report.checked_descriptors, manifest.segment_count);
-        assert!(report.root_bytes_read > 0);
-        assert!(report.checked_pages > 0);
-        assert!(report.page_artifact_bytes > 0);
-        assert_eq!(cache.snapshot().resident_bytes, 0);
+        let descriptors = collect_descriptors(&reader, CanonicalSegmentKind::Nodes);
+        assert_eq!(descriptors.len() as u64, manifest.node_segment_count);
+        for descriptor in descriptors {
+            let key = descriptor.descriptor_tree_key();
+            let value = descriptor.encode_descriptor_tree_value().unwrap();
+            assert_eq!(
+                CanonicalSegmentDescriptor::decode_descriptor_tree_entry(&key, &value).unwrap(),
+                descriptor
+            );
+        }
+        drop(reader);
+        let scrub_cache = Arc::new(SegmentCache::new(0));
+        let scrub_reader = CanonicalSegmentReader::open(
+            &path,
+            manifest.clone(),
+            Arc::clone(&scrub_cache),
+            StoreId(17),
+            NonZeroU64::new(512).unwrap(),
+        )
+        .unwrap();
+        let report = scrub_reader.deep_scrub().unwrap();
+        assert_eq!(report.descriptors_checked, manifest.segment_count);
+        assert_eq!(report.segments_checked, manifest.segment_count);
+        assert_eq!(report.records_checked, manifest.node_count);
+        assert!(report.descriptor_pages_checked > 0);
+        assert_eq!(report.canonical_bytes_hashed, manifest.artifact_len);
+        assert_eq!(scrub_cache.snapshot().resident_bytes, 0);
 
         let descriptor_tree =
             PersistentCanonicalSegmentDescriptorTree::for_artifact(&path, manifest.generation);
@@ -3088,8 +3748,132 @@ mod tests {
         let mut pages = std::fs::read(&descriptor_paths.page_artifact).unwrap();
         pages[0] ^= 0xff;
         std::fs::write(&descriptor_paths.page_artifact, pages).unwrap();
-        assert!(reader.verify_descriptor_shadow().is_err());
+        assert!(scrub_reader.deep_scrub().is_err());
+        assert!(scrub_reader.is_poisoned());
 
+        drop(scrub_reader);
+        remove_fixture(&path, manifest.generation);
+    }
+
+    #[test]
+    fn compact_manifest_residency_is_independent_of_segment_count() {
+        let small_path = unique_path("compact_manifest_small");
+        let large_path = unique_path("compact_manifest_large");
+        let config = CanonicalSegmentConfig {
+            target_segment_bytes: NonZeroU64::new(256).unwrap(),
+            max_record_bytes: NonZeroU64::new(512).unwrap(),
+        };
+        let make_node = |id| NodeRecord {
+            id: NodeId(id),
+            labels: BTreeSet::from([LabelId(1)]),
+            properties: BTreeMap::from([("payload".to_string(), Value::String("x".repeat(96)))]),
+        };
+        let small = CanonicalSegmentWriter::new(config)
+            .write(
+                &small_path,
+                ManifestGeneration(31),
+                [make_node(1)],
+                std::iter::empty::<RelRecord>(),
+            )
+            .unwrap();
+        let large = CanonicalSegmentWriter::new(config)
+            .write(
+                &large_path,
+                ManifestGeneration(32),
+                (0..1_024).map(make_node),
+                std::iter::empty::<RelRecord>(),
+            )
+            .unwrap();
+        assert!(large.node_segment_count > 256);
+        assert!(large.artifact_len > small.artifact_len * 256);
+        let small_manifest_bytes = small.encode().unwrap().len();
+        let large_manifest_bytes = large.encode().unwrap().len();
+        assert!(large_manifest_bytes.abs_diff(small_manifest_bytes) < 64);
+        remove_fixture(&small_path, small.generation);
+        remove_fixture(&large_path, large.generation);
+    }
+
+    #[test]
+    fn canonical_segment_admission_does_not_poison_the_reader() {
+        let path = unique_path("segment_admission");
+        let manifest = CanonicalSegmentWriter::new(CanonicalSegmentConfig::default())
+            .write(
+                &path,
+                ManifestGeneration(33),
+                [NodeRecord {
+                    id: NodeId(1),
+                    labels: BTreeSet::from([LabelId(1)]),
+                    properties: BTreeMap::new(),
+                }],
+                std::iter::empty::<RelRecord>(),
+            )
+            .unwrap();
+        let reader = CanonicalSegmentReader::open(
+            &path,
+            manifest.clone(),
+            Arc::new(SegmentCache::new(1024 * 1024)),
+            StoreId(33),
+            NonZeroU64::new(1).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            reader.get_node(NodeId(1)),
+            Err(CanonicalSegmentError::SegmentTooLarge { .. })
+        ));
+        assert!(!reader.is_poisoned());
+        assert!(matches!(
+            reader.get_node(NodeId(1)),
+            Err(CanonicalSegmentError::SegmentTooLarge { .. })
+        ));
+        drop(reader);
+        remove_fixture(&path, manifest.generation);
+    }
+
+    #[test]
+    fn canonical_scan_streams_more_than_one_descriptor_batch() {
+        let path = unique_path("descriptor_batches");
+        let config = CanonicalSegmentConfig {
+            target_segment_bytes: NonZeroU64::new(256).unwrap(),
+            max_record_bytes: NonZeroU64::new(512).unwrap(),
+        };
+        let manifest = CanonicalSegmentWriter::new(config)
+            .write(
+                &path,
+                ManifestGeneration(34),
+                (0..1_024).map(|id| NodeRecord {
+                    id: NodeId(id),
+                    labels: BTreeSet::from([LabelId(1)]),
+                    properties: BTreeMap::from([(
+                        "payload".to_string(),
+                        Value::String("x".repeat(96)),
+                    )]),
+                }),
+                std::iter::empty::<RelRecord>(),
+            )
+            .unwrap();
+        assert!(manifest.node_segment_count > DESCRIPTOR_SCAN_BATCH);
+        let cache = Arc::new(SegmentCache::new(64 * 1024));
+        let reader = CanonicalSegmentReader::open(
+            &path,
+            manifest.clone(),
+            Arc::clone(&cache),
+            StoreId(34),
+            NonZeroU64::new(512).unwrap(),
+        )
+        .unwrap();
+        let mut rows = 0u64;
+        let report = reader
+            .scan_nodes(|_| {
+                rows = rows.saturating_add(1);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(rows, manifest.node_count);
+        assert_eq!(report.segments_considered, manifest.node_segment_count);
+        assert_eq!(report.descriptors_examined, manifest.node_segment_count);
+        assert!(report.descriptor_pages_visited > 1);
+        assert!(cache.snapshot().resident_bytes <= 64 * 1024);
+        drop(reader);
         remove_fixture(&path, manifest.generation);
     }
 
@@ -3130,7 +3914,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_manifest_rejects_incomplete_segment_summaries() {
+    fn canonical_manifest_rejects_incomplete_segment_counts() {
         let path = unique_path("incomplete_manifest");
         let nodes = vec![NodeRecord {
             id: NodeId(1),
@@ -3150,21 +3934,16 @@ mod tests {
         let encoded = manifest.encode().unwrap();
         let body = encoded
             .lines()
-            .filter(|line| !line.starts_with("checksum\t"))
-            .map(|line| {
-                if !line.starts_with("segment\t") {
-                    return line.to_string();
-                }
-                line.split('\t').take(9).collect::<Vec<_>>().join("\t")
+            .filter(|line| {
+                !line.starts_with("checksum\t") && !line.starts_with("node_segment_count\t")
             })
+            .map(str::to_string)
             .collect::<Vec<_>>()
             .join("\n")
             + "\n";
         let incomplete = format!("{body}checksum\t{}\n", content_digest(body.as_bytes()).0);
         let error = CanonicalSegmentManifest::decode(&incomplete).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("invalid canonical manifest line"));
+        assert!(error.to_string().contains("missing node segment count"));
         std::fs::remove_file(path).unwrap();
     }
 
@@ -3195,7 +3974,7 @@ mod tests {
                 &relationships,
             )
             .unwrap();
-        let relationship_segment_count = manifest.relationship_segments().count() as u64;
+        let relationship_segment_count = manifest.relationship_segment_count;
         assert!(relationship_segment_count > 8);
         let reader = CanonicalSegmentReader::open(
             &path,
@@ -3248,7 +4027,15 @@ mod tests {
                 &relationships,
             )
             .unwrap();
-        let descriptors = manifest.relationship_segments().collect::<Vec<_>>();
+        let reader = CanonicalSegmentReader::open(
+            &path,
+            manifest.clone(),
+            Arc::new(SegmentCache::new(8 * 1024 * 1024)),
+            StoreId(20),
+            NonZeroU64::new(4 * 1024 * 1024).unwrap(),
+        )
+        .unwrap();
+        let descriptors = collect_descriptors(&reader, CanonicalSegmentKind::Relationships);
         assert!(!descriptors.is_empty());
         assert!(descriptors
             .iter()
@@ -3287,7 +4074,7 @@ mod tests {
                 std::iter::empty::<RelRecord>(),
             )
             .unwrap();
-        let node_segment_count = manifest.node_segments().count() as u64;
+        let node_segment_count = manifest.node_segment_count;
         assert!(node_segment_count > 8);
         let reader = CanonicalSegmentReader::open(
             &path,
@@ -3331,7 +4118,18 @@ mod tests {
                 std::iter::empty::<RelRecord>(),
             )
             .unwrap();
-        let descriptor = &manifest.segments[0];
+        let descriptor_reader = CanonicalSegmentReader::open(
+            &path,
+            manifest.clone(),
+            Arc::new(SegmentCache::new(8 * 1024 * 1024)),
+            StoreId(1),
+            NonZeroU64::new(16 * 1024 * 1024).unwrap(),
+        )
+        .unwrap();
+        let descriptor = collect_descriptors(&descriptor_reader, CanonicalSegmentKind::Nodes)
+            .into_iter()
+            .next()
+            .unwrap();
         let mut bytes = std::fs::read(&path).unwrap();
         bytes[descriptor.offset as usize] ^= 0xff;
         std::fs::write(&path, bytes).unwrap();
@@ -3349,6 +4147,7 @@ mod tests {
                 SegmentReadError::DigestMismatch { .. }
             ))
         ));
+        assert!(reader.is_poisoned());
         std::fs::remove_file(path).unwrap();
     }
 
@@ -3425,8 +4224,16 @@ mod tests {
                 Vec::<RelRecord>::new(),
             )
             .unwrap();
-        assert!(manifest.segments.len() > 8);
-        let segments = manifest.segments.clone();
+        assert!(manifest.node_segment_count > 8);
+        let descriptor_reader = CanonicalSegmentReader::open(
+            &path,
+            manifest.clone(),
+            Arc::new(SegmentCache::new(1024 * 1024)),
+            StoreId(22),
+            NonZeroU64::new(4096).unwrap(),
+        )
+        .unwrap();
+        let segments = collect_descriptors(&descriptor_reader, CanonicalSegmentKind::Nodes);
         // Ids that fall between two segments, plus one below the first segment
         // and one past the last. None of these is inside any range, so the
         // range bounds alone settle them.
@@ -3439,21 +4246,21 @@ mod tests {
         );
         assert!(unreadable_probes.len() > 4);
 
-        // A cold cache per probe, so a segment read would have to show up as an
-        // insertion. The decoder reaches the same `None` after reading, which is
-        // why this asserts on the read avoided rather than on the answer.
+        // Descriptor pages may be read and cached, but a gap settled by range
+        // metadata must not read a canonical data segment.
         for probe in unreadable_probes {
-            let cache = Arc::new(SegmentCache::new(1024 * 1024));
             let reader = CanonicalSegmentReader::open(
                 &path,
                 manifest.clone(),
-                Arc::clone(&cache),
+                Arc::new(SegmentCache::new(1024 * 1024)),
                 StoreId(23),
                 NonZeroU64::new(4096).unwrap(),
             )
             .unwrap();
-            assert_eq!(reader.get_node(NodeId(probe)).unwrap(), None);
-            assert_eq!(cache.snapshot().insertion_count, 0, "probe {probe}");
+            let (node, report) = reader.get_node_with_report(NodeId(probe)).unwrap();
+            assert_eq!(node, None);
+            assert_eq!(report.segments_read, 0, "probe {probe}");
+            assert_eq!(report.bytes_read, 0, "probe {probe}");
         }
 
         let reader = CanonicalSegmentReader::open(
@@ -3484,10 +4291,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_rejects_segments_that_are_not_grouped_by_kind() {
-        // `segments_of_kind` slices on the assumption that a kind occupies one
-        // contiguous run. Interleaving would silently truncate a lookup's search
-        // space, so the manifest refuses to describe it.
+    fn deep_scrub_rejects_descriptor_kind_count_drift() {
         let path = unique_path("interleaved_kinds");
         let nodes = (0..32)
             .map(|id| NodeRecord {
@@ -3512,43 +4316,42 @@ mod tests {
         let mut manifest = CanonicalSegmentWriter::new(config)
             .write(&path, ManifestGeneration(11), &nodes, &relationships)
             .unwrap();
-        manifest.validate().unwrap();
-        let mut node_segments = manifest
-            .segments_of_kind(CanonicalSegmentKind::Nodes)
-            .to_vec();
-        let mut relationship_segments = manifest
-            .segments_of_kind(CanonicalSegmentKind::Relationships)
-            .to_vec();
-        assert!(node_segments.len() > 1 && relationship_segments.len() > 1);
-
-        // Interleave the two kinds while keeping every other invariant intact:
-        // relative order within a kind is preserved, so the per-kind ranges stay
-        // ascending and disjoint, and reassigning ids and offsets keeps the
-        // layout contiguous and the counts unchanged. Only the grouping is
-        // violated, so only the grouping check can reject it.
-        let mut interleaved = Vec::new();
-        while !node_segments.is_empty() || !relationship_segments.is_empty() {
-            if !node_segments.is_empty() {
-                interleaved.push(node_segments.remove(0));
-            }
-            if !relationship_segments.is_empty() {
-                interleaved.push(relationship_segments.remove(0));
-            }
-        }
-        let mut offset = ARTIFACT_HEADER.len() as u64 + 8;
-        for (index, segment) in interleaved.iter_mut().enumerate() {
-            segment.segment_id = index as u64;
-            segment.offset = offset;
-            offset += segment.length.get();
-        }
-        assert_eq!(offset, manifest.artifact_len);
-        manifest.segments = interleaved;
-        assert!(manifest.validate().is_err());
-        std::fs::remove_file(path).unwrap();
+        let reader = CanonicalSegmentReader::open(
+            &path,
+            manifest.clone(),
+            Arc::new(SegmentCache::new(1024 * 1024)),
+            StoreId(24),
+            NonZeroU64::new(4096).unwrap(),
+        )
+        .unwrap();
+        let mut descriptors = collect_descriptors(&reader, CanonicalSegmentKind::Nodes);
+        descriptors.extend(collect_descriptors(
+            &reader,
+            CanonicalSegmentKind::Relationships,
+        ));
+        drop(reader);
+        let relationship = descriptors
+            .iter_mut()
+            .find(|descriptor| descriptor.kind == CanonicalSegmentKind::Relationships)
+            .unwrap();
+        relationship.kind = CanonicalSegmentKind::Nodes;
+        replace_descriptor_tree(&path, &mut manifest, descriptors);
+        let reader = CanonicalSegmentReader::open(
+            &path,
+            manifest.clone(),
+            Arc::new(SegmentCache::new(1024 * 1024)),
+            StoreId(24),
+            NonZeroU64::new(4096).unwrap(),
+        )
+        .unwrap();
+        assert!(reader.deep_scrub().is_err());
+        assert!(reader.is_poisoned());
+        drop(reader);
+        remove_fixture(&path, manifest.generation);
     }
 
     #[test]
-    fn manifest_rejects_segments_whose_record_ranges_overlap() {
+    fn deep_scrub_rejects_descriptor_record_range_overlap() {
         let path = unique_path("overlapping_ranges");
         let nodes = (0..64)
             .map(|id| NodeRecord {
@@ -3569,13 +4372,31 @@ mod tests {
                 Vec::<RelRecord>::new(),
             )
             .unwrap();
-        assert!(manifest.segments.len() > 2);
-        manifest.validate().unwrap();
-        // Reach the previous segment's range back over this one. A lookup that
-        // binary searches would silently miss records; validation must refuse.
-        manifest.segments[0].max_record_id = manifest.segments[1].max_record_id;
-        assert!(manifest.validate().is_err());
-        std::fs::remove_file(path).unwrap();
+        assert!(manifest.node_segment_count > 2);
+        let reader = CanonicalSegmentReader::open(
+            &path,
+            manifest.clone(),
+            Arc::new(SegmentCache::new(1024 * 1024)),
+            StoreId(25),
+            NonZeroU64::new(4096).unwrap(),
+        )
+        .unwrap();
+        let mut descriptors = collect_descriptors(&reader, CanonicalSegmentKind::Nodes);
+        drop(reader);
+        descriptors[0].max_record_id = descriptors[1].max_record_id;
+        replace_descriptor_tree(&path, &mut manifest, descriptors);
+        let reader = CanonicalSegmentReader::open(
+            &path,
+            manifest.clone(),
+            Arc::new(SegmentCache::new(1024 * 1024)),
+            StoreId(25),
+            NonZeroU64::new(4096).unwrap(),
+        )
+        .unwrap();
+        assert!(reader.deep_scrub().is_err());
+        assert!(reader.is_poisoned());
+        drop(reader);
+        remove_fixture(&path, manifest.generation);
     }
 
     fn fixture_nodes() -> Vec<NodeRecord> {

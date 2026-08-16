@@ -10,9 +10,9 @@ EXTENDS FiniteSets, Naturals
 (* lookup admits at most MaxResidentPages and pins one selected page until   *)
 (* completion. Corruption fails the read closed and poisons the handle.      *)
 (* The model is instantiated for canonical adjacency, property projection,     *)
-(* and property-spill publication and demand reads. Canonical segments use the *)
-(* candidate-data/page/root transitions for shadow publication; their resident *)
-(* descriptor vector remains authoritative until a later activation step. A   *)
+(* property spills, and canonical-segment publication and demand reads. Every  *)
+(* serving path selects the compact root; no resident descriptor vector is an  *)
+(* oracle after activation. Resource admission fails without poisoning. A      *)
 (* published descriptor root additionally requires its same-generation data   *)
 (* artifact to be durable.                                                      *)
 (***************************************************************************)
@@ -23,7 +23,7 @@ PageCopies == Generations \X Pages
 NoPage == <<0, 0>>
 CompleteGeneration(generation) == {<<generation, page>> : page \in Pages}
 
-ReaderStates == {"closed", "open", "reading", "succeeded", "failed"}
+ReaderStates == {"closed", "open", "reading", "succeeded", "failed", "admission_failed"}
 
 VARIABLES
     durableDataGenerations,
@@ -189,6 +189,18 @@ BeginDemandRead ==
         corruptPages, poisoned
        >>
 
+RejectDemandAdmission ==
+    /\ readerState = "open"
+    /\ ~poisoned
+    /\ readerState' = "admission_failed"
+    /\ pinnedPage' = NoPage
+    /\ UNCHANGED <<
+        durableDataGenerations, durablePages, usedGenerations, candidateGeneration, candidatePages,
+        publishedGeneration, publishedPages, publishedGenerations,
+        servingGeneration, servingPages, readerGeneration, readerPages,
+        residentPages, corruptPages, poisoned
+       >>
+
 CompleteDemandRead ==
     /\ readerState = "reading"
     /\ pinnedPage \notin corruptPages
@@ -221,6 +233,16 @@ ReleaseSuccessfulRead ==
         publishedGeneration, publishedPages, publishedGenerations,
         servingGeneration, servingPages, readerGeneration, readerPages,
         residentPages, corruptPages, poisoned
+       >>
+
+ReleaseAdmissionFailure ==
+    /\ readerState = "admission_failed"
+    /\ readerState' = "open"
+    /\ UNCHANGED <<
+        durableDataGenerations, durablePages, usedGenerations, candidateGeneration, candidatePages,
+        publishedGeneration, publishedPages, publishedGenerations,
+        servingGeneration, servingPages, readerGeneration, readerPages,
+        residentPages, pinnedPage, corruptPages, poisoned
        >>
 
 CloseReader ==
@@ -256,9 +278,11 @@ Next ==
     \/ CrashCandidate
     \/ OpenPinnedReader
     \/ BeginDemandRead
+    \/ RejectDemandAdmission
     \/ CompleteDemandRead
     \/ RejectCorruptPage
     \/ ReleaseSuccessfulRead
+    \/ ReleaseAdmissionFailure
     \/ CloseReader
     \/ InjectCorruption
 
@@ -329,5 +353,11 @@ SuccessfulReadIsClean ==
 
 PoisonedReaderCannotRead ==
     ~poisoned \/ readerState \notin {"open", "reading", "succeeded"}
+
+AdmissionFailureDoesNotPoison ==
+    readerState # "admission_failed" \/ ~poisoned
+
+AdmissionFailurePinsNothing ==
+    readerState # "admission_failed" \/ pinnedPage = NoPage
 
 =============================================================================

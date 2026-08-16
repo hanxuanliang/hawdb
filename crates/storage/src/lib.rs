@@ -36,11 +36,11 @@ pub use cache::{
 pub use canonical::{
     canonical_segment_descriptor_page_file, canonical_segment_descriptor_root_file,
     decode_residual_row_properties, encode_residual_row_properties,
-    residual_row_properties_encoded_len, write_residual_row_properties,
-    CanonicalDescriptorShadowReport, CanonicalEndpointBloom, CanonicalEndpointDirection,
-    CanonicalNodeIterator, CanonicalReadReport, CanonicalRelationshipIterator,
-    CanonicalScanControl, CanonicalSegmentConfig, CanonicalSegmentDescriptor,
-    CanonicalSegmentError, CanonicalSegmentKind, CanonicalSegmentManifest, CanonicalSegmentReader,
+    residual_row_properties_encoded_len, write_residual_row_properties, CanonicalEndpointBloom,
+    CanonicalEndpointDirection, CanonicalNodeIterator, CanonicalReadReport,
+    CanonicalRelationshipIterator, CanonicalScanControl, CanonicalSegmentConfig,
+    CanonicalSegmentDescriptor, CanonicalSegmentError, CanonicalSegmentKind,
+    CanonicalSegmentManifest, CanonicalSegmentReader, CanonicalSegmentScrubReport,
     CanonicalSegmentWriter, PersistentCanonicalSegmentDescriptorTree,
     CANONICAL_SEGMENT_DESCRIPTOR_ARTIFACT_ID,
 };

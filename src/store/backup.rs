@@ -534,7 +534,7 @@ pub(super) fn validate_backup_files(
             store_id_for_path(root)?,
             max_segment_bytes,
         )
-        .and_then(|reader| reader.verify_descriptor_shadow())
+        .and_then(|reader| reader.deep_scrub())
         .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
     }
     if let Some(binding) = manifest.canonical_adjacency_generation_artifacts {
