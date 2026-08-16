@@ -50,6 +50,7 @@ rust_library(
         "src/release_bundle/graph_index.rs",
         "src/release_bundle/graph_resource.rs",
         "src/release_bundle/graph_search.rs",
+        "src/release_bundle/memory.rs",
         "src/release_bundle/runtime.rs",
         "src/release_bundle/tests.rs",
         "src/release_bundle/vector.rs",

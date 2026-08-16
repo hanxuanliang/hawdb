@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use skein::ProductionQualificationIdentity;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(super) fn validate_read_storage(
+fn validate_read_storage(
     artifact: &Value,
     expected: &ProductionQualificationIdentity,
 ) -> Vec<String> {
@@ -212,6 +212,28 @@ pub(super) fn validate_read_storage(
         },
         &mut blockers,
     );
+    deduplicate(blockers)
+}
+
+pub(super) fn validate_production_read_storage(
+    artifact: &Value,
+    expected: &ProductionQualificationIdentity,
+) -> Vec<String> {
+    let mut blockers = validate_read_storage(artifact, expected);
+    if string(artifact, "/resource_profile_kind") == Some("capability512_mib") {
+        blockers.push("content_store_production_read_uses_512_mib_capability".to_string());
+    }
+    deduplicate(blockers)
+}
+
+pub(super) fn validate_512_mib_read_storage(
+    artifact: &Value,
+    expected: &ProductionQualificationIdentity,
+) -> Vec<String> {
+    let mut blockers = validate_read_storage(artifact, expected);
+    if string(artifact, "/resource_profile_kind") != Some("capability512_mib") {
+        blockers.push("content_store_512_mib_read_profile_missing".to_string());
+    }
     deduplicate(blockers)
 }
 

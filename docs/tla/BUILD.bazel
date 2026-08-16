@@ -24,6 +24,7 @@ _STORAGE_MODELS = [
     "SkeinIndexPublication",
     "SkeinIndexRecovery",
     "SkeinIndexStatistics",
+    "SkeinMemoryTierRelease",
     "SkeinOverflowPublication",
     "SkeinOverflowExactCompaction",
     "SkeinPageCacheAdmission",

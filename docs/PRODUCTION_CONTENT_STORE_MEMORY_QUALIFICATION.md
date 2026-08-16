@@ -57,3 +57,10 @@ matrix is blocked, and `2` means input or execution failed. Retain the plan,
 matrix JSON, exact binary revision, resource environment, and later workload
 artifacts together. This collector proves neither a 512 MiB workload nor a
 representative production workload by itself.
+
+The final release bundle accepts this matrix through
+`--content-store-memory-profiles-json`. It also requires the representative
+production read through `--content-store-read-json` and a distinct constrained
+run through `--content-store-512-mib-read-json`. All three artifacts must bind
+the same exact release identity; neither workload artifact can substitute for
+the other.

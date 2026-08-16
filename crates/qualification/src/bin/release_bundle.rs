@@ -54,7 +54,9 @@ fn run(
     let expected_identity =
         read_json::<ProductionQualificationIdentity>(&config.expected_identity)?;
     let artifacts = ProductionReleaseQualificationArtifacts {
+        content_store_memory_profiles: Some(read_value(&config.content_store_memory_profiles)?),
         content_store_read: Some(read_value(&config.content_store_read)?),
+        content_store_512_mib_read: Some(read_value(&config.content_store_512_mib_read)?),
         content_store_mutation_matrix: Some(read_value(&config.content_store_mutation_matrix)?),
         graph_storage: Some(read_value(&config.graph)?),
         graph_index_matrix: Some(read_value(&config.graph_index_matrix)?),
@@ -83,7 +85,9 @@ fn run(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Config {
     expected_identity: PathBuf,
+    content_store_memory_profiles: PathBuf,
     content_store_read: PathBuf,
+    content_store_512_mib_read: PathBuf,
     content_store_mutation_matrix: PathBuf,
     graph: PathBuf,
     graph_index_matrix: PathBuf,
@@ -98,7 +102,9 @@ struct Config {
 
 fn parse_config(args: impl IntoIterator<Item = String>) -> Result<Option<Config>, String> {
     let mut expected_identity = None;
+    let mut content_store_memory_profiles = None;
     let mut content_store_read = None;
+    let mut content_store_512_mib_read = None;
     let mut content_store_mutation_matrix = None;
     let mut graph = None;
     let mut graph_index_matrix = None;
@@ -119,7 +125,13 @@ fn parse_config(args: impl IntoIterator<Item = String>) -> Result<Option<Config>
             .ok_or_else(|| format!("missing value for {argument}"))?;
         match argument.as_str() {
             "--expected-identity-json" => expected_identity = Some(PathBuf::from(value)),
+            "--content-store-memory-profiles-json" => {
+                content_store_memory_profiles = Some(PathBuf::from(value));
+            }
             "--content-store-read-json" => content_store_read = Some(PathBuf::from(value)),
+            "--content-store-512-mib-read-json" => {
+                content_store_512_mib_read = Some(PathBuf::from(value));
+            }
             "--content-store-mutation-matrix-json" => {
                 content_store_mutation_matrix = Some(PathBuf::from(value));
             }
@@ -151,7 +163,15 @@ fn parse_config(args: impl IntoIterator<Item = String>) -> Result<Option<Config>
     }
     Ok(Some(Config {
         expected_identity: required(expected_identity, "--expected-identity-json")?,
+        content_store_memory_profiles: required(
+            content_store_memory_profiles,
+            "--content-store-memory-profiles-json",
+        )?,
         content_store_read: required(content_store_read, "--content-store-read-json")?,
+        content_store_512_mib_read: required(
+            content_store_512_mib_read,
+            "--content-store-512-mib-read-json",
+        )?,
         content_store_mutation_matrix: required(
             content_store_mutation_matrix,
             "--content-store-mutation-matrix-json",
@@ -213,7 +233,8 @@ fn parse_bool(name: &str, value: &str) -> Result<bool, String> {
 
 fn usage() -> &'static str {
     "usage: skein-qualification-bundle \
-     --expected-identity-json <path> --content-store-read-json <path> \
+     --expected-identity-json <path> --content-store-memory-profiles-json <path> \
+     --content-store-read-json <path> --content-store-512-mib-read-json <path> \
      --content-store-mutation-matrix-json <path> --graph-json <path> \
      --graph-index-matrix-json <path> --search-json <path> \
      --vector-json <path>... --morsel-json <path>... --blocking-json <path> \
@@ -234,8 +255,12 @@ mod tests {
         let config = parse_config([
             "--expected-identity-json".to_string(),
             "identity.json".to_string(),
+            "--content-store-memory-profiles-json".to_string(),
+            "content-store-memory-profiles.json".to_string(),
             "--content-store-read-json".to_string(),
             "content-store-read.json".to_string(),
+            "--content-store-512-mib-read-json".to_string(),
+            "content-store-512-mib-read.json".to_string(),
             "--content-store-mutation-matrix-json".to_string(),
             "content-store-mutation.json".to_string(),
             "--graph-json".to_string(),
@@ -263,8 +288,16 @@ mod tests {
         assert_eq!(config.vectors.len(), 2);
         assert_eq!(config.morsels.len(), 1);
         assert_eq!(
+            config.content_store_memory_profiles,
+            PathBuf::from("content-store-memory-profiles.json")
+        );
+        assert_eq!(
             config.content_store_read,
             PathBuf::from("content-store-read.json")
+        );
+        assert_eq!(
+            config.content_store_512_mib_read,
+            PathBuf::from("content-store-512-mib-read.json")
         );
         assert_eq!(
             config.content_store_mutation_matrix,

@@ -15,6 +15,8 @@ mod graph_index;
 mod graph_resource;
 #[path = "release_bundle/graph_search.rs"]
 mod graph_search;
+#[path = "release_bundle/memory.rs"]
+mod memory;
 #[path = "release_bundle/runtime.rs"]
 mod runtime;
 #[path = "release_bundle/vector.rs"]
@@ -107,7 +109,9 @@ impl ProductionReleaseControlEvidence {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProductionReleaseQualificationArtifacts {
+    pub content_store_memory_profiles: Option<Value>,
     pub content_store_read: Option<Value>,
+    pub content_store_512_mib_read: Option<Value>,
     pub content_store_mutation_matrix: Option<Value>,
     pub graph_storage: Option<Value>,
     pub graph_index_matrix: Option<Value>,
@@ -189,7 +193,9 @@ pub struct ProductionReleaseQualificationBundleReport {
     pub blocker_codes: Vec<String>,
     pub expected_identity: ProductionQualificationIdentity,
     pub policy: ProductionReleaseQualificationPolicy,
+    pub content_store_memory_profiles: ProductionArtifactAssessment,
     pub content_store_read: ProductionArtifactAssessment,
+    pub content_store_512_mib_read: ProductionArtifactAssessment,
     pub content_store_mutation_matrix: ProductionArtifactAssessment,
     pub graph_storage: ProductionArtifactAssessment,
     pub graph_index_matrix: ProductionArtifactAssessment,
@@ -210,7 +216,9 @@ impl ProductionReleaseQualificationBundleReport {
             "blocker_codes": self.blocker_codes,
             "expected_identity": self.expected_identity.json(),
             "policy": self.policy,
+            "content_store_memory_profiles": self.content_store_memory_profiles,
             "content_store_read": self.content_store_read,
+            "content_store_512_mib_read": self.content_store_512_mib_read,
             "content_store_mutation_matrix": self.content_store_mutation_matrix,
             "graph_storage": self.graph_storage,
             "graph_index_matrix": self.graph_index_matrix,
@@ -229,10 +237,20 @@ pub fn evaluate_production_release_qualification_bundle(
     expected_identity: ProductionQualificationIdentity,
     policy: ProductionReleaseQualificationPolicy,
 ) -> ProductionReleaseQualificationBundleReport {
+    let content_store_memory_profiles = evaluate_optional(
+        "production_content_store_memory_profiles",
+        artifacts.content_store_memory_profiles.as_ref(),
+        |artifact| memory::validate_memory_profiles(artifact, &expected_identity),
+    );
     let content_store_read = evaluate_optional(
         "representative_production_relational_replica",
         artifacts.content_store_read.as_ref(),
-        |artifact| content_store::validate_read_storage(artifact, &expected_identity),
+        |artifact| content_store::validate_production_read_storage(artifact, &expected_identity),
+    );
+    let content_store_512_mib_read = evaluate_optional(
+        "content_store_512_mib_read_capability",
+        artifacts.content_store_512_mib_read.as_ref(),
+        |artifact| content_store::validate_512_mib_read_storage(artifact, &expected_identity),
     );
     let content_store_mutation_matrix = evaluate_optional(
         "representative_production_relational_mutation_replicas",
@@ -284,7 +302,15 @@ pub fn evaluate_production_release_qualification_bundle(
         .map(|_| vec!["expected_identity_invalid".to_string()])
         .unwrap_or_default();
     for (prefix, ready) in [
+        (
+            "content_store_memory_profiles",
+            content_store_memory_profiles.ready,
+        ),
         ("content_store_read", content_store_read.ready),
+        (
+            "content_store_512_mib_read",
+            content_store_512_mib_read.ready,
+        ),
         (
             "content_store_mutation_matrix",
             content_store_mutation_matrix.ready,
@@ -310,7 +336,9 @@ pub fn evaluate_production_release_qualification_bundle(
         blocker_codes,
         expected_identity,
         policy,
+        content_store_memory_profiles,
         content_store_read,
+        content_store_512_mib_read,
         content_store_mutation_matrix,
         graph_storage,
         graph_index_matrix,

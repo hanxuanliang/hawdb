@@ -249,9 +249,12 @@ crash; read-only recovery remains fail closed.
     host/cgroup ceiling takes precedence. The identity-bound production matrix
     and `skein-content-store-memory-qualification` collector now evaluate both
     fixed policies from one detected snapshot without opening or mutating the
-    database. Retain this item until the matrix, constrained-capability
-    workload, and production-profile workload artifacts are checked in; the
-    policy report alone does not prove peak RSS.
+    database. The final release bundle now independently requires that matrix,
+    one production-profile read artifact, and one explicit 512 MiB capability
+    read artifact for the same release identity; it recomputes the policy
+    budgets and rejects profile substitution. Retain this item until real
+    representative artifacts are checked in; synthetic fixtures and policy
+    reports alone do not prove peak RSS.
 - [ ] Differentially qualify and production-activate persistent graph indexes.
   - The independent general graph-storage release artifact now has a bounded
     `skein-graph-storage-qualification` collector over the existing typed
@@ -358,10 +361,12 @@ qualification justifies moving them.
     replayed or prevent cutover.
 
 - [ ] Close the production evidence and decommissioning gates.
-  - The final release bundle now requires both the representative read-only
-    Content Store artifact and the isolated 1/4/8/10-writer mutation-replica
-    matrix. It independently revalidates frozen statement contracts, raw
-    cold/warm I/O and resource runs, runtime admission, writer sequences,
+  - The final release bundle now requires the identity-bound memory-policy
+    matrix, distinct production and explicit 512 MiB read-only Content Store
+    artifacts, and the isolated 1/4/8/10-writer mutation-replica matrix. It
+    independently revalidates memory derivation, profile separation, frozen
+    statement contracts, raw cold/warm I/O and resource runs, runtime admission,
+    writer sequences,
     latency percentiles and regression, WAL/group accounting, replay deltas,
     manifest-only reopen, checkpoint folding, and verification parity instead
     of trusting child `ready` fields. Representative retained artifacts are

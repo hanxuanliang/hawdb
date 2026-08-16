@@ -2,6 +2,9 @@ use super::*;
 use crate::evidence_digest::hash_bytes;
 use crate::{
     nowledge_content_store_schema_identity, nowledge_content_store_sql_corpus,
+    CONTENT_STORE_512_MIB_CAPABILITY_BYTES, CONTENT_STORE_DESKTOP_8_GIB_BYTES,
+    CONTENT_STORE_DESKTOP_MAX_CAPACITY_BYTES,
+    PRODUCTION_CONTENT_STORE_MEMORY_QUALIFICATION_PROTOCOL,
     PRODUCTION_CONTENT_STORE_MUTATION_QUALIFICATION_PROTOCOL,
     PRODUCTION_CONTENT_STORE_STORAGE_QUALIFICATION_PROTOCOL,
     PRODUCTION_CONTENT_STORE_WRITER_MATRIX,
@@ -13,7 +16,9 @@ use skein::PRODUCTION_QUALIFICATION_POLICY_VERSION;
 fn complete_raw_artifact_bundle_is_ready() {
     let expected = identity("linux", "x86_64");
     let artifacts = ProductionReleaseQualificationArtifacts {
+        content_store_memory_profiles: Some(content_store_memory_profiles(&expected)),
         content_store_read: Some(content_store_read(&expected)),
+        content_store_512_mib_read: Some(content_store_512_mib_read(&expected)),
         content_store_mutation_matrix: Some(content_store_mutation_matrix(&expected)),
         graph_storage: Some(graph(&expected)),
         graph_index_matrix: Some(graph_index_matrix(&expected)),
@@ -44,7 +49,9 @@ fn complete_raw_artifact_bundle_is_ready() {
     );
 
     assert!(report.ready, "{:?}", report.blocker_codes);
+    assert!(report.content_store_memory_profiles.ready);
     assert!(report.content_store_read.ready);
+    assert!(report.content_store_512_mib_read.ready);
     assert!(report.content_store_mutation_matrix.ready);
     assert!(report.graph_storage.ready);
     assert!(report.graph_index_matrix.ready);
@@ -58,6 +65,87 @@ fn complete_raw_artifact_bundle_is_ready() {
         report.json()["protocol"],
         PRODUCTION_RELEASE_QUALIFICATION_BUNDLE_PROTOCOL
     );
+}
+
+#[test]
+fn memory_profile_top_level_ready_cannot_hide_a_wrong_desktop_budget() {
+    let expected = identity("linux", "x86_64");
+    let mut artifact = content_store_memory_profiles(&expected);
+    artifact["desktop_bound_8_gib"]["memory_budget_bytes"] = serde_json::json!(1);
+    let report = evaluate_production_release_qualification_bundle(
+        ProductionReleaseQualificationArtifacts {
+            content_store_memory_profiles: Some(artifact),
+            ..ProductionReleaseQualificationArtifacts::default()
+        },
+        expected,
+        ProductionReleaseQualificationPolicy::default(),
+    );
+
+    assert!(!report.content_store_memory_profiles.ready);
+    assert!(report
+        .content_store_memory_profiles
+        .blocker_codes
+        .contains(&"content_store_desktop_memory_policy_invalid".to_string()));
+}
+
+#[test]
+fn memory_profile_matrix_rejects_different_resource_snapshots() {
+    let expected = identity("linux", "x86_64");
+    let mut artifact = content_store_memory_profiles(&expected);
+    artifact["capability_512_mib"]["observed_effective_available_bytes"] =
+        serde_json::json!(5_368_709_120_u64);
+    let report = evaluate_production_release_qualification_bundle(
+        ProductionReleaseQualificationArtifacts {
+            content_store_memory_profiles: Some(artifact),
+            ..ProductionReleaseQualificationArtifacts::default()
+        },
+        expected,
+        ProductionReleaseQualificationPolicy::default(),
+    );
+
+    assert!(!report.content_store_memory_profiles.ready);
+    assert!(report
+        .content_store_memory_profiles
+        .blocker_codes
+        .contains(&"content_store_memory_profile_snapshot_mismatch".to_string()));
+}
+
+#[test]
+fn production_read_cannot_substitute_the_512_mib_capability_run() {
+    let expected = identity("linux", "x86_64");
+    let report = evaluate_production_release_qualification_bundle(
+        ProductionReleaseQualificationArtifacts {
+            content_store_read: Some(content_store_512_mib_read(&expected)),
+            ..ProductionReleaseQualificationArtifacts::default()
+        },
+        expected,
+        ProductionReleaseQualificationPolicy::default(),
+    );
+
+    assert!(!report.content_store_read.ready);
+    assert!(report
+        .content_store_read
+        .blocker_codes
+        .contains(&"content_store_production_read_uses_512_mib_capability".to_string()));
+}
+
+#[test]
+fn configured_production_read_cannot_substitute_the_512_mib_capability_run() {
+    let expected = identity("linux", "x86_64");
+    let report = evaluate_production_release_qualification_bundle(
+        ProductionReleaseQualificationArtifacts {
+            content_store_512_mib_read: Some(content_store_read(&expected)),
+            ..ProductionReleaseQualificationArtifacts::default()
+        },
+        expected,
+        ProductionReleaseQualificationPolicy::default(),
+    );
+
+    assert!(!report.content_store_512_mib_read.ready);
+    assert!(report
+        .content_store_512_mib_read
+        .blocker_codes
+        .contains(&"content_store_512_mib_read_profile_missing".to_string()));
 }
 
 #[test]
@@ -480,6 +568,51 @@ fn content_store_statement_digest(statement_name: &str, mutation: bool) -> Strin
     format!("sha256:{:x}", hasher.finalize())
 }
 
+fn content_store_memory_profiles(identity: &ProductionQualificationIdentity) -> Value {
+    let available_bytes = 6 * 1024 * 1024 * 1024_u64;
+    let desktop_budget_bytes = available_bytes / 4;
+    serde_json::json!({
+        "protocol": PRODUCTION_CONTENT_STORE_MEMORY_QUALIFICATION_PROTOCOL,
+        "evidence_kind": "production_content_store_memory_profiles",
+        "production_eligible": true,
+        "ready": true,
+        "blocker_codes": [],
+        "evidence_binding": binding(identity),
+        "desktop_bound_8_gib": {
+            "profile_kind": "desktop_bound8_gib",
+            "ready": true,
+            "blocker_codes": [],
+            "required_effective_limit_bytes": CONTENT_STORE_DESKTOP_8_GIB_BYTES,
+            "configured_memory_ceiling_bytes": null,
+            "nominal_available_threshold_bytes": 4 * 1024 * 1024 * 1024_u64,
+            "nominal_budget_range_observed": true,
+            "observed_effective_limit_bytes": CONTENT_STORE_DESKTOP_8_GIB_BYTES,
+            "observed_effective_available_bytes": available_bytes,
+            "memory_fraction_per_million": 250_000,
+            "memory_capacity_bytes": CONTENT_STORE_DESKTOP_MAX_CAPACITY_BYTES,
+            "memory_budget_bytes": desktop_budget_bytes,
+            "expected_capacity_bytes": CONTENT_STORE_DESKTOP_MAX_CAPACITY_BYTES,
+            "expected_dynamic_budget_bytes": desktop_budget_bytes,
+        },
+        "capability_512_mib": {
+            "profile_kind": "capability512_mib",
+            "ready": true,
+            "blocker_codes": [],
+            "required_effective_limit_bytes": null,
+            "configured_memory_ceiling_bytes": CONTENT_STORE_512_MIB_CAPABILITY_BYTES,
+            "nominal_available_threshold_bytes": null,
+            "nominal_budget_range_observed": false,
+            "observed_effective_limit_bytes": CONTENT_STORE_DESKTOP_8_GIB_BYTES,
+            "observed_effective_available_bytes": available_bytes,
+            "memory_fraction_per_million": 250_000,
+            "memory_capacity_bytes": CONTENT_STORE_512_MIB_CAPABILITY_BYTES,
+            "memory_budget_bytes": CONTENT_STORE_512_MIB_CAPABILITY_BYTES,
+            "expected_capacity_bytes": CONTENT_STORE_512_MIB_CAPABILITY_BYTES,
+            "expected_dynamic_budget_bytes": CONTENT_STORE_512_MIB_CAPABILITY_BYTES,
+        },
+    })
+}
+
 fn content_store_read(identity: &ProductionQualificationIdentity) -> Value {
     let (corpus, schema) = content_store_contract_identity();
     let digest = "1".repeat(64);
@@ -662,6 +795,32 @@ fn content_store_read(identity: &ProductionQualificationIdentity) -> Value {
         }],
         "runs": [run(0, "cold", 0, 1), run(1, "warm", 1, 0)],
     })
+}
+
+fn content_store_512_mib_read(identity: &ProductionQualificationIdentity) -> Value {
+    let mut artifact = content_store_read(identity);
+    artifact["resource_profile_kind"] = serde_json::json!("capability512_mib");
+    artifact["configured_available_memory_bytes"] =
+        serde_json::json!(CONTENT_STORE_512_MIB_CAPABILITY_BYTES);
+    artifact["runtime_memory"]["host_total_bytes"] =
+        serde_json::json!(CONTENT_STORE_DESKTOP_8_GIB_BYTES);
+    artifact["runtime_memory"]["host_available_bytes"] =
+        serde_json::json!(6 * 1024 * 1024 * 1024_u64);
+    artifact["runtime_memory"]["effective_limit_bytes"] =
+        serde_json::json!(CONTENT_STORE_DESKTOP_8_GIB_BYTES);
+    artifact["runtime_memory"]["effective_available_bytes"] =
+        serde_json::json!(6 * 1024 * 1024 * 1024_u64);
+    artifact["runtime_governor"]["configured_memory_ceiling_bytes"] =
+        serde_json::json!(CONTENT_STORE_512_MIB_CAPABILITY_BYTES);
+    artifact["runtime_governor"]["effective_memory_limit_bytes"] =
+        serde_json::json!(CONTENT_STORE_DESKTOP_8_GIB_BYTES);
+    artifact["runtime_governor"]["effective_available_memory_bytes"] =
+        serde_json::json!(6 * 1024 * 1024 * 1024_u64);
+    artifact["runtime_governor"]["memory_capacity_bytes"] =
+        serde_json::json!(CONTENT_STORE_512_MIB_CAPABILITY_BYTES);
+    artifact["runtime_governor"]["memory_budget_bytes"] =
+        serde_json::json!(CONTENT_STORE_512_MIB_CAPABILITY_BYTES);
+    artifact
 }
 
 fn content_store_open_timings(total_open_micros: u64, wal_replay_micros: u64) -> Value {

@@ -162,10 +162,12 @@ diagnostics MAY expose local detail through an explicit host decision, but
 debug reports MUST NOT be accepted as production cutover evidence.
 
 `evaluate_production_release_qualification_bundle` is the final typed
-cross-process evidence gate. It consumes the raw read-only Content Store,
-Content Store mutation-replica matrix, graph-storage, all-class graph index
-matrix, out-of-core search, per-target vector, per-worker morsel, active-route
-blocking, storage crash-recovery, and exact-revision release-control artifacts.
+cross-process evidence gate. It consumes the identity-bound Content Store
+memory-policy matrix, a representative production-profile Content Store read,
+a separate explicitly constrained 512 MiB Content Store read, the Content
+Store mutation-replica matrix, graph-storage, all-class graph index matrix,
+out-of-core search, per-target vector, per-worker morsel, active-route blocking,
+storage crash-recovery, and exact-revision release-control artifacts.
 The evaluator
 does not trust their top-level `ready` fields: it revalidates protocols,
 release bindings, every graph cold/warm resource run, the recomputed graph
@@ -179,9 +181,16 @@ and assessments, so it can be retained as release evidence without copying queri
 paths, embeddings, or row payloads.
 
 The Content Store artifacts are independently re-evaluated from retained raw
-contracts and measurements. The read-only artifact binds every frozen SQL
-statement to its corpus-derived digest and row/payload limits, requires one
-open plus exact cold/warm runs per case, recomputes row/index generation and
+contracts and measurements. The memory-policy artifact MUST contain both the
+dynamic desktop and explicit 512 MiB policy reports from the same detected
+resource snapshot, and the evaluator MUST recompute their capacities, dynamic
+budgets, nominal-range flag, and exact release binding. A nominal desktop
+budget below 1 GiB under pressure remains valid; a desktop capacity or budget
+above 2 GiB does not. Policy evidence cannot substitute for either workload
+run. The production read MUST NOT use the 512 MiB capability profile, and the
+separate capability read MUST use it. Both reads bind every frozen SQL
+statement to its corpus-derived digest and row/payload limits, require one
+open plus exact cold/warm runs per case, recompute row/index generation and
 larger-than-cache invariants, and checks physical I/O, hydration, process,
 page-fault, cache-pin, and runtime-governor accounting. The mutation artifact
 requires exactly the 1, 4, 8, and 10 writer cases, validates every frozen
@@ -203,8 +212,10 @@ typed evaluator. It accepts bounded JSON inputs from independently generated
 process and platform artifacts and exits unsuccessfully when the recomputed
 bundle is not ready. It is not a production serving control plane and cannot
 generate representative evidence by itself. The Content Store inputs are
-mandatory through `--content-store-read-json` and
-`--content-store-mutation-matrix-json`; omitting either fails before evaluation.
+mandatory through `--content-store-memory-profiles-json`,
+`--content-store-read-json`, `--content-store-512-mib-read-json`, and
+`--content-store-mutation-matrix-json`; omitting any one fails before
+evaluation.
 
 ## Cross-Platform Qualification
 

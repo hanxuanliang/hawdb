@@ -1076,16 +1076,16 @@ mod tests {
         );
         let release = crate::evaluate_production_release_qualification_bundle(
             crate::ProductionReleaseQualificationArtifacts {
-                content_store_read: Some(report.json()),
+                content_store_512_mib_read: Some(report.json()),
                 ..crate::ProductionReleaseQualificationArtifacts::default()
             },
             identity,
             crate::ProductionReleaseQualificationPolicy::default(),
         );
         assert!(
-            release.content_store_read.ready,
+            release.content_store_512_mib_read.ready,
             "unexpected release blockers: {:?}",
-            release.content_store_read.blocker_codes
+            release.content_store_512_mib_read.blocker_codes
         );
         assert_eq!(report.opens.len(), 1);
         assert!(report.opens[0].open_timings.consistent);

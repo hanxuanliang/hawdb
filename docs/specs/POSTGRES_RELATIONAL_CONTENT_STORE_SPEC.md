@@ -557,9 +557,14 @@ the isolation, replay, checkpoint, digest, and evidence contracts only; release
 readiness still requires retained reports from disposable copies of the
 representative production import.
 
-The final `evaluate_production_release_qualification_bundle` gate requires
-both the read-only production-copy report and the four-case mutation-replica
-report. The reports retain their declared resource and statement contracts so
+The final `evaluate_production_release_qualification_bundle` gate requires the
+identity-bound two-policy memory matrix, a read-only production-copy report, a
+separate read-only report with the explicit 512 MiB ceiling, and the four-case
+mutation-replica report. The 8 GiB policy caps automatic Skein capacity at
+2 GiB and derives the effective budget from current headroom; 1--2 GiB is the
+nominal operating range, not a reservation or lower bound. The 512 MiB report
+proves a separate supported capability and cannot stand in for the production
+profile. The reports retain their declared resource and statement contracts so
 the gate can independently recompute every cold/warm I/O bound, runtime permit,
 writer sequence, percentile, epoch, WAL, recovery-delta, checkpoint-fold, and
 verification-digest obligation. It resolves statement digests and row/payload

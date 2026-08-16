@@ -122,6 +122,18 @@ cargo run -p skein-qualification \
   > content-store-read-evidence.json
 ```
 
+Run the same representative read corpus again with a plan whose
+`resource_profile` is `capability_512_mib`, whose cache and result budgets fit
+that envelope, and whose RSS limit is at most 512 MiB. Retain it separately:
+
+```bash
+cargo run -p skein-qualification \
+  --bin skein-content-store-read-qualification -- \
+  --database-path /path/to/representative.skein \
+  --plan-json /path/to/content-store-512-mib-read-plan.json \
+  > content-store-512-mib-read-evidence.json
+```
+
 The wrapper always constructs `read_only + OutOfCore + Authoritative` and
 passes the plan to `run_production_content_store_storage_qualification`. It
 does not retain the local database path. Exit code `0` means the complete report
@@ -131,6 +143,9 @@ execution failed.
 Retain the plan, evidence JSON, exact binary revision, and offline oracle
 artifact together. A successful local run is not a release gate until those
 artifacts are reviewed and included in the production qualification bundle.
+The production-profile output and the 512 MiB capability output are independent
+mandatory release inputs; a successful capability run does not redefine the
+normal desktop budget.
 
 ## Writable Mutation Matrix
 
