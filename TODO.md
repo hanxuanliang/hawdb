@@ -158,9 +158,13 @@ crash; read-only recovery remains fail closed.
     overlay, publish only dirty row pages, conservatively retain the pinned
     overflow base, rebuild required indexes by batch-scanning the new row root
     through the spillable index builder, and omit the legacy full-row artifact.
-    Add a separately admitted full-scan overflow compaction/GC operation and
-    production-copy evidence before claiming exact unreachable-extent reclaim
-    for repeated metadata-only checkpoints.
+    Exact full-scan overflow compaction is now a separately admitted typed
+    maintenance operation with zero-hydration closure scanning, bounded
+    external sorting, fresh physical rewrite, manifest-last selection, pinned
+    reader retention, and TLA+ coverage. Retain this item until a production
+    copy demonstrates repeated-checkpoint reclaimable bytes, physical deletion,
+    RSS, page faults, elapsed time, and write amplification under its declared
+    resource profile.
   - The typed runner now qualifies `content_documents`, `thread_messages`,
     `content_chunks`, and `content_anchors` using the frozen PostgreSQL statement
     corpus and graph-plus-relational commits that publish one shared epoch.

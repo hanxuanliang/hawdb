@@ -2,6 +2,34 @@
 
 use super::*;
 
+struct ExactRelationalOverflowCheckpoint<'a> {
+    references: &'a skein_storage::RelationalOverflowReferenceSet,
+    scan: relational_row_pages::RelationalOverflowClosureScanReport,
+    admitted_memory_bytes: u64,
+    max_rewrite_bytes: NonZeroU64,
+    task: &'a RuntimeTaskContext,
+}
+
+fn exact_overflow_publication_error(
+    error: skein_storage::RelationalOverflowPublicationError,
+) -> SkeinError {
+    let message = error.to_string();
+    match error {
+        skein_storage::RelationalOverflowPublicationError::Corrupt(_)
+        | skein_storage::RelationalOverflowPublicationError::MissingExtent(_) => {
+            SkeinError::StorageIntegrity(message)
+        }
+        skein_storage::RelationalOverflowPublicationError::Admission(_)
+        | skein_storage::RelationalOverflowPublicationError::Durability(_)
+        | skein_storage::RelationalOverflowPublicationError::StaleGeneration { .. } => {
+            SkeinError::Storage(message)
+        }
+        skein_storage::RelationalOverflowPublicationError::Stopped(_) => {
+            SkeinError::Execution(message)
+        }
+    }
+}
+
 fn push_property_projection_definition(
     definitions: &mut Vec<PersistentPropertyProjectionDefinition>,
     admission: &mut PersistentPropertyProjectionDefinitionAdmission,
@@ -41,6 +69,103 @@ fn push_relationship_property_projection_definitions(
 impl GraphStore {
     pub fn checkpoint(&mut self, catalog: &Catalog) -> Result<()> {
         self.checkpoint_with_reader_epoch(catalog, None)
+    }
+
+    pub(crate) fn compact_relational_overflow(
+        &mut self,
+        catalog: &Catalog,
+        oldest_reader_commit_epoch: Option<u64>,
+        config: RelationalOverflowCompactionConfig,
+        task: &RuntimeTaskContext,
+    ) -> Result<RelationalOverflowCompactionReport> {
+        let result = self.compact_relational_overflow_inner(
+            catalog,
+            oldest_reader_commit_epoch,
+            config,
+            task,
+        );
+        if matches!(&result, Err(SkeinError::StorageIntegrity(_))) {
+            self.integrity_poisoned.store(true, AtomicOrdering::Release);
+        }
+        result
+    }
+
+    fn compact_relational_overflow_inner(
+        &mut self,
+        catalog: &Catalog,
+        oldest_reader_commit_epoch: Option<u64>,
+        config: RelationalOverflowCompactionConfig,
+        task: &RuntimeTaskContext,
+    ) -> Result<RelationalOverflowCompactionReport> {
+        self.ensure_usable()?;
+        task.checkpoint().map_err(|reason| {
+            SkeinError::Execution(format!("relational overflow compaction stopped: {reason}"))
+        })?;
+        let durable = self.durable.as_ref().ok_or_else(|| {
+            SkeinError::Storage(
+                "relational overflow compaction requires durable storage".to_string(),
+            )
+        })?;
+        if durable.read_only {
+            return Err(SkeinError::Storage(
+                "read-only database cannot compact relational overflow".to_string(),
+            ));
+        }
+        let admitted_memory_bytes = config.admission_bytes()?;
+        let _permit = match &self.runtime_governor {
+            Some(governor) => Some(
+                governor
+                    .try_admit(skein_qos::RuntimeWorkRequest {
+                        priority: skein_qos::RuntimeWorkPriority::Background,
+                        kind: skein_qos::RuntimeWorkKind::Control,
+                        cpu_slots: 1,
+                        memory_bytes: admitted_memory_bytes,
+                        io_slots: 1,
+                        result_bytes: 0,
+                        blocking: false,
+                    })
+                    .map_err(|error| {
+                        SkeinError::Storage(format!(
+                            "relational overflow compaction admission denied: {error}"
+                        ))
+                    })?,
+            ),
+            None => None,
+        };
+        let generation = durable.checkpoint_epoch.saturating_add(1);
+        let (references, scan) =
+            self.collect_exact_relational_overflow_closure(generation, config, task)?;
+        task.checkpoint().map_err(|reason| {
+            SkeinError::Execution(format!("relational overflow compaction stopped: {reason}"))
+        })?;
+        let prepared = self
+            .prepare_checkpoint_with_overflow_mode(
+                catalog,
+                DerivedArtifactBuildConfig::default(),
+                Some(ExactRelationalOverflowCheckpoint {
+                    references: &references,
+                    scan,
+                    admitted_memory_bytes,
+                    max_rewrite_bytes: config.max_rewrite_bytes,
+                    task,
+                }),
+            )?
+            .ok_or_else(|| {
+                SkeinError::Storage(
+                    "relational overflow compaction did not prepare a durable checkpoint"
+                        .to_string(),
+                )
+            })?;
+        let report = prepared
+            .relational_overflow_compaction_report
+            .clone()
+            .ok_or_else(|| {
+                SkeinError::StorageIntegrity(
+                    "relational overflow compaction checkpoint lost its report".to_string(),
+                )
+            })?;
+        self.publish_prepared_checkpoint(prepared, oldest_reader_commit_epoch)?;
+        Ok(report)
     }
 
     pub fn backup_to(
@@ -114,6 +239,15 @@ impl GraphStore {
         &self,
         catalog: &Catalog,
         build_config: DerivedArtifactBuildConfig,
+    ) -> Result<Option<PreparedCheckpoint>> {
+        self.prepare_checkpoint_with_overflow_mode(catalog, build_config, None)
+    }
+
+    fn prepare_checkpoint_with_overflow_mode(
+        &self,
+        catalog: &Catalog,
+        build_config: DerivedArtifactBuildConfig,
+        exact_overflow: Option<ExactRelationalOverflowCheckpoint<'_>>,
     ) -> Result<Option<PreparedCheckpoint>> {
         let Some(durable) = self.durable.as_ref() else {
             return Ok(None);
@@ -336,7 +470,10 @@ impl GraphStore {
                     .map_err(|error| SkeinError::Storage(error.to_string()))
                 })
                 .transpose()?;
-            let overflow_publication_config = RelationalOverflowPublicationConfig::default();
+            let mut overflow_publication_config = RelationalOverflowPublicationConfig::default();
+            if let Some(exact) = exact_overflow.as_ref() {
+                overflow_publication_config.max_new_extent_bytes = exact.max_rewrite_bytes;
+            }
             let previous_overflow = durable
                 .relational_overflow_generation_artifacts
                 .map(|_| durable.open_bound_relational_overflow())
@@ -356,45 +493,115 @@ impl GraphStore {
                 usize::try_from(overflow_publication_config.max_new_extent_bytes.get())
                     .unwrap_or(usize::MAX);
             let metadata_only_rows = self.relational_state.canonical_row_metadata_only();
-            let overflow_inputs = if metadata_only_rows {
-                self.relational_state
-                    .overflow_delta_generation_inputs(&row_plan.deltas)
-            } else {
-                self.relational_state.overflow_generation_inputs(
-                    previous_overflow.is_some(),
-                    max_materialized_overflow_bytes,
-                )
+            if exact_overflow.is_some() && !metadata_only_rows {
+                return Err(SkeinError::Storage(
+                    "exact overflow compaction requires canonical metadata-only rows".to_string(),
+                ));
             }
-            .map_err(|error| SkeinError::Storage(error.to_string()))?;
             let overflow_publisher = RelationalOverflowPublisher::new(overflow_publication_config);
-            let relational_overflow_report = if metadata_only_rows {
+            let mut copied_base_extent_count = 0u64;
+            let mut introduced_extent_count = 0u64;
+            let relational_overflow_report = if let Some(exact) = exact_overflow.as_ref() {
+                let base = previous_overflow.as_ref().ok_or_else(|| {
+                    SkeinError::StorageIntegrity(
+                        "exact overflow compaction requires a pinned overflow root".to_string(),
+                    )
+                })?;
+                overflow_publisher
+                    .persist_generation_exact_references(
+                        skein_storage::RelationalOverflowExactGenerationRequest {
+                            directory: durable.root_path(),
+                            generation,
+                            source_commit_epoch: commit_epoch,
+                            base,
+                            expected_previous_generation: base.manifest().generation,
+                            references: exact.references,
+                            task: exact.task,
+                        },
+                        |reference| Ok(self.relational_state.inline_overflow_envelope(reference)),
+                    )
+                    .map(|report| {
+                        copied_base_extent_count = report.copied_base_extent_count;
+                        introduced_extent_count = report.introduced_extent_count;
+                        report.publication
+                    })
+                    .map_err(exact_overflow_publication_error)
+            } else if metadata_only_rows {
                 let base = previous_overflow.as_ref().ok_or_else(|| {
                     SkeinError::StorageIntegrity(
                         "metadata-only relational checkpoint requires a pinned overflow root"
                             .to_string(),
                     )
                 })?;
-                overflow_publisher.persist_generation_retaining_base(
-                    durable.root_path(),
-                    generation,
-                    commit_epoch,
-                    base,
-                    base.manifest().generation,
-                    overflow_inputs,
-                )
+                let overflow_inputs = self
+                    .relational_state
+                    .overflow_delta_generation_inputs(&row_plan.deltas)
+                    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                overflow_publisher
+                    .persist_generation_retaining_base(
+                        durable.root_path(),
+                        generation,
+                        commit_epoch,
+                        base,
+                        base.manifest().generation,
+                        overflow_inputs,
+                    )
+                    .map_err(|error| SkeinError::Storage(error.to_string()))
             } else {
-                overflow_publisher.persist_generation(
-                    durable.root_path(),
-                    generation,
-                    commit_epoch,
-                    previous_overflow.as_ref(),
-                    durable
-                        .relational_overflow_generation_artifacts
-                        .map(|binding| binding.generation),
-                    overflow_inputs,
-                )
-            }
-            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                let overflow_inputs = self
+                    .relational_state
+                    .overflow_generation_inputs(
+                        previous_overflow.is_some(),
+                        max_materialized_overflow_bytes,
+                    )
+                    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                overflow_publisher
+                    .persist_generation(
+                        durable.root_path(),
+                        generation,
+                        commit_epoch,
+                        previous_overflow.as_ref(),
+                        durable
+                            .relational_overflow_generation_artifacts
+                            .map(|binding| binding.generation),
+                        overflow_inputs,
+                    )
+                    .map_err(|error| SkeinError::Storage(error.to_string()))
+            }?;
+            let relational_overflow_compaction_report =
+                exact_overflow
+                    .as_ref()
+                    .map(|exact| RelationalOverflowCompactionReport {
+                        source_commit_epoch: commit_epoch,
+                        published_generation: generation,
+                        tables_scanned: exact.scan.tables_scanned,
+                        rows_scanned: exact.scan.rows_scanned,
+                        pages_read: exact.scan.pages_read,
+                        row_bytes_read: exact.scan.row_bytes_read,
+                        hydrated_values: exact.scan.hydrated_values,
+                        reference_occurrences: exact.scan.sort.reference_occurrences,
+                        unique_references: exact.scan.sort.unique_references,
+                        spill_run_count: exact.scan.sort.spill_run_count,
+                        spill_bytes: exact.scan.sort.spill_bytes,
+                        peak_sort_memory_bytes: exact.scan.sort.peak_memory_bytes,
+                        previous_extent_count: previous_overflow
+                            .as_ref()
+                            .map_or(0, |base| base.manifest().extent_count),
+                        published_extent_count: relational_overflow_report.extent_count,
+                        reclaimable_base_extent_count: previous_overflow.as_ref().map_or(
+                            0,
+                            |base| {
+                                base.manifest()
+                                    .extent_count
+                                    .saturating_sub(copied_base_extent_count)
+                            },
+                        ),
+                        new_extent_count: relational_overflow_report.new_extent_count,
+                        reused_extent_count: relational_overflow_report.reused_extent_count,
+                        copied_base_extent_count,
+                        introduced_extent_count,
+                        admitted_memory_bytes: exact.admitted_memory_bytes,
+                    });
             let relational_overflow_root =
                 skein_storage::RelationalOverflowRootReader::open_generation(
                     durable.root_path(),
@@ -458,6 +665,7 @@ impl GraphStore {
                 checkpoint_statistics,
                 checkpoint_relational_state,
                 relational_index_candidate,
+                relational_overflow_compaction_report,
                 manifest_artifacts: CheckpointManifestArtifacts {
                     checkpoint: checkpoint_artifact,
                     relational_checkpoint: relational_checkpoint_artifact,

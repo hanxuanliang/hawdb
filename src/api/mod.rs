@@ -1184,6 +1184,31 @@ impl Database {
         self.checkpoint_internal(None)
     }
 
+    /// Runs an explicitly admitted full relational-row closure scan and
+    /// publishes an exact overflow root through the ordinary manifest-last
+    /// checkpoint boundary. Large overflow payloads are not hydrated.
+    pub fn compact_relational_overflow(
+        &mut self,
+        config: crate::store::RelationalOverflowCompactionConfig,
+    ) -> Result<crate::store::RelationalOverflowCompactionReport> {
+        self.compact_relational_overflow_context(config, &skein_core::RuntimeTaskContext::default())
+    }
+
+    pub fn compact_relational_overflow_context(
+        &mut self,
+        config: crate::store::RelationalOverflowCompactionConfig,
+        task: &skein_core::RuntimeTaskContext,
+    ) -> Result<crate::store::RelationalOverflowCompactionReport> {
+        self.ensure_writable()?;
+        let oldest_reader_epoch = self
+            .reader_pins
+            .lock()
+            .expect("database reader pins lock should not be poisoned")
+            .oldest_epoch();
+        self.store
+            .compact_relational_overflow(&self.catalog, oldest_reader_epoch, config, task)
+    }
+
     /// Checkpoint entry carrying an explicit pre-admitted columnar-shadow
     /// context, for callers that already hold a governor permit and
     /// extended it by [`Database::columnar_shadow_admission_bytes`]. The

@@ -184,12 +184,30 @@ pub struct RelationalOverflowPublicationReport {
     pub events: [RelationalOverflowPublicationPhase; 6],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationalOverflowExactPublicationReport {
+    pub publication: RelationalOverflowPublicationReport,
+    pub copied_base_extent_count: u64,
+    pub introduced_extent_count: u64,
+}
+
+pub struct RelationalOverflowExactGenerationRequest<'a> {
+    pub directory: &'a std::path::Path,
+    pub generation: u64,
+    pub source_commit_epoch: u64,
+    pub base: &'a RelationalOverflowRootReader,
+    pub expected_previous_generation: u64,
+    pub references: &'a super::RelationalOverflowReferenceSet,
+    pub task: &'a skein_core::RuntimeTaskContext,
+}
+
 #[derive(Debug)]
 pub enum RelationalOverflowPublicationError {
     Admission(String),
     Corrupt(String),
     Durability(String),
     MissingExtent(Sha256Digest),
+    Stopped(skein_core::RuntimeCancellationReason),
     StaleGeneration {
         expected_previous: Option<u64>,
         actual_previous: Option<u64>,
@@ -210,6 +228,9 @@ impl fmt::Display for RelationalOverflowPublicationError {
             }
             Self::MissingExtent(digest) => {
                 write!(formatter, "relational overflow root has no extent {digest}")
+            }
+            Self::Stopped(reason) => {
+                write!(formatter, "relational overflow publication stopped: {reason}")
             }
             Self::StaleGeneration {
                 expected_previous,

@@ -548,6 +548,7 @@ pub use store::{
     RelationalIndexReadViewBackendReport, RelationalIndexReadViewReport,
     RelationalIndexRecoveryReadReport, RelationalIndexStorageResidencyReport,
     RelationalIndexViewQualificationOptions, RelationalIndexViewQualificationReport,
+    RelationalOverflowCompactionConfig, RelationalOverflowCompactionReport,
     RelationalRowPageRecoveryStatus, RelationalRowStorageResidencyReport,
     SearchProjectionChangefeedReadiness, SearchProjectionChangefeedStatus,
     SearchProjectionMutationId, SegmentCacheSnapshot, SegmentRangeReader, SegmentReadError,

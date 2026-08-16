@@ -714,6 +714,59 @@ buffer. It then reads exactly one physical range, verifies its CRC32C and
 content SHA-256, and invokes the shared envelope decoder. Admission or
 corruption does not partially charge the caller hydration budget.
 
+### Exact relational overflow compaction
+
+Normal metadata-only checkpoints intentionally retain the complete pinned
+overflow descriptor root. Exact reachability is established only by the
+separately invoked `Database::compact_relational_overflow` maintenance
+operation. It is valid only for a writable durable database serving canonical
+metadata-only rows through the current `OutOfCore` plus `Authoritative` row and
+index views.
+
+The operation first requests one background control permit with one CPU slot,
+one I/O slot, and the complete compaction-specific working-memory reservation.
+The ordinary checkpoint stages retain their own existing bounded builders. The
+operation then pins one row snapshot and scans every current table and row
+through `visit_projected_range_unhydrated`. Page, row, encoded-read-byte,
+overlay-entry, overlay-resident-byte, reference-occurrence, sort-memory,
+spill-byte, spill-run, and rewrite-byte limits are hard admission bounds. The
+scan decodes row fields but preserves every `TEXT` or `BYTEA` overflow
+descriptor; it MUST report zero payload hydrations. References are sorted and
+deduplicated either in memory or through checksummed fixed-record temporary
+runs. The resulting set is repeatable because publication preflight and
+candidate writing consume it independently.
+
+Before creating a candidate, publication merges that exact set with the pinned
+base descriptors, rejects conflicting digest metadata, validates every newly
+introduced inline envelope, and proves that descriptor and physical rewrite
+limits are sufficient. Every reachable base envelope is copied one at a time,
+without decompression, into the fresh generation. This physical rewrite is
+required: retaining a descriptor that points into an old mixed live/dead
+artifact would keep the unreachable bytes physically reachable. References
+absent from the exact set are omitted. The fresh overflow generation is
+published first, followed by the row and required index candidates; only the
+outer checkpoint manifest selects the complete generation.
+
+Admission failure, cancellation, stale source identity, corruption, or I/O
+failure before outer-manifest replacement leaves the previous checkpoint
+selected. Candidate cleanup removes temporary runs and unpublished generation
+artifacts. Current, immediately previous, and reader-pinned generations retain
+their complete physical closure. Consequently
+`reclaimable_base_extent_count` reports descriptors excluded from the new root,
+not files already deleted; physical deletion occurs only after generation
+retention and reader pins permit it.
+
+The default operation reserves approximately 154 MiB of working memory: 8 MiB
+for reference sorting, 16 MiB for row overlays, two one-MiB pages, and a
+conservative two-value overflow envelope. This is compatible with the
+separately configured 512 MiB low-memory capability profile, but 512 MiB is
+neither Skein's default nor a universal host limit. On an 8 GiB host, automatic
+Skein capacity remains dynamically bounded to at most 2 GiB and normally falls
+within 1--2 GiB. Scan, spill, and rewrite limits govern I/O and disk work; they
+do not increase the admitted resident-memory reservation. Production-copy RSS,
+page-fault, elapsed-time, write-amplification, and reclaimed-byte evidence
+remains an activation gate rather than an implementation invariant.
+
 ### Relational row-root v1 publication
 
 `RelationalRowPagePublisher` publishes a generation through five immutable or

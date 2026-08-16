@@ -621,6 +621,11 @@ fn overflow_dependency_error(
                 "missing overflow extent {digest}"
             ))
         }
+        RelationalOverflowPublicationError::Stopped(reason) => {
+            RelationalRowPagePublicationError::Admission(format!(
+                "overflow dependency validation stopped: {reason}"
+            ))
+        }
         RelationalOverflowPublicationError::StaleGeneration {
             expected_previous,
             actual_previous,

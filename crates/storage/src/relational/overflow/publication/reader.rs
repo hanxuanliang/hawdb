@@ -133,6 +133,19 @@ impl RelationalOverflowRootReader {
             RelationalOverflowPublicationError::MissingExtent(reference.digest),
         )?;
         admit_extent_hydration(reference, descriptor.envelope_bytes, budget)?;
+        let encoded = self.read_encoded_extent(&descriptor)?;
+        decode_overflow_envelope(reference, &encoded, budget, task_context)
+            .map_err(publication_error)
+    }
+
+    /// Reads and verifies one encoded envelope without decompressing it.
+    /// Exact overflow compaction uses this path to rewrite physical closure
+    /// while keeping memory bounded to one value.
+    pub(super) fn read_encoded_extent(
+        &self,
+        descriptor: &RelationalOverflowExtentDescriptor,
+    ) -> Result<Arc<[u8]>, RelationalOverflowPublicationError> {
+        let reference = descriptor.reference;
         let path = self.directory.join(relational_overflow_extent_file(
             descriptor.physical_generation,
         ));
@@ -173,8 +186,7 @@ impl RelationalOverflowRootReader {
                 reference.digest
             )));
         }
-        decode_overflow_envelope(reference, &encoded, budget, task_context)
-            .map_err(publication_error)
+        Ok(encoded.into())
     }
 
     pub fn visit_descriptors(

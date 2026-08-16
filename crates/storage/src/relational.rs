@@ -52,14 +52,20 @@ pub use overflow::{
     relational_overflow_descriptor_file, relational_overflow_extent_file,
     relational_overflow_manifest_generation_file, RelationalHydrationBudget,
     RelationalOverflowArtifactMetadata, RelationalOverflowConfig,
+    RelationalOverflowExactGenerationRequest, RelationalOverflowExactPublicationReport,
     RelationalOverflowExtentDescriptor, RelationalOverflowExtentInput,
     RelationalOverflowGenerationArtifacts, RelationalOverflowPublicationConfig,
     RelationalOverflowPublicationError, RelationalOverflowPublicationPhase,
     RelationalOverflowPublicationReport, RelationalOverflowPublisher, RelationalOverflowRef,
+    RelationalOverflowReferenceSet, RelationalOverflowReferenceSetBuilder,
+    RelationalOverflowReferenceSortConfig, RelationalOverflowReferenceSortReport,
     RelationalOverflowRootBinding, RelationalOverflowRootManifest, RelationalOverflowRootReader,
     DEFAULT_MAX_RELATIONAL_HYDRATION_BYTES, DEFAULT_RELATIONAL_OVERFLOW_EXTENTS,
     DEFAULT_RELATIONAL_OVERFLOW_MANIFEST_BYTES, DEFAULT_RELATIONAL_OVERFLOW_NEW_EXTENT_BYTES,
-    DEFAULT_RELATIONAL_OVERFLOW_THRESHOLD_BYTES, RELATIONAL_OVERFLOW_MANIFEST_FILE,
+    DEFAULT_RELATIONAL_OVERFLOW_REFERENCE_OCCURRENCES, DEFAULT_RELATIONAL_OVERFLOW_REFERENCE_RUNS,
+    DEFAULT_RELATIONAL_OVERFLOW_REFERENCE_SORT_MEMORY_BYTES,
+    DEFAULT_RELATIONAL_OVERFLOW_REFERENCE_SPILL_BYTES, DEFAULT_RELATIONAL_OVERFLOW_THRESHOLD_BYTES,
+    RELATIONAL_OVERFLOW_MANIFEST_FILE,
 };
 pub(crate) use recovery::RELATIONAL_RECOVERY_SOURCE_BYTES;
 pub use recovery::{
@@ -2961,6 +2967,18 @@ impl RelationalState {
             .values()
             .filter(|segment| segment.is_file_backed())
             .count()
+    }
+
+    /// Returns the newly encoded envelope for an exact closure reference.
+    /// References backed by the pinned checkpoint intentionally return
+    /// `None`; the overflow publisher resolves those from the base descriptor
+    /// stream and copies at most one encoded envelope at a time without
+    /// hydration.
+    pub fn inline_overflow_envelope(&self, reference: &RelationalOverflowRef) -> Option<Arc<[u8]>> {
+        match self.overflow_segments.get(&reference.digest) {
+            Some(RelationalOverflowSegment::Inline(encoded)) => Some(Arc::clone(encoded)),
+            Some(RelationalOverflowSegment::FileRange { .. }) | None => None,
+        }
     }
 
     /// Derives the exact overflow closure for one canonical checkpoint.

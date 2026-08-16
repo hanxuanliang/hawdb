@@ -1,13 +1,16 @@
 use super::*;
 use crate::durability::fail_durable_replace_for_destination;
 use crate::relational::{
-    RelationalHydrationBudget, RelationalOverflowConfig, RelationalScalarType, RelationalValue,
+    RelationalHydrationBudget, RelationalOverflowConfig, RelationalOverflowReferenceSetBuilder,
+    RelationalOverflowReferenceSortConfig, RelationalScalarType, RelationalValue,
 };
+use skein_core::{RuntimeCancellationToken, RuntimeTaskContext};
 use std::fs::{self, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -79,6 +82,81 @@ fn persisted_overflow_candidate_does_not_change_latest_selection() {
     let candidate = RelationalOverflowRootReader::open_generation(&directory, 1, config).unwrap();
     assert!(candidate.contains(&reference).unwrap());
 
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn exact_publication_cancellation_after_preflight_creates_no_candidate() {
+    let directory = unique_test_dir("exact-cancelled");
+    let config = RelationalOverflowPublicationConfig::default();
+    let publisher = RelationalOverflowPublisher::new(config);
+    let (base_input, base_reference) = encoded_input(RelationalScalarType::Text, b"base payload");
+    publisher
+        .publish(&directory, 1, 10, None, vec![base_input])
+        .unwrap();
+    let base = RelationalOverflowRootReader::open_latest(&directory, config)
+        .unwrap()
+        .unwrap();
+    let (introduced_input, introduced_reference) =
+        encoded_input(RelationalScalarType::Bytea, b"introduced payload");
+    let RelationalOverflowExtentInput::Write {
+        encoded: introduced_encoded,
+        ..
+    } = introduced_input
+    else {
+        unreachable!("encoded input always writes an envelope");
+    };
+    let mut references = RelationalOverflowReferenceSetBuilder::new(
+        &directory,
+        2,
+        RelationalOverflowReferenceSortConfig::default(),
+    )
+    .unwrap();
+    references.push(base_reference).unwrap();
+    references.push(introduced_reference).unwrap();
+    let references = references.finish().unwrap();
+    let cancellation = RuntimeCancellationToken::new();
+    let task = RuntimeTaskContext::without_deadline(cancellation.clone());
+
+    let error = publisher
+        .persist_generation_exact_references(
+            RelationalOverflowExactGenerationRequest {
+                directory: &directory,
+                generation: 2,
+                source_commit_epoch: 11,
+                base: &base,
+                expected_previous_generation: 1,
+                references: &references,
+                task: &task,
+            },
+            |reference| {
+                if *reference == introduced_reference {
+                    cancellation.cancel();
+                    Ok(Some(Arc::clone(&introduced_encoded)))
+                } else {
+                    Ok(None)
+                }
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RelationalOverflowPublicationError::Stopped(_)
+    ));
+    assert!(!directory
+        .join(relational_overflow_manifest_generation_file(2))
+        .exists());
+    assert!(!directory.join(relational_overflow_extent_file(2)).exists());
+    assert_eq!(
+        RelationalOverflowRootReader::open_latest(&directory, config)
+            .unwrap()
+            .unwrap()
+            .manifest()
+            .generation,
+        1
+    );
+
+    drop(references);
     fs::remove_dir_all(directory).unwrap();
 }
 

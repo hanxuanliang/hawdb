@@ -1,11 +1,13 @@
 //! Shadow recovery state for canonical relational row-page roots.
 
-use super::{GraphStore, RelationalRowStorageResidencyReport};
+use super::{GraphStore, RelationalOverflowCompactionConfig, RelationalRowStorageResidencyReport};
 use skein_storage::{
     RelationalConstraintIndex, RelationalError, RelationalHydrationBudget,
-    RelationalIndexChangeCapture, RelationalIndexChangeCaptureLimits, RelationalOverflowRootReader,
-    RelationalProjectedRow, RelationalRecoveryFence, RelationalRecoverySourceIdentity,
-    RelationalReplayAccess, RelationalReplayAccessSet, RelationalRow, RelationalRowChangeCapture,
+    RelationalIndexChangeCapture, RelationalIndexChangeCaptureLimits,
+    RelationalOverflowReferenceSet, RelationalOverflowReferenceSetBuilder,
+    RelationalOverflowReferenceSortReport, RelationalOverflowRootReader, RelationalProjectedRow,
+    RelationalRecoveryFence, RelationalRecoverySourceIdentity, RelationalReplayAccess,
+    RelationalReplayAccessSet, RelationalRow, RelationalRowChangeCapture,
     RelationalRowChangeCaptureLimits, RelationalRowDeltaBuilder, RelationalRowDeltaConfig,
     RelationalRowDeltaError, RelationalRowDeltaReader, RelationalRowDeltaReport,
     RelationalRowPageDemandReadError, RelationalRowPageLiveError, RelationalRowPageMutationPlanner,
@@ -16,8 +18,8 @@ use skein_storage::{
     RelationalRowPageSnapshotReadLimits, RelationalRowPageSnapshotReader,
     RelationalRowPageSnapshotRowSource, RelationalRowPageTableDelta, RelationalSparseIndexProbe,
     RelationalSparseLivePreparationStage, RelationalSparseLiveStage, RelationalSparseRecoveryRow,
-    RelationalSparseWorkspaceBuilder, RelationalState, RelationalTransaction, SegmentCache,
-    StorageResidencyMode, StoreId,
+    RelationalSparseWorkspaceBuilder, RelationalState, RelationalTransaction, RelationalValue,
+    SegmentCache, StorageResidencyMode, StoreId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -96,6 +98,18 @@ struct RelationalRowPageServingResources {
 pub(super) struct RelationalRowPageCheckpointPlan {
     pub base: Option<Arc<RelationalRowPageRootReader>>,
     pub deltas: Vec<RelationalRowPageTableDelta>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct RelationalOverflowClosureScanReport {
+    pub tables_scanned: usize,
+    pub rows_scanned: usize,
+    pub pages_read: usize,
+    pub row_bytes_read: usize,
+    pub hydrated_values: usize,
+    pub overlay_entries: usize,
+    pub overlay_bytes: usize,
+    pub sort: RelationalOverflowReferenceSortReport,
 }
 
 /// A bounded transaction-private row overlay pinned to the committed row view.
@@ -1720,6 +1734,236 @@ impl GraphStore {
             .map(Some)
     }
 
+    pub(super) fn collect_exact_relational_overflow_closure(
+        &self,
+        generation: u64,
+        config: RelationalOverflowCompactionConfig,
+        task: &skein_core::RuntimeTaskContext,
+    ) -> crate::error::Result<(
+        RelationalOverflowReferenceSet,
+        RelationalOverflowClosureScanReport,
+    )> {
+        if !self.relational_state.canonical_row_metadata_only() {
+            return Err(crate::error::SkeinError::Storage(
+                "exact overflow compaction requires canonical metadata-only relational rows"
+                    .to_string(),
+            ));
+        }
+        task.checkpoint().map_err(|reason| {
+            crate::error::SkeinError::Execution(format!(
+                "relational overflow compaction stopped: {reason}"
+            ))
+        })?;
+        let durable = self.durable.as_ref().ok_or_else(|| {
+            crate::error::SkeinError::Storage(
+                "exact overflow compaction requires durable storage".to_string(),
+            )
+        })?;
+        let view = self
+            .relational_row_pages
+            .current_read_view(self.commit_epoch)
+            .ok_or_else(|| {
+                crate::error::SkeinError::StorageIntegrity(
+                    "exact overflow compaction requires a current relational row view".to_string(),
+                )
+            })?;
+        let manifest = view.base().manifest();
+        let current_rows = self.relational_state.total_row_count();
+        if current_rows > config.max_scan_rows.get() {
+            return Err(crate::error::SkeinError::Storage(format!(
+                "overflow compaction needs {current_rows} row visits, exceeding limit {}",
+                config.max_scan_rows
+            )));
+        }
+        let root_pages = usize::try_from(manifest.root_page_count).map_err(|_| {
+            crate::error::SkeinError::Storage(
+                "overflow compaction page count exceeds this target".to_string(),
+            )
+        })?;
+        if root_pages > config.max_scan_pages.get() {
+            return Err(crate::error::SkeinError::Storage(format!(
+                "overflow compaction needs {root_pages} row pages, exceeding limit {}",
+                config.max_scan_pages
+            )));
+        }
+        let page_bytes = usize::try_from(manifest.page_bytes).map_err(|_| {
+            crate::error::SkeinError::Storage(
+                "overflow compaction page size exceeds this target".to_string(),
+            )
+        })?;
+        let estimated_scan_bytes = root_pages.checked_mul(page_bytes).ok_or_else(|| {
+            crate::error::SkeinError::Storage(
+                "overflow compaction scan byte count overflow".to_string(),
+            )
+        })?;
+        if estimated_scan_bytes > config.max_scan_bytes.get() {
+            return Err(crate::error::SkeinError::Storage(format!(
+                "overflow compaction needs {estimated_scan_bytes} row bytes, exceeding limit {}",
+                config.max_scan_bytes
+            )));
+        }
+
+        let reader = self.open_relational_row_snapshot_reader()?.ok_or_else(|| {
+            crate::error::SkeinError::StorageIntegrity(
+                "exact overflow compaction could not open the current row snapshot".to_string(),
+            )
+        })?;
+        let mut references = RelationalOverflowReferenceSetBuilder::new(
+            durable.root_path(),
+            generation,
+            config.reference_sort,
+        )
+        .map_err(|error| crate::error::SkeinError::Storage(error.to_string()))?;
+        let mut report = RelationalOverflowClosureScanReport::default();
+        let mut remaining_overlay_entries = config.max_overlay_entries.get();
+        let mut remaining_overlay_bytes = config.max_overlay_bytes.get();
+        for schema in self.relational_state.table_schemas() {
+            task.checkpoint().map_err(|reason| {
+                crate::error::SkeinError::Execution(format!(
+                    "relational overflow compaction stopped: {reason}"
+                ))
+            })?;
+            let requested_fields = (0..schema.columns.len()).collect::<Vec<_>>();
+            let table_root = view
+                .base()
+                .table_root(&schema.name)
+                .map_err(|error| crate::error::SkeinError::StorageIntegrity(error.to_string()))?;
+            let table_pages = usize::try_from(table_root.page_count).map_err(|_| {
+                crate::error::SkeinError::Storage(
+                    "overflow compaction table page count exceeds this target".to_string(),
+                )
+            })?;
+            let table_rows = self.relational_state.row_count(&schema.name);
+            let table_bytes = table_pages.checked_mul(page_bytes).ok_or_else(|| {
+                crate::error::SkeinError::Storage(
+                    "overflow compaction table read-byte count overflow".to_string(),
+                )
+            })?;
+            let limits = RelationalRowPageSnapshotReadLimits {
+                demand: skein_storage::RelationalRowPageDemandReadLimits {
+                    max_pages: NonZeroUsize::new(table_pages.max(1)).unwrap(),
+                    max_rows: NonZeroUsize::new(table_rows.max(1)).unwrap(),
+                    max_bytes: NonZeroUsize::new(table_bytes.max(1)).unwrap(),
+                    ..skein_storage::RelationalRowPageDemandReadLimits::default()
+                },
+                max_overlay_entries: NonZeroUsize::new(remaining_overlay_entries.max(1)).unwrap(),
+                max_overlay_bytes: NonZeroUsize::new(remaining_overlay_bytes.max(1)).unwrap(),
+            };
+            let mut callback_error = None;
+            let table_report = reader.visit_projected_range_unhydrated(
+                RelationalRowPageProjectedRange {
+                    table: &schema.name,
+                    lower: Bound::Unbounded,
+                    upper: Bound::Unbounded,
+                    requested_fields: &requested_fields,
+                },
+                limits,
+                task,
+                |row| {
+                    for field in row.fields {
+                        if let RelationalValue::Overflow(reference) = field.value
+                            && let Err(error) = references.push(reference)
+                        {
+                            callback_error = Some(error);
+                            return false;
+                        }
+                    }
+                    true
+                },
+            );
+            let table_report = table_report.map_err(|error| {
+                let message = format!(
+                    "exact overflow closure scan failed for table {}: {error}",
+                    schema.name
+                );
+                match error {
+                    skein_storage::RelationalRowPageSnapshotReadError::Corrupt(_)
+                    | skein_storage::RelationalRowPageSnapshotReadError::MissingTable(_) => {
+                        crate::error::SkeinError::StorageIntegrity(message)
+                    }
+                    skein_storage::RelationalRowPageSnapshotReadError::Stopped(_) => {
+                        crate::error::SkeinError::Execution(message)
+                    }
+                    skein_storage::RelationalRowPageSnapshotReadError::Admission(_)
+                    | skein_storage::RelationalRowPageSnapshotReadError::Durability(_) => {
+                        crate::error::SkeinError::Storage(message)
+                    }
+                }
+            })?;
+            if let Some(error) = callback_error {
+                return Err(crate::error::SkeinError::Storage(error.to_string()));
+            }
+            if table_report.demand.stopped_early {
+                return Err(crate::error::SkeinError::StorageIntegrity(format!(
+                    "exact overflow closure scan stopped before table {} completed",
+                    schema.name
+                )));
+            }
+            if table_report.demand.hydrated_values != 0
+                || table_report.demand.compressed_hydration_bytes != 0
+                || table_report.demand.decompressed_hydration_bytes != 0
+            {
+                return Err(crate::error::SkeinError::StorageIntegrity(format!(
+                    "exact overflow closure scan hydrated payloads for table {}",
+                    schema.name
+                )));
+            }
+            remaining_overlay_entries = remaining_overlay_entries
+                .checked_sub(table_report.overlay_entries)
+                .ok_or_else(|| {
+                    crate::error::SkeinError::Storage(
+                        "overflow compaction overlay entry budget exhausted".to_string(),
+                    )
+                })?;
+            remaining_overlay_bytes = remaining_overlay_bytes
+                .checked_sub(table_report.overlay_resident_bytes)
+                .ok_or_else(|| {
+                    crate::error::SkeinError::Storage(
+                        "overflow compaction overlay byte budget exhausted".to_string(),
+                    )
+                })?;
+            report.tables_scanned += 1;
+            report.rows_scanned = report
+                .rows_scanned
+                .checked_add(table_report.demand.rows_emitted)
+                .ok_or_else(|| {
+                    crate::error::SkeinError::Storage(
+                        "overflow compaction row count overflow".to_string(),
+                    )
+                })?;
+            report.pages_read = report
+                .pages_read
+                .checked_add(table_report.demand.pages_read)
+                .ok_or_else(|| {
+                    crate::error::SkeinError::Storage(
+                        "overflow compaction page count overflow".to_string(),
+                    )
+                })?;
+            report.row_bytes_read = report
+                .row_bytes_read
+                .checked_add(table_report.demand.bytes_read)
+                .ok_or_else(|| {
+                    crate::error::SkeinError::Storage(
+                        "overflow compaction read-byte count overflow".to_string(),
+                    )
+                })?;
+            report.hydrated_values += table_report.demand.hydrated_values;
+            report.overlay_entries += table_report.overlay_entries;
+            report.overlay_bytes += table_report.overlay_resident_bytes;
+        }
+        if report.rows_scanned != current_rows {
+            return Err(crate::error::SkeinError::StorageIntegrity(format!(
+                "exact overflow closure scanned {} rows, expected {current_rows}",
+                report.rows_scanned
+            )));
+        }
+        let references = references
+            .finish()
+            .map_err(|error| crate::error::SkeinError::Storage(error.to_string()))?;
+        report.sort = references.report();
+        Ok((references, report))
+    }
+
     pub(crate) fn open_relational_transaction_row_snapshot_reader(
         &self,
         rows: &RelationalTransactionRowView,
@@ -1851,10 +2095,12 @@ fn map_sparse_snapshot_read_error(error: RelationalRowPageSnapshotReadError) -> 
 
 #[cfg(test)]
 mod tests {
+    mod overflow_compaction;
+
     use super::*;
     use crate::schema::Catalog;
     use crate::store::GraphStore;
-    use skein_core::RuntimeTaskContext;
+    use skein_core::{RuntimeCancellationToken, RuntimeTaskContext};
     use skein_storage::{
         relational_overflow_extent_file, relational_overflow_manifest_generation_file,
         relational_row_page_manifest_generation_file, DurabilityPolicy, RelationalColumnSchema,

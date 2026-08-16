@@ -1,8 +1,10 @@
+use super::super::RelationalOverflowReferenceSet;
 use super::super::{decode_overflow_envelope, RelationalHydrationBudget, RelationalOverflowRef};
 use super::{
     durability, manifest, reader, relational_overflow_descriptor_file,
     relational_overflow_extent_file, relational_overflow_manifest_generation_file,
-    RelationalOverflowArtifactMetadata, RelationalOverflowExtentDescriptor,
+    RelationalOverflowArtifactMetadata, RelationalOverflowExactGenerationRequest,
+    RelationalOverflowExactPublicationReport, RelationalOverflowExtentDescriptor,
     RelationalOverflowExtentInput, RelationalOverflowPublicationConfig,
     RelationalOverflowPublicationError, RelationalOverflowPublicationPhase,
     RelationalOverflowPublicationReport, RelationalOverflowRootManifest,
@@ -104,6 +106,87 @@ impl RelationalOverflowPublisher {
         )
     }
 
+    /// Persists exactly the overflow references found by a bounded full-row
+    /// closure scan. Unmentioned base extents are intentionally omitted.
+    ///
+    /// `resolve_new` is consulted only for references absent from the pinned
+    /// base. It must be repeatable because admission is completed before any
+    /// candidate artifact is created, then the same sorted source is replayed
+    /// to write the candidate.
+    pub fn persist_generation_exact_references(
+        &self,
+        request: RelationalOverflowExactGenerationRequest<'_>,
+        mut resolve_new: impl FnMut(
+            &RelationalOverflowRef,
+        ) -> Result<
+            Option<std::sync::Arc<[u8]>>,
+            RelationalOverflowPublicationError,
+        >,
+    ) -> Result<RelationalOverflowExactPublicationReport, RelationalOverflowPublicationError> {
+        let RelationalOverflowExactGenerationRequest {
+            directory,
+            generation,
+            source_commit_epoch,
+            base,
+            expected_previous_generation,
+            references,
+            task,
+        } = request;
+        validate_publication_identity(
+            generation,
+            source_commit_epoch,
+            references.report().unique_references == 0,
+        )?;
+        validate_publication_config(self.config)?;
+        fs::create_dir_all(directory).map_err(durability("create overflow directory"))?;
+        let _lock = acquire_publication_lock(directory)?;
+        let paths = PublicationPaths::new(directory, generation);
+        paths.remove_temps()?;
+        paths.require_fresh_generation()?;
+        validate_base_identity(
+            generation,
+            source_commit_epoch,
+            Some(base),
+            Some(expected_previous_generation),
+            false,
+        )?;
+        let preflight =
+            preflight_exact_references(base, references, &mut resolve_new, self.config, task)?;
+        task.checkpoint()
+            .map_err(RelationalOverflowPublicationError::Stopped)?;
+
+        let result = (|| {
+            maybe_stop(None, RelationalOverflowPublicationPhase::CandidateStarted)?;
+            let artifacts = write_exact_artifacts(ExactArtifactWrite {
+                extent_path: &paths.extent_tmp,
+                descriptor_path: &paths.descriptor_tmp,
+                base,
+                references,
+                resolve_new: &mut resolve_new,
+                generation,
+                config: self.config,
+                task,
+            })?;
+            task.checkpoint()
+                .map_err(RelationalOverflowPublicationError::Stopped)?;
+            self.finish_candidate_publication(PublicationCommit {
+                paths: &paths,
+                generation,
+                source_commit_epoch,
+                expected_previous_generation: Some(expected_previous_generation),
+                artifacts,
+                select_latest: false,
+                stop_after: None,
+            })
+        })();
+        let _ = paths.remove_temps();
+        result.map(|publication| RelationalOverflowExactPublicationReport {
+            publication,
+            copied_base_extent_count: preflight.copied_base_extent_count,
+            introduced_extent_count: preflight.introduced_extent_count,
+        })
+    }
+
     pub(super) fn publish_inner(
         &self,
         directory: &Path,
@@ -153,34 +236,13 @@ impl RelationalOverflowPublisher {
         paths.remove_temps()?;
         paths.require_fresh_generation()?;
 
-        let base_generation = base.map(|reader| reader.manifest().generation);
-        if (select_latest || base.is_some()) && base_generation != expected_previous_generation {
-            return Err(RelationalOverflowPublicationError::StaleGeneration {
-                expected_previous: expected_previous_generation,
-                actual_previous: base_generation,
-            });
-        }
-        if let Some(previous) = expected_previous_generation
-            && generation <= previous
-        {
-            return Err(RelationalOverflowPublicationError::Admission(format!(
-                "new overflow generation {generation} must exceed previous generation {previous}"
-            )));
-        }
-        if let Some(base) = base {
-            if generation <= base.manifest().generation {
-                return Err(RelationalOverflowPublicationError::Admission(format!(
-                    "new overflow generation {generation} must exceed published generation {}",
-                    base.manifest().generation
-                )));
-            }
-            if source_commit_epoch < base.manifest().source_commit_epoch {
-                return Err(RelationalOverflowPublicationError::Admission(format!(
-                    "overflow source epoch {source_commit_epoch} precedes published epoch {}",
-                    base.manifest().source_commit_epoch
-                )));
-            }
-        }
+        validate_base_identity(
+            generation,
+            source_commit_epoch,
+            base,
+            expected_previous_generation,
+            select_latest,
+        )?;
         preflight_root_capacity(base, &extents, retain_unmentioned_base, self.config)?;
 
         let result = self.build_and_publish(PublicationBuild {
@@ -215,10 +277,34 @@ impl RelationalOverflowPublisher {
             build.generation,
             self.config,
         )?;
-        let manifest = RelationalOverflowRootManifest {
+        self.finish_candidate_publication(PublicationCommit {
+            paths: build.paths,
             generation: build.generation,
             source_commit_epoch: build.source_commit_epoch,
-            previous_generation: build.expected_previous_generation,
+            expected_previous_generation: build.expected_previous_generation,
+            artifacts,
+            select_latest: build.select_latest,
+            stop_after: build.stop_after,
+        })
+    }
+
+    fn finish_candidate_publication(
+        &self,
+        build: PublicationCommit<'_>,
+    ) -> Result<RelationalOverflowPublicationReport, RelationalOverflowPublicationError> {
+        let PublicationCommit {
+            paths,
+            generation,
+            source_commit_epoch,
+            expected_previous_generation,
+            artifacts,
+            select_latest,
+            stop_after,
+        } = build;
+        let manifest = RelationalOverflowRootManifest {
+            generation,
+            source_commit_epoch,
+            previous_generation: expected_previous_generation,
             extent_count: artifacts.extent_count,
             new_extent_count: artifacts.new_extent_count,
             extent_artifact: artifacts.extent_artifact,
@@ -226,56 +312,50 @@ impl RelationalOverflowPublisher {
             root_set_digest: artifacts.root_set_digest,
         };
         let encoded_manifest = manifest::encode_manifest(&manifest, self.config)?;
-        write_synced(&build.paths.generation_manifest_tmp, &encoded_manifest)?;
+        write_synced(&paths.generation_manifest_tmp, &encoded_manifest)?;
 
-        durable_publish_immutable(&build.paths.extent_tmp, &build.paths.extent)?;
+        durable_publish_immutable(&paths.extent_tmp, &paths.extent)?;
         maybe_stop(
-            build.stop_after,
+            stop_after,
             RelationalOverflowPublicationPhase::CandidateExtentsDurable,
         )?;
-        durable_publish_immutable(&build.paths.descriptor_tmp, &build.paths.descriptor)?;
+        durable_publish_immutable(&paths.descriptor_tmp, &paths.descriptor)?;
         maybe_stop(
-            build.stop_after,
+            stop_after,
             RelationalOverflowPublicationPhase::CandidateRootDurable,
         )?;
-        durable_publish_immutable(
-            &build.paths.generation_manifest_tmp,
-            &build.paths.generation_manifest,
-        )?;
+        durable_publish_immutable(&paths.generation_manifest_tmp, &paths.generation_manifest)?;
         maybe_stop(
-            build.stop_after,
+            stop_after,
             RelationalOverflowPublicationPhase::CandidateManifestDurable,
         )?;
 
-        if build.select_latest {
+        if select_latest {
             let actual_previous =
-                manifest::read_manifest_if_exists(&build.paths.latest_manifest, self.config)?
+                manifest::read_manifest_if_exists(&paths.latest_manifest, self.config)?
                     .map(|manifest| manifest.generation);
-            if actual_previous != build.expected_previous_generation {
+            if actual_previous != expected_previous_generation {
                 return Err(RelationalOverflowPublicationError::StaleGeneration {
-                    expected_previous: build.expected_previous_generation,
+                    expected_previous: expected_previous_generation,
                     actual_previous,
                 });
             }
         }
         maybe_stop(
-            build.stop_after,
+            stop_after,
             RelationalOverflowPublicationPhase::BaseRevalidated,
         )?;
-        if build.select_latest {
-            write_synced(&build.paths.latest_manifest_tmp, &encoded_manifest)?;
-            durable_replace_file(
-                &build.paths.latest_manifest_tmp,
-                &build.paths.latest_manifest,
-            )
-            .map_err(durability("publish latest overflow manifest"))?;
+        if select_latest {
+            write_synced(&paths.latest_manifest_tmp, &encoded_manifest)?;
+            durable_replace_file(&paths.latest_manifest_tmp, &paths.latest_manifest)
+                .map_err(durability("publish latest overflow manifest"))?;
         }
 
         let manifest_digest = integrity_digest(&encoded_manifest);
 
         Ok(RelationalOverflowPublicationReport {
-            generation: build.generation,
-            source_commit_epoch: build.source_commit_epoch,
+            generation,
+            source_commit_epoch,
             extent_count: manifest.extent_count,
             new_extent_count: manifest.new_extent_count,
             reused_extent_count: artifacts.reused_extent_count,
@@ -292,13 +372,23 @@ impl RelationalOverflowPublisher {
                     encoded_sha256: manifest_digest.sha256,
                 },
             },
-            events: if build.select_latest {
+            events: if select_latest {
                 COMPLETE_PUBLICATION_TRACE
             } else {
                 CANDIDATE_PUBLICATION_TRACE
             },
         })
     }
+}
+
+struct PublicationCommit<'a> {
+    paths: &'a PublicationPaths,
+    generation: u64,
+    source_commit_epoch: u64,
+    expected_previous_generation: Option<u64>,
+    artifacts: WrittenArtifacts,
+    select_latest: bool,
+    stop_after: Option<RelationalOverflowPublicationPhase>,
 }
 
 struct GenerationPublication<'a> {
@@ -331,6 +421,234 @@ struct WrittenArtifacts {
     extent_count: u64,
     new_extent_count: u64,
     reused_extent_count: u64,
+}
+
+fn validate_base_identity(
+    generation: u64,
+    source_commit_epoch: u64,
+    base: Option<&RelationalOverflowRootReader>,
+    expected_previous_generation: Option<u64>,
+    select_latest: bool,
+) -> Result<(), RelationalOverflowPublicationError> {
+    let base_generation = base.map(|reader| reader.manifest().generation);
+    if (select_latest || base.is_some()) && base_generation != expected_previous_generation {
+        return Err(RelationalOverflowPublicationError::StaleGeneration {
+            expected_previous: expected_previous_generation,
+            actual_previous: base_generation,
+        });
+    }
+    if let Some(previous) = expected_previous_generation
+        && generation <= previous
+    {
+        return Err(RelationalOverflowPublicationError::Admission(format!(
+            "new overflow generation {generation} must exceed previous generation {previous}"
+        )));
+    }
+    if let Some(base) = base {
+        if generation <= base.manifest().generation {
+            return Err(RelationalOverflowPublicationError::Admission(format!(
+                "new overflow generation {generation} must exceed published generation {}",
+                base.manifest().generation
+            )));
+        }
+        if source_commit_epoch < base.manifest().source_commit_epoch {
+            return Err(RelationalOverflowPublicationError::Admission(format!(
+                "overflow source epoch {source_commit_epoch} precedes published epoch {}",
+                base.manifest().source_commit_epoch
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn preflight_exact_references(
+    base: &RelationalOverflowRootReader,
+    references: &RelationalOverflowReferenceSet,
+    resolve_new: &mut impl FnMut(
+        &RelationalOverflowRef,
+    ) -> Result<
+        Option<std::sync::Arc<[u8]>>,
+        RelationalOverflowPublicationError,
+    >,
+    config: RelationalOverflowPublicationConfig,
+    task: &skein_core::RuntimeTaskContext,
+) -> Result<ExactReferencePreflight, RelationalOverflowPublicationError> {
+    let extent_count = references.report().unique_references;
+    if extent_count > config.max_extents.get() {
+        return Err(RelationalOverflowPublicationError::Admission(format!(
+            "exact overflow root contains {extent_count} extents, exceeding limit {}",
+            config.max_extents
+        )));
+    }
+    let descriptor_bytes = extent_count
+        .checked_mul(reader::DESCRIPTOR_BYTES as u64)
+        .ok_or_else(|| {
+            RelationalOverflowPublicationError::Admission(
+                "exact overflow descriptor byte count overflow".to_string(),
+            )
+        })?;
+    if descriptor_bytes > config.max_descriptor_bytes.get() {
+        return Err(RelationalOverflowPublicationError::Admission(format!(
+            "exact overflow root requires {descriptor_bytes} descriptor bytes, exceeding limit {}",
+            config.max_descriptor_bytes
+        )));
+    }
+
+    let mut base_file = File::open(base.descriptor_path())
+        .map_err(durability("open base overflow descriptor artifact"))?;
+    let mut base_ordinal = 0u64;
+    let mut base_descriptor = if base.manifest().extent_count == 0 {
+        None
+    } else {
+        Some(base.read_descriptor_from(&mut base_file, 0)?)
+    };
+    let mut new_extent_bytes = 0u64;
+    let mut copied_base_extent_count = 0u64;
+    let mut introduced_extent_count = 0u64;
+    references.visit(&mut |reference| {
+        task.checkpoint()
+            .map_err(RelationalOverflowPublicationError::Stopped)?;
+        while base_descriptor
+            .as_ref()
+            .is_some_and(|descriptor| descriptor.reference.digest < reference.digest)
+        {
+            advance_base_descriptor(
+                base,
+                &mut base_file,
+                &mut base_ordinal,
+                &mut base_descriptor,
+            )?;
+        }
+        if let Some(existing) = base_descriptor
+            .filter(|descriptor| descriptor.reference.digest == reference.digest)
+        {
+            if existing.reference != reference {
+                return Err(RelationalOverflowPublicationError::Corrupt(format!(
+                    "base overflow descriptor {} metadata differs from its content identity",
+                    reference.digest
+                )));
+            }
+            copied_base_extent_count = copied_base_extent_count.checked_add(1).ok_or_else(|| {
+                RelationalOverflowPublicationError::Admission(
+                    "copied base overflow extent count overflow".to_string(),
+                )
+            })?;
+            new_extent_bytes = new_extent_bytes
+                .checked_add(existing.envelope_bytes)
+                .ok_or_else(|| {
+                    RelationalOverflowPublicationError::Admission(
+                        "exact overflow extent byte count overflow".to_string(),
+                    )
+                })?;
+        } else {
+            let encoded = resolve_new(&reference)?.ok_or(
+                RelationalOverflowPublicationError::MissingExtent(reference.digest),
+            )?;
+            validate_encoded_extent(&reference, &encoded, config)?;
+            introduced_extent_count = introduced_extent_count.checked_add(1).ok_or_else(|| {
+                RelationalOverflowPublicationError::Admission(
+                    "introduced overflow extent count overflow".to_string(),
+                )
+            })?;
+            new_extent_bytes = new_extent_bytes
+                .checked_add(encoded.len() as u64)
+                .ok_or_else(|| {
+                    RelationalOverflowPublicationError::Admission(
+                        "exact overflow extent byte count overflow".to_string(),
+                    )
+                })?;
+        }
+        if new_extent_bytes > config.max_new_extent_bytes.get() {
+            return Err(RelationalOverflowPublicationError::Admission(format!(
+                "exact overflow root needs {new_extent_bytes} rewritten extent bytes, exceeding limit {}",
+                config.max_new_extent_bytes
+            )));
+        }
+        Ok(true)
+    })?;
+    Ok(ExactReferencePreflight {
+        copied_base_extent_count,
+        introduced_extent_count,
+    })
+}
+
+type NewExtentResolver<'a> = dyn FnMut(
+        &RelationalOverflowRef,
+    ) -> Result<Option<std::sync::Arc<[u8]>>, RelationalOverflowPublicationError>
+    + 'a;
+
+struct ExactArtifactWrite<'a> {
+    extent_path: &'a Path,
+    descriptor_path: &'a Path,
+    base: &'a RelationalOverflowRootReader,
+    references: &'a RelationalOverflowReferenceSet,
+    resolve_new: &'a mut NewExtentResolver<'a>,
+    generation: u64,
+    config: RelationalOverflowPublicationConfig,
+    task: &'a skein_core::RuntimeTaskContext,
+}
+
+fn write_exact_artifacts(
+    request: ExactArtifactWrite<'_>,
+) -> Result<WrittenArtifacts, RelationalOverflowPublicationError> {
+    let ExactArtifactWrite {
+        extent_path,
+        descriptor_path,
+        base,
+        references,
+        resolve_new,
+        generation,
+        config,
+        task,
+    } = request;
+    let mut writer = ArtifactWriter::new(extent_path, descriptor_path, generation, config)?;
+    let mut base_file = File::open(base.descriptor_path())
+        .map_err(durability("open base overflow descriptor artifact"))?;
+    let mut base_ordinal = 0u64;
+    let mut base_descriptor = if base.manifest().extent_count == 0 {
+        None
+    } else {
+        Some(base.read_descriptor_from(&mut base_file, 0)?)
+    };
+    references.visit(&mut |reference| {
+        task.checkpoint()
+            .map_err(RelationalOverflowPublicationError::Stopped)?;
+        while base_descriptor
+            .as_ref()
+            .is_some_and(|descriptor| descriptor.reference.digest < reference.digest)
+        {
+            advance_base_descriptor(
+                base,
+                &mut base_file,
+                &mut base_ordinal,
+                &mut base_descriptor,
+            )?;
+        }
+        if let Some(existing) =
+            base_descriptor.filter(|descriptor| descriptor.reference.digest == reference.digest)
+        {
+            if existing.reference != reference {
+                return Err(RelationalOverflowPublicationError::Corrupt(format!(
+                    "base overflow descriptor {} changed after exact preflight",
+                    reference.digest
+                )));
+            }
+            let encoded = base.read_encoded_extent(&existing)?;
+            writer.emit_input(&RelationalOverflowExtentInput::Write { reference, encoded })?;
+        } else {
+            let encoded = resolve_new(&reference)?.ok_or(
+                RelationalOverflowPublicationError::MissingExtent(reference.digest),
+            )?;
+            writer.emit_input(&RelationalOverflowExtentInput::Write { reference, encoded })?;
+        }
+        Ok(true)
+    })?;
+    writer.finish()
+}
+
+struct ExactReferencePreflight {
+    copied_base_extent_count: u64,
+    introduced_extent_count: u64,
 }
 
 fn write_artifacts(

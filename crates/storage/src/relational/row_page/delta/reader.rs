@@ -619,6 +619,11 @@ pub(super) fn validate_candidate_overflow_closure(
                         ) => RelationalRowDeltaError::Admission(format!(
                             "row delta references missing overflow extent {digest}"
                         )),
+                        crate::relational::RelationalOverflowPublicationError::Stopped(reason) => {
+                            RelationalRowDeltaError::Invalidated(format!(
+                                "overflow validation stopped: {reason}"
+                            ))
+                        }
                         crate::relational::RelationalOverflowPublicationError::StaleGeneration {
                             expected_previous,
                             actual_previous,

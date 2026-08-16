@@ -197,6 +197,8 @@ pub(crate) struct PreparedCheckpoint {
     pub(super) checkpoint_relational_state: Option<RelationalState>,
     pub(super) relational_index_candidate:
         Option<super::relational_index_shadow::PreparedRelationalIndexCandidate>,
+    pub(super) relational_overflow_compaction_report:
+        Option<super::RelationalOverflowCompactionReport>,
     pub(super) manifest_artifacts: CheckpointManifestArtifacts,
     pub(super) staging_path: PathBuf,
 }
