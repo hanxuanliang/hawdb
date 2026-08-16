@@ -72,6 +72,12 @@ pub(super) fn parse_property_spill_manifest_generation_file(name: &str) -> Optio
         .ok()
 }
 
+pub(super) fn parse_property_spill_descriptor_generation_file(name: &str) -> Option<u64> {
+    parse_hyphenated_generation_file(name, "property-spill-descriptors-", ".pages.skein").or_else(
+        || parse_hyphenated_generation_file(name, "property-spill-descriptors-", ".root.skein"),
+    )
+}
+
 pub(super) fn parse_property_projection_manifest_generation_file(name: &str) -> Option<u64> {
     name.strip_prefix("property-index.")?
         .strip_suffix(".manifest.skein")?
@@ -149,6 +155,7 @@ pub(super) fn storage_generation_for_file(name: &str) -> Option<u64> {
         .or_else(|| parse_canonical_adjacency_descriptor_generation_file(name))
         .or_else(|| parse_generation_file(name, "properties."))
         .or_else(|| parse_property_spill_manifest_generation_file(name))
+        .or_else(|| parse_property_spill_descriptor_generation_file(name))
         .or_else(|| parse_generation_file(name, "property-index."))
         .or_else(|| parse_property_projection_manifest_generation_file(name))
         .or_else(|| parse_property_projection_descriptor_generation_file(name))
@@ -238,6 +245,14 @@ mod tests {
         assert_eq!(
             storage_generation_for_file("adjacency-descriptors-x.root.skein"),
             None
+        );
+        assert_eq!(
+            storage_generation_for_file("property-spill-descriptors-17.pages.skein"),
+            Some(17)
+        );
+        assert_eq!(
+            storage_generation_for_file("property-spill-descriptors-17.root.skein"),
+            Some(17)
         );
     }
 }

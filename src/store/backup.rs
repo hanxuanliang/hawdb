@@ -7,7 +7,8 @@ use super::{
     parse_canonical_manifest_generation_file, parse_generation_file,
     parse_property_projection_descriptor_generation_file,
     parse_property_projection_manifest_generation_file,
-    parse_property_spill_manifest_generation_file, parse_relational_index_artifact_generation_file,
+    parse_property_spill_descriptor_generation_file, parse_property_spill_manifest_generation_file,
+    parse_relational_index_artifact_generation_file,
     parse_relational_index_manifest_generation_file, parse_relational_overflow_generation_file,
     parse_relational_row_generation_file, parse_u64, property_projection_artifact_generation_file,
     property_projection_manifest_generation_file, property_spill_artifact_generation_file,
@@ -205,6 +206,7 @@ fn validate_backup_file_name(name: &str) -> Result<()> {
         || parse_canonical_adjacency_descriptor_generation_file(name).is_some()
         || parse_generation_file(name, "properties.").is_some()
         || parse_property_spill_manifest_generation_file(name).is_some()
+        || parse_property_spill_descriptor_generation_file(name).is_some()
         || parse_generation_file(name, "property-index.").is_some()
         || parse_property_projection_manifest_generation_file(name).is_some()
         || parse_property_projection_descriptor_generation_file(name).is_some()
@@ -560,9 +562,13 @@ pub(super) fn validate_backup_files(
     ) {
         let property_manifest_name = property_spill_manifest_generation_file(generation);
         let property_artifact_name = property_spill_artifact_generation_file(generation);
+        let descriptor_page_name = skein_storage::property_spill_descriptor_page_file(generation);
+        let descriptor_root_name = skein_storage::property_spill_descriptor_root_file(generation);
         for required in [
             property_manifest_name.as_str(),
             property_artifact_name.as_str(),
+            descriptor_page_name.as_str(),
+            descriptor_root_name.as_str(),
         ] {
             if !names.contains(required) {
                 return Err(SkeinError::Storage(format!(
@@ -586,6 +592,11 @@ pub(super) fn validate_backup_files(
         let property_manifest_text = fs::read_to_string(root.join(&property_manifest_name))?;
         let property_manifest = PropertySpillManifest::decode(&property_manifest_text)
             .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        if property_manifest.source_commit_epoch != manifest.checkpoint_commit_epoch {
+            return Err(SkeinError::Storage(
+                "backup property spill source epoch does not match its checkpoint".to_string(),
+            ));
+        }
         let property_artifact = files
             .iter()
             .find(|file| file.name == property_artifact_name)
@@ -596,6 +607,46 @@ pub(super) fn validate_backup_files(
         {
             return Err(SkeinError::Storage(
                 "backup property spill artifact metadata does not match its manifest".to_string(),
+            ));
+        }
+        let descriptor_root = files
+            .iter()
+            .find(|file| file.name == descriptor_root_name)
+            .expect("required property spill descriptor root must exist");
+        if descriptor_root.encoded_len != property_manifest.descriptor_root_artifact.encoded_len
+            || descriptor_root.encoded_checksum
+                != u64::from(property_manifest.descriptor_root_artifact.encoded_crc32c)
+            || descriptor_root.sha256 != property_manifest.descriptor_root_artifact.encoded_sha256
+        {
+            return Err(SkeinError::Storage(
+                "backup property spill descriptor root does not match its manifest".to_string(),
+            ));
+        }
+        let descriptor_paths = GraphDescriptorTreePaths::new(
+            root.join(&descriptor_page_name),
+            root.join(&descriptor_root_name),
+        );
+        let root_reader = GraphDescriptorTreeRootReader::open_bound(
+            descriptor_paths,
+            property_manifest.descriptor_generation_artifacts(),
+            GraphDescriptorTreeBuildConfig::default(),
+        )
+        .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+        if root_reader.root().descriptor_count != property_manifest.blocks.len() as u64 {
+            return Err(SkeinError::Storage(
+                "backup property spill descriptor count does not match its manifest".to_string(),
+            ));
+        }
+        let descriptor_page = files
+            .iter()
+            .find(|file| file.name == descriptor_page_name)
+            .expect("required property spill descriptor pages must exist");
+        if descriptor_page.encoded_len != root_reader.root().page_artifact_len
+            || descriptor_page.encoded_checksum != root_reader.root().page_artifact_crc32c.as_u64()
+            || descriptor_page.sha256 != root_reader.root().page_artifact_sha256
+        {
+            return Err(SkeinError::Storage(
+                "backup property spill descriptor pages do not match their root".to_string(),
             ));
         }
     }

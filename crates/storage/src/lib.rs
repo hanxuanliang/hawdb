@@ -138,8 +138,10 @@ pub use property_projection::{
     PersistentPropertyProjectionWriteOutput, PersistentPropertyProjectionWriter,
 };
 pub use property_spill::{
-    PropertySpillBlockDescriptor, PropertySpillConfig, PropertySpillError, PropertySpillManifest,
-    PropertySpillReader, PropertySpillWriter,
+    property_spill_descriptor_page_file, property_spill_descriptor_root_file,
+    PersistentPropertySpillDescriptorTree, PropertySpillBlockDescriptor, PropertySpillConfig,
+    PropertySpillError, PropertySpillManifest, PropertySpillReader, PropertySpillWriteOptions,
+    PropertySpillWriteOutput, PropertySpillWriter,
 };
 pub use relational::{
     decode_relational_checkpoint, decode_relational_checkpoint_file,

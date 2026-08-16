@@ -400,15 +400,19 @@ impl GraphStore {
                 .transpose()?;
             let (canonical_manifest_artifact, property_spill_manifest_artifact) =
                 match (merged_nodes, merged_relationships) {
-                    (Some(nodes), Some(relationships)) => {
-                        durable.write_canonical_segments(nodes, relationships, generation)?
-                    }
+                    (Some(nodes), Some(relationships)) => durable.write_canonical_segments(
+                        nodes,
+                        relationships,
+                        generation,
+                        commit_epoch,
+                    )?,
                     (None, None) => durable.write_canonical_segments(
                         self.nodes.values().map(|node| Ok(node.clone())),
                         self.relationships
                             .values()
                             .map(|relationship| Ok(relationship.clone())),
                         generation,
+                        commit_epoch,
                     )?,
                     _ => unreachable!("canonical base iterators are created together"),
                 };

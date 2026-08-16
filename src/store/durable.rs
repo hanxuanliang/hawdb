@@ -45,8 +45,9 @@ use skein_storage::{
     PersistentPropertyProjectionConfig, PersistentPropertyProjectionDefinition,
     PersistentPropertyProjectionDescriptorTree, PersistentPropertyProjectionManifest,
     PersistentPropertyProjectionReader, PersistentPropertyProjectionRecord,
-    PersistentPropertyProjectionWriter, ProjectedGraphDefinition, PropertySpillConfig,
-    PropertySpillManifest, PropertySpillReader, RelId, RelRecord, RelationalDecodeLimits,
+    PersistentPropertyProjectionWriter, PersistentPropertySpillDescriptorTree,
+    ProjectedGraphDefinition, PropertySpillConfig, PropertySpillManifest, PropertySpillReader,
+    PropertySpillWriteOptions, RelId, RelRecord, RelationalDecodeLimits,
     RelationalIndexArtifactMetadata, RelationalIndexGenerationArtifacts,
     RelationalOverflowArtifactMetadata, RelationalOverflowGenerationArtifacts,
     RelationalRowPageArtifactMetadata, RelationalRowPageGenerationArtifacts, RelationalState,
@@ -840,6 +841,12 @@ impl DurableStore {
                     self.root_path
                         .join(property_spill_manifest_generation_file(generation)),
                 );
+                for name in [
+                    skein_storage::property_spill_descriptor_page_file(generation),
+                    skein_storage::property_spill_descriptor_root_file(generation),
+                ] {
+                    sources.insert(name.clone(), self.root_path.join(name));
+                }
             }
             if self.property_projection_manifest_encoded_len.is_some() {
                 sources.insert(
@@ -1200,6 +1207,11 @@ impl DurableStore {
             )?;
             let artifact = PropertySpillManifest::decode(&fs::read_to_string(&manifest_path)?)
                 .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            if artifact.source_commit_epoch != manifest.checkpoint_commit_epoch {
+                return Err(SkeinError::StorageIntegrity(
+                    "property spill source epoch does not match its checkpoint".to_string(),
+                ));
+            }
             scrub.verify_path(
                 &self
                     .root_path
@@ -1208,6 +1220,41 @@ impl DurableStore {
                 artifact.artifact_digest.0,
                 artifact.artifact_sha256,
                 "property spill artifact",
+            )?;
+            let descriptor_paths = GraphDescriptorTreePaths::new(
+                self.root_path
+                    .join(skein_storage::property_spill_descriptor_page_file(
+                        generation,
+                    )),
+                self.root_path
+                    .join(skein_storage::property_spill_descriptor_root_file(
+                        generation,
+                    )),
+            );
+            scrub.verify_path(
+                &descriptor_paths.root_manifest,
+                artifact.descriptor_root_artifact.encoded_len,
+                u64::from(artifact.descriptor_root_artifact.encoded_crc32c),
+                artifact.descriptor_root_artifact.encoded_sha256,
+                "property spill descriptor root",
+            )?;
+            let descriptor_root = GraphDescriptorTreeRootReader::open_bound(
+                descriptor_paths.clone(),
+                artifact.descriptor_generation_artifacts(),
+                GraphDescriptorTreeBuildConfig::default(),
+            )
+            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+            if descriptor_root.root().descriptor_count != artifact.blocks.len() as u64 {
+                return Err(SkeinError::StorageIntegrity(
+                    "property spill descriptor count does not match its manifest".to_string(),
+                ));
+            }
+            scrub.verify_path(
+                &descriptor_paths.page_artifact,
+                descriptor_root.root().page_artifact_len,
+                descriptor_root.root().page_artifact_crc32c.as_u64(),
+                descriptor_root.root().page_artifact_sha256,
+                "property spill descriptor pages",
             )?;
         }
 
@@ -1716,6 +1763,7 @@ impl DurableStore {
         nodes: N,
         relationships: R,
         generation: u64,
+        source_commit_epoch: u64,
     ) -> Result<(DurableArtifactMetadata, DurableArtifactMetadata)>
     where
         N: IntoIterator<Item = std::result::Result<NodeRecord, CanonicalSegmentError>>,
@@ -1727,17 +1775,35 @@ impl DurableStore {
         let property_artifact_path = self
             .root_path
             .join(property_spill_artifact_generation_file(generation));
-        let (canonical_manifest, property_spill_manifest) =
+        let property_descriptor_tree = PersistentPropertySpillDescriptorTree::new(
+            GraphDescriptorTreePaths::new(
+                self.root_path
+                    .join(skein_storage::property_spill_descriptor_page_file(
+                        generation,
+                    )),
+                self.root_path
+                    .join(skein_storage::property_spill_descriptor_root_file(
+                        generation,
+                    )),
+            ),
+            GraphDescriptorTreeBuildConfig::default(),
+        );
+        let (canonical_manifest, property_spill_output) =
             CanonicalSegmentWriter::new(CanonicalSegmentConfig::default())
                 .write_fallible_with_property_spills(
                     &artifact_path,
-                    &property_artifact_path,
                     ManifestGeneration(generation),
                     nodes,
                     relationships,
-                    PropertySpillConfig::default(),
+                    PropertySpillWriteOptions {
+                        artifact_path: &property_artifact_path,
+                        source_commit_epoch,
+                        config: PropertySpillConfig::default(),
+                        descriptor_tree: property_descriptor_tree,
+                    },
                 )
                 .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        let property_spill_manifest = property_spill_output.manifest;
         let encoded = canonical_manifest
             .encode()
             .map_err(|error| SkeinError::Storage(error.to_string()))?;
@@ -2345,6 +2411,8 @@ impl DurableStore {
             skein_storage::canonical_adjacency_descriptor_root_file(generation),
             property_spill_artifact_generation_file(generation),
             property_spill_manifest_generation_file(generation),
+            skein_storage::property_spill_descriptor_page_file(generation),
+            skein_storage::property_spill_descriptor_root_file(generation),
             property_projection_artifact_generation_file(generation),
             property_projection_manifest_generation_file(generation),
             skein_storage::property_projection_descriptor_page_file(generation),
@@ -4105,6 +4173,30 @@ fn load_published_property_spills(
             "property spill generation {} does not match durable generation {generation}",
             manifest.generation.0
         )));
+    }
+    if manifest.source_commit_epoch != durable_manifest.checkpoint_commit_epoch {
+        return Err(SkeinError::Storage(format!(
+            "property spill source epoch {} does not match durable checkpoint epoch {}",
+            manifest.source_commit_epoch, durable_manifest.checkpoint_commit_epoch
+        )));
+    }
+    let descriptor_root = GraphDescriptorTreeRootReader::open_bound(
+        GraphDescriptorTreePaths::new(
+            root.join(skein_storage::property_spill_descriptor_page_file(
+                generation,
+            )),
+            root.join(skein_storage::property_spill_descriptor_root_file(
+                generation,
+            )),
+        ),
+        manifest.descriptor_generation_artifacts(),
+        GraphDescriptorTreeBuildConfig::default(),
+    )
+    .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+    if descriptor_root.root().descriptor_count != manifest.blocks.len() as u64 {
+        return Err(SkeinError::StorageIntegrity(
+            "property spill descriptor count does not match its manifest".to_string(),
+        ));
     }
     let config = PropertySpillConfig::default();
     let max_block_bytes = NonZeroU64::new(

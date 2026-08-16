@@ -1,6 +1,10 @@
 use crate::{
-    content_digest, ContentDigest, FileSegmentRangeReader, ManifestGeneration, SegmentCache,
-    SegmentRangeReader, SegmentReadError, SegmentReadRange, StoreId,
+    content_digest, durable_replace_file, ContentDigest, FileSegmentRangeReader,
+    GraphDescriptorKind, GraphDescriptorTreeArtifactMetadata, GraphDescriptorTreeBuildConfig,
+    GraphDescriptorTreeBuilder, GraphDescriptorTreeError, GraphDescriptorTreeGenerationArtifacts,
+    GraphDescriptorTreePaths, GraphDescriptorTreeWriteOutput, ManifestGeneration,
+    PreparedGraphDescriptorTree, SegmentCache, SegmentRangeReader, SegmentReadError,
+    SegmentReadRange, StoreId,
 };
 use skein_integrity::{Crc32cHasher, IntegrityHasher, Sha256Digest};
 use std::error::Error;
@@ -15,9 +19,21 @@ const ARTIFACT_HEADER: &[u8; 16] = b"SKEINPROPSPILL01";
 const BLOCK_HEADER: &[u8; 8] = b"SKNPRP01";
 const MANIFEST_HEADER: &str = "SKEIN_PROPERTY_SPILL_MANIFEST_V1";
 const ARTIFACT_ID: u64 = 0x534b_5052_5350_4c31;
+const DESCRIPTOR_ARTIFACT_ID: u64 = 0x534b_5052_5350_4431;
 const BLOCK_ID_BASE: u64 = 1 << 62;
 const BLOCK_FIXED_BYTES: u64 = 8 + 8 + 8 + 4;
 const RECORD_FIXED_BYTES: u64 = 8 + 8;
+const DESCRIPTOR_VALUE_MAGIC: &[u8; 8] = b"SKPSDSC1";
+const DESCRIPTOR_VALUE_VERSION: u16 = 1;
+const DESCRIPTOR_VALUE_BYTES: usize = 68;
+
+pub fn property_spill_descriptor_page_file(generation: u64) -> String {
+    format!("property-spill-descriptors-{generation}.pages.skein")
+}
+
+pub fn property_spill_descriptor_root_file(generation: u64) -> String {
+    format!("property-spill-descriptors-{generation}.root.skein")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PropertySpillConfig {
@@ -39,10 +55,38 @@ impl Default for PropertySpillConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct PersistentPropertySpillDescriptorTree {
+    paths: GraphDescriptorTreePaths,
+    config: GraphDescriptorTreeBuildConfig,
+}
+
+impl PersistentPropertySpillDescriptorTree {
+    pub const fn new(
+        paths: GraphDescriptorTreePaths,
+        config: GraphDescriptorTreeBuildConfig,
+    ) -> Self {
+        Self { paths, config }
+    }
+
+    fn into_parts(self) -> (GraphDescriptorTreePaths, GraphDescriptorTreeBuildConfig) {
+        (self.paths, self.config)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PropertySpillWriteOptions<'a> {
+    pub artifact_path: &'a Path,
+    pub source_commit_epoch: u64,
+    pub config: PropertySpillConfig,
+    pub descriptor_tree: PersistentPropertySpillDescriptorTree,
+}
+
 #[derive(Debug)]
 pub enum PropertySpillError {
     Io(std::io::Error),
     Read(SegmentReadError),
+    DescriptorTree(GraphDescriptorTreeError),
     Corrupt(String),
     ValueTooLarge { value_bytes: u64, max_bytes: u64 },
     BlockTooLarge { block_bytes: u64, max_bytes: u64 },
@@ -53,6 +97,7 @@ impl Display for PropertySpillError {
         match self {
             Self::Io(error) => Display::fmt(error, formatter),
             Self::Read(error) => Display::fmt(error, formatter),
+            Self::DescriptorTree(error) => Display::fmt(error, formatter),
             Self::Corrupt(message) => formatter.write_str(message),
             Self::ValueTooLarge {
                 value_bytes,
@@ -77,6 +122,7 @@ impl Error for PropertySpillError {
         match self {
             Self::Io(error) => Some(error),
             Self::Read(error) => Some(error),
+            Self::DescriptorTree(error) => Some(error),
             _ => None,
         }
     }
@@ -94,6 +140,12 @@ impl From<SegmentReadError> for PropertySpillError {
     }
 }
 
+impl From<GraphDescriptorTreeError> for PropertySpillError {
+    fn from(error: GraphDescriptorTreeError) -> Self {
+        Self::DescriptorTree(error)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PropertySpillBlockDescriptor {
     pub block_id: u64,
@@ -105,9 +157,96 @@ pub struct PropertySpillBlockDescriptor {
     pub value_count: u32,
 }
 
+impl PropertySpillBlockDescriptor {
+    pub fn descriptor_tree_key(&self) -> Vec<u8> {
+        self.max_spill_id.to_be_bytes().to_vec()
+    }
+
+    pub fn encode_descriptor_tree_value(&self) -> Result<Vec<u8>, PropertySpillError> {
+        self.validate_descriptor_identity()?;
+        let mut encoded = Vec::with_capacity(DESCRIPTOR_VALUE_BYTES);
+        encoded.extend_from_slice(DESCRIPTOR_VALUE_MAGIC);
+        encoded.extend_from_slice(&DESCRIPTOR_VALUE_VERSION.to_le_bytes());
+        encoded.extend_from_slice(&0u16.to_le_bytes());
+        encoded.extend_from_slice(&self.block_id.to_le_bytes());
+        encoded.extend_from_slice(&self.offset.to_le_bytes());
+        encoded.extend_from_slice(&self.length.get().to_le_bytes());
+        encoded.extend_from_slice(&self.content_digest.0.to_le_bytes());
+        encoded.extend_from_slice(&self.min_spill_id.to_le_bytes());
+        encoded.extend_from_slice(&self.max_spill_id.to_le_bytes());
+        encoded.extend_from_slice(&self.value_count.to_le_bytes());
+        encoded.extend_from_slice(&0u32.to_le_bytes());
+        debug_assert_eq!(encoded.len(), DESCRIPTOR_VALUE_BYTES);
+        Ok(encoded)
+    }
+
+    pub fn decode_descriptor_tree_entry(
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<Self, PropertySpillError> {
+        if key.len() != 8
+            || value.len() != DESCRIPTOR_VALUE_BYTES
+            || &value[..8] != DESCRIPTOR_VALUE_MAGIC
+        {
+            return Err(PropertySpillError::Corrupt(
+                "property spill descriptor tree entry has an invalid header or length".to_string(),
+            ));
+        }
+        let version = u16::from_le_bytes(value[8..10].try_into().expect("fixed-width u16"));
+        let flags = u16::from_le_bytes(value[10..12].try_into().expect("fixed-width u16"));
+        let reserved = u32::from_le_bytes(value[64..68].try_into().expect("fixed-width u32"));
+        if version != DESCRIPTOR_VALUE_VERSION || flags != 0 || reserved != 0 {
+            return Err(PropertySpillError::Corrupt(format!(
+                "property spill descriptor has unsupported version {version}, flags {flags}, or reserved fields"
+            )));
+        }
+        let descriptor = Self {
+            block_id: read_u64_at(value, 12),
+            offset: read_u64_at(value, 20),
+            length: NonZeroU64::new(read_u64_at(value, 28)).ok_or_else(|| {
+                PropertySpillError::Corrupt(
+                    "property spill descriptor block length is zero".to_string(),
+                )
+            })?,
+            content_digest: ContentDigest(read_u64_at(value, 36)),
+            min_spill_id: read_u64_at(value, 44),
+            max_spill_id: read_u64_at(value, 52),
+            value_count: u32::from_le_bytes(value[60..64].try_into().expect("fixed-width u32")),
+        };
+        descriptor.validate_descriptor_identity()?;
+        if key != descriptor.descriptor_tree_key() {
+            return Err(PropertySpillError::Corrupt(
+                "property spill descriptor key does not match its value".to_string(),
+            ));
+        }
+        Ok(descriptor)
+    }
+
+    fn validate_descriptor_identity(&self) -> Result<(), PropertySpillError> {
+        let expected_count = self
+            .max_spill_id
+            .checked_sub(self.min_spill_id)
+            .and_then(|difference| difference.checked_add(1));
+        if self.block_id < BLOCK_ID_BASE
+            || self.value_count == 0
+            || self.min_spill_id > self.max_spill_id
+            || expected_count != Some(u64::from(self.value_count))
+            || self.content_digest.0 > u64::from(u32::MAX)
+            || self.offset.checked_add(self.length.get()).is_none()
+        {
+            return Err(PropertySpillError::Corrupt(format!(
+                "property spill block {} has invalid descriptor identity",
+                self.block_id
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PropertySpillManifest {
     pub generation: ManifestGeneration,
+    pub source_commit_epoch: u64,
     pub artifact_id: u64,
     pub artifact_len: u64,
     pub artifact_digest: ContentDigest,
@@ -115,9 +254,19 @@ pub struct PropertySpillManifest {
     pub value_count: u64,
     pub value_bytes: u64,
     pub blocks: Vec<PropertySpillBlockDescriptor>,
+    pub descriptor_root_artifact: GraphDescriptorTreeArtifactMetadata,
 }
 
 impl PropertySpillManifest {
+    pub const fn descriptor_generation_artifacts(&self) -> GraphDescriptorTreeGenerationArtifacts {
+        GraphDescriptorTreeGenerationArtifacts {
+            kind: GraphDescriptorKind::PropertySpill,
+            generation: self.generation.0,
+            source_commit_epoch: self.source_commit_epoch,
+            root_artifact: self.descriptor_root_artifact,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), PropertySpillError> {
         if self.artifact_id != ARTIFACT_ID {
             return Err(PropertySpillError::Corrupt(
@@ -133,11 +282,8 @@ impl PropertySpillManifest {
         let mut previous_id = None;
         let mut value_count = 0u64;
         for block in &self.blocks {
-            if block.block_id < BLOCK_ID_BASE
-                || block.value_count == 0
-                || block.min_spill_id > block.max_spill_id
-                || block.offset < previous_end
-                || previous_id.is_some_and(|id| block.min_spill_id <= id)
+            block.validate_descriptor_identity()?;
+            if block.offset < previous_end || previous_id.is_some_and(|id| block.min_spill_id <= id)
             {
                 return Err(PropertySpillError::Corrupt(format!(
                     "property spill block {} has invalid bounds",
@@ -165,20 +311,29 @@ impl PropertySpillManifest {
                 "property spill manifest counts or artifact length are inconsistent".to_string(),
             ));
         }
+        if self.descriptor_root_artifact.encoded_len == 0 {
+            return Err(PropertySpillError::Corrupt(
+                "property spill descriptor root artifact is empty".to_string(),
+            ));
+        }
         Ok(())
     }
 
     pub fn encode(&self) -> Result<String, PropertySpillError> {
         self.validate()?;
         let mut body = format!(
-            "{MANIFEST_HEADER}\ngeneration\t{}\nartifact_id\t{}\nartifact_len\t{}\nartifact_digest\t{}\nartifact_sha256\t{}\nvalue_count\t{}\nvalue_bytes\t{}\n",
+            "{MANIFEST_HEADER}\ngeneration\t{}\nsource_commit_epoch\t{}\nartifact_id\t{}\nartifact_len\t{}\nartifact_digest\t{}\nartifact_sha256\t{}\nvalue_count\t{}\nvalue_bytes\t{}\ndescriptor_root_len\t{}\ndescriptor_root_crc32c\t{}\ndescriptor_root_sha256\t{}\n",
             self.generation.0,
+            self.source_commit_epoch,
             self.artifact_id,
             self.artifact_len,
             self.artifact_digest.0,
             self.artifact_sha256,
             self.value_count,
-            self.value_bytes
+            self.value_bytes,
+            self.descriptor_root_artifact.encoded_len,
+            self.descriptor_root_artifact.encoded_crc32c,
+            self.descriptor_root_artifact.encoded_sha256
         );
         for block in &self.blocks {
             body.push_str(&format!(
@@ -219,12 +374,16 @@ impl PropertySpillManifest {
             )));
         }
         let mut generation = None;
+        let mut source_commit_epoch = None;
         let mut artifact_id = None;
         let mut artifact_len = None;
         let mut artifact_digest = None;
         let mut artifact_sha256 = None;
         let mut value_count = None;
         let mut value_bytes = None;
+        let mut descriptor_root_len = None;
+        let mut descriptor_root_crc32c = None;
+        let mut descriptor_root_sha256 = None;
         let mut blocks = Vec::new();
         let mut saw_header = false;
         for line in body.lines() {
@@ -235,6 +394,9 @@ impl PropertySpillManifest {
             let fields = line.split('\t').collect::<Vec<_>>();
             match fields.as_slice() {
                 ["generation", value] => generation = Some(parse_u64(value, "generation")?),
+                ["source_commit_epoch", value] => {
+                    source_commit_epoch = Some(parse_u64(value, "source commit epoch")?)
+                }
                 ["artifact_id", value] => artifact_id = Some(parse_u64(value, "artifact id")?),
                 ["artifact_len", value] => {
                     artifact_len = Some(parse_u64(value, "artifact length")?)
@@ -251,6 +413,19 @@ impl PropertySpillManifest {
                 }
                 ["value_count", value] => value_count = Some(parse_u64(value, "value count")?),
                 ["value_bytes", value] => value_bytes = Some(parse_u64(value, "value bytes")?),
+                ["descriptor_root_len", value] => {
+                    descriptor_root_len = Some(parse_u64(value, "descriptor root length")?)
+                }
+                ["descriptor_root_crc32c", value] => {
+                    descriptor_root_crc32c = Some(parse_u32(value, "descriptor root CRC32C")?)
+                }
+                ["descriptor_root_sha256", value] => {
+                    descriptor_root_sha256 = Some(value.parse().map_err(|error| {
+                        PropertySpillError::Corrupt(format!(
+                            "invalid descriptor root SHA-256 digest: {error}"
+                        ))
+                    })?)
+                }
                 ["block", block_id, offset, length, digest, min_id, max_id, count] => {
                     blocks.push(PropertySpillBlockDescriptor {
                         block_id: parse_u64(block_id, "block id")?,
@@ -283,6 +458,7 @@ impl PropertySpillManifest {
         }
         let manifest = Self {
             generation: ManifestGeneration(required(generation, "generation")?),
+            source_commit_epoch: required(source_commit_epoch, "source commit epoch")?,
             artifact_id: required(artifact_id, "artifact id")?,
             artifact_len: required(artifact_len, "artifact length")?,
             artifact_digest: ContentDigest(required(artifact_digest, "artifact digest")?),
@@ -290,6 +466,11 @@ impl PropertySpillManifest {
             value_count: required(value_count, "value count")?,
             value_bytes: required(value_bytes, "value bytes")?,
             blocks,
+            descriptor_root_artifact: GraphDescriptorTreeArtifactMetadata {
+                encoded_len: required(descriptor_root_len, "descriptor root length")?,
+                encoded_crc32c: required(descriptor_root_crc32c, "descriptor root CRC32C")?,
+                encoded_sha256: required(descriptor_root_sha256, "descriptor root SHA-256 digest")?,
+            },
         };
         manifest.validate()?;
         Ok(manifest)
@@ -309,15 +490,19 @@ pub struct PropertySpillWriter {
     pending: Vec<(u64, Vec<u8>)>,
     pending_bytes: u64,
     blocks: Vec<PropertySpillBlockDescriptor>,
+    descriptor_tree: GraphDescriptorTreeBuilder,
 }
 
 impl PropertySpillWriter {
     pub fn create(
         path: impl Into<PathBuf>,
         generation: ManifestGeneration,
+        source_commit_epoch: u64,
         config: PropertySpillConfig,
+        descriptor_tree: PersistentPropertySpillDescriptorTree,
     ) -> Result<Self, PropertySpillError> {
         let path = path.into();
+        let (descriptor_paths, descriptor_config) = descriptor_tree.into_parts();
         let mut file = File::create(&path)?;
         let mut artifact_digest = IntegrityHasher::new();
         write_hashed(&mut file, &mut artifact_digest, ARTIFACT_HEADER)?;
@@ -335,6 +520,14 @@ impl PropertySpillWriter {
             pending: Vec::new(),
             pending_bytes: 0,
             blocks: Vec::new(),
+            descriptor_tree: GraphDescriptorTreeBuilder::create(
+                descriptor_paths,
+                GraphDescriptorKind::PropertySpill,
+                generation.0,
+                source_commit_epoch,
+                DESCRIPTOR_ARTIFACT_ID,
+                descriptor_config,
+            )?,
         })
     }
 
@@ -370,22 +563,22 @@ impl PropertySpillWriter {
         Ok(spill_id)
     }
 
-    pub fn finish(mut self) -> Result<PropertySpillManifest, PropertySpillError> {
+    pub(crate) fn finish(mut self) -> Result<PreparedPropertySpillArtifact, PropertySpillError> {
         self.flush_block()?;
         self.file.sync_all()?;
         let artifact_integrity = self.artifact_digest.finish();
-        let manifest = PropertySpillManifest {
+        let descriptor_tree = self.descriptor_tree.finish()?;
+        Ok(PreparedPropertySpillArtifact {
+            temporary_artifact_path: self.path,
             generation: self.generation,
-            artifact_id: ARTIFACT_ID,
             artifact_len: self.artifact_len,
             artifact_digest: ContentDigest(artifact_integrity.crc32c.as_u64()),
             artifact_sha256: artifact_integrity.sha256,
             value_count: self.next_spill_id,
             value_bytes: self.value_bytes,
             blocks: self.blocks,
-        };
-        manifest.validate()?;
-        Ok(manifest)
+            descriptor_tree,
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -461,7 +654,7 @@ impl PropertySpillWriter {
             )?;
         }
         let length = NonZeroU64::new(block_bytes).expect("property spill block is non-empty");
-        self.blocks.push(PropertySpillBlockDescriptor {
+        let descriptor = PropertySpillBlockDescriptor {
             block_id: self.next_block_id,
             offset: self.artifact_len,
             length,
@@ -469,13 +662,72 @@ impl PropertySpillWriter {
             min_spill_id,
             max_spill_id,
             value_count,
-        });
+        };
+        self.descriptor_tree.push(
+            descriptor.descriptor_tree_key(),
+            descriptor.encode_descriptor_tree_value()?,
+        )?;
+        self.blocks.push(descriptor);
         self.artifact_len = self.artifact_len.saturating_add(block_bytes);
         self.next_block_id = self.next_block_id.saturating_add(1);
         self.pending.clear();
         self.pending_bytes = 0;
         Ok(())
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedPropertySpillArtifact {
+    temporary_artifact_path: PathBuf,
+    generation: ManifestGeneration,
+    artifact_len: u64,
+    artifact_digest: ContentDigest,
+    artifact_sha256: Sha256Digest,
+    value_count: u64,
+    value_bytes: u64,
+    blocks: Vec<PropertySpillBlockDescriptor>,
+    descriptor_tree: PreparedGraphDescriptorTree,
+}
+
+impl PreparedPropertySpillArtifact {
+    pub(crate) fn publish(
+        self,
+        artifact_path: &Path,
+    ) -> Result<PropertySpillWriteOutput, PropertySpillError> {
+        durable_replace_file(&self.temporary_artifact_path, artifact_path)?;
+        let descriptor_tree = self.descriptor_tree.publish()?;
+        if descriptor_tree.root.kind != GraphDescriptorKind::PropertySpill
+            || descriptor_tree.root.generation != self.generation.0
+            || descriptor_tree.root.descriptor_count != self.blocks.len() as u64
+        {
+            return Err(PropertySpillError::Corrupt(
+                "property spill descriptor root identity is inconsistent".to_string(),
+            ));
+        }
+        let manifest = PropertySpillManifest {
+            generation: self.generation,
+            source_commit_epoch: descriptor_tree.root.source_commit_epoch,
+            artifact_id: ARTIFACT_ID,
+            artifact_len: self.artifact_len,
+            artifact_digest: self.artifact_digest,
+            artifact_sha256: self.artifact_sha256,
+            value_count: self.value_count,
+            value_bytes: self.value_bytes,
+            blocks: self.blocks,
+            descriptor_root_artifact: descriptor_tree.root_artifact,
+        };
+        manifest.validate()?;
+        Ok(PropertySpillWriteOutput {
+            manifest,
+            descriptor_tree,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropertySpillWriteOutput {
+    pub manifest: PropertySpillManifest,
+    pub descriptor_tree: GraphDescriptorTreeWriteOutput,
 }
 
 #[derive(Debug, Clone)]
@@ -644,6 +896,14 @@ fn parse_u64(value: &str, name: &str) -> Result<u64, PropertySpillError> {
     })
 }
 
+fn read_u64_at(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(
+        bytes[offset..offset + 8]
+            .try_into()
+            .expect("fixed-width u64"),
+    )
+}
+
 fn parse_u32(value: &str, name: &str) -> Result<u32, PropertySpillError> {
     value.parse().map_err(|_| {
         PropertySpillError::Corrupt(format!(
@@ -739,11 +999,39 @@ mod tests {
             target_block_bytes: NonZeroU64::new(64).unwrap(),
             max_value_bytes: NonZeroU64::new(1024).unwrap(),
         };
-        let mut writer = PropertySpillWriter::create(&path, ManifestGeneration(3), config).unwrap();
+        let descriptor_paths = GraphDescriptorTreePaths::new(
+            root.join(property_spill_descriptor_page_file(3)),
+            root.join(property_spill_descriptor_root_file(3)),
+        );
+        let mut writer = PropertySpillWriter::create(
+            path.with_extension("skein.tmp"),
+            ManifestGeneration(3),
+            11,
+            config,
+            PersistentPropertySpillDescriptorTree::new(
+                descriptor_paths.clone(),
+                GraphDescriptorTreeBuildConfig::default(),
+            ),
+        )
+        .unwrap();
         let first = writer.push(vec![1; 32]).unwrap();
         let second = writer.push(vec![2; 48]).unwrap();
-        let manifest = writer.finish().unwrap();
+        let output = writer.finish().unwrap().publish(&path).unwrap();
+        let manifest = output.manifest;
         assert_eq!(manifest.blocks.len(), 2);
+        assert_eq!(manifest.source_commit_epoch, 11);
+        assert_eq!(output.descriptor_tree.root.descriptor_count, 2);
+        assert_eq!(
+            output.descriptor_tree.root.kind,
+            GraphDescriptorKind::PropertySpill
+        );
+        let root_reader = crate::GraphDescriptorTreeRootReader::open_bound(
+            descriptor_paths,
+            manifest.descriptor_generation_artifacts(),
+            GraphDescriptorTreeBuildConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(root_reader.root(), &output.descriptor_tree.root);
         let manifest = PropertySpillManifest::decode(&manifest.encode().unwrap()).unwrap();
         let reader = PropertySpillReader::open(
             &path,
@@ -757,5 +1045,36 @@ mod tests {
         assert_eq!(reader.get(second).unwrap().unwrap().as_ref(), &[2; 48]);
         assert!(reader.get(99).unwrap().is_none());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn descriptor_tree_entry_codec_is_order_preserving_and_symmetric() {
+        let first = PropertySpillBlockDescriptor {
+            block_id: BLOCK_ID_BASE,
+            offset: 24,
+            length: NonZeroU64::new(80).unwrap(),
+            content_digest: ContentDigest(7),
+            min_spill_id: 0,
+            max_spill_id: 1,
+            value_count: 2,
+        };
+        let second = PropertySpillBlockDescriptor {
+            block_id: BLOCK_ID_BASE + 1,
+            offset: 104,
+            length: NonZeroU64::new(48).unwrap(),
+            content_digest: ContentDigest(9),
+            min_spill_id: 2,
+            max_spill_id: 2,
+            value_count: 1,
+        };
+        assert!(first.descriptor_tree_key() < second.descriptor_tree_key());
+        for descriptor in [first, second] {
+            let key = descriptor.descriptor_tree_key();
+            let value = descriptor.encode_descriptor_tree_value().unwrap();
+            assert_eq!(
+                PropertySpillBlockDescriptor::decode_descriptor_tree_entry(&key, &value).unwrap(),
+                descriptor
+            );
+        }
     }
 }

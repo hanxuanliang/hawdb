@@ -61,7 +61,8 @@ use artifact_files::{
     parse_canonical_adjacency_descriptor_generation_file, parse_canonical_manifest_generation_file,
     parse_generation_file, parse_property_projection_descriptor_generation_file,
     parse_property_projection_manifest_generation_file,
-    parse_property_spill_manifest_generation_file, parse_relational_index_artifact_generation_file,
+    parse_property_spill_descriptor_generation_file, parse_property_spill_manifest_generation_file,
+    parse_relational_index_artifact_generation_file,
     parse_relational_index_manifest_generation_file,
     parse_relational_overflow_extent_generation_file, parse_relational_overflow_generation_file,
     parse_relational_row_generation_file, parse_relational_row_page_artifact_generation_file,
@@ -6457,7 +6458,7 @@ mod tests {
             store.backup_to(&catalog, &backup).unwrap()
         };
         assert!(report.generation > 0);
-        assert_eq!(report.file_count, 21);
+        assert_eq!(report.file_count, 23);
         assert!(backup
             .join(skein_storage::canonical_adjacency_descriptor_page_file(
                 report.generation
@@ -6475,6 +6476,16 @@ mod tests {
             .exists());
         assert!(backup
             .join(skein_storage::property_projection_descriptor_root_file(
+                report.generation
+            ))
+            .exists());
+        assert!(backup
+            .join(skein_storage::property_spill_descriptor_page_file(
+                report.generation
+            ))
+            .exists());
+        assert!(backup
+            .join(skein_storage::property_spill_descriptor_root_file(
                 report.generation
             ))
             .exists());
@@ -7183,6 +7194,20 @@ mod tests {
             let spill_manifest = store.property_spill_manifest().unwrap();
             assert_eq!(spill_manifest.value_count, 2);
             assert!(spill_manifest.value_bytes > 64 * 1024);
+            assert_eq!(spill_manifest.source_commit_epoch, store.commit_epoch());
+            let descriptor_root = skein_storage::GraphDescriptorTreeRootReader::open_bound(
+                skein_storage::GraphDescriptorTreePaths::new(
+                    path.join(skein_storage::property_spill_descriptor_page_file(1)),
+                    path.join(skein_storage::property_spill_descriptor_root_file(1)),
+                ),
+                spill_manifest.descriptor_generation_artifacts(),
+                skein_storage::GraphDescriptorTreeBuildConfig::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                descriptor_root.root().descriptor_count,
+                spill_manifest.blocks.len() as u64
+            );
             corrupt_offset = spill_manifest.blocks[0].offset + 40;
             let canonical_manifest = store.canonical_segment_manifest().unwrap();
             assert!(canonical_manifest
@@ -7246,6 +7271,44 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn out_of_core_property_spill_requires_the_selected_descriptor_root() {
+        let path = unique_test_dir("property_spill_descriptor_root");
+        let replay_config = WalReplayConfig {
+            residency_mode: StorageResidencyMode::OutOfCore,
+            ..WalReplayConfig::default()
+        };
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay_config,
+            )
+            .unwrap();
+            store
+                .create_node(&mut catalog, "Memory", BTreeMap::new())
+                .unwrap();
+            store.checkpoint(&catalog).unwrap();
+        }
+        fs::remove_file(path.join(skein_storage::property_spill_descriptor_root_file(1))).unwrap();
+        let mut catalog = Catalog::default();
+        let error = GraphStore::open_with_durability_and_replay_config(
+            &path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            replay_config,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("No such file")
+                || error.to_string().contains("property spill descriptor"),
+            "unexpected missing property spill descriptor error: {error}"
+        );
+        fs::remove_dir_all(path).unwrap();
     }
 
     #[test]

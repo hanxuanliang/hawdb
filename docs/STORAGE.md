@@ -36,6 +36,14 @@ Files:
   fetch only selected data blocks through the shared bounded cache. The
   property spill artifact remains part of canonical checkpoint input and is
   not eligible for derived repair.
+- `properties.<generation>.skein`,
+  `properties.<generation>.manifest.skein`,
+  `property-spill-descriptors-<generation>.pages.skein`, and
+  `property-spill-descriptors-<generation>.root.skein`: canonical large graph
+  property values plus a same-generation shadow descriptor tree. The data
+  artifact becomes durable before descriptor pages and the compact root. The
+  current reader still uses the manifest's block vector; demand activation and
+  removal of that graph-size-dependent vector are the next storage step.
 - `wal.<generation>.skein`: append-only committed mutation records beginning at
   the replay LSN published by the manifest. The only v1 encoding uses binary
   fragment framing with the `SKWALB01` file header. Text WAL bytes and unknown

@@ -9,9 +9,10 @@ EXTENDS FiniteSets, Naturals
 (* warming descriptor pages; a later selection cannot move that reader. A   *)
 (* lookup admits at most MaxResidentPages and pins one selected page until   *)
 (* completion. Corruption fails the read closed and poisons the handle.      *)
-(* The model is instantiated for canonical adjacency and property projection. *)
-(* Both classes refine candidate/write/publish, atomic outer-manifest         *)
-(* activation, generation-pinned demand reads, corruption poison, and crash.  *)
+(* The model is instantiated for canonical adjacency, property projection,    *)
+(* and property-spill descriptor publication. A published descriptor root     *)
+(* additionally requires its same-generation data artifact to be durable.     *)
+(* Property-spill demand-read activation is a later concrete refinement step. *)
 (***************************************************************************)
 
 CONSTANTS Pages, Generations, MaxResidentPages
@@ -23,6 +24,7 @@ CompleteGeneration(generation) == {<<generation, page>> : page \in Pages}
 ReaderStates == {"closed", "open", "reading", "succeeded", "failed"}
 
 VARIABLES
+    durableDataGenerations,
     durablePages,
     usedGenerations,
     candidateGeneration,
@@ -41,6 +43,7 @@ VARIABLES
     poisoned
 
 vars == <<
+    durableDataGenerations,
     durablePages,
     usedGenerations,
     candidateGeneration,
@@ -60,6 +63,7 @@ vars == <<
 >>
 
 Init ==
+    /\ durableDataGenerations = {}
     /\ durablePages = {}
     /\ usedGenerations = {}
     /\ candidateGeneration = 0
@@ -84,10 +88,21 @@ StartCandidate ==
           /\ usedGenerations' = usedGenerations \union {generation}
     /\ candidatePages' = {}
     /\ UNCHANGED <<
-        durablePages, publishedGeneration, publishedPages,
+        durableDataGenerations, durablePages, publishedGeneration, publishedPages,
         publishedGenerations, servingGeneration, servingPages,
         readerGeneration, readerPages, readerState, residentPages, pinnedPage,
         corruptPages, poisoned
+       >>
+
+WriteCandidateData ==
+    /\ candidateGeneration \in Generations
+    /\ candidateGeneration \notin durableDataGenerations
+    /\ durableDataGenerations' = durableDataGenerations \union {candidateGeneration}
+    /\ UNCHANGED <<
+        durablePages, usedGenerations, candidateGeneration, candidatePages,
+        publishedGeneration, publishedPages, publishedGenerations,
+        servingGeneration, servingPages, readerGeneration, readerPages,
+        readerState, residentPages, pinnedPage, corruptPages, poisoned
        >>
 
 WriteCandidatePage ==
@@ -97,7 +112,7 @@ WriteCandidatePage ==
           /\ candidatePages' = candidatePages \union {copy}
           /\ durablePages' = durablePages \union {copy}
     /\ UNCHANGED <<
-        usedGenerations, candidateGeneration, publishedGeneration,
+        durableDataGenerations, usedGenerations, candidateGeneration, publishedGeneration,
         publishedPages, publishedGenerations, servingGeneration, servingPages,
         readerGeneration, readerPages, readerState, residentPages, pinnedPage,
         corruptPages, poisoned
@@ -105,6 +120,7 @@ WriteCandidatePage ==
 
 PublishCandidateRoot ==
     /\ candidateGeneration \in Generations
+    /\ candidateGeneration \in durableDataGenerations
     /\ candidatePages = CompleteGeneration(candidateGeneration)
     /\ candidatePages \subseteq durablePages
     /\ publishedGeneration' = candidateGeneration
@@ -114,7 +130,7 @@ PublishCandidateRoot ==
     /\ candidateGeneration' = 0
     /\ candidatePages' = {}
     /\ UNCHANGED <<
-        durablePages, usedGenerations, servingGeneration, servingPages,
+        durableDataGenerations, durablePages, usedGenerations, servingGeneration, servingPages,
         readerGeneration, readerPages, readerState, residentPages, pinnedPage,
         corruptPages, poisoned
        >>
@@ -126,7 +142,7 @@ ActivatePublishedRoot ==
     /\ servingGeneration' = publishedGeneration
     /\ servingPages' = publishedPages
     /\ UNCHANGED <<
-        durablePages, usedGenerations, candidateGeneration, candidatePages,
+        durableDataGenerations, durablePages, usedGenerations, candidateGeneration, candidatePages,
         publishedGeneration, publishedPages, publishedGenerations,
         readerGeneration, readerPages, readerState, residentPages, pinnedPage,
         corruptPages, poisoned
@@ -137,7 +153,7 @@ CrashCandidate ==
     /\ candidateGeneration' = 0
     /\ candidatePages' = {}
     /\ UNCHANGED <<
-        durablePages, usedGenerations, publishedGeneration, publishedPages,
+        durableDataGenerations, durablePages, usedGenerations, publishedGeneration, publishedPages,
         publishedGenerations, servingGeneration, servingPages,
         readerGeneration, readerPages, readerState, residentPages, pinnedPage,
         corruptPages, poisoned
@@ -152,7 +168,7 @@ OpenPinnedReader ==
     /\ readerState' = "open"
     /\ pinnedPage' = NoPage
     /\ UNCHANGED <<
-        durablePages, usedGenerations, candidateGeneration, candidatePages,
+        durableDataGenerations, durablePages, usedGenerations, candidateGeneration, candidatePages,
         publishedGeneration, publishedPages, publishedGenerations,
         servingGeneration, servingPages, residentPages, corruptPages, poisoned
        >>
@@ -165,7 +181,7 @@ BeginDemandRead ==
           /\ residentPages' = {copy}
     /\ readerState' = "reading"
     /\ UNCHANGED <<
-        durablePages, usedGenerations, candidateGeneration, candidatePages,
+        durableDataGenerations, durablePages, usedGenerations, candidateGeneration, candidatePages,
         publishedGeneration, publishedPages, publishedGenerations,
         servingGeneration, servingPages, readerGeneration, readerPages,
         corruptPages, poisoned
@@ -176,7 +192,7 @@ CompleteDemandRead ==
     /\ pinnedPage \notin corruptPages
     /\ readerState' = "succeeded"
     /\ UNCHANGED <<
-        durablePages, usedGenerations, candidateGeneration, candidatePages,
+        durableDataGenerations, durablePages, usedGenerations, candidateGeneration, candidatePages,
         publishedGeneration, publishedPages, publishedGenerations,
         servingGeneration, servingPages, readerGeneration, readerPages,
         residentPages, pinnedPage, corruptPages, poisoned
@@ -188,7 +204,7 @@ RejectCorruptPage ==
     /\ readerState' = "failed"
     /\ poisoned' = TRUE
     /\ UNCHANGED <<
-        durablePages, usedGenerations, candidateGeneration, candidatePages,
+        durableDataGenerations, durablePages, usedGenerations, candidateGeneration, candidatePages,
         publishedGeneration, publishedPages, publishedGenerations,
         servingGeneration, servingPages, readerGeneration, readerPages,
         residentPages, pinnedPage, corruptPages
@@ -199,7 +215,7 @@ ReleaseSuccessfulRead ==
     /\ readerState' = "open"
     /\ pinnedPage' = NoPage
     /\ UNCHANGED <<
-        durablePages, usedGenerations, candidateGeneration, candidatePages,
+        durableDataGenerations, durablePages, usedGenerations, candidateGeneration, candidatePages,
         publishedGeneration, publishedPages, publishedGenerations,
         servingGeneration, servingPages, readerGeneration, readerPages,
         residentPages, corruptPages, poisoned
@@ -212,7 +228,7 @@ CloseReader ==
     /\ readerPages' = {}
     /\ pinnedPage' = NoPage
     /\ UNCHANGED <<
-        durablePages, usedGenerations, candidateGeneration, candidatePages,
+        durableDataGenerations, durablePages, usedGenerations, candidateGeneration, candidatePages,
         publishedGeneration, publishedPages, publishedGenerations,
         servingGeneration, servingPages, residentPages, corruptPages, poisoned
        >>
@@ -223,7 +239,7 @@ InjectCorruption ==
     /\ \E copy \in durablePages \ corruptPages:
           corruptPages' = corruptPages \union {copy}
     /\ UNCHANGED <<
-        durablePages, usedGenerations, candidateGeneration, candidatePages,
+        durableDataGenerations, durablePages, usedGenerations, candidateGeneration, candidatePages,
         publishedGeneration, publishedPages, publishedGenerations,
         servingGeneration, servingPages, readerGeneration, readerPages,
         readerState, residentPages, pinnedPage, poisoned
@@ -231,6 +247,7 @@ InjectCorruption ==
 
 Next ==
     \/ StartCandidate
+    \/ WriteCandidateData
     \/ WriteCandidatePage
     \/ PublishCandidateRoot
     \/ ActivatePublishedRoot
@@ -246,6 +263,7 @@ Next ==
 Spec == Init /\ [][Next]_vars
 
 TypeOK ==
+    /\ durableDataGenerations \subseteq Generations
     /\ durablePages \subseteq PageCopies
     /\ usedGenerations \subseteq Generations
     /\ candidateGeneration \in Generations \union {0}
@@ -274,6 +292,9 @@ AllPublishedRootsAreDurable ==
     \A generation \in publishedGenerations:
         CompleteGeneration(generation) \subseteq durablePages
 
+AllPublishedRootsHaveDurableData ==
+    publishedGenerations \subseteq durableDataGenerations
+
 CandidateIsNeverSelectable ==
     candidateGeneration = 0
         \/ /\ candidateGeneration \notin publishedGenerations
@@ -286,6 +307,9 @@ ServingRootIsPublished ==
     \/ /\ servingGeneration \in publishedGenerations
        /\ servingPages = CompleteGeneration(servingGeneration)
        /\ servingPages \subseteq durablePages
+
+ServingRootHasDurableData ==
+    servingGeneration = 0 \/ servingGeneration \in durableDataGenerations
 
 PinnedReaderIsComplete ==
     \/ /\ readerGeneration = 0

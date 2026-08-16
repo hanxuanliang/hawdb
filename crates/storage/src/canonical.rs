@@ -1,8 +1,9 @@
 use crate::{
     content_digest, durable_replace_file, wire, ContentDigest, FileSegmentRangeReader,
-    ManifestGeneration, NodeId, NodeRecord, PropertySpillConfig, PropertySpillError,
-    PropertySpillManifest, PropertySpillReader, PropertySpillWriter, RelId, RelRecord,
-    SegmentCache, SegmentRangeReader, SegmentReadError, SegmentReadRange, StoreId,
+    ManifestGeneration, NodeId, NodeRecord, PropertySpillError, PropertySpillManifest,
+    PropertySpillReader, PropertySpillWriteOptions, PropertySpillWriteOutput, PropertySpillWriter,
+    RelId, RelRecord, SegmentCache, SegmentRangeReader, SegmentReadError, SegmentReadRange,
+    StoreId,
 };
 use skein_core::{LabelId, RelTypeId, Value};
 use skein_integrity::{IntegrityHasher, Sha256Digest};
@@ -659,20 +660,24 @@ impl CanonicalSegmentWriter {
     pub fn write_fallible_with_property_spills<N, R>(
         &self,
         path: &Path,
-        property_spill_path: &Path,
         generation: ManifestGeneration,
         nodes: N,
         relationships: R,
-        property_spill_config: PropertySpillConfig,
-    ) -> Result<(CanonicalSegmentManifest, PropertySpillManifest), CanonicalSegmentError>
+        property_spill: PropertySpillWriteOptions<'_>,
+    ) -> Result<(CanonicalSegmentManifest, PropertySpillWriteOutput), CanonicalSegmentError>
     where
         N: IntoIterator<Item = Result<NodeRecord, CanonicalSegmentError>>,
         R: IntoIterator<Item = Result<RelRecord, CanonicalSegmentError>>,
     {
         let tmp_path = path.with_extension("skein.tmp");
-        let spill_tmp_path = property_spill_path.with_extension("skein.tmp");
-        let mut spill_writer =
-            PropertySpillWriter::create(&spill_tmp_path, generation, property_spill_config)?;
+        let spill_tmp_path = property_spill.artifact_path.with_extension("skein.tmp");
+        let mut spill_writer = PropertySpillWriter::create(
+            &spill_tmp_path,
+            generation,
+            property_spill.source_commit_epoch,
+            property_spill.config,
+            property_spill.descriptor_tree,
+        )?;
         let result = self.write_inner(
             &tmp_path,
             generation,
@@ -683,22 +688,29 @@ impl CanonicalSegmentWriter {
         let canonical_manifest = match result {
             Ok(manifest) => manifest,
             Err(error) => {
+                drop(spill_writer);
                 let _ = fs::remove_file(&tmp_path);
                 let _ = fs::remove_file(&spill_tmp_path);
                 return Err(error);
             }
         };
-        let spill_manifest = match spill_writer.finish() {
-            Ok(manifest) => manifest,
+        let prepared_spill = match spill_writer.finish() {
+            Ok(prepared) => prepared,
             Err(error) => {
                 let _ = fs::remove_file(&tmp_path);
                 let _ = fs::remove_file(&spill_tmp_path);
                 return Err(error.into());
             }
         };
-        durable_replace_file(&spill_tmp_path, property_spill_path)?;
+        let spill_output = match prepared_spill.publish(property_spill.artifact_path) {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(error.into());
+            }
+        };
         durable_replace_file(&tmp_path, path)?;
-        Ok((canonical_manifest, spill_manifest))
+        Ok((canonical_manifest, spill_output))
     }
 
     fn write_inner<N, R>(
