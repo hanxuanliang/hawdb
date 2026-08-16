@@ -1,0 +1,38 @@
+{
+  "protocol": "skein-production-content-store-memory-plan-v1",
+  "evidence_binding": {
+    "identity": {
+      "source_revision": "replace-with-skein-revision",
+      "rust_toolchain": "rustc 1.xx.x",
+      "target_os": "macos",
+      "target_arch": "aarch64",
+      "enabled_features": [
+        "full-text-search"
+      ],
+      "durable_format_version": 1,
+      "schema_version": 1,
+      "configuration_digest": "sha256:replace-with-qualified-config",
+      "deployment_profile": "desktop-bound-8-gib",
+      "dataset_fingerprint": "sha256:replace-with-offline-dataset-digest",
+      "canonical_graph_commit_epoch": 1,
+      "policy_version": 1
+    },
+    "generated_at_unix_seconds": 1
+  },
+  "expected_identity": {
+    "source_revision": "replace-with-skein-revision",
+    "rust_toolchain": "rustc 1.xx.x",
+    "target_os": "macos",
+    "target_arch": "aarch64",
+    "enabled_features": [
+      "full-text-search"
+    ],
+    "durable_format_version": 1,
+    "schema_version": 1,
+    "configuration_digest": "sha256:replace-with-qualified-config",
+    "deployment_profile": "desktop-bound-8-gib",
+    "dataset_fingerprint": "sha256:replace-with-offline-dataset-digest",
+    "canonical_graph_commit_epoch": 1,
+    "policy_version": 1
+  }
+}

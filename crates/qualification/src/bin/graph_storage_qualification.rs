@@ -4,6 +4,9 @@ mod graph_qualification_input;
 #[path = "shared/qualification_input.rs"]
 mod qualification_input;
 
+#[path = "shared/qualification_value.rs"]
+mod qualification_value;
+
 #[path = "graph_storage_qualification/plan.rs"]
 mod plan;
 

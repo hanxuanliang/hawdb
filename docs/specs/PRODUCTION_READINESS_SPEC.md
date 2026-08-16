@@ -268,6 +268,24 @@ headroom. The policy report MUST be paired with a constrained workload run
 whose peak RSS stays within its declared 512 MiB envelope. This is a supported
 capability profile, not the default profile or a universal release cutoff.
 
+`run_production_content_store_memory_qualification` is the identity-bound
+fixed-profile matrix. It MUST evaluate `DesktopBound8Gib` and
+`Capability512Mib` from the same detected `RuntimeResourceSnapshot` and I/O
+budget, bind the result to the exact current target and release identity, and
+retain both raw policy reports. Matrix readiness MUST be recomputed from their
+blockers rather than accepted from a caller-provided flag. The desktop report
+MUST retain dynamic headroom derivation and MUST NOT reject a correct budget
+only because it is below 1 GiB. The capability report MUST install the explicit
+512 MiB ceiling without pretending that the OS limit is 512 MiB.
+
+`skein-content-store-memory-qualification` is a thin evidence collector for
+that typed matrix. It accepts one existing storage path separately from a
+bounded `skein-production-content-store-memory-plan-v1` document. The path is
+used only for storage-device classification and MUST NOT enter retained
+evidence. The collector MUST NOT open, create, copy, repair, checkpoint, or
+mutate a database. Its operational contract is documented in
+[`PRODUCTION_CONTENT_STORE_MEMORY_QUALIFICATION.md`](../PRODUCTION_CONTENT_STORE_MEMORY_QUALIFICATION.md).
+
 The canonical artifact MUST exceed the configured segment-cache budget. Search
 qualification MUST also exercise a document corpus larger than the admitted
 search memory budget. The report MUST record steady RSS, peak RSS, page faults,

@@ -31,6 +31,10 @@ name = "skein-content-store-contract"
 path = "src/bin/content_store_contract.rs"
 
 [[bin]]
+name = "skein-content-store-memory-qualification"
+path = "src/bin/content_store_memory_qualification.rs"
+
+[[bin]]
 name = "skein-content-store-read-qualification"
 path = "src/bin/content_store_read_qualification.rs"
 

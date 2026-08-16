@@ -1,10 +1,15 @@
+use crate::production_graph::validate_production_identity_for_current_target;
 use crate::ContentStoreResourceProfileKind;
 use serde::Serialize;
 use skein::{
-    IoConcurrencyBudget, RuntimeGovernor, RuntimeGovernorConfig, RuntimeResourceSnapshot,
-    SkeinError,
+    IoConcurrencyBudget, ProductionEvidenceBinding, ProductionQualificationIdentity,
+    RuntimeGovernor, RuntimeGovernorConfig, RuntimeResourceSnapshot, SkeinError,
+    StorageDeviceProfile,
 };
+use std::path::PathBuf;
 
+pub const PRODUCTION_CONTENT_STORE_MEMORY_QUALIFICATION_PROTOCOL: &str =
+    "skein-production-content-store-memory-qualification-v1";
 pub const CONTENT_STORE_DESKTOP_8_GIB_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const CONTENT_STORE_DESKTOP_NOMINAL_AVAILABLE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 pub const CONTENT_STORE_DESKTOP_NOMINAL_MIN_BUDGET_BYTES: u64 = 1024 * 1024 * 1024;
@@ -26,6 +31,37 @@ pub struct ContentStoreMemoryProfileQualificationReport {
     pub memory_budget_bytes: u64,
     pub expected_capacity_bytes: u64,
     pub expected_dynamic_budget_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductionContentStoreMemoryQualificationConfig {
+    pub evidence_binding: ProductionEvidenceBinding,
+    pub expected_identity: ProductionQualificationIdentity,
+    pub storage_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductionContentStoreMemoryQualificationReport {
+    pub ready: bool,
+    pub blocker_codes: Vec<String>,
+    pub evidence_binding: ProductionEvidenceBinding,
+    pub desktop_bound_8_gib: ContentStoreMemoryProfileQualificationReport,
+    pub capability_512_mib: ContentStoreMemoryProfileQualificationReport,
+}
+
+impl ProductionContentStoreMemoryQualificationReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": PRODUCTION_CONTENT_STORE_MEMORY_QUALIFICATION_PROTOCOL,
+            "evidence_kind": "production_content_store_memory_profiles",
+            "production_eligible": true,
+            "ready": self.ready,
+            "blocker_codes": self.blocker_codes,
+            "evidence_binding": self.evidence_binding.json(),
+            "desktop_bound_8_gib": self.desktop_bound_8_gib,
+            "capability_512_mib": self.capability_512_mib,
+        })
+    }
 }
 
 impl ContentStoreMemoryProfileQualificationReport {
@@ -152,6 +188,72 @@ pub fn qualify_content_store_memory_profile(
     })
 }
 
+/// Binds both fixed memory-policy evaluations to one exact release identity.
+/// This proves policy derivation only; representative desktop and 512 MiB
+/// workload reports remain separate release obligations.
+pub fn run_production_content_store_memory_qualification(
+    config: ProductionContentStoreMemoryQualificationConfig,
+) -> Result<ProductionContentStoreMemoryQualificationReport, SkeinError> {
+    if !config.storage_path.exists() {
+        return Err(SkeinError::Semantic(
+            "production Content Store memory qualification requires an existing storage path"
+                .to_string(),
+        ));
+    }
+    validate_production_identity_for_current_target(
+        &config.evidence_binding,
+        &config.expected_identity,
+    )
+    .map_err(|error| SkeinError::Semantic(error.to_string()))?;
+    let storage_io = IoConcurrencyBudget::desktop_bound_for_device(StorageDeviceProfile::detect(
+        &config.storage_path,
+    ));
+    evaluate_production_content_store_memory_qualification(
+        config,
+        RuntimeResourceSnapshot::detect(),
+        storage_io,
+    )
+}
+
+fn evaluate_production_content_store_memory_qualification(
+    config: ProductionContentStoreMemoryQualificationConfig,
+    resources: RuntimeResourceSnapshot,
+    storage_io: IoConcurrencyBudget,
+) -> Result<ProductionContentStoreMemoryQualificationReport, SkeinError> {
+    let desktop_bound_8_gib = qualify_content_store_memory_profile(
+        ContentStoreResourceProfileKind::DesktopBound8Gib,
+        resources,
+        storage_io,
+    )?;
+    let capability_512_mib = qualify_content_store_memory_profile(
+        ContentStoreResourceProfileKind::Capability512Mib,
+        resources,
+        storage_io,
+    )?;
+    let mut blocker_codes = Vec::new();
+    blocker_codes.extend(
+        desktop_bound_8_gib
+            .blocker_codes
+            .iter()
+            .map(|blocker| format!("desktop_bound_8_gib_{blocker}")),
+    );
+    blocker_codes.extend(
+        capability_512_mib
+            .blocker_codes
+            .iter()
+            .map(|blocker| format!("capability_512_mib_{blocker}")),
+    );
+    blocker_codes.sort();
+    blocker_codes.dedup();
+    Ok(ProductionContentStoreMemoryQualificationReport {
+        ready: blocker_codes.is_empty(),
+        blocker_codes,
+        evidence_binding: config.evidence_binding,
+        desktop_bound_8_gib,
+        capability_512_mib,
+    })
+}
+
 fn scale_memory(bytes: u64, fraction_per_million: u32) -> u64 {
     (u128::from(bytes) * u128::from(fraction_per_million) / 1_000_000).min(u128::from(u64::MAX))
         as u64
@@ -160,7 +262,9 @@ fn scale_memory(bytes: u64, fraction_per_million: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skein::{RuntimeMemorySnapshot, RuntimeResourceBudget};
+    use skein::{
+        RuntimeMemorySnapshot, RuntimeResourceBudget, PRODUCTION_QUALIFICATION_POLICY_VERSION,
+    };
     use std::num::NonZeroUsize;
 
     fn resources(limit: u64, available: u64) -> RuntimeResourceSnapshot {
@@ -187,6 +291,35 @@ mod tests {
         IoConcurrencyBudget {
             foreground_depth: NonZeroUsize::new(4).unwrap(),
             background_depth: NonZeroUsize::new(1).unwrap(),
+        }
+    }
+
+    fn identity() -> ProductionQualificationIdentity {
+        ProductionQualificationIdentity {
+            source_revision: "revision".to_string(),
+            rust_toolchain: "rustc".to_string(),
+            target_os: std::env::consts::OS.to_string(),
+            target_arch: std::env::consts::ARCH.to_string(),
+            enabled_features: Vec::new(),
+            durable_format_version: 1,
+            schema_version: 1,
+            configuration_digest: "configuration".to_string(),
+            deployment_profile: "desktop-bound".to_string(),
+            dataset_fingerprint: "dataset".to_string(),
+            canonical_graph_commit_epoch: 1,
+            policy_version: PRODUCTION_QUALIFICATION_POLICY_VERSION,
+        }
+    }
+
+    fn production_config() -> ProductionContentStoreMemoryQualificationConfig {
+        let expected_identity = identity();
+        ProductionContentStoreMemoryQualificationConfig {
+            evidence_binding: ProductionEvidenceBinding {
+                identity: expected_identity.clone(),
+                generated_at_unix_seconds: 1,
+            },
+            expected_identity,
+            storage_path: std::env::temp_dir(),
         }
     }
 
@@ -306,5 +439,73 @@ mod tests {
             .blocker_codes
             .iter()
             .any(|blocker| blocker.contains("configured_capacity_not_effective")));
+    }
+
+    #[test]
+    fn production_matrix_binds_dynamic_desktop_and_explicit_capability_profiles() {
+        let report = evaluate_production_content_store_memory_qualification(
+            production_config(),
+            resources(CONTENT_STORE_DESKTOP_8_GIB_BYTES, 6 * 1024 * 1024 * 1024),
+            storage_io(),
+        )
+        .expect("production memory profiles should evaluate");
+
+        assert!(
+            report.ready,
+            "unexpected blockers: {:?}",
+            report.blocker_codes
+        );
+        assert_eq!(
+            report.desktop_bound_8_gib.memory_budget_bytes,
+            1536 * 1024 * 1024
+        );
+        assert_eq!(
+            report.capability_512_mib.memory_budget_bytes,
+            crate::CONTENT_STORE_512_MIB_CAPABILITY_BYTES
+        );
+        assert_eq!(
+            report.json()["protocol"],
+            PRODUCTION_CONTENT_STORE_MEMORY_QUALIFICATION_PROTOCOL
+        );
+    }
+
+    #[test]
+    fn production_matrix_accepts_desktop_budget_below_nominal_range() {
+        let report = evaluate_production_content_store_memory_qualification(
+            production_config(),
+            resources(CONTENT_STORE_DESKTOP_8_GIB_BYTES, 3 * 1024 * 1024 * 1024),
+            storage_io(),
+        )
+        .expect("pressured desktop memory profiles should evaluate");
+
+        assert!(
+            report.ready,
+            "unexpected blockers: {:?}",
+            report.blocker_codes
+        );
+        assert_eq!(
+            report.desktop_bound_8_gib.memory_budget_bytes,
+            768 * 1024 * 1024
+        );
+        assert!(!report.desktop_bound_8_gib.nominal_budget_range_observed);
+    }
+
+    #[test]
+    fn production_matrix_reports_wrong_desktop_limit_and_rejects_stale_identity() {
+        let report = evaluate_production_content_store_memory_qualification(
+            production_config(),
+            resources(16 * 1024 * 1024 * 1024, 12 * 1024 * 1024 * 1024),
+            storage_io(),
+        )
+        .expect("wrong desktop limit should produce bounded evidence");
+        assert!(!report.ready);
+        assert!(report
+            .blocker_codes
+            .iter()
+            .any(|blocker| blocker.contains("effective_limit_mismatch")));
+
+        let mut config = production_config();
+        config.expected_identity.source_revision = "different".to_string();
+        assert!(run_production_content_store_memory_qualification(config).is_err());
     }
 }

@@ -1,11 +1,13 @@
 #[path = "shared/qualification_input.rs"]
 mod qualification_input;
+
+#[path = "shared/qualification_value.rs"]
+mod qualification_value;
 #[path = "shared/relational_database_input.rs"]
 mod relational_database_input;
 
-use qualification_input::{
-    read_bounded_json, value_from_json, EvidenceBindingInput, ProductionIdentityInput,
-};
+use qualification_input::{read_bounded_json, EvidenceBindingInput, ProductionIdentityInput};
+use qualification_value::value_from_json;
 use relational_database_input::DatabaseInput;
 use serde::Deserialize;
 use skein::RuntimeGovernorConfig;

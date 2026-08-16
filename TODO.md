@@ -246,8 +246,11 @@ crash; read-only recovery remains fail closed.
     detected limit, derives the exact 25% capacity/headroom budget, records the
     nominal 1--2 GiB range without turning 1 GiB into a hard floor, and proves
     that an explicit 512 MiB Skein ceiling is effective unless a smaller
-    host/cgroup ceiling takes precedence. Retain this item until the constrained
-    capability and production-profile workload artifacts are checked in; the
+    host/cgroup ceiling takes precedence. The identity-bound production matrix
+    and `skein-content-store-memory-qualification` collector now evaluate both
+    fixed policies from one detected snapshot without opening or mutating the
+    database. Retain this item until the matrix, constrained-capability
+    workload, and production-profile workload artifacts are checked in; the
     policy report alone does not prove peak RSS.
 - [ ] Differentially qualify and production-activate persistent graph indexes.
   - The independent general graph-storage release artifact now has a bounded

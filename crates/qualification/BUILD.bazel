@@ -79,12 +79,31 @@ rust_binary(
 )
 
 rust_binary(
+    name = "skein_content_store_memory_qualification",
+    crate_name = "skein_content_store_memory_qualification",
+    crate_root = "src/bin/content_store_memory_qualification.rs",
+    srcs = [
+        "src/bin/content_store_memory_qualification.rs",
+        "src/bin/content_store_memory_qualification/plan.rs",
+        "src/bin/shared/qualification_input.rs",
+    ],
+    edition = "2024",
+    aliases = aliases(normal = True, proc_macro = True),
+    deps = all_crate_deps(normal = True) + [
+        ":skein_qualification",
+        "//:skein",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+)
+
+rust_binary(
     name = "skein_content_store_read_qualification",
     crate_name = "skein_content_store_read_qualification",
     crate_root = "src/bin/content_store_read_qualification.rs",
     srcs = [
         "src/bin/content_store_read_qualification.rs",
         "src/bin/shared/qualification_input.rs",
+        "src/bin/shared/qualification_value.rs",
         "src/bin/shared/relational_database_input.rs",
     ],
     edition = "2024",
@@ -103,6 +122,7 @@ rust_binary(
     srcs = [
         "src/bin/content_store_mutation_qualification.rs",
         "src/bin/shared/qualification_input.rs",
+        "src/bin/shared/qualification_value.rs",
         "src/bin/shared/relational_database_input.rs",
     ],
     edition = "2024",
@@ -123,6 +143,7 @@ rust_binary(
         "src/bin/graph_index_qualification/plan.rs",
         "src/bin/shared/graph_qualification_input.rs",
         "src/bin/shared/qualification_input.rs",
+        "src/bin/shared/qualification_value.rs",
     ],
     edition = "2024",
     aliases = aliases(normal = True, proc_macro = True),
@@ -142,6 +163,7 @@ rust_binary(
         "src/bin/graph_storage_qualification/plan.rs",
         "src/bin/shared/graph_qualification_input.rs",
         "src/bin/shared/qualification_input.rs",
+        "src/bin/shared/qualification_value.rs",
     ],
     edition = "2024",
     aliases = aliases(normal = True, proc_macro = True),
@@ -192,11 +214,35 @@ rust_test(
 )
 
 rust_test(
+    name = "skein_content_store_memory_qualification_cli_tests",
+    crate_root = "src/bin/content_store_memory_qualification.rs",
+    srcs = [
+        "src/bin/content_store_memory_qualification.rs",
+        "src/bin/content_store_memory_qualification/plan.rs",
+        "src/bin/shared/qualification_input.rs",
+    ],
+    compile_data = ["fixtures/nowledge_content_store/production_memory_plan_example_v1.json"],
+    edition = "2024",
+    aliases = aliases(
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = all_crate_deps(normal = True, normal_dev = True) + [
+        ":skein_qualification",
+        "//:skein",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
     name = "skein_content_store_read_qualification_cli_tests",
     crate_root = "src/bin/content_store_read_qualification.rs",
     srcs = [
         "src/bin/content_store_read_qualification.rs",
         "src/bin/shared/qualification_input.rs",
+        "src/bin/shared/qualification_value.rs",
         "src/bin/shared/relational_database_input.rs",
     ],
     compile_data = ["fixtures/nowledge_content_store/production_read_plan_example_v1.json"],
@@ -220,6 +266,7 @@ rust_test(
     srcs = [
         "src/bin/content_store_mutation_qualification.rs",
         "src/bin/shared/qualification_input.rs",
+        "src/bin/shared/qualification_value.rs",
         "src/bin/shared/relational_database_input.rs",
     ],
     compile_data = ["fixtures/nowledge_content_store/production_mutation_plan_example_v1.json"],
@@ -245,6 +292,7 @@ rust_test(
         "src/bin/graph_index_qualification/plan.rs",
         "src/bin/shared/graph_qualification_input.rs",
         "src/bin/shared/qualification_input.rs",
+        "src/bin/shared/qualification_value.rs",
     ],
     compile_data = ["fixtures/nowledge_graph/production_graph_index_plan_example_v1.json"],
     edition = "2024",
@@ -269,6 +317,7 @@ rust_test(
         "src/bin/graph_storage_qualification/plan.rs",
         "src/bin/shared/graph_qualification_input.rs",
         "src/bin/shared/qualification_input.rs",
+        "src/bin/shared/qualification_value.rs",
     ],
     compile_data = ["fixtures/nowledge_graph/production_graph_storage_plan_example_v1.json"],
     edition = "2024",

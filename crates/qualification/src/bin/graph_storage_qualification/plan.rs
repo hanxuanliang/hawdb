@@ -2,8 +2,9 @@ use super::graph_qualification_input::{
     GraphDatabaseInput, ProcessLimitsInput, QueryLimitsInput, RuntimeProfileInput,
 };
 use super::qualification_input::{
-    read_bounded_json, value_from_json, EvidenceBindingInput, ProductionIdentityInput,
+    read_bounded_json, EvidenceBindingInput, ProductionIdentityInput,
 };
+use super::qualification_value::value_from_json;
 use serde::Deserialize;
 use skein::{NowledgeGraphStatement, NowledgeMemGraphMode, NowledgeMemOpenOptions};
 use skein_qualification::ProductionGraphStorageQualificationConfig;

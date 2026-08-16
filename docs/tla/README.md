@@ -836,6 +836,14 @@ profile, recomputes the limit- and headroom-derived capacity/budget, and rejects
 any report where the budget exceeds capacity. The TLA+ model proves that this
 capacity/budget ordering remains safe across later resource refreshes, waits,
 admissions, releases, and capacity shrink.
+`run_production_content_store_memory_qualification` evaluates both refinements
+from one immutable resource snapshot and binds them to one exact release
+identity. The CLI parser only supplies that identity and an existing path for
+device classification; it introduces no resource transition. Consequently the
+existing `SkeinRuntimeAdmission.tla` safety and liveness obligations apply to
+both derived configurations independently, while matrix completeness and
+identity equality are deterministic Rust refinement checks rather than a new
+state machine.
 
 ## Columnar Shadow Checkpoint Integration
 
