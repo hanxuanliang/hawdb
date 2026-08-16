@@ -125,8 +125,8 @@ use skein_storage::{
     RelationalCheckpointIndexLoad, RelationalDecodeLimits, RelationalMutationLimits,
     RelationalOverflowConfig, RelationalOverflowPublicationConfig, RelationalOverflowPublisher,
     RelationalRecoverySourceBuilder, RelationalRowPageGenerationRequest,
-    RelationalRowPagePublicationConfig, RelationalRowPagePublisher, RelationalState,
-    RelationalTransaction,
+    RelationalRowPagePublicationConfig, RelationalRowPagePublisher, RelationalSparseLiveStage,
+    RelationalState, RelationalTransaction,
 };
 pub use skein_storage::{
     AdjacencyDirection, AdjacencyGroupConsistencyMismatch, AdjacencyGroupKey, AdjacencyGroupStats,

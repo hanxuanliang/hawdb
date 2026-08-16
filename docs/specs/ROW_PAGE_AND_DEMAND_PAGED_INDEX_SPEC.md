@@ -483,19 +483,31 @@ the transaction without publishing it and returns the exact replay-access set
 plus all unique-key, foreign-key-target, and parent-delete referrer probes
 derived from the real row and index change captures. A primary-key rewrite may
 therefore add a missing destination key after the first preparation pass.
-Callers MUST demand-hydrate every newly discovered replay key and every posting
-returned by those probes, repeat preparation until the set is closed, and
-enforce one cumulative entry/read/resident-byte budget across all passes.
-Preparation never changes detached counts, appends WAL, or publishes a live
-view. The final authoritative live stage remains the only semantic validation
-whose captures may cross the durability boundary.
+`GraphStore::hydrate_sparse_relational_live_workspace` demand-hydrates every
+newly discovered replay key and every posting returned by those probes, repeats
+preparation until the set is closed, and enforces one cumulative
+entry/read/resident-byte budget across all passes. One generation-pinned row
+snapshot and one authoritative index reader remain fixed for the complete
+closure and final validation. The workspace builder admits each present or
+missing key atomically and conservatively reserves the later replay-access
+ledger before retaining the row. Preparation never changes detached counts,
+appends WAL, or publishes a live view. The final authoritative live stage
+remains the only semantic validation whose captures may cross the durability
+boundary.
 
-This primitive does not by itself enable metadata-only writable open. The
-`GraphStore` selector MUST continue loading the materialized recovery state until
-both WAL replay and later live commits hydrate their mutation candidates through
-the same bounded path. Activating only recovery would return a writable handle
-whose next transaction requires rows that are no longer resident, which is not
-an admissible intermediate production state.
+`GraphStore` uses that bounded path whenever a metadata-only state reaches the
+relational commit boundary. It stages canonical metadata plus row and index
+live-view candidates before WAL, requires both view candidates to be valid,
+then appends WAL and advances all three visible epochs together. Failure or
+budget rejection before WAL leaves the prior state, WAL LSN, and read views
+unchanged. A crash after WAL may discard unpublished candidates; recovery must
+replay the durable transaction and reconstruct the same epoch.
+
+This live path does not by itself activate metadata-only writable open. The
+production-open selector MUST continue loading materialized recovery state
+until the sparse recovery and live-commit paths pass generation-bound recovery,
+constraint, budget, and representative-copy qualification. Selector activation
+is a separate commit and evidence decision.
 
 ## Identities and terminology
 

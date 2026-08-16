@@ -291,11 +291,12 @@ Content Store memory evidence separates policy qualification from workload
 qualification. On an 8 GiB desktop limit, the default governor reserves 75% for
 the host process and derives at most 2 GiB of Skein capacity; sensed available
 headroom normally moves the budget through the 1--2 GiB range and may reduce it
-further under pressure. The 512 MiB capability case is a separate OS-constrained
-run. It proves that the bounded workload can execute within that process limit
-with an explicit 512 MiB Skein capacity ceiling; a smaller effective host or
-cgroup ceiling and sensed headroom remain authoritative. Neither profile
-changes SQL semantics or becomes a table-specific API.
+further under pressure. The 512 MiB capability case is a separately configured
+bounded run. It proves that the bounded workload can execute within an explicit
+512 MiB Skein capacity ceiling; it does not require a 512 MiB host or process
+limit. A smaller effective host or cgroup ceiling and sensed headroom remain
+authoritative. Neither profile changes SQL semantics or becomes a table-specific
+API.
 
 ## Migration Boundary
 

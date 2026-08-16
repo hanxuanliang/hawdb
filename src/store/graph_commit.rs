@@ -1716,17 +1716,41 @@ impl GraphStore {
             let (next, index_capture, row_capture, replay_access) =
                 match (authoritative_index.as_ref(), index_limits, row_limits) {
                     (Some(index), Some(index_limits), Some(row_limits)) => {
-                        let (next, index_capture, row_capture, replay_access) = self
-                            .relational_state
-                            .stage_transaction_with_authoritative_replay_access(
-                                transaction.clone(),
-                                self.relational_mutation_limits,
-                                self.relational_overflow_config,
-                                index_limits,
-                                row_limits,
-                                index,
-                            )
-                            .map_err(map_relational_staging_error)?;
+                        let (next, index_capture, row_capture, replay_access) =
+                            if self.relational_state.canonical_row_metadata_only() {
+                                let hydrated_workspace = self
+                                    .hydrate_sparse_relational_live_workspace(
+                                        &transaction,
+                                        index_limits,
+                                        row_limits,
+                                        index,
+                                    )
+                                    .map_err(map_relational_staging_error)?;
+                                self.relational_state
+                                    .stage_sparse_transaction_with_authoritative_replay_access(
+                                        RelationalSparseLiveStage {
+                                            transaction: transaction.clone(),
+                                            hydrated_workspace,
+                                            mutation_limits: self.relational_mutation_limits,
+                                            overflow_config: self.relational_overflow_config,
+                                            index_capture_limits: index_limits,
+                                            row_capture_limits: row_limits,
+                                            constraint_index: index,
+                                        },
+                                    )
+                                    .map_err(map_relational_staging_error)?
+                            } else {
+                                self.relational_state
+                                    .stage_transaction_with_authoritative_replay_access(
+                                        transaction.clone(),
+                                        self.relational_mutation_limits,
+                                        self.relational_overflow_config,
+                                        index_limits,
+                                        row_limits,
+                                        index,
+                                    )
+                                    .map_err(map_relational_staging_error)?
+                            };
                         (
                             next,
                             Some(index_capture),

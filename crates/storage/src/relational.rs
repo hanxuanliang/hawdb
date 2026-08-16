@@ -496,6 +496,121 @@ pub struct RelationalSparseRecoveryRow {
     pub row: Option<RelationalRow>,
 }
 
+/// Incrementally admitted live hydration workspace.
+///
+/// Admission is atomic per key: a failed entry or byte reservation leaves the
+/// workspace unchanged. The byte accounting deliberately includes the later
+/// replay-access ledger because sparse preparation and final staging retain
+/// both views at the same time.
+#[derive(Debug)]
+pub struct RelationalSparseWorkspaceBuilder {
+    rows: BTreeMap<RelationalReplayAccess, Option<RelationalRow>>,
+    resident_bytes: usize,
+    limits: RelationalRowChangeCaptureLimits,
+}
+
+impl RelationalSparseWorkspaceBuilder {
+    pub fn new(limits: RelationalRowChangeCaptureLimits) -> Self {
+        Self {
+            rows: BTreeMap::new(),
+            resident_bytes: 0,
+            limits,
+        }
+    }
+
+    pub fn contains(&self, access: &RelationalReplayAccess) -> bool {
+        self.rows.contains_key(access)
+    }
+
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    pub fn resident_bytes(&self) -> usize {
+        self.resident_bytes
+    }
+
+    pub fn remaining_entries(&self) -> usize {
+        self.limits
+            .max_entries
+            .get()
+            .saturating_sub(self.rows.len())
+    }
+
+    pub fn insert(
+        &mut self,
+        hydrated: RelationalSparseRecoveryRow,
+    ) -> Result<bool, RelationalError> {
+        let access = RelationalReplayAccess {
+            table: hydrated.table.clone(),
+            primary_key: hydrated.primary_key.clone(),
+        };
+        if let Some(existing) = self.rows.get(&access) {
+            if existing == &hydrated.row {
+                return Ok(false);
+            }
+            return Err(RelationalError::Corruption(format!(
+                "sparse relational live hydration returned conflicting values for {:?} in table {}",
+                access.primary_key, access.table
+            )));
+        }
+        let next_entries = self.rows.len().checked_add(1).ok_or_else(|| {
+            RelationalError::Admission(
+                "sparse relational live workspace entry count overflow".to_string(),
+            )
+        })?;
+        if next_entries > self.limits.max_entries.get() {
+            return Err(RelationalError::Admission(format!(
+                "sparse relational live workspace requires {next_entries} entries, exceeding limit {}",
+                self.limits.max_entries
+            )));
+        }
+        let entry_bytes = relational_sparse_recovery_entry_bytes(&hydrated).ok_or_else(|| {
+            RelationalError::Admission(
+                "sparse relational live workspace byte count overflow".to_string(),
+            )
+        })?;
+        let access_bytes = relational_replay_access_resident_bytes(&access).ok_or_else(|| {
+            RelationalError::Admission(
+                "sparse relational live workspace byte count overflow".to_string(),
+            )
+        })?;
+        let next_bytes = self
+            .resident_bytes
+            .checked_add(entry_bytes)
+            .and_then(|bytes| bytes.checked_add(access_bytes))
+            .ok_or_else(|| {
+                RelationalError::Admission(
+                    "sparse relational live workspace byte count overflow".to_string(),
+                )
+            })?;
+        if next_bytes > self.limits.max_bytes.get() {
+            return Err(RelationalError::Admission(format!(
+                "sparse relational live workspace requires {next_bytes} bytes, exceeding limit {}",
+                self.limits.max_bytes
+            )));
+        }
+        self.rows.insert(access, hydrated.row);
+        self.resident_bytes = next_bytes;
+        Ok(true)
+    }
+
+    pub fn snapshot(&self) -> Vec<RelationalSparseRecoveryRow> {
+        self.rows
+            .iter()
+            .map(|(access, row)| RelationalSparseRecoveryRow {
+                table: access.table.clone(),
+                primary_key: access.primary_key.clone(),
+                row: row.clone(),
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug)]
 pub struct RelationalSparseRecoveryStage<'a> {
     pub transaction: RelationalTransaction,

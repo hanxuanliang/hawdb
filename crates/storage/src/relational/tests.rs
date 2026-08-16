@@ -93,6 +93,71 @@ impl RelationalConstraintIndex for TestConstraintIndex {
 }
 
 #[test]
+fn sparse_workspace_builder_admits_entries_and_bytes_atomically() {
+    let first = RelationalSparseRecoveryRow {
+        table: "documents".to_string(),
+        primary_key: RelationalKey(vec![RelationalValue::Text("first".to_string())]),
+        row: Some(document_row("first")),
+    };
+    let first_access = RelationalReplayAccess {
+        table: first.table.clone(),
+        primary_key: first.primary_key.clone(),
+    };
+    let first_bytes = relational_sparse_recovery_entry_bytes(&first)
+        .unwrap()
+        .checked_add(relational_replay_access_resident_bytes(&first_access).unwrap())
+        .unwrap();
+    let limits = RelationalRowChangeCaptureLimits {
+        max_entries: NonZeroUsize::new(2).unwrap(),
+        max_bytes: NonZeroUsize::new(first_bytes).unwrap(),
+    };
+    let mut workspace = RelationalSparseWorkspaceBuilder::new(limits);
+    assert!(workspace.insert(first.clone()).unwrap());
+    let resident_bytes = workspace.resident_bytes();
+
+    let second = RelationalSparseRecoveryRow {
+        table: "documents".to_string(),
+        primary_key: RelationalKey(vec![RelationalValue::Text("second".to_string())]),
+        row: Some(document_row("second")),
+    };
+    let error = workspace.insert(second.clone()).unwrap_err();
+    assert!(matches!(error, RelationalError::Admission(message) if message.contains("bytes")));
+    assert_eq!(workspace.len(), 1);
+    assert_eq!(workspace.resident_bytes(), resident_bytes);
+    assert!(!workspace.contains(&RelationalReplayAccess {
+        table: second.table,
+        primary_key: second.primary_key,
+    }));
+    assert_eq!(workspace.snapshot(), vec![first]);
+}
+
+#[test]
+fn sparse_workspace_builder_rejects_conflicting_duplicate_hydration() {
+    let limits = RelationalRowChangeCaptureLimits {
+        max_entries: NonZeroUsize::new(1).unwrap(),
+        max_bytes: NonZeroUsize::new(1024 * 1024).unwrap(),
+    };
+    let mut workspace = RelationalSparseWorkspaceBuilder::new(limits);
+    let missing = RelationalSparseRecoveryRow {
+        table: "documents".to_string(),
+        primary_key: RelationalKey(vec![RelationalValue::Text("same".to_string())]),
+        row: None,
+    };
+    assert!(workspace.insert(missing.clone()).unwrap());
+    assert!(!workspace.insert(missing.clone()).unwrap());
+    let error = workspace
+        .insert(RelationalSparseRecoveryRow {
+            row: Some(document_row("same")),
+            ..missing.clone()
+        })
+        .unwrap_err();
+    assert!(
+        matches!(error, RelationalError::Corruption(message) if message.contains("conflicting"))
+    );
+    assert_eq!(workspace.snapshot(), vec![missing]);
+}
+
+#[test]
 fn snapshots_share_untouched_segments_and_keep_old_rows_visible() {
     let store = RelationalStore::default();
     store
