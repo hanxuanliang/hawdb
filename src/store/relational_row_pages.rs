@@ -3512,7 +3512,7 @@ mod tests {
         .unwrap_err();
         assert!(error
             .to_string()
-            .contains("canonical relational row-page generation manifest integrity mismatch"));
+            .contains("row-page generation manifest does not match its canonical binding"));
 
         std::fs::remove_dir_all(path).unwrap();
     }

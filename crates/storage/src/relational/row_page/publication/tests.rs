@@ -118,6 +118,55 @@ fn persisted_row_candidate_does_not_change_latest_selection() {
 }
 
 #[test]
+fn bound_row_generation_verifies_the_canonical_manifest_image() {
+    let directory = unique_test_dir("bound-generation");
+    let config = RelationalRowPagePublicationConfig::default();
+    let report = RelationalRowPagePublisher::new(config)
+        .persist_generation(
+            RelationalRowPageGenerationRequest {
+                directory: &directory,
+                generation: 1,
+                source_commit_epoch: 10,
+                base: None,
+                expected_previous_generation: None,
+                overflow_root: None,
+            },
+            vec![table_delta("documents", vec![page(1, 1, 10, 1, 2)])],
+        )
+        .unwrap();
+
+    let reader = RelationalRowPageRootReader::open_bound_generation(
+        &directory,
+        report.generation_artifacts,
+        config,
+    )
+    .unwrap();
+    assert_eq!(reader.manifest().generation, 1);
+
+    let mut wrong_manifest = report.generation_artifacts;
+    wrong_manifest.manifest_artifact.encoded_crc32c ^= 1;
+    assert!(matches!(
+        RelationalRowPageRootReader::open_bound_generation(
+            &directory,
+            wrong_manifest,
+            config,
+        ),
+        Err(RelationalRowPagePublicationError::Corrupt(message))
+            if message.contains("canonical binding")
+    ));
+
+    let mut wrong_root = report.generation_artifacts;
+    wrong_root.root_set_digest = integrity_digest(b"wrong row root").sha256;
+    assert!(matches!(
+        RelationalRowPageRootReader::open_bound_generation(&directory, wrong_root, config),
+        Err(RelationalRowPagePublicationError::Corrupt(message))
+            if message.contains("identity")
+    ));
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn generation_manifest_replace_failure_leaves_the_canonical_row_root_unselected() {
     let directory = unique_test_dir("generation-manifest-replace-failure");
     let config = RelationalRowPagePublicationConfig::default();

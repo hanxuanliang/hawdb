@@ -10,9 +10,9 @@ use super::super::{
 };
 use super::{
     decode_bytes, decode_utf8, encode_relational_key, read_bounded_file, read_u16, read_u32,
-    read_u64, take, RelationalIndexGenerationIdentity, RelationalIndexReadLimits,
-    RelationalIndexReadReport, RelationalIndexShadowConfig, RelationalIndexShadowError,
-    RelationalIndexShadowReader,
+    read_u64, take, RelationalIndexGenerationArtifacts, RelationalIndexGenerationIdentity,
+    RelationalIndexReadLimits, RelationalIndexReadReport, RelationalIndexShadowConfig,
+    RelationalIndexShadowError, RelationalIndexShadowReader,
 };
 use crate::{
     durable_replace_file, ContentDigest, ManifestGeneration, RepresentationKind, SegmentCache,
@@ -645,6 +645,32 @@ impl RelationalIndexRecoveryReader {
         let base = RelationalIndexShadowReader::open_generation_with_cache(
             directory,
             expected_base,
+            shadow_config,
+            Arc::clone(&page_cache),
+            store_id,
+        )?;
+        Self::open_with_base(
+            directory,
+            base,
+            expected_recovery,
+            recovery_config,
+            Some(page_cache),
+            store_id,
+        )
+    }
+
+    pub fn open_bound_generation_with_cache(
+        directory: &Path,
+        base_binding: RelationalIndexGenerationArtifacts,
+        expected_recovery: RelationalRecoveryFence,
+        shadow_config: RelationalIndexShadowConfig,
+        recovery_config: RelationalIndexRecoveryConfig,
+        page_cache: Arc<SegmentCache>,
+        store_id: StoreId,
+    ) -> Result<Self, RelationalIndexShadowError> {
+        let base = RelationalIndexShadowReader::open_bound_generation_with_cache(
+            directory,
+            base_binding,
             shadow_config,
             Arc::clone(&page_cache),
             store_id,

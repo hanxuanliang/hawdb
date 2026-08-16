@@ -2,7 +2,7 @@ use super::{
     durability, RelationalRowPageArtifactMetadata, RelationalRowPagePublicationConfig,
     RelationalRowPagePublicationError, RelationalRowPageRootManifest, RelationalRowPageTableRoot,
 };
-use skein_integrity::{IntegrityHasher, Sha256Digest, SHA256_BYTES};
+use skein_integrity::{integrity_digest, IntegrityHasher, Sha256Digest, SHA256_BYTES};
 use std::fs::{self, File};
 use std::io::Read;
 use std::num::{NonZeroU32, NonZeroU64};
@@ -106,10 +106,49 @@ pub(super) fn read_manifest(
     path: &Path,
     config: RelationalRowPagePublicationConfig,
 ) -> Result<RelationalRowPageRootManifest, RelationalRowPagePublicationError> {
-    let encoded_len = fs::metadata(path)
+    let encoded = read_encoded_manifest(path, config)?;
+    decode_manifest(&encoded, config)
+}
+
+pub(super) fn read_bound_manifest(
+    path: &Path,
+    config: RelationalRowPagePublicationConfig,
+    expected: RelationalRowPageArtifactMetadata,
+) -> Result<RelationalRowPageRootManifest, RelationalRowPagePublicationError> {
+    let encoded = read_encoded_manifest(path, config)?;
+    let digest = integrity_digest(&encoded);
+    if encoded.len() as u64 != expected.encoded_len
+        || digest.crc32c.get() != expected.encoded_crc32c
+        || digest.sha256 != expected.encoded_sha256
+    {
+        return Err(RelationalRowPagePublicationError::Corrupt(
+            "row-page generation manifest does not match its canonical binding".to_string(),
+        ));
+    }
+    decode_manifest(&encoded, config)
+}
+
+fn read_encoded_manifest(
+    path: &Path,
+    config: RelationalRowPagePublicationConfig,
+) -> Result<Vec<u8>, RelationalRowPagePublicationError> {
+    let max_bytes = config.max_manifest_bytes.get();
+    let max_bytes_u64 = u64::try_from(max_bytes).map_err(|_| {
+        RelationalRowPagePublicationError::Admission(
+            "row-page manifest limit overflows u64".to_string(),
+        )
+    })?;
+    let read_limit = max_bytes_u64.checked_add(1).ok_or_else(|| {
+        RelationalRowPagePublicationError::Admission(
+            "row-page manifest read limit overflows u64".to_string(),
+        )
+    })?;
+    let file = File::open(path).map_err(durability("open row-page manifest"))?;
+    let encoded_len = file
+        .metadata()
         .map_err(durability("read row-page manifest metadata"))?
         .len();
-    if encoded_len > config.max_manifest_bytes.get() as u64 {
+    if encoded_len > max_bytes_u64 {
         return Err(RelationalRowPagePublicationError::Admission(format!(
             "row-page manifest contains {encoded_len} bytes, exceeding limit {}",
             config.max_manifest_bytes
@@ -121,11 +160,16 @@ pub(super) fn read_manifest(
         )
     })?;
     let mut encoded = Vec::with_capacity(capacity);
-    File::open(path)
-        .map_err(durability("open row-page manifest"))?
+    file.take(read_limit)
         .read_to_end(&mut encoded)
         .map_err(durability("read row-page manifest"))?;
-    decode_manifest(&encoded, config)
+    if encoded.len() > max_bytes {
+        return Err(RelationalRowPagePublicationError::Admission(format!(
+            "row-page manifest exceeds limit {}",
+            config.max_manifest_bytes
+        )));
+    }
+    Ok(encoded)
 }
 
 fn decode_manifest(

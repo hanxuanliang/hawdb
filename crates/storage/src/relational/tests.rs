@@ -2781,6 +2781,86 @@ fn relational_index_shadow_publishes_generation_fenced_cold_pages() {
 }
 
 #[test]
+fn relational_index_bound_open_verifies_one_canonical_manifest_image() {
+    let state = RelationalState::default()
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![
+                    RelationalWrite::CreateTable(RelationalTableSchema {
+                        name: "documents".to_string(),
+                        columns: vec![text_column("id", false), text_column("owner", false)],
+                        primary_key: vec!["id".to_string()],
+                        unique_constraints: Vec::new(),
+                        foreign_keys: Vec::new(),
+                        indexes: vec![RelationalIndexSchema {
+                            name: "documents_owner_idx".to_string(),
+                            columns: vec!["owner".to_string()],
+                            unique: false,
+                        }],
+                    }),
+                    RelationalWrite::Insert {
+                        table: "documents".to_string(),
+                        rows: vec![RelationalRow::new(vec![
+                            RelationalValue::Text("doc-1".to_string()),
+                            RelationalValue::Text("owner-1".to_string()),
+                        ])],
+                        mode: RelationalInsertMode::Error,
+                    },
+                ],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("build bound relational index source");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "skein-relational-index-bound-{}-{nonce}",
+        std::process::id()
+    ));
+    let config = RelationalIndexShadowConfig::default();
+    let report = RelationalIndexShadowWriter::new(config)
+        .publish_generation(&directory, &state, 1, 40)
+        .expect("publish bound relational index generation");
+
+    let reader = RelationalIndexShadowReader::open_bound_generation(
+        &directory,
+        report.generation_artifacts,
+        config,
+    )
+    .expect("open exact canonical index binding");
+    assert_eq!(reader.manifest().generation, 1);
+
+    let mut wrong_manifest = report.generation_artifacts;
+    wrong_manifest.manifest_artifact.encoded_crc32c ^= 1;
+    assert!(matches!(
+        RelationalIndexShadowReader::open_bound_generation(
+            &directory,
+            wrong_manifest,
+            config,
+        ),
+        Err(RelationalIndexShadowError::Corrupt(message))
+            if message.contains("canonical binding")
+    ));
+
+    let mut wrong_page_length = report.generation_artifacts;
+    wrong_page_length.page_artifact.encoded_len += 1;
+    assert!(matches!(
+        RelationalIndexShadowReader::open_bound_generation(
+            &directory,
+            wrong_page_length,
+            config,
+        ),
+        Err(RelationalIndexShadowError::Corrupt(message))
+            if message.contains("identity")
+    ));
+
+    std::fs::remove_dir_all(directory).expect("remove bound relational index fixture");
+}
+
+#[test]
 fn relational_index_shadow_streams_rows_without_materialized_postings() {
     let mut state = RelationalState::default()
         .stage_transaction(

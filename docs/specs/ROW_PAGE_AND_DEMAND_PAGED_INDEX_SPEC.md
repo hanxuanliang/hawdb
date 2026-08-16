@@ -228,13 +228,15 @@ all-absent binding; partially present identity or artifact metadata is invalid.
 
 These artifacts remain non-authoritative in `Shadow` and `DemandPaged` modes.
 The canonical checkpoint does not depend on their optional reverse reference
-in those modes. Open selects only the bound generation and verifies
-the complete bounded generation manifest bytes against its length, CRC32C, and
-SHA-256, then verifies its internal generation/source-epoch, catalog schema,
-exact root set, and page artifact length. It does not scan the page artifact to
-recompute its full digest during normal open. An unbound candidate, including a
-legacy latest-pointer manifest whose epoch happens to match the checkpoint, is
-never selected. A missing, extra, renamed,
+in those modes. Open selects only the bound generation and reads its bounded
+generation manifest into one byte image. That same image is verified against
+the outer length, CRC32C, and SHA-256 binding and then decoded to verify its
+internal generation/source-epoch, catalog schema, exact root set, and page
+artifact length. Open MUST NOT verify one read and decode a second read of the
+same manifest. It does not scan the page artifact to recompute its full digest
+during normal open. An unbound candidate, including a legacy latest-pointer
+manifest whose epoch happens to match the checkpoint, is never selected. A
+missing, extra, renamed,
 re-roled, schema-drifted, or manifest-corrupt root rejects the candidate. A
 corrupt selected candidate does not prevent canonical open in `Shadow` mode.
 In `DemandPaged` mode, an integrity failure for the explicitly selected
@@ -1006,11 +1008,13 @@ selector. It opens only the exact bound generations and rejects the database if
 a selected generation manifest is missing, corrupt, or identity-mismatched.
 Unbound future candidates are ignored and reclaimed by writable open.
 
-Mounting validates the outer generation-manifest length, CRC32C, and SHA-256,
-then reads the bounded row and overflow manifests and exact current-generation
-artifact file lengths. It verifies row-to-overflow binding and table schemas,
-but does not read row-page slots or hash database-scale payload artifacts.
-Descriptor and page integrity checks remain demand-read or scrub obligations.
+Mounting reads each bounded row and overflow generation manifest exactly once.
+For each manifest, the same bounded byte image validates the outer length,
+CRC32C, and SHA-256 binding and supplies the internal decode. Mounting then
+checks exact current-generation artifact file lengths, row-to-overflow binding,
+and table schemas, but does not read row-page slots or hash database-scale
+payload artifacts. Descriptor and page integrity checks remain demand-read or
+scrub obligations.
 
 An `OutOfCore` plus `Authoritative` handle builds a metadata-only
 `RelationalState` directly from the validated row root. With an empty

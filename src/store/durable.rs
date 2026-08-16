@@ -2197,33 +2197,12 @@ impl DurableStore {
                         .to_string(),
                 )
             })?;
-        let manifest_path =
-            self.root_path
-                .join(skein_storage::relational_overflow_manifest_generation_file(
-                    binding.generation,
-                ));
-        verify_bound_generation_manifest(
-            &manifest_path,
-            binding.manifest_artifact.encoded_len,
-            binding.manifest_artifact.encoded_crc32c,
-            binding.manifest_artifact.encoded_sha256,
-            "relational overflow",
-        )?;
-        let reader = skein_storage::RelationalOverflowRootReader::open_generation(
+        let reader = skein_storage::RelationalOverflowRootReader::open_bound_generation(
             &self.root_path,
-            binding.generation,
+            binding,
             skein_storage::RelationalOverflowPublicationConfig::default(),
         )
         .map_err(|error| SkeinError::Storage(error.to_string()))?;
-        let manifest = reader.manifest();
-        if manifest.source_commit_epoch != binding.source_commit_epoch
-            || manifest.root_set_digest != binding.root_set_digest
-        {
-            return Err(SkeinError::Storage(
-                "relational overflow generation identity differs from canonical binding"
-                    .to_string(),
-            ));
-        }
         Ok(reader)
     }
 
@@ -2236,21 +2215,9 @@ impl DurableStore {
                 "published checkpoint has no relational row-page generation binding".to_string(),
             )
         })?;
-        let manifest_path =
-            self.root_path
-                .join(skein_storage::relational_row_page_manifest_generation_file(
-                    binding.generation,
-                ));
-        verify_bound_generation_manifest(
-            &manifest_path,
-            binding.manifest_artifact.encoded_len,
-            binding.manifest_artifact.encoded_crc32c,
-            binding.manifest_artifact.encoded_sha256,
-            "relational row-page",
-        )?;
-        let reader = skein_storage::RelationalRowPageRootReader::open_generation(
+        let reader = skein_storage::RelationalRowPageRootReader::open_bound_generation(
             &self.root_path,
-            binding.generation,
+            binding,
             skein_storage::RelationalRowPagePublicationConfig::default(),
         )
         .map_err(|error| SkeinError::Storage(error.to_string()))?;
@@ -2748,25 +2715,6 @@ pub(super) fn artifact_metadata_presence_consistent(
 ) -> bool {
     let present = encoded_len.is_some();
     encoded_checksum.is_some() == present && encoded_sha256.is_some() == present
-}
-
-fn verify_bound_generation_manifest(
-    path: &Path,
-    expected_len: u64,
-    expected_checksum: u32,
-    expected_sha256: Sha256Digest,
-    artifact: &str,
-) -> Result<()> {
-    let (actual_len, actual_checksum, actual_sha256) = file_checksum(path)?;
-    if actual_len != expected_len
-        || actual_checksum != u64::from(expected_checksum)
-        || actual_sha256 != expected_sha256
-    {
-        return Err(SkeinError::Storage(format!(
-            "canonical {artifact} generation manifest integrity mismatch"
-        )));
-    }
-    Ok(())
 }
 
 impl Default for DurableManifest {

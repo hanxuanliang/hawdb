@@ -21,7 +21,7 @@ use skein_integrity::{
 };
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -898,6 +898,72 @@ impl RelationalIndexShadowReader {
         store_id: StoreId,
     ) -> Result<Self, RelationalIndexShadowError> {
         Self::open_generation_inner(directory, expected, config, Some(page_cache), store_id)
+    }
+
+    pub fn open_bound_generation(
+        directory: &Path,
+        binding: RelationalIndexGenerationArtifacts,
+        config: RelationalIndexShadowConfig,
+    ) -> Result<Self, RelationalIndexShadowError> {
+        Self::open_bound_generation_inner(directory, binding, config, None, StoreId::default())
+    }
+
+    pub fn open_bound_generation_with_cache(
+        directory: &Path,
+        binding: RelationalIndexGenerationArtifacts,
+        config: RelationalIndexShadowConfig,
+        page_cache: Arc<SegmentCache>,
+        store_id: StoreId,
+    ) -> Result<Self, RelationalIndexShadowError> {
+        Self::open_bound_generation_inner(directory, binding, config, Some(page_cache), store_id)
+    }
+
+    fn open_bound_generation_inner(
+        directory: &Path,
+        binding: RelationalIndexGenerationArtifacts,
+        config: RelationalIndexShadowConfig,
+        page_cache: Option<Arc<SegmentCache>>,
+        store_id: StoreId,
+    ) -> Result<Self, RelationalIndexShadowError> {
+        let manifest_path = directory.join(relational_index_shadow_manifest_generation_file(
+            binding.generation,
+        ));
+        let encoded = read_bounded_file(
+            &manifest_path,
+            config.max_manifest_bytes.get(),
+            "bound relational index manifest",
+        )?;
+        let digest = integrity_digest(&encoded);
+        if encoded.len() as u64 != binding.manifest_artifact.encoded_len
+            || digest.crc32c.as_u64() != binding.manifest_artifact.encoded_crc32c
+            || digest.sha256 != binding.manifest_artifact.encoded_sha256
+        {
+            return Err(RelationalIndexShadowError::Corrupt(
+                "relational index generation manifest does not match its canonical binding"
+                    .to_string(),
+            ));
+        }
+        let manifest = RelationalIndexShadowManifest::decode(&encoded, config)?;
+        let expected_page_bytes = manifest
+            .page_count
+            .checked_mul(manifest.page_bytes)
+            .ok_or_else(|| {
+                RelationalIndexShadowError::Corrupt(
+                    "relational index shadow artifact size overflow".to_string(),
+                )
+            })?;
+        if manifest.generation != binding.generation
+            || manifest.source_commit_epoch != binding.source_commit_epoch
+            || manifest.catalog_schema_digest != binding.catalog_schema_digest
+            || manifest.root_set_digest != binding.root_set_digest
+            || expected_page_bytes != binding.page_artifact.encoded_len
+        {
+            return Err(RelationalIndexShadowError::Corrupt(
+                "relational index generation identity does not match its canonical binding"
+                    .to_string(),
+            ));
+        }
+        Self::from_manifest(directory, manifest, config, page_cache, store_id)
     }
 
     fn open_generation_inner(
@@ -2148,15 +2214,35 @@ fn read_bounded_file(
     max_bytes: usize,
     context: &str,
 ) -> Result<Vec<u8>, RelationalIndexShadowError> {
-    let len = fs::metadata(path)
+    let max_bytes_u64 = u64::try_from(max_bytes).map_err(|_| {
+        RelationalIndexShadowError::Admission(format!("{context} limit overflows u64"))
+    })?;
+    let read_limit = max_bytes_u64.checked_add(1).ok_or_else(|| {
+        RelationalIndexShadowError::Admission(format!("{context} read limit overflows u64"))
+    })?;
+    let file = File::open(path).map_err(durability("open bounded file"))?;
+    let encoded_len = file
+        .metadata()
         .map_err(durability("inspect bounded file"))?
         .len();
-    if len > max_bytes as u64 {
+    if encoded_len > max_bytes_u64 {
         return Err(RelationalIndexShadowError::Admission(format!(
-            "{context} contains {len} bytes, exceeding limit {max_bytes}"
+            "{context} contains {encoded_len} bytes, exceeding limit {max_bytes}"
         )));
     }
-    fs::read(path).map_err(durability("read bounded file"))
+    let capacity = usize::try_from(encoded_len).map_err(|_| {
+        RelationalIndexShadowError::Admission(format!("{context} length overflows usize"))
+    })?;
+    let mut encoded = Vec::with_capacity(capacity);
+    file.take(read_limit)
+        .read_to_end(&mut encoded)
+        .map_err(durability("read bounded file"))?;
+    if encoded.len() > max_bytes {
+        return Err(RelationalIndexShadowError::Admission(format!(
+            "{context} exceeds limit {max_bytes}"
+        )));
+    }
+    Ok(encoded)
 }
 
 fn encode_bytes(encoded: &mut Vec<u8>, bytes: &[u8]) -> Result<(), RelationalIndexShadowError> {

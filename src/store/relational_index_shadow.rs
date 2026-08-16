@@ -21,29 +21,30 @@ pub(crate) use transaction::RelationalTransactionIndexView;
 
 use super::{GraphStore, RelationalIndexStorageResidencyReport, SkeinError};
 use skein_core::RuntimeTaskContext;
-use skein_integrity::{integrity_digest, IntegrityHasher, Sha256Digest};
+use skein_integrity::{IntegrityHasher, Sha256Digest};
+#[cfg(test)]
+use skein_storage::relational_index_shadow_artifact_file;
 use skein_storage::{
-    relational_index_shadow_artifact_file, relational_index_shadow_manifest_generation_file,
-    RelationalCheckpointIndexLoad, RelationalHydrationBudget, RelationalIndexChange,
-    RelationalIndexChangeCapture, RelationalIndexChangeCaptureLimits, RelationalIndexChangeKind,
-    RelationalIndexGenerationArtifacts, RelationalIndexGenerationIdentity, RelationalIndexMode,
-    RelationalIndexReadLimits, RelationalIndexReadReport, RelationalIndexRecoveryBuilder,
-    RelationalIndexRecoveryConfig, RelationalIndexRecoveryReadReport,
-    RelationalIndexRecoveryReader, RelationalIndexRecoveryReport, RelationalIndexRole,
-    RelationalIndexRowSource, RelationalIndexShadowBuildReport, RelationalIndexShadowConfig,
-    RelationalIndexShadowError, RelationalIndexShadowManifest, RelationalIndexShadowReader,
-    RelationalIndexShadowWriter, RelationalKey, RelationalOverflowPublicationConfig,
-    RelationalOverflowRootReader, RelationalRecoveryFence, RelationalRecoverySourceIdentity,
-    RelationalReplayAccessSet, RelationalRow, RelationalRowPageProjectedRange,
-    RelationalRowPagePublicationConfig, RelationalRowPageReadView, RelationalRowPageRootReader,
-    RelationalRowPageSnapshotReadError, RelationalRowPageSnapshotReadLimits,
-    RelationalRowPageSnapshotReader, RelationalScalarType, RelationalSparseRecoveryStage,
-    RelationalState, RelationalTableSchema, RelationalTransaction, RelationalValue,
-    StorageResidencyMode, RELATIONAL_PRIMARY_INDEX_NAME,
+    relational_index_shadow_manifest_generation_file, RelationalCheckpointIndexLoad,
+    RelationalHydrationBudget, RelationalIndexChange, RelationalIndexChangeCapture,
+    RelationalIndexChangeCaptureLimits, RelationalIndexChangeKind,
+    RelationalIndexGenerationArtifacts, RelationalIndexMode, RelationalIndexReadLimits,
+    RelationalIndexReadReport, RelationalIndexRecoveryBuilder, RelationalIndexRecoveryConfig,
+    RelationalIndexRecoveryReadReport, RelationalIndexRecoveryReader,
+    RelationalIndexRecoveryReport, RelationalIndexRole, RelationalIndexRowSource,
+    RelationalIndexShadowBuildReport, RelationalIndexShadowConfig, RelationalIndexShadowError,
+    RelationalIndexShadowManifest, RelationalIndexShadowReader, RelationalIndexShadowWriter,
+    RelationalKey, RelationalOverflowPublicationConfig, RelationalOverflowRootReader,
+    RelationalRecoveryFence, RelationalRecoverySourceIdentity, RelationalReplayAccessSet,
+    RelationalRow, RelationalRowPageProjectedRange, RelationalRowPagePublicationConfig,
+    RelationalRowPageReadView, RelationalRowPageRootReader, RelationalRowPageSnapshotReadError,
+    RelationalRowPageSnapshotReadLimits, RelationalRowPageSnapshotReader, RelationalScalarType,
+    RelationalSparseRecoveryStage, RelationalState, RelationalTableSchema, RelationalTransaction,
+    RelationalValue, StorageResidencyMode, RELATIONAL_PRIMARY_INDEX_NAME,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt, fs,
+    fmt,
     num::NonZeroUsize,
     ops::Bound,
     sync::Arc,
@@ -51,15 +52,6 @@ use std::{
 
 pub const RELATIONAL_INDEX_VIEW_QUALIFICATION_PROTOCOL: &str =
     "skein-relational-index-view-qualification-v1";
-
-const fn relational_index_generation_identity(
-    artifacts: RelationalIndexGenerationArtifacts,
-) -> RelationalIndexGenerationIdentity {
-    RelationalIndexGenerationIdentity {
-        generation: artifacts.generation,
-        source_commit_epoch: artifacts.source_commit_epoch,
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RelationalIndexQualificationProbeKind {
@@ -1299,22 +1291,13 @@ impl GraphStore {
                     .to_string(),
             ));
         }
-        validate_bounded_relational_index_generation(durable.root_path(), generation_artifacts)?;
-        let reader = RelationalIndexShadowReader::open_generation_with_cache(
+        let reader = RelationalIndexShadowReader::open_bound_generation_with_cache(
             durable.root_path(),
-            relational_index_generation_identity(generation_artifacts),
+            generation_artifacts,
             RelationalIndexShadowConfig::default(),
             Arc::clone(&durable.segment_cache),
             durable.store_id(),
         )?;
-        let manifest = reader.manifest();
-        if manifest.catalog_schema_digest != generation_artifacts.catalog_schema_digest
-            || manifest.root_set_digest != generation_artifacts.root_set_digest
-        {
-            return Err(RelationalIndexShadowError::Corrupt(
-                "relational index manifest digests do not match the canonical binding".to_string(),
-            ));
-        }
         reader.validate_required_roots(&self.relational_state)?;
         Ok(Arc::new(RelationalIndexReadView::from_base(reader)))
     }
@@ -1337,9 +1320,9 @@ impl GraphStore {
                     "canonical manifest does not bind a relational index generation".to_string(),
                 )
             })?;
-        let reader = RelationalIndexRecoveryReader::open_generation_with_cache(
+        let reader = RelationalIndexRecoveryReader::open_bound_generation_with_cache(
             durable.root_path(),
-            relational_index_generation_identity(generation_artifacts),
+            generation_artifacts,
             RelationalRecoveryFence::new(recovered_commit_epoch, expected_recovery_source),
             RelationalIndexShadowConfig::default(),
             RelationalIndexRecoveryConfig::default(),
@@ -2053,51 +2036,6 @@ impl GraphStore {
                 reason,
             };
     }
-}
-
-fn validate_bounded_relational_index_generation(
-    root: &std::path::Path,
-    binding: RelationalIndexGenerationArtifacts,
-) -> Result<(), RelationalIndexShadowError> {
-    let config = RelationalIndexShadowConfig::default();
-    if binding.manifest_artifact.encoded_len > config.max_manifest_bytes.get() as u64 {
-        return Err(RelationalIndexShadowError::Corrupt(format!(
-            "canonical relational index manifest binding contains {} bytes, exceeding limit {}",
-            binding.manifest_artifact.encoded_len, config.max_manifest_bytes,
-        )));
-    }
-    let manifest_path = root.join(relational_index_shadow_manifest_generation_file(
-        binding.generation,
-    ));
-    let encoded = fs::read(&manifest_path).map_err(|error| {
-        RelationalIndexShadowError::Durability(format!(
-            "read canonical relational index generation manifest: {error}"
-        ))
-    })?;
-    let digest = integrity_digest(&encoded);
-    if encoded.len() as u64 != binding.manifest_artifact.encoded_len
-        || digest.crc32c.as_u64() != binding.manifest_artifact.encoded_crc32c
-        || digest.sha256 != binding.manifest_artifact.encoded_sha256
-    {
-        return Err(RelationalIndexShadowError::Corrupt(
-            "relational index generation manifest does not match the canonical binding".to_string(),
-        ));
-    }
-    let page_path = root.join(relational_index_shadow_artifact_file(binding.generation));
-    let page_len = fs::metadata(page_path)
-        .map_err(|error| {
-            RelationalIndexShadowError::Durability(format!(
-                "inspect canonical relational index page artifact: {error}"
-            ))
-        })?
-        .len();
-    if page_len != binding.page_artifact.encoded_len {
-        return Err(RelationalIndexShadowError::Corrupt(format!(
-            "relational index page artifact length {page_len} does not match canonical binding {}",
-            binding.page_artifact.encoded_len,
-        )));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

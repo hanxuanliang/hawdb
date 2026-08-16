@@ -63,10 +63,49 @@ pub(super) fn read_manifest(
     path: &Path,
     config: RelationalOverflowPublicationConfig,
 ) -> Result<RelationalOverflowRootManifest, RelationalOverflowPublicationError> {
-    let encoded_len = fs::metadata(path)
+    let encoded = read_encoded_manifest(path, config)?;
+    decode_manifest(&encoded, config)
+}
+
+pub(super) fn read_bound_manifest(
+    path: &Path,
+    config: RelationalOverflowPublicationConfig,
+    expected: RelationalOverflowArtifactMetadata,
+) -> Result<RelationalOverflowRootManifest, RelationalOverflowPublicationError> {
+    let encoded = read_encoded_manifest(path, config)?;
+    let digest = integrity_digest(&encoded);
+    if encoded.len() as u64 != expected.encoded_len
+        || digest.crc32c.get() != expected.encoded_crc32c
+        || digest.sha256 != expected.encoded_sha256
+    {
+        return Err(RelationalOverflowPublicationError::Corrupt(
+            "overflow generation manifest does not match its canonical binding".to_string(),
+        ));
+    }
+    decode_manifest(&encoded, config)
+}
+
+fn read_encoded_manifest(
+    path: &Path,
+    config: RelationalOverflowPublicationConfig,
+) -> Result<Vec<u8>, RelationalOverflowPublicationError> {
+    let max_bytes = config.max_manifest_bytes.get();
+    let max_bytes_u64 = u64::try_from(max_bytes).map_err(|_| {
+        RelationalOverflowPublicationError::Admission(
+            "overflow manifest limit overflows u64".to_string(),
+        )
+    })?;
+    let read_limit = max_bytes_u64.checked_add(1).ok_or_else(|| {
+        RelationalOverflowPublicationError::Admission(
+            "overflow manifest read limit overflows u64".to_string(),
+        )
+    })?;
+    let file = File::open(path).map_err(durability("open overflow manifest"))?;
+    let encoded_len = file
+        .metadata()
         .map_err(durability("read overflow manifest metadata"))?
         .len();
-    if encoded_len > config.max_manifest_bytes.get() as u64 {
+    if encoded_len > max_bytes_u64 {
         return Err(RelationalOverflowPublicationError::Admission(format!(
             "overflow manifest contains {encoded_len} bytes, exceeding limit {}",
             config.max_manifest_bytes
@@ -78,11 +117,16 @@ pub(super) fn read_manifest(
         )
     })?;
     let mut encoded = Vec::with_capacity(capacity);
-    File::open(path)
-        .map_err(durability("open overflow manifest"))?
+    file.take(read_limit)
         .read_to_end(&mut encoded)
         .map_err(durability("read overflow manifest"))?;
-    decode_manifest(&encoded, config)
+    if encoded.len() > max_bytes {
+        return Err(RelationalOverflowPublicationError::Admission(format!(
+            "overflow manifest exceeds limit {}",
+            config.max_manifest_bytes
+        )));
+    }
+    Ok(encoded)
 }
 
 fn decode_manifest(

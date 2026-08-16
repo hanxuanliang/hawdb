@@ -86,6 +86,46 @@ fn persisted_overflow_candidate_does_not_change_latest_selection() {
 }
 
 #[test]
+fn bound_overflow_generation_verifies_the_canonical_manifest_image() {
+    let directory = unique_test_dir("bound-generation");
+    let config = RelationalOverflowPublicationConfig::default();
+    let (input, reference) = encoded_input(RelationalScalarType::Text, b"bound payload");
+    let report = RelationalOverflowPublisher::new(config)
+        .persist_generation(&directory, 1, 10, None, None, vec![input])
+        .unwrap();
+
+    let reader = RelationalOverflowRootReader::open_bound_generation(
+        &directory,
+        report.generation_artifacts,
+        config,
+    )
+    .unwrap();
+    assert!(reader.contains(&reference).unwrap());
+
+    let mut wrong_manifest = report.generation_artifacts;
+    wrong_manifest.manifest_artifact.encoded_crc32c ^= 1;
+    assert!(matches!(
+        RelationalOverflowRootReader::open_bound_generation(
+            &directory,
+            wrong_manifest,
+            config,
+        ),
+        Err(RelationalOverflowPublicationError::Corrupt(message))
+            if message.contains("canonical binding")
+    ));
+
+    let mut wrong_root = report.generation_artifacts;
+    wrong_root.root_set_digest = skein_integrity::integrity_digest(b"wrong overflow root").sha256;
+    assert!(matches!(
+        RelationalOverflowRootReader::open_bound_generation(&directory, wrong_root, config),
+        Err(RelationalOverflowPublicationError::Corrupt(message))
+            if message.contains("identity")
+    ));
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn exact_publication_cancellation_after_preflight_creates_no_candidate() {
     let directory = unique_test_dir("exact-cancelled");
     let config = RelationalOverflowPublicationConfig::default();

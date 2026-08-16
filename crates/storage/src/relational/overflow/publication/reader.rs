@@ -52,6 +52,26 @@ impl RelationalOverflowRootReader {
         Self::from_manifest(directory, manifest, config)
     }
 
+    pub fn open_bound_generation(
+        directory: &Path,
+        binding: super::RelationalOverflowGenerationArtifacts,
+        config: RelationalOverflowPublicationConfig,
+    ) -> Result<Self, RelationalOverflowPublicationError> {
+        let path = directory.join(relational_overflow_manifest_generation_file(
+            binding.generation,
+        ));
+        let manifest = manifest::read_bound_manifest(&path, config, binding.manifest_artifact)?;
+        if manifest.generation != binding.generation
+            || manifest.source_commit_epoch != binding.source_commit_epoch
+            || manifest.root_set_digest != binding.root_set_digest
+        {
+            return Err(RelationalOverflowPublicationError::Corrupt(
+                "overflow generation identity does not match its canonical binding".to_string(),
+            ));
+        }
+        Self::from_manifest(directory, manifest, config)
+    }
+
     fn from_manifest(
         directory: &Path,
         manifest: RelationalOverflowRootManifest,
