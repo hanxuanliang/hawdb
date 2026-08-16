@@ -582,6 +582,269 @@ fn sparse_authoritative_recovery_matches_materialized_predicate_replay() {
 }
 
 #[test]
+fn sparse_live_staging_validates_constraints_without_counting_support_rows() {
+    let base = RelationalState::default()
+        .stage_transaction(
+            create_content_tables(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("create foreign-key tables")
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::Insert {
+                    table: "content_documents".to_string(),
+                    rows: vec![document_row("doc-1")],
+                    mode: RelationalInsertMode::Error,
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("seed foreign-key target");
+    let constraint_index = TestConstraintIndex::from_state(&base);
+    let transaction = RelationalTransaction {
+        writes: vec![RelationalWrite::Insert {
+            table: "content_anchors".to_string(),
+            rows: vec![anchor_row("anchor-1", "doc-1")],
+            mode: RelationalInsertMode::Error,
+        }],
+    };
+    let (materialized, expected_index_capture, expected_row_capture, expected_access) = base
+        .stage_transaction_with_authoritative_replay_access(
+            transaction.clone(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            RelationalIndexChangeCaptureLimits::default(),
+            RelationalRowChangeCaptureLimits::default(),
+            &constraint_index,
+        )
+        .expect("materialized oracle validates the foreign key");
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "skein-sparse-relational-live-{}-{nonce}",
+        std::process::id()
+    ));
+    let row_page_config = RelationalRowPagePublicationConfig::default();
+    let deltas = base
+        .row_page_snapshot_deltas(1, 1, row_page_config)
+        .expect("pack canonical row pages");
+    RelationalRowPagePublisher::new(row_page_config)
+        .publish(&directory, 1, 1, None, deltas)
+        .expect("publish canonical row root");
+    let row_root = RelationalRowPageRootReader::open_generation(&directory, 1, row_page_config)
+        .expect("open canonical row root");
+    let metadata = RelationalState::from_canonical_row_root(row_root.manifest())
+        .expect("mount canonical row metadata");
+    let anchor_key = RelationalKey(vec![RelationalValue::Text("anchor-1".to_string())]);
+    let document_key = RelationalKey(vec![RelationalValue::Text("doc-1".to_string())]);
+    let hydrated_workspace = vec![
+        RelationalSparseRecoveryRow {
+            table: "content_anchors".to_string(),
+            primary_key: anchor_key.clone(),
+            row: None,
+        },
+        RelationalSparseRecoveryRow {
+            table: "content_documents".to_string(),
+            primary_key: document_key.clone(),
+            row: base.row("content_documents", &document_key).cloned(),
+        },
+    ];
+    let (staged, index_capture, row_capture, replay_access) = metadata
+        .stage_sparse_transaction_with_authoritative_replay_access(RelationalSparseLiveStage {
+            transaction: transaction.clone(),
+            hydrated_workspace: hydrated_workspace.clone(),
+            mutation_limits: RelationalMutationLimits::default(),
+            overflow_config: RelationalOverflowConfig::default(),
+            index_capture_limits: RelationalIndexChangeCaptureLimits::default(),
+            row_capture_limits: RelationalRowChangeCaptureLimits::default(),
+            constraint_index: &constraint_index,
+        })
+        .expect("sparse live staging validates from a support row");
+
+    assert!(!staged.materialized_rows_resident());
+    assert!(staged.canonical_row_metadata_only());
+    assert_eq!(staged.materialized_row_count(), 0);
+    assert_eq!(staged.total_row_count(), materialized.total_row_count());
+    assert_eq!(staged.row_count("content_documents"), 1);
+    assert_eq!(staged.row_count("content_anchors"), 1);
+    assert_eq!(index_capture, expected_index_capture);
+    assert_eq!(row_capture, expected_row_capture);
+    assert_eq!(replay_access, expected_access);
+    assert_eq!(
+        replay_access.entries(),
+        &[RelationalReplayAccess {
+            table: "content_anchors".to_string(),
+            primary_key: anchor_key.clone(),
+        }]
+    );
+
+    let missing_constraint_row = metadata
+        .stage_sparse_transaction_with_authoritative_replay_access(RelationalSparseLiveStage {
+            transaction: transaction.clone(),
+            hydrated_workspace: hydrated_workspace[..1].to_vec(),
+            mutation_limits: RelationalMutationLimits::default(),
+            overflow_config: RelationalOverflowConfig::default(),
+            index_capture_limits: RelationalIndexChangeCaptureLimits::default(),
+            row_capture_limits: RelationalRowChangeCaptureLimits::default(),
+            constraint_index: &constraint_index,
+        })
+        .expect_err("sparse live staging rejects an unhydrated foreign-key target");
+    assert!(
+        matches!(
+            &missing_constraint_row,
+            RelationalError::Corruption(message) if message.contains("missing row")
+        ),
+        "unexpected error: {missing_constraint_row:?}"
+    );
+
+    let missing_mutation_key = metadata
+        .stage_sparse_transaction_with_authoritative_replay_access(RelationalSparseLiveStage {
+            transaction,
+            hydrated_workspace: hydrated_workspace[1..].to_vec(),
+            mutation_limits: RelationalMutationLimits::default(),
+            overflow_config: RelationalOverflowConfig::default(),
+            index_capture_limits: RelationalIndexChangeCaptureLimits::default(),
+            row_capture_limits: RelationalRowChangeCaptureLimits::default(),
+            constraint_index: &constraint_index,
+        })
+        .expect_err("sparse live staging rejects replay access outside the workspace");
+    assert!(matches!(
+        missing_mutation_key,
+        RelationalError::Corruption(message) if message.contains("did not hydrate replay access")
+    ));
+    assert_eq!(metadata.row_count("content_documents"), 1);
+    assert_eq!(metadata.row_count("content_anchors"), 0);
+    std::fs::remove_dir_all(directory).expect("remove sparse live fixture");
+}
+
+#[test]
+fn sparse_live_staging_hydrates_authoritative_unique_conflicts() {
+    let base = RelationalState::default()
+        .stage_transaction(
+            create_upsert_table(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("create unique table")
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::Insert {
+                    table: "documents".to_string(),
+                    rows: vec![upsert_row("id-1", "owner-1", "old")],
+                    mode: RelationalInsertMode::Error,
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("seed unique row");
+    let constraint_index = TestConstraintIndex::from_state(&base);
+    let transaction = RelationalTransaction {
+        writes: vec![RelationalWrite::Upsert {
+            table: "documents".to_string(),
+            rows: vec![upsert_row("id-2", "owner-1", "new")],
+            conflict_columns: vec!["owner".to_string()],
+            action: RelationalConflictAction::Update(vec![RelationalUpsertAssignment {
+                column: "payload".to_string(),
+                value: RelationalUpsertValue::ExcludedColumn("payload".to_string()),
+            }]),
+        }],
+    };
+    let (materialized, expected_index_capture, expected_row_capture, expected_access) = base
+        .stage_transaction_with_authoritative_replay_access(
+            transaction.clone(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            RelationalIndexChangeCaptureLimits::default(),
+            RelationalRowChangeCaptureLimits::default(),
+            &constraint_index,
+        )
+        .expect("materialized oracle resolves the unique conflict");
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "skein-sparse-relational-unique-live-{}-{nonce}",
+        std::process::id()
+    ));
+    let row_page_config = RelationalRowPagePublicationConfig::default();
+    let deltas = base
+        .row_page_snapshot_deltas(1, 1, row_page_config)
+        .expect("pack canonical row pages");
+    RelationalRowPagePublisher::new(row_page_config)
+        .publish(&directory, 1, 1, None, deltas)
+        .expect("publish canonical row root");
+    let row_root = RelationalRowPageRootReader::open_generation(&directory, 1, row_page_config)
+        .expect("open canonical row root");
+    let metadata = RelationalState::from_canonical_row_root(row_root.manifest())
+        .expect("mount canonical row metadata");
+    let id_1 = RelationalKey(vec![RelationalValue::Text("id-1".to_string())]);
+    let id_2 = RelationalKey(vec![RelationalValue::Text("id-2".to_string())]);
+    let hydrated_workspace = vec![
+        RelationalSparseRecoveryRow {
+            table: "documents".to_string(),
+            primary_key: id_1.clone(),
+            row: base.row("documents", &id_1).cloned(),
+        },
+        RelationalSparseRecoveryRow {
+            table: "documents".to_string(),
+            primary_key: id_2,
+            row: None,
+        },
+    ];
+    let (staged, index_capture, row_capture, replay_access) = metadata
+        .stage_sparse_transaction_with_authoritative_replay_access(RelationalSparseLiveStage {
+            transaction: transaction.clone(),
+            hydrated_workspace: hydrated_workspace.clone(),
+            mutation_limits: RelationalMutationLimits::default(),
+            overflow_config: RelationalOverflowConfig::default(),
+            index_capture_limits: RelationalIndexChangeCaptureLimits::default(),
+            row_capture_limits: RelationalRowChangeCaptureLimits::default(),
+            constraint_index: &constraint_index,
+        })
+        .expect("sparse live staging resolves the unique conflict");
+    assert_eq!(
+        staged.row_count("documents"),
+        materialized.row_count("documents")
+    );
+    assert_eq!(staged.total_row_count(), materialized.total_row_count());
+    assert_eq!(index_capture, expected_index_capture);
+    assert_eq!(row_capture, expected_row_capture);
+    assert_eq!(replay_access, expected_access);
+    assert_eq!(
+        replay_access.entries(),
+        &[RelationalReplayAccess {
+            table: "documents".to_string(),
+            primary_key: id_1,
+        }]
+    );
+
+    let missing_conflict = metadata
+        .stage_sparse_transaction_with_authoritative_replay_access(RelationalSparseLiveStage {
+            transaction,
+            hydrated_workspace: hydrated_workspace[1..].to_vec(),
+            mutation_limits: RelationalMutationLimits::default(),
+            overflow_config: RelationalOverflowConfig::default(),
+            index_capture_limits: RelationalIndexChangeCaptureLimits::default(),
+            row_capture_limits: RelationalRowChangeCaptureLimits::default(),
+            constraint_index: &constraint_index,
+        })
+        .expect_err("sparse live staging rejects an unhydrated unique conflict");
+    assert!(matches!(
+        missing_conflict,
+        RelationalError::Corruption(message) if message.contains("stale primary key")
+    ));
+    std::fs::remove_dir_all(directory).expect("remove sparse unique live fixture");
+}
+
+#[test]
 fn authoritative_constraint_staging_merges_transaction_local_unique_changes() {
     let empty = RelationalState::default()
         .stage_transaction(

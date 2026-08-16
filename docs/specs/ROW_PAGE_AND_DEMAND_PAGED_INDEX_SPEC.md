@@ -459,6 +459,19 @@ Older unreachable recovery overflow segments may remain until checkpoint
 because proving them unreachable would require scanning rows outside the
 bounded workspace.
 
+Live schema-stable DML uses the same metadata-only merge boundary through
+`RelationalState::stage_sparse_transaction_with_authoritative_replay_access`.
+Its hydrated workspace must be strictly ordered, duplicate-free, fully
+hydrated, and bounded by both entry count and conservative resident bytes. It
+may be a strict superset of the resulting replay-access set: unchanged rows
+returned by the pinned authoritative unique or foreign-key indexes are valid
+constraint-support rows. The existing authoritative transaction engine runs
+against that workspace, so unique and foreign-key semantics are not
+reimplemented by `GraphStore`. Every actual replay-access key must still have
+an explicit present or missing entry. An unhydrated mutation key or required
+constraint posting fails closed before metadata merge. Constraint-support rows
+that remain unchanged contribute zero to the detached row-count delta.
+
 This primitive does not by itself enable metadata-only writable open. The
 `GraphStore` selector MUST continue loading the materialized recovery state until
 both WAL replay and later live commits hydrate their mutation candidates through
