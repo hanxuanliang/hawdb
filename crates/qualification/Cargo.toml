@@ -43,6 +43,10 @@ name = "skein-content-store-mutation-qualification"
 path = "src/bin/content_store_mutation_qualification.rs"
 
 [[bin]]
+name = "skein-content-store-overflow-compaction-qualification"
+path = "src/bin/content_store_overflow_compaction_qualification.rs"
+
+[[bin]]
 name = "skein-graph-index-qualification"
 path = "src/bin/graph_index_qualification.rs"
 

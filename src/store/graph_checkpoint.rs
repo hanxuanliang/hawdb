@@ -579,6 +579,8 @@ impl GraphStore {
                         pages_read: exact.scan.pages_read,
                         row_bytes_read: exact.scan.row_bytes_read,
                         hydrated_values: exact.scan.hydrated_values,
+                        overlay_entries: exact.scan.overlay_entries,
+                        overlay_bytes: exact.scan.overlay_bytes,
                         reference_occurrences: exact.scan.sort.reference_occurrences,
                         unique_references: exact.scan.sort.unique_references,
                         spill_run_count: exact.scan.sort.spill_run_count,

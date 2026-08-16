@@ -53,6 +53,7 @@ rust_library(
         "src/release_bundle/graph_resource.rs",
         "src/release_bundle/graph_search.rs",
         "src/release_bundle/memory.rs",
+        "src/release_bundle/overflow_compaction.rs",
         "src/release_bundle/runtime.rs",
         "src/release_bundle/tests.rs",
         "src/release_bundle/vector.rs",
@@ -105,6 +106,7 @@ rust_binary(
     crate_root = "src/bin/content_store_read_qualification.rs",
     srcs = [
         "src/bin/content_store_read_qualification.rs",
+        "src/bin/shared/content_store_qualification_input.rs",
         "src/bin/shared/qualification_input.rs",
         "src/bin/shared/qualification_value.rs",
         "src/bin/shared/relational_database_input.rs",
@@ -124,6 +126,26 @@ rust_binary(
     crate_root = "src/bin/content_store_mutation_qualification.rs",
     srcs = [
         "src/bin/content_store_mutation_qualification.rs",
+        "src/bin/shared/qualification_input.rs",
+        "src/bin/shared/qualification_value.rs",
+        "src/bin/shared/relational_database_input.rs",
+    ],
+    edition = "2024",
+    aliases = aliases(normal = True, proc_macro = True),
+    deps = all_crate_deps(normal = True) + [
+        ":skein_qualification",
+        "//:skein",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+)
+
+rust_binary(
+    name = "skein_content_store_overflow_compaction_qualification",
+    crate_name = "skein_content_store_overflow_compaction_qualification",
+    crate_root = "src/bin/content_store_overflow_compaction_qualification.rs",
+    srcs = [
+        "src/bin/content_store_overflow_compaction_qualification.rs",
+        "src/bin/shared/content_store_qualification_input.rs",
         "src/bin/shared/qualification_input.rs",
         "src/bin/shared/qualification_value.rs",
         "src/bin/shared/relational_database_input.rs",
@@ -244,11 +266,36 @@ rust_test(
     crate_root = "src/bin/content_store_read_qualification.rs",
     srcs = [
         "src/bin/content_store_read_qualification.rs",
+        "src/bin/shared/content_store_qualification_input.rs",
         "src/bin/shared/qualification_input.rs",
         "src/bin/shared/qualification_value.rs",
         "src/bin/shared/relational_database_input.rs",
     ],
     compile_data = ["fixtures/nowledge_content_store/production_read_plan_example_v1.json"],
+    edition = "2024",
+    aliases = aliases(
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = all_crate_deps(normal = True, normal_dev = True) + [
+        ":skein_qualification",
+        "//:skein",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+)
+
+rust_test(
+    name = "skein_content_store_overflow_compaction_qualification_cli_tests",
+    crate_root = "src/bin/content_store_overflow_compaction_qualification.rs",
+    srcs = [
+        "src/bin/content_store_overflow_compaction_qualification.rs",
+        "src/bin/shared/content_store_qualification_input.rs",
+        "src/bin/shared/qualification_input.rs",
+        "src/bin/shared/qualification_value.rs",
+        "src/bin/shared/relational_database_input.rs",
+    ],
     edition = "2024",
     aliases = aliases(
         normal = True,

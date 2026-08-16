@@ -179,9 +179,13 @@ crash; read-only recovery remains fail closed.
     reopen, advances one Cypher marker plus a later checkpoint, scrubs the
     selected closure, and records reclaimable descriptors, physical deletion,
     RSS, page faults, elapsed time, governor admission, and write amplification.
+    Its thin bounded CLI now emits the declared scan/spill/rewrite policy, and
+    the release bundle independently revalidates raw evidence from distinct
+    explicit 512 MiB capability and dynamic 8 GiB desktop runs. The desktop
+    run keeps automatic capacity at or below 2 GiB while permitting pressure
+    to reduce its budget below the nominal 1--2 GiB range.
     Retain this item until representative production-copy reports under the
-    explicitly configured 512 MiB capability and dynamic 8 GiB desktop profile
-    have been retained and admitted by release policy.
+    two profiles have been collected, retained, and accepted by that policy.
   - The typed runner now qualifies `content_documents`, `thread_messages`,
     `content_chunks`, and `content_anchors` using the frozen PostgreSQL statement
     corpus and graph-plus-relational commits that publish one shared epoch.

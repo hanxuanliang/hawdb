@@ -147,6 +147,31 @@ The production-profile output and the 512 MiB capability output are independent
 mandatory release inputs; a successful capability run does not redefine the
 normal desktop budget.
 
+## Exact Overflow Compaction
+
+Run exact overflow compaction only against an existing caller-owned disposable
+replica. The collector mutates, checkpoints, scrubs, and reopens that directory;
+it never copies or mutates the production source. The bounded plan protocol is
+`skein-production-content-store-overflow-compaction-plan-v1` and must declare
+the exact evidence identity, frozen SQL verification cases, database budgets,
+scan/overlay/rewrite/sort/spill bounds, and resource/reclamation limits.
+
+```bash
+cargo run -p skein-qualification \
+  --bin skein-content-store-overflow-compaction-qualification -- \
+  --replica-path /path/to/disposable-overflow-replica.skein \
+  --plan-json /path/to/content-store-overflow-compaction-plan.json \
+  > content-store-overflow-compaction-evidence.json
+```
+
+Retain two independent current-revision reports. The `capability_512_mib` plan
+installs an explicit 512 MiB Skein ceiling and proves the low-memory capability.
+The `desktop_bound_8_gib` plan observes an 8 GiB host or cgroup envelope and
+keeps dynamic memory derivation; automatic capacity cannot exceed 2 GiB, while
+pressure may lower the budget below 1 GiB. The release bundle requires both
+reports and recomputes their raw scan, spill, rewrite, digest, RSS, page-fault,
+write-amplification, physical-reclamation, scrub, and governor evidence.
+
 ## Writable Mutation Matrix
 
 The mutation collector requires the read-only source plus four caller-created,

@@ -1026,6 +1026,8 @@ pub struct RelationalOverflowCompactionReport {
     pub pages_read: usize,
     pub row_bytes_read: usize,
     pub hydrated_values: usize,
+    pub overlay_entries: usize,
+    pub overlay_bytes: usize,
     pub reference_occurrences: u64,
     pub unique_references: u64,
     pub spill_run_count: usize,

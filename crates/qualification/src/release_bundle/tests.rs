@@ -6,6 +6,7 @@ use crate::{
     CONTENT_STORE_DESKTOP_MAX_CAPACITY_BYTES,
     PRODUCTION_CONTENT_STORE_MEMORY_QUALIFICATION_PROTOCOL,
     PRODUCTION_CONTENT_STORE_MUTATION_QUALIFICATION_PROTOCOL,
+    PRODUCTION_CONTENT_STORE_OVERFLOW_COMPACTION_QUALIFICATION_PROTOCOL,
     PRODUCTION_CONTENT_STORE_STORAGE_QUALIFICATION_PROTOCOL,
     PRODUCTION_CONTENT_STORE_WRITER_MATRIX,
 };
@@ -19,6 +20,12 @@ fn complete_raw_artifact_bundle_is_ready() {
         content_store_memory_profiles: Some(content_store_memory_profiles(&expected)),
         content_store_read: Some(content_store_read(&expected)),
         content_store_512_mib_read: Some(content_store_512_mib_read(&expected)),
+        content_store_512_mib_overflow_compaction: Some(content_store_overflow_compaction(
+            &expected, true,
+        )),
+        content_store_desktop_overflow_compaction: Some(content_store_overflow_compaction(
+            &expected, false,
+        )),
         content_store_mutation_matrix: Some(content_store_mutation_matrix(&expected)),
         graph_storage: Some(graph(&expected)),
         graph_index_matrix: Some(graph_index_matrix(&expected)),
@@ -52,6 +59,8 @@ fn complete_raw_artifact_bundle_is_ready() {
     assert!(report.content_store_memory_profiles.ready);
     assert!(report.content_store_read.ready);
     assert!(report.content_store_512_mib_read.ready);
+    assert!(report.content_store_512_mib_overflow_compaction.ready);
+    assert!(report.content_store_desktop_overflow_compaction.ready);
     assert!(report.content_store_mutation_matrix.ready);
     assert!(report.graph_storage.ready);
     assert!(report.graph_index_matrix.ready);
@@ -146,6 +155,59 @@ fn configured_production_read_cannot_substitute_the_512_mib_capability_run() {
         .content_store_512_mib_read
         .blocker_codes
         .contains(&"content_store_512_mib_read_profile_missing".to_string()));
+}
+
+#[test]
+fn overflow_compaction_top_level_ready_cannot_hide_raw_budget_drift() {
+    let expected = identity("linux", "x86_64");
+    let mut artifact = content_store_overflow_compaction(&expected, true);
+    artifact["compaction"]["hydrated_values"] = serde_json::json!(1);
+    artifact["artifacts"]["new_artifact_write_amplification_per_million"] = serde_json::json!(1);
+    let report = evaluate_production_release_qualification_bundle(
+        ProductionReleaseQualificationArtifacts {
+            content_store_512_mib_overflow_compaction: Some(artifact),
+            ..ProductionReleaseQualificationArtifacts::default()
+        },
+        expected,
+        ProductionReleaseQualificationPolicy::default(),
+    );
+
+    assert!(!report.content_store_512_mib_overflow_compaction.ready);
+    assert!(report
+        .content_store_512_mib_overflow_compaction
+        .blocker_codes
+        .contains(&"overflow_compaction_rewrite_shape_invalid".to_string()));
+    assert!(report
+        .content_store_512_mib_overflow_compaction
+        .blocker_codes
+        .contains(&"overflow_compaction_artifact_budget_invalid".to_string()));
+}
+
+#[test]
+fn overflow_compaction_profiles_cannot_substitute_for_each_other() {
+    let expected = identity("linux", "x86_64");
+    let report = evaluate_production_release_qualification_bundle(
+        ProductionReleaseQualificationArtifacts {
+            content_store_512_mib_overflow_compaction: Some(content_store_overflow_compaction(
+                &expected, false,
+            )),
+            content_store_desktop_overflow_compaction: Some(content_store_overflow_compaction(
+                &expected, true,
+            )),
+            ..ProductionReleaseQualificationArtifacts::default()
+        },
+        expected,
+        ProductionReleaseQualificationPolicy::default(),
+    );
+
+    assert!(report
+        .content_store_512_mib_overflow_compaction
+        .blocker_codes
+        .contains(&"overflow_compaction_512_mib_profile_invalid".to_string()));
+    assert!(report
+        .content_store_desktop_overflow_compaction
+        .blocker_codes
+        .contains(&"overflow_compaction_desktop_profile_invalid".to_string()));
 }
 
 #[test]
@@ -821,6 +883,333 @@ fn content_store_512_mib_read(identity: &ProductionQualificationIdentity) -> Val
     artifact["runtime_governor"]["memory_budget_bytes"] =
         serde_json::json!(CONTENT_STORE_512_MIB_CAPABILITY_BYTES);
     artifact
+}
+
+fn overflow_residency(commit_epoch: u64, generation: u64, base_commit_epoch: u64) -> Value {
+    serde_json::json!({
+        "database_commit_epoch": commit_epoch,
+        "row_serving": true,
+        "row_materialized_rows_resident": false,
+        "row_checkpoint_state_metadata_only": true,
+        "row_base_generation": generation,
+        "row_recovery_delta_generation": null,
+        "row_base_commit_epoch": base_commit_epoch,
+        "row_visible_commit_epoch": commit_epoch,
+        "row_page_artifact_bytes": 16_384,
+        "row_root_descriptor_artifact_bytes": 128,
+        "row_root_key_artifact_bytes": 128,
+        "row_overflow_extent_artifact_bytes": 4_096,
+        "row_overflow_descriptor_artifact_bytes": 128,
+        "row_overflow_extent_count": 2,
+        "row_canonical_artifact_bytes": 20_736,
+        "row_recovery_delta_artifact_bytes": 0,
+        "row_live_entries": 0,
+        "row_live_encoded_bytes": 0,
+        "row_live_resident_bytes": 0,
+        "index_serving": true,
+        "index_base_generation": generation,
+        "index_recovery_delta_generation": null,
+        "index_base_commit_epoch": base_commit_epoch,
+        "index_visible_commit_epoch": commit_epoch,
+        "index_base_page_count": 4,
+        "index_canonical_artifact_bytes": 8_192,
+        "index_recovery_delta_artifact_bytes": 0,
+        "index_live_entries": 0,
+        "index_live_encoded_bytes": 0,
+        "segment_cache_capacity_bytes": 1_024,
+        "segment_cache_resident_bytes": 512,
+        "segment_cache_pinned_bytes": 0,
+        "row_index_epoch_aligned": true,
+        "row_artifact_exceeds_cache": true,
+        "index_artifact_exceeds_cache": true,
+    })
+}
+
+fn overflow_read(
+    identity: &ProductionQualificationIdentity,
+    phase: &str,
+    generation: u64,
+    base_commit_epoch: u64,
+) -> Value {
+    let statement_digest = content_store_statement_digest("thread_message_anchor_lookup", false);
+    let parameter_digest = format!("sha256:{}", "2".repeat(64));
+    let output_digest = "1".repeat(64);
+    let visible_commit_epoch = if phase == "wal_recovery" {
+        identity.canonical_graph_commit_epoch + 1
+    } else {
+        identity.canonical_graph_commit_epoch
+    };
+    let execution = serde_json::json!({
+        "index_runtime_path": "authoritative",
+        "row_runtime_path": "snapshot_rows",
+        "base_generation": generation,
+        "delta_generation": null,
+        "base_commit_epoch": base_commit_epoch,
+        "visible_commit_epoch": visible_commit_epoch,
+        "root_set_digest": parameter_digest,
+        "logical_pages": 2,
+        "logical_bytes": 256,
+        "physical_pages": 1,
+        "physical_bytes": 128,
+        "cache_hits": 1,
+        "cache_misses": 1,
+        "cache_admission_rejections": 0,
+        "index_logical_pages": 1,
+        "index_logical_bytes": 128,
+        "index_physical_pages": 1,
+        "index_physical_bytes": 128,
+        "index_cache_hits": 1,
+        "index_cache_misses": 1,
+        "index_cache_admission_rejections": 0,
+        "overlay_entries": 0,
+        "overlay_bytes": 0,
+        "rows_visited": 1,
+        "intermediate_rows": 1,
+        "hydrated_rows": 1,
+        "hydrated_compressed_bytes": 128,
+        "hydrated_decompressed_bytes": 256,
+    });
+    let read = serde_json::json!({
+        "statement_name": "thread_message_anchor_lookup",
+        "phase": phase,
+        "max_rows": 1_000,
+        "max_payload_bytes": 8_388_608,
+        "output_rows": 1,
+        "output_payload_bytes": 128,
+        "output_sha256": output_digest,
+        "cache": {
+            "hits": 1,
+            "misses": 1,
+            "insertions": 1,
+            "evictions": 0,
+            "admission_rejections": 0,
+            "resident_bytes_after": 512,
+            "pinned_bytes_after": 0,
+        },
+        "execution": execution,
+    });
+    serde_json::json!({
+        "case_name": "message_lookup",
+        "statement_sha256": statement_digest,
+        "parameter_sha256": parameter_digest,
+        "expected_output_sha256": output_digest,
+        "read": read,
+    })
+}
+
+fn content_store_overflow_compaction(
+    identity: &ProductionQualificationIdentity,
+    capability_512_mib: bool,
+) -> Value {
+    let (corpus, schema) = content_store_contract_identity();
+    let profile_kind = if capability_512_mib {
+        "capability512_mib"
+    } else {
+        "desktop_bound8_gib"
+    };
+    let configured_available_memory_bytes = if capability_512_mib {
+        CONTENT_STORE_512_MIB_CAPABILITY_BYTES
+    } else {
+        CONTENT_STORE_DESKTOP_8_GIB_BYTES
+    };
+    let memory_capacity_bytes = if capability_512_mib {
+        CONTENT_STORE_512_MIB_CAPABILITY_BYTES
+    } else {
+        CONTENT_STORE_DESKTOP_MAX_CAPACITY_BYTES
+    };
+    let memory_budget_bytes = if capability_512_mib {
+        CONTENT_STORE_512_MIB_CAPABILITY_BYTES
+    } else {
+        3 * 512 * 1024 * 1024_u64
+    };
+    let initial_generation = 7;
+    let published_generation = 8;
+    let cleanup_generation = 9;
+    let cleanup_epoch = identity.canonical_graph_commit_epoch + 1;
+    let statement_digest = content_store_statement_digest("thread_message_anchor_lookup", false);
+    let parameter_digest = format!("sha256:{}", "2".repeat(64));
+    let output_digest = "1".repeat(64);
+    serde_json::json!({
+        "protocol": PRODUCTION_CONTENT_STORE_OVERFLOW_COMPACTION_QUALIFICATION_PROTOCOL,
+        "evidence_kind": "representative_production_relational_overflow_compaction",
+        "production_eligible": true,
+        "ready": true,
+        "blocker_codes": [],
+        "evidence_binding": binding(identity),
+        "corpus": corpus,
+        "schema": schema,
+        "resource_profile_kind": profile_kind,
+        "configured_available_memory_bytes": configured_available_memory_bytes,
+        "limits": {
+            "process": {
+                "max_steady_resident_bytes": memory_capacity_bytes,
+                "max_peak_resident_bytes": memory_capacity_bytes,
+                "max_total_page_faults_per_run": 100,
+                "max_minor_page_faults_per_run": 100,
+                "max_major_page_faults_per_run": 10,
+            },
+            "max_compaction_elapsed_micros": 1_000_000,
+            "max_cleanup_elapsed_micros": 1_000_000,
+            "max_new_generation_artifact_bytes": 16_384,
+            "max_new_artifact_write_amplification_per_million": 3_000_000,
+            "min_reclaimable_base_extent_count": 1,
+            "min_physically_removed_extent_bytes": 1_024,
+        },
+        "read_contracts": [{
+            "case_name": "message_lookup",
+            "statement_name": "thread_message_anchor_lookup",
+            "statement_sha256": statement_digest,
+            "parameter_sha256": parameter_digest,
+            "expected_output_rows": 1,
+            "expected_output_sha256": output_digest,
+            "max_output_rows": 1_000,
+            "max_output_payload_bytes": 8_388_608,
+            "max_intermediate_rows": 10,
+            "max_physical_pages_per_run": 10,
+            "max_physical_bytes_per_run": 10_000,
+        }],
+        "runtime_memory": {
+            "host_total_bytes": CONTENT_STORE_DESKTOP_8_GIB_BYTES,
+            "host_available_bytes": 6 * 1024 * 1024 * 1024_u64,
+            "cgroup_limit_bytes": null,
+            "cgroup_high_bytes": null,
+            "cgroup_current_bytes": null,
+            "effective_limit_bytes": CONTENT_STORE_DESKTOP_8_GIB_BYTES,
+            "effective_available_bytes": 6 * 1024 * 1024 * 1024_u64,
+            "pressure": "normal",
+        },
+        "runtime_governor": {
+            "configured_memory_ceiling_bytes": if capability_512_mib {
+                Some(CONTENT_STORE_512_MIB_CAPABILITY_BYTES)
+            } else {
+                None
+            },
+            "memory_fraction_per_million": 250_000,
+            "effective_memory_limit_bytes": CONTENT_STORE_DESKTOP_8_GIB_BYTES,
+            "effective_available_memory_bytes": 6 * 1024 * 1024 * 1024_u64,
+            "memory_capacity_bytes": memory_capacity_bytes,
+            "memory_budget_bytes": memory_budget_bytes,
+            "result_budget_bytes": 8_388_608,
+            "effective_cpu_slots": 4,
+            "foreground_io_depth": 2,
+            "admissions_delta": 4,
+            "admission_waits_delta": 0,
+            "admission_rejections_delta": 0,
+            "completions_delta": 4,
+            "final_active_foreground_tasks": 0,
+            "final_active_background_tasks": 0,
+            "final_active_blocking_tasks": 0,
+            "final_active_cpu_slots": 0,
+            "final_active_foreground_io_slots": 0,
+            "final_active_background_io_slots": 0,
+            "final_admitted_memory_bytes": 0,
+            "final_overcommitted": false,
+        },
+        "compaction_elapsed_micros": 100,
+        "cleanup_elapsed_micros": 100,
+        "compaction_process": content_store_process(),
+        "compaction_policy": {
+            "max_scan_rows": 1_000,
+            "max_scan_pages": 1_000,
+            "max_scan_bytes": 1_000_000,
+            "max_overlay_entries": 1_000,
+            "max_overlay_bytes": 16_777_216,
+            "max_rewrite_bytes": 16_384,
+            "max_sort_memory_bytes": 8_388_608,
+            "max_spill_bytes": 134_217_728,
+            "max_spill_runs": 32,
+            "max_reference_occurrences": 1_000,
+            "admission_bytes": 64 * 1024 * 1024_u64,
+        },
+        "compaction": {
+            "source_commit_epoch": identity.canonical_graph_commit_epoch,
+            "published_generation": published_generation,
+            "tables_scanned": 1,
+            "rows_scanned": 10,
+            "pages_read": 2,
+            "row_bytes_read": 1_024,
+            "hydrated_values": 0,
+            "overlay_entries": 0,
+            "overlay_bytes": 0,
+            "reference_occurrences": 4,
+            "unique_references": 2,
+            "spill_run_count": 1,
+            "spill_bytes": 1_024,
+            "peak_sort_memory_bytes": 4_096,
+            "previous_extent_count": 3,
+            "published_extent_count": 2,
+            "reclaimable_base_extent_count": 1,
+            "new_extent_count": 2,
+            "reused_extent_count": 0,
+            "copied_base_extent_count": 1,
+            "introduced_extent_count": 1,
+            "admitted_memory_bytes": 64 * 1024 * 1024_u64,
+        },
+        "artifacts": {
+            "files_before": 10,
+            "files_after_compaction": 12,
+            "files_after_cleanup": 10,
+            "new_generation_artifact_bytes": 8_192,
+            "published_live_overflow_extent_bytes": 4_096,
+            "new_artifact_write_amplification_per_million": 2_000_000,
+            "physically_removed_extent_files": 1,
+            "physically_removed_extent_bytes": 4_096,
+        },
+        "initial_residency": overflow_residency(
+            identity.canonical_graph_commit_epoch,
+            initial_generation,
+            identity.canonical_graph_commit_epoch,
+        ),
+        "compacted_residency": overflow_residency(
+            identity.canonical_graph_commit_epoch,
+            published_generation,
+            identity.canonical_graph_commit_epoch,
+        ),
+        "final_residency": overflow_residency(
+            cleanup_epoch,
+            cleanup_generation,
+            cleanup_epoch,
+        ),
+        "reopened_residency": overflow_residency(
+            cleanup_epoch,
+            cleanup_generation,
+            cleanup_epoch,
+        ),
+        "reclamation": {
+            "current_commit_epoch": cleanup_epoch,
+            "checkpoint_epoch": cleanup_epoch,
+            "checkpoint_commit_epoch": cleanup_epoch,
+            "oldest_reader_commit_epoch": null,
+            "safe_reclaim_commit_epoch": identity.canonical_graph_commit_epoch,
+            "durable": true,
+        },
+        "scrub": {
+            "generation": cleanup_generation,
+            "checked_file_count": 10,
+            "checked_bytes": 32_768,
+            "sha256_verified_file_count": 10,
+            "wal_record_count": 0,
+            "wal_bytes": 0,
+        },
+        "before_reads": [overflow_read(
+            identity,
+            "production_cold",
+            initial_generation,
+            identity.canonical_graph_commit_epoch,
+        )],
+        "compacted_reads": [overflow_read(
+            identity,
+            "production_warm",
+            published_generation,
+            identity.canonical_graph_commit_epoch,
+        )],
+        "reopened_reads": [overflow_read(
+            identity,
+            "wal_recovery",
+            cleanup_generation,
+            cleanup_epoch,
+        )],
+    })
 }
 
 fn content_store_open_timings(total_open_micros: u64, wal_replay_micros: u64) -> Value {

@@ -46,11 +46,13 @@ fn qualification_requires_a_writable_disposable_replica() {
         canonical_graph_commit_epoch: 1,
         policy_version: skein::PRODUCTION_QUALIFICATION_POLICY_VERSION,
     };
-    let mut database_config = DatabaseConfig::default();
-    database_config.read_only = true;
-    database_config.storage_residency_mode = StorageResidencyMode::OutOfCore;
-    database_config.relational_index_mode = RelationalIndexMode::Authoritative;
-    database_config.segment_cache_capacity_bytes = 1;
+    let database_config = DatabaseConfig {
+        read_only: true,
+        storage_residency_mode: StorageResidencyMode::OutOfCore,
+        relational_index_mode: RelationalIndexMode::Authoritative,
+        segment_cache_capacity_bytes: 1,
+        ..DatabaseConfig::default()
+    };
     let error = run_production_content_store_overflow_compaction_qualification(
         ProductionContentStoreOverflowCompactionQualificationConfig {
             replica_path: path.clone(),
@@ -230,6 +232,25 @@ fn qualification_proves_exact_rewrite_physical_reclaim_and_reopen() {
         .json()
         .to_string()
         .contains(path.to_string_lossy().as_ref()));
+    let release = crate::evaluate_production_release_qualification_bundle(
+        crate::ProductionReleaseQualificationArtifacts {
+            content_store_512_mib_overflow_compaction: Some(report.json()),
+            ..crate::ProductionReleaseQualificationArtifacts::default()
+        },
+        report.evidence_binding.identity.clone(),
+        crate::ProductionReleaseQualificationPolicy::default(),
+    );
+    assert!(
+        release.content_store_512_mib_overflow_compaction.ready,
+        "release blockers: {:?}, initial: {:?}, compacted: {:?}, final: {:?}, reopened: {:?}",
+        release
+            .content_store_512_mib_overflow_compaction
+            .blocker_codes,
+        report.initial_residency,
+        report.compacted_residency,
+        report.final_residency,
+        report.reopened_residency,
+    );
 
     std::fs::remove_dir_all(path).unwrap();
 }

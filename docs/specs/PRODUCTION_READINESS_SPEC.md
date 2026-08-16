@@ -165,7 +165,8 @@ debug reports MUST NOT be accepted as production cutover evidence.
 cross-process evidence gate. It consumes the identity-bound Content Store
 memory-policy matrix, a representative production-profile Content Store read,
 a separate explicitly constrained 512 MiB Content Store read, the Content
-Store mutation-replica matrix, graph-storage, all-class graph index matrix,
+Store mutation-replica matrix, separate 512 MiB capability and dynamic 8 GiB
+desktop overflow-compaction runs, graph-storage, all-class graph index matrix,
 out-of-core search, per-target vector, per-worker morsel, active-route blocking,
 storage crash-recovery, and exact-revision release-control artifacts.
 The evaluator
@@ -198,6 +199,16 @@ requires exactly the 1, 4, 8, and 10 writer cases, validates every frozen
 checks commit-epoch and WAL group accounting, and proves the distinct
 WAL-replay and manifest-only reopen boundaries plus result-digest parity. A
 child report's empty blocker list cannot override contradictory raw fields.
+
+The two overflow-compaction artifacts are not interchangeable. The capability
+artifact MUST carry an explicit 512 MiB governor ceiling. The desktop artifact
+MUST observe an 8 GiB host or cgroup limit, retain dynamic memory derivation,
+and keep both capacity and budget at or below 2 GiB; pressure may reduce the
+budget below 1 GiB. For both artifacts, the evaluator independently validates
+the frozen SQL contracts and before/published/reopened digests, metadata-only
+generation transitions, scan/sort/spill/rewrite bounds, zero closure hydration,
+RSS and requested page-fault limits, artifact write amplification, physical
+extent deletion, scrub evidence, and exact admission/completion accounting.
 
 The graph-index matrix is a required release artifact distinct from the
 general graph-storage run. The evaluator requires all eight classes in stable

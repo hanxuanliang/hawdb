@@ -3,10 +3,11 @@ EXTENDS FiniteSets
 
 (***************************************************************************)
 (* The release gate keeps the desktop policy, explicit 512 MiB capability  *)
-(* policy, representative production read, and constrained capability read *)
-(* as four independent obligations. Every obligation is bound to the exact *)
-(* release identity. Advancing the identity makes retained evidence stale;  *)
-(* stale or incomplete evidence can never publish a ready release.          *)
+(* policy, representative production read, constrained capability read, and *)
+(* both desktop and capability overflow-compaction runs as six independent  *)
+(* obligations. Every obligation is bound to the exact release identity.     *)
+(* Advancing the identity makes retained evidence stale; stale or incomplete *)
+(* evidence can never publish a ready release.                               *)
 (***************************************************************************)
 
 CONSTANT Identities
@@ -22,6 +23,8 @@ VARIABLES
     capabilityPolicyIdentity,
     productionReadIdentity,
     capabilityReadIdentity,
+    desktopOverflowIdentity,
+    capabilityOverflowIdentity,
     releaseReady
 
 vars == <<
@@ -30,6 +33,8 @@ vars == <<
     capabilityPolicyIdentity,
     productionReadIdentity,
     capabilityReadIdentity,
+    desktopOverflowIdentity,
+    capabilityOverflowIdentity,
     releaseReady
 >>
 
@@ -39,6 +44,8 @@ Init ==
     /\ capabilityPolicyIdentity = NoEvidence
     /\ productionReadIdentity = NoEvidence
     /\ capabilityReadIdentity = NoEvidence
+    /\ desktopOverflowIdentity = NoEvidence
+    /\ capabilityOverflowIdentity = NoEvidence
     /\ releaseReady = FALSE
 
 RecordDesktopPolicy ==
@@ -48,6 +55,8 @@ RecordDesktopPolicy ==
         capabilityPolicyIdentity,
         productionReadIdentity,
         capabilityReadIdentity,
+        desktopOverflowIdentity,
+        capabilityOverflowIdentity,
         releaseReady
        >>
 
@@ -58,6 +67,8 @@ RecordCapabilityPolicy ==
         desktopPolicyIdentity,
         productionReadIdentity,
         capabilityReadIdentity,
+        desktopOverflowIdentity,
+        capabilityOverflowIdentity,
         releaseReady
        >>
 
@@ -68,6 +79,8 @@ RecordProductionRead ==
         desktopPolicyIdentity,
         capabilityPolicyIdentity,
         capabilityReadIdentity,
+        desktopOverflowIdentity,
+        capabilityOverflowIdentity,
         releaseReady
        >>
 
@@ -78,6 +91,32 @@ RecordCapabilityRead ==
         desktopPolicyIdentity,
         capabilityPolicyIdentity,
         productionReadIdentity,
+        desktopOverflowIdentity,
+        capabilityOverflowIdentity,
+        releaseReady
+       >>
+
+RecordDesktopOverflow ==
+    /\ desktopOverflowIdentity' = currentIdentity
+    /\ UNCHANGED <<
+        currentIdentity,
+        desktopPolicyIdentity,
+        capabilityPolicyIdentity,
+        productionReadIdentity,
+        capabilityReadIdentity,
+        capabilityOverflowIdentity,
+        releaseReady
+       >>
+
+RecordCapabilityOverflow ==
+    /\ capabilityOverflowIdentity' = currentIdentity
+    /\ UNCHANGED <<
+        currentIdentity,
+        desktopPolicyIdentity,
+        capabilityPolicyIdentity,
+        productionReadIdentity,
+        capabilityReadIdentity,
+        desktopOverflowIdentity,
         releaseReady
        >>
 
@@ -89,7 +128,9 @@ AdvanceIdentity ==
         desktopPolicyIdentity,
         capabilityPolicyIdentity,
         productionReadIdentity,
-        capabilityReadIdentity
+        capabilityReadIdentity,
+        desktopOverflowIdentity,
+        capabilityOverflowIdentity
        >>
 
 AllEvidenceCurrent ==
@@ -97,6 +138,8 @@ AllEvidenceCurrent ==
     /\ capabilityPolicyIdentity = currentIdentity
     /\ productionReadIdentity = currentIdentity
     /\ capabilityReadIdentity = currentIdentity
+    /\ desktopOverflowIdentity = currentIdentity
+    /\ capabilityOverflowIdentity = currentIdentity
 
 AdmitRelease ==
     /\ ~releaseReady
@@ -107,7 +150,9 @@ AdmitRelease ==
         desktopPolicyIdentity,
         capabilityPolicyIdentity,
         productionReadIdentity,
-        capabilityReadIdentity
+        capabilityReadIdentity,
+        desktopOverflowIdentity,
+        capabilityOverflowIdentity
        >>
 
 Next ==
@@ -115,6 +160,8 @@ Next ==
     \/ RecordCapabilityPolicy
     \/ RecordProductionRead
     \/ RecordCapabilityRead
+    \/ RecordDesktopOverflow
+    \/ RecordCapabilityOverflow
     \/ AdvanceIdentity
     \/ AdmitRelease
 
@@ -124,6 +171,8 @@ TypeOK ==
     /\ capabilityPolicyIdentity \in EvidenceIdentities
     /\ productionReadIdentity \in EvidenceIdentities
     /\ capabilityReadIdentity \in EvidenceIdentities
+    /\ desktopOverflowIdentity \in EvidenceIdentities
+    /\ capabilityOverflowIdentity \in EvidenceIdentities
     /\ releaseReady \in BOOLEAN
 
 ReadyRequiresBothPolicies ==
@@ -135,6 +184,11 @@ ReadyRequiresBothWorkloads ==
     releaseReady =>
         /\ productionReadIdentity = currentIdentity
         /\ capabilityReadIdentity = currentIdentity
+
+ReadyRequiresBothOverflowProfiles ==
+    releaseReady =>
+        /\ desktopOverflowIdentity = currentIdentity
+        /\ capabilityOverflowIdentity = currentIdentity
 
 Spec == Init /\ [][Next]_vars
 

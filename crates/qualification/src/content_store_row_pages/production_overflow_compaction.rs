@@ -47,6 +47,39 @@ pub struct ProductionContentStoreOverflowCompactionLimits {
     pub min_physically_removed_extent_bytes: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ProductionRelationalOverflowCompactionPolicyEvidence {
+    pub max_scan_rows: usize,
+    pub max_scan_pages: usize,
+    pub max_scan_bytes: usize,
+    pub max_overlay_entries: usize,
+    pub max_overlay_bytes: usize,
+    pub max_rewrite_bytes: u64,
+    pub max_sort_memory_bytes: usize,
+    pub max_spill_bytes: u64,
+    pub max_spill_runs: usize,
+    pub max_reference_occurrences: u64,
+    pub admission_bytes: u64,
+}
+
+impl ProductionRelationalOverflowCompactionPolicyEvidence {
+    fn from_config(config: RelationalOverflowCompactionConfig) -> Result<Self, SkeinError> {
+        Ok(Self {
+            max_scan_rows: config.max_scan_rows.get(),
+            max_scan_pages: config.max_scan_pages.get(),
+            max_scan_bytes: config.max_scan_bytes.get(),
+            max_overlay_entries: config.max_overlay_entries.get(),
+            max_overlay_bytes: config.max_overlay_bytes.get(),
+            max_rewrite_bytes: config.max_rewrite_bytes.get(),
+            max_sort_memory_bytes: config.reference_sort.max_memory_bytes.get(),
+            max_spill_bytes: config.reference_sort.max_spill_bytes.get(),
+            max_spill_runs: config.reference_sort.max_runs.get(),
+            max_reference_occurrences: config.reference_sort.max_reference_occurrences.get(),
+            admission_bytes: config.admission_bytes()?,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProductionContentStoreOverflowCompactionQualificationConfig {
     /// Existing caller-owned disposable writable replica. The runner never
@@ -72,6 +105,8 @@ pub struct ProductionRelationalOverflowCompactionEvidence {
     pub pages_read: usize,
     pub row_bytes_read: usize,
     pub hydrated_values: usize,
+    pub overlay_entries: usize,
+    pub overlay_bytes: usize,
     pub reference_occurrences: u64,
     pub unique_references: u64,
     pub spill_run_count: usize,
@@ -97,6 +132,8 @@ impl From<RelationalOverflowCompactionReport> for ProductionRelationalOverflowCo
             pages_read: report.pages_read,
             row_bytes_read: report.row_bytes_read,
             hydrated_values: report.hydrated_values,
+            overlay_entries: report.overlay_entries,
+            overlay_bytes: report.overlay_bytes,
             reference_occurrences: report.reference_occurrences,
             unique_references: report.unique_references,
             spill_run_count: report.spill_run_count,
@@ -197,6 +234,7 @@ pub struct ProductionContentStoreOverflowCompactionQualificationReport {
     pub compaction_elapsed_micros: u64,
     pub cleanup_elapsed_micros: u64,
     pub compaction_process: ContentStoreProcessResourceEvidence,
+    pub compaction_policy: ProductionRelationalOverflowCompactionPolicyEvidence,
     pub compaction: ProductionRelationalOverflowCompactionEvidence,
     pub artifacts: ProductionContentStoreOverflowArtifactEvidence,
     pub initial_residency: ProductionContentStoreResidencyEvidence,
@@ -230,6 +268,7 @@ impl ProductionContentStoreOverflowCompactionQualificationReport {
             "compaction_elapsed_micros": self.compaction_elapsed_micros,
             "cleanup_elapsed_micros": self.cleanup_elapsed_micros,
             "compaction_process": self.compaction_process,
+            "compaction_policy": self.compaction_policy,
             "compaction": self.compaction,
             "artifacts": self.artifacts,
             "initial_residency": self.initial_residency,
@@ -255,6 +294,8 @@ pub fn run_production_content_store_overflow_compaction_qualification(
     validate_config(&config, &corpus)?;
 
     let runtime_memory = runtime_memory_evidence(RuntimeMemorySnapshot::detect());
+    let compaction_policy =
+        ProductionRelationalOverflowCompactionPolicyEvidence::from_config(config.compaction)?;
     let storage_io = IoConcurrencyBudget::desktop_bound_for_device(StorageDeviceProfile::detect(
         &config.replica_path,
     ));
@@ -409,6 +450,7 @@ pub fn run_production_content_store_overflow_compaction_qualification(
             compaction_elapsed_micros,
             cleanup_elapsed_micros,
             compaction_process,
+            compaction_policy,
             compaction,
             artifacts,
             initial_residency,

@@ -798,6 +798,18 @@ capacity policy. The 8 GiB desktop kind retains dynamic admission and a 2 GiB
 maximum Skein capacity; its measured RSS limits remain separately declared in
 the qualification input.
 
+`skein-content-store-overflow-compaction-qualification` is a thin developer
+and evidence wrapper over this typed collector. It accepts exactly one existing
+caller-owned disposable replica plus one bounded JSON plan; it MUST NOT copy,
+create, migrate, or identify the source database in retained output. The plan
+serializes every scan, overlay, rewrite, sort, spill, result, RSS, page-fault,
+latency, write-amplification, and physical-reclamation bound so the release
+evaluator can recompute admission from raw evidence. The final release bundle
+requires two current-identity artifacts: one explicit 512 MiB capability run
+and one dynamic 8 GiB desktop run. Neither artifact can satisfy the other's
+profile obligation, and a top-level `ready` value cannot override inconsistent
+raw policy, generation, digest, resource, or reclamation fields.
+
 ### Relational row-root v1 publication
 
 `RelationalRowPagePublisher` publishes a generation through five immutable or

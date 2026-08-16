@@ -304,7 +304,7 @@ pub(super) fn validate_mutation_matrix(
     deduplicate(blockers)
 }
 
-fn validate_frozen_contract(
+pub(super) fn validate_frozen_contract(
     artifact: &Value,
     blockers: &mut Vec<String>,
 ) -> Option<ContentStoreSqlCorpus> {
@@ -1026,18 +1026,19 @@ fn validate_process(inputs: ProcessValidation<'_>, blockers: &mut Vec<String>) {
     }
 }
 
-const READ_STATEMENT_DIGEST_DOMAIN: &[u8] = b"skein-production-content-store-statement-v1";
+pub(super) const READ_STATEMENT_DIGEST_DOMAIN: &[u8] =
+    b"skein-production-content-store-statement-v1";
 const MUTATION_STATEMENT_DIGEST_DOMAIN: &[u8] =
     b"skein-production-content-store-mutation-statement-v1";
 
 #[derive(Clone, Copy)]
-enum StatementRole {
+pub(super) enum StatementRole {
     Read,
     Insert,
     Update,
 }
 
-fn valid_statement_contract(
+pub(super) fn valid_statement_contract(
     evidence: &Value,
     corpus: &ContentStoreSqlCorpus,
     role: StatementRole,
@@ -1091,15 +1092,15 @@ fn regression_per_million(observed: u64, reference: u64) -> u64 {
     }
 }
 
-fn string<'a>(value: &'a Value, pointer: &str) -> Option<&'a str> {
+pub(super) fn string<'a>(value: &'a Value, pointer: &str) -> Option<&'a str> {
     value.pointer(pointer).and_then(Value::as_str)
 }
 
-fn unsigned(value: &Value, pointer: &str) -> Option<u64> {
+pub(super) fn unsigned(value: &Value, pointer: &str) -> Option<u64> {
     value.pointer(pointer).and_then(Value::as_u64)
 }
 
-fn boolean(value: &Value, pointer: &str) -> Option<bool> {
+pub(super) fn boolean(value: &Value, pointer: &str) -> Option<bool> {
     value.pointer(pointer).and_then(Value::as_bool)
 }
 
@@ -1108,15 +1109,15 @@ fn sum(left: Option<u64>, right: Option<u64>) -> u64 {
         .saturating_add(right.unwrap_or(u64::MAX))
 }
 
-fn valid_sha256(value: &str) -> bool {
+pub(super) fn valid_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn valid_prefixed_sha256(value: &str) -> bool {
+pub(super) fn valid_prefixed_sha256(value: &str) -> bool {
     value.strip_prefix("sha256:").is_some_and(valid_sha256)
 }
 
-fn deduplicate(mut blockers: Vec<String>) -> Vec<String> {
+pub(super) fn deduplicate(mut blockers: Vec<String>) -> Vec<String> {
     blockers.sort();
     blockers.dedup();
     blockers
