@@ -340,19 +340,20 @@ fn authoritative_constraint_staging_derives_index_and_row_batches_once() {
     let index = TestConstraintIndex::from_state(&base);
     let owner = RelationalKey(vec![RelationalValue::Text("owner-1".to_string())]);
 
-    let (next, index_capture, row_capture) = base
-        .stage_transaction_with_authoritative_index_and_row_changes(
-            RelationalTransaction {
-                writes: vec![RelationalWrite::Upsert {
-                    table: "documents".to_string(),
-                    rows: vec![upsert_row("id-2", "owner-1", "new")],
-                    conflict_columns: vec!["owner".to_string()],
-                    action: RelationalConflictAction::Update(vec![RelationalUpsertAssignment {
-                        column: "payload".to_string(),
-                        value: RelationalUpsertValue::ExcludedColumn("payload".to_string()),
-                    }]),
-                }],
-            },
+    let transaction = RelationalTransaction {
+        writes: vec![RelationalWrite::Upsert {
+            table: "documents".to_string(),
+            rows: vec![upsert_row("id-2", "owner-1", "new")],
+            conflict_columns: vec!["owner".to_string()],
+            action: RelationalConflictAction::Update(vec![RelationalUpsertAssignment {
+                column: "payload".to_string(),
+                value: RelationalUpsertValue::ExcludedColumn("payload".to_string()),
+            }]),
+        }],
+    };
+    let (next, index_capture, row_capture, replay_access) = base
+        .stage_transaction_with_authoritative_replay_access(
+            transaction.clone(),
             RelationalMutationLimits::default(),
             RelationalOverflowConfig::default(),
             RelationalIndexChangeCaptureLimits::default(),
@@ -363,6 +364,56 @@ fn authoritative_constraint_staging_derives_index_and_row_batches_once() {
 
     let id_1 = RelationalKey(vec![RelationalValue::Text("id-1".to_string())]);
     let id_2 = RelationalKey(vec![RelationalValue::Text("id-2".to_string())]);
+    assert_eq!(
+        replay_access.entries(),
+        &[RelationalReplayAccess {
+            table: "documents".to_string(),
+            primary_key: id_1.clone(),
+        }]
+    );
+    let encoded =
+        encode_relational_wal_batch_with_replay_access(3, &transaction, Some(&replay_access))
+            .expect("encode authoritative WAL access set");
+    let decoded = decode_relational_wal_batch(&encoded, RelationalDecodeLimits::wal())
+        .expect("decode authoritative WAL access set");
+    assert_eq!(decoded.epoch, 3);
+    assert_eq!(decoded.transaction, transaction);
+    assert_eq!(decoded.replay_access.as_ref(), Some(&replay_access));
+
+    let (recovered, _, _) = base
+        .stage_transaction_for_authoritative_recovery_with_replay_access(
+            decoded.transaction,
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            RelationalIndexChangeCaptureLimits::default(),
+            RelationalRowChangeCaptureLimits::default(),
+            decoded
+                .replay_access
+                .as_ref()
+                .expect("decoded WAL retains replay access"),
+        )
+        .expect("recovery accepts the authenticated access set");
+    assert_eq!(
+        recovered.row("documents", &id_1),
+        next.row("documents", &id_1)
+    );
+
+    let drifted = RelationalReplayAccessSet::from_decoded_entries(Vec::new())
+        .expect("empty access set has canonical ordering");
+    let drift = base
+        .stage_transaction_for_authoritative_recovery_with_replay_access(
+            transaction.clone(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            RelationalIndexChangeCaptureLimits::default(),
+            RelationalRowChangeCaptureLimits::default(),
+            &drifted,
+        )
+        .expect_err("recovery rejects access-set drift");
+    assert!(matches!(
+        drift,
+        RelationalError::Corruption(message) if message.contains("does not match")
+    ));
     assert_eq!(next.row_count("documents"), 1);
     assert_eq!(
         next.row("documents", &id_1)
@@ -1410,6 +1461,45 @@ fn torn_or_modified_wal_record_is_rejected_before_replay() {
         decode_relational_wal_batch(&modified, RelationalDecodeLimits::wal()),
         Err(RelationalError::Corruption(_))
     ));
+}
+
+#[test]
+fn wal_encoder_rejects_replay_access_above_decoder_limit() {
+    let limits = RelationalDecodeLimits::wal();
+    let entries = (0..=limits.max_rows)
+        .map(|ordinal| RelationalReplayAccess {
+            table: "documents".to_string(),
+            primary_key: RelationalKey(vec![RelationalValue::BigInt(
+                i64::try_from(ordinal).expect("test ordinal fits i64"),
+            )]),
+        })
+        .collect();
+    let replay_access = RelationalReplayAccessSet { entries };
+    let error = encode_relational_wal_batch_with_replay_access(
+        1,
+        &RelationalTransaction::default(),
+        Some(&replay_access),
+    )
+    .expect_err("encoder must not emit access sets rejected by its decoder");
+    assert!(matches!(
+        error,
+        RelationalError::Admission(message) if message.contains("decoder entry limit")
+    ));
+}
+
+#[test]
+fn replay_access_decoder_rejects_noncanonical_order() {
+    let entry = |id: i64| RelationalReplayAccess {
+        table: "documents".to_string(),
+        primary_key: RelationalKey(vec![RelationalValue::BigInt(id)]),
+    };
+    for entries in [vec![entry(2), entry(1)], vec![entry(1), entry(1)]] {
+        assert!(matches!(
+            RelationalReplayAccessSet::from_decoded_entries(entries),
+            Err(RelationalError::Corruption(message))
+                if message.contains("not strictly ordered")
+        ));
+    }
 }
 
 #[test]
@@ -3371,6 +3461,320 @@ fn relational_row_change_capture_limit_invalidates_without_rejecting_canonical_s
         RelationalRowChangeCapture::Invalidated { reason }
             if reason.contains("max_entries=1")
     ));
+}
+
+#[test]
+fn replay_access_retains_transient_and_primary_key_working_set() {
+    let base = RelationalState::default()
+        .stage_transaction(
+            create_upsert_table(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("create replay-access table")
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::Insert {
+                    table: "documents".to_string(),
+                    rows: vec![upsert_row("id-1", "owner-1", "old")],
+                    mode: RelationalInsertMode::Error,
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("seed replay-access table");
+    let index = TestConstraintIndex::from_state(&base);
+    let transaction = RelationalTransaction {
+        writes: vec![
+            RelationalWrite::UpdateWhere {
+                table: "documents".to_string(),
+                assignments: vec![RelationalUpdateAssignment {
+                    column: "id".to_string(),
+                    value: RelationalUpdateValue::Value(RelationalValue::Text("id-3".to_string())),
+                }],
+                predicate: RelationalPredicate::Compare {
+                    column: "id".to_string(),
+                    op: RelationalComparisonOp::Eq,
+                    value: RelationalValue::Text("id-1".to_string()),
+                },
+            },
+            RelationalWrite::Insert {
+                table: "documents".to_string(),
+                rows: vec![upsert_row("id-2", "owner-2", "transient")],
+                mode: RelationalInsertMode::Error,
+            },
+            RelationalWrite::DeleteByPrimaryKey {
+                table: "documents".to_string(),
+                keys: vec![RelationalKey(vec![RelationalValue::Text(
+                    "id-2".to_string(),
+                )])],
+            },
+        ],
+    };
+
+    let (_, _, row_capture, replay_access) = base
+        .stage_transaction_with_authoritative_replay_access(
+            transaction,
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            RelationalIndexChangeCaptureLimits::default(),
+            RelationalRowChangeCaptureLimits::default(),
+            &index,
+        )
+        .expect("capture durable replay access");
+
+    let RelationalRowChangeCapture::Captured { changes, .. } = row_capture else {
+        panic!("row changes remain capturable");
+    };
+    assert_eq!(changes.len(), 2);
+    assert_eq!(
+        replay_access.entries(),
+        &[
+            RelationalReplayAccess {
+                table: "documents".to_string(),
+                primary_key: RelationalKey(vec![RelationalValue::Text("id-1".to_string())]),
+            },
+            RelationalReplayAccess {
+                table: "documents".to_string(),
+                primary_key: RelationalKey(vec![RelationalValue::Text("id-2".to_string())]),
+            },
+            RelationalReplayAccess {
+                table: "documents".to_string(),
+                primary_key: RelationalKey(vec![RelationalValue::Text("id-3".to_string())]),
+            },
+        ]
+    );
+}
+
+#[test]
+fn replay_access_retains_predicate_non_matches() {
+    let base = RelationalState::default()
+        .stage_transaction(
+            create_upsert_table(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("create replay-access table")
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::Insert {
+                    table: "documents".to_string(),
+                    rows: vec![
+                        upsert_row("id-1", "owner-1", "one"),
+                        upsert_row("id-2", "owner-2", "two"),
+                    ],
+                    mode: RelationalInsertMode::Error,
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("seed replay-access table");
+    let index = TestConstraintIndex::from_state(&base);
+    let (_, _, row_capture, replay_access) = base
+        .stage_transaction_with_authoritative_replay_access(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::UpdateWhere {
+                    table: "documents".to_string(),
+                    assignments: vec![RelationalUpdateAssignment {
+                        column: "payload".to_string(),
+                        value: RelationalUpdateValue::Value(RelationalValue::Text(
+                            "updated".to_string(),
+                        )),
+                    }],
+                    predicate: RelationalPredicate::Compare {
+                        column: "id".to_string(),
+                        op: RelationalComparisonOp::Eq,
+                        value: RelationalValue::Text("id-1".to_string()),
+                    },
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            RelationalIndexChangeCaptureLimits::default(),
+            RelationalRowChangeCaptureLimits::default(),
+            &index,
+        )
+        .expect("capture the complete predicate-read set");
+
+    assert!(matches!(
+        row_capture,
+        RelationalRowChangeCapture::Captured { changes, .. } if changes.len() == 1
+    ));
+    assert_eq!(
+        replay_access.entries(),
+        &[
+            RelationalReplayAccess {
+                table: "documents".to_string(),
+                primary_key: RelationalKey(vec![RelationalValue::Text("id-1".to_string())]),
+            },
+            RelationalReplayAccess {
+                table: "documents".to_string(),
+                primary_key: RelationalKey(vec![RelationalValue::Text("id-2".to_string())]),
+            },
+        ]
+    );
+}
+
+#[test]
+fn replay_access_retains_noop_upsert_conflict_reads() {
+    let base = RelationalState::default()
+        .stage_transaction(
+            create_upsert_table(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("create replay-access table")
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::Insert {
+                    table: "documents".to_string(),
+                    rows: vec![upsert_row("id-1", "owner-1", "old")],
+                    mode: RelationalInsertMode::Error,
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("seed replay-access table");
+    let index = TestConstraintIndex::from_state(&base);
+    let (_, _, row_capture, replay_access) = base
+        .stage_transaction_with_authoritative_replay_access(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::Upsert {
+                    table: "documents".to_string(),
+                    rows: vec![upsert_row("id-2", "owner-1", "ignored")],
+                    conflict_columns: vec!["owner".to_string()],
+                    action: RelationalConflictAction::DoNothing,
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            RelationalIndexChangeCaptureLimits::default(),
+            RelationalRowChangeCaptureLimits::default(),
+            &index,
+        )
+        .expect("capture no-op conflict read");
+
+    assert!(matches!(
+        row_capture,
+        RelationalRowChangeCapture::Captured { changes, .. } if changes.is_empty()
+    ));
+    assert_eq!(
+        replay_access.entries(),
+        &[RelationalReplayAccess {
+            table: "documents".to_string(),
+            primary_key: RelationalKey(vec![RelationalValue::Text("id-1".to_string())]),
+        }]
+    );
+}
+
+#[test]
+fn replay_access_limit_rejects_before_durable_staging() {
+    let base = RelationalState::default()
+        .stage_transaction(
+            create_upsert_table(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("create replay-access table")
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::Insert {
+                    table: "documents".to_string(),
+                    rows: vec![
+                        upsert_row("id-1", "owner-1", "one"),
+                        upsert_row("id-2", "owner-2", "two"),
+                    ],
+                    mode: RelationalInsertMode::Error,
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("seed replay-access table");
+    let index = TestConstraintIndex::from_state(&base);
+    let error = base
+        .stage_transaction_with_authoritative_replay_access(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::DeleteByPrimaryKey {
+                    table: "documents".to_string(),
+                    keys: vec![
+                        RelationalKey(vec![RelationalValue::Text("id-1".to_string())]),
+                        RelationalKey(vec![RelationalValue::Text("id-2".to_string())]),
+                    ],
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            RelationalIndexChangeCaptureLimits::default(),
+            RelationalRowChangeCaptureLimits {
+                max_entries: NonZeroUsize::new(1).unwrap(),
+                max_bytes: NonZeroUsize::new(1024 * 1024).unwrap(),
+            },
+            &index,
+        )
+        .expect_err("oversized replay access must reject staging");
+    assert!(matches!(
+        error,
+        RelationalError::Admission(message) if message.contains("replay access set")
+    ));
+    assert_eq!(base.row_count("documents"), 2);
+}
+
+#[test]
+fn replay_access_limit_rejects_unbounded_predicate_scan_without_changes() {
+    let base = RelationalState::default()
+        .stage_transaction(
+            create_upsert_table(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("create replay-access table")
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::Insert {
+                    table: "documents".to_string(),
+                    rows: vec![
+                        upsert_row("id-1", "owner-1", "one"),
+                        upsert_row("id-2", "owner-2", "two"),
+                    ],
+                    mode: RelationalInsertMode::Error,
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("seed replay-access table");
+    let index = TestConstraintIndex::from_state(&base);
+    let error = base
+        .stage_transaction_with_authoritative_replay_access(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::DeleteWhere {
+                    table: "documents".to_string(),
+                    predicate: RelationalPredicate::Compare {
+                        column: "id".to_string(),
+                        op: RelationalComparisonOp::Eq,
+                        value: RelationalValue::Text("absent".to_string()),
+                    },
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            RelationalIndexChangeCaptureLimits::default(),
+            RelationalRowChangeCaptureLimits {
+                max_entries: NonZeroUsize::new(1).unwrap(),
+                max_bytes: NonZeroUsize::new(1024 * 1024).unwrap(),
+            },
+            &index,
+        )
+        .expect_err("an unbounded predicate read set must reject before WAL");
+    assert!(matches!(
+        error,
+        RelationalError::Admission(message) if message.contains("replay access set")
+    ));
+    assert_eq!(base.row_count("documents"), 2);
 }
 
 #[test]

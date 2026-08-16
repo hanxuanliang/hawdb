@@ -23,8 +23,9 @@ pub use codec::{
     decode_relational_checkpoint_file_with_index_load,
     decode_relational_checkpoint_with_index_load, decode_relational_wal_batch,
     encode_relational_checkpoint, encode_relational_checkpoint_to_writer,
-    encode_relational_wal_batch, RelationalCheckpoint, RelationalCheckpointIndexLoad,
-    RelationalDecodeLimits, RelationalWalBatch,
+    encode_relational_wal_batch, encode_relational_wal_batch_with_replay_access,
+    RelationalCheckpoint, RelationalCheckpointIndexLoad, RelationalDecodeLimits,
+    RelationalWalBatch,
 };
 pub use constraints::RelationalConstraintIndex;
 pub use index_shadow::{
@@ -460,6 +461,123 @@ pub struct RelationalRowChange {
     pub table: String,
     pub primary_key: RelationalKey,
     pub row: Option<RelationalRow>,
+}
+
+/// The exact primary-key working set used by one durable relational DML
+/// transaction.
+///
+/// Entries are strictly ordered by table and primary key. Unlike the final row
+/// change capture, this set retains every row evaluated by predicate DML, keys
+/// whose values changed transiently and returned to their original value, and
+/// conflict rows read by a no-op `UPSERT`. Recovery can therefore hydrate only
+/// this bounded set before replaying predicate DML instead of scanning rows
+/// that were not authenticated by the WAL record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationalReplayAccessSet {
+    entries: Vec<RelationalReplayAccess>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RelationalReplayAccess {
+    pub table: String,
+    pub primary_key: RelationalKey,
+}
+
+impl RelationalReplayAccessSet {
+    pub fn entries(&self) -> &[RelationalReplayAccess] {
+        &self.entries
+    }
+
+    pub(crate) fn from_decoded_entries(
+        entries: Vec<RelationalReplayAccess>,
+    ) -> Result<Self, RelationalError> {
+        if entries.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(RelationalError::Corruption(
+                "relational WAL replay access set is not strictly ordered".to_string(),
+            ));
+        }
+        Ok(Self { entries })
+    }
+}
+
+struct RelationalReplayAccessTracker {
+    entries: BTreeMap<String, BTreeSet<RelationalKey>>,
+    entry_count: usize,
+    encoded_bytes: usize,
+    limits: RelationalRowChangeCaptureLimits,
+}
+
+impl RelationalReplayAccessTracker {
+    fn new(limits: RelationalRowChangeCaptureLimits) -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            entry_count: 0,
+            encoded_bytes: 0,
+            limits,
+        }
+    }
+
+    fn record(&mut self, table: &str, primary_key: &RelationalKey) -> Result<(), RelationalError> {
+        if self
+            .entries
+            .get(table)
+            .is_some_and(|keys| keys.contains(primary_key))
+        {
+            return Ok(());
+        }
+        let entry = RelationalReplayAccess {
+            table: table.to_string(),
+            primary_key: primary_key.clone(),
+        };
+        let entry_bytes = estimated_replay_access_encoding_bytes(&entry).ok_or_else(|| {
+            RelationalError::Admission(
+                "relational WAL replay access-set byte count overflow".to_string(),
+            )
+        })?;
+        let encoded_bytes = self.encoded_bytes.checked_add(entry_bytes).ok_or_else(|| {
+            RelationalError::Admission(
+                "relational WAL replay access-set byte count overflow".to_string(),
+            )
+        })?;
+        if self.entry_count >= self.limits.max_entries.get()
+            || encoded_bytes > self.limits.max_bytes.get()
+        {
+            return Err(RelationalError::Admission(format!(
+                "relational WAL replay access set exceeds max_entries {} or max_bytes {} before WAL append",
+                self.limits.max_entries, self.limits.max_bytes
+            )));
+        }
+        self.entries
+            .entry(table.to_string())
+            .or_default()
+            .insert(primary_key.clone());
+        self.entry_count += 1;
+        self.encoded_bytes = encoded_bytes;
+        Ok(())
+    }
+
+    fn record_changed_keys(
+        &mut self,
+        changed_keys: &BTreeMap<String, BTreeSet<RelationalKey>>,
+    ) -> Result<(), RelationalError> {
+        for (table, keys) in changed_keys {
+            for primary_key in keys {
+                self.record(table, primary_key)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> RelationalReplayAccessSet {
+        let mut entries = Vec::with_capacity(self.entry_count);
+        for (table, keys) in self.entries {
+            entries.extend(keys.into_iter().map(|primary_key| RelationalReplayAccess {
+                table: table.clone(),
+                primary_key,
+            }));
+        }
+        RelationalReplayAccessSet { entries }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1236,7 +1354,12 @@ impl RelationalState {
     > {
         self.require_materialized_rows("relational transaction")?;
         admit_transaction(&transaction, limits)?;
-        let (state, index_capture, row_capture) = apply_transaction_inner(
+        let TransactionApplyResult {
+            state,
+            index_capture,
+            row_capture,
+            ..
+        } = apply_transaction_inner(
             self,
             transaction,
             limits,
@@ -1254,6 +1377,49 @@ impl RelationalState {
         ))
     }
 
+    pub fn stage_transaction_with_index_row_and_replay_access(
+        &self,
+        transaction: RelationalTransaction,
+        limits: RelationalMutationLimits,
+        overflow_config: RelationalOverflowConfig,
+        index_capture_limits: RelationalIndexChangeCaptureLimits,
+        row_capture_limits: RelationalRowChangeCaptureLimits,
+    ) -> Result<
+        (
+            Self,
+            RelationalIndexChangeCapture,
+            RelationalRowChangeCapture,
+            RelationalReplayAccessSet,
+        ),
+        RelationalError,
+    > {
+        self.require_materialized_rows("relational transaction")?;
+        admit_transaction(&transaction, limits)?;
+        let TransactionApplyResult {
+            state,
+            index_capture,
+            row_capture,
+            replay_access,
+        } = apply_transaction_inner(
+            self,
+            transaction,
+            limits,
+            overflow_config,
+            TransactionApplyOptions {
+                index_capture_limits: Some(index_capture_limits),
+                row_capture_limits: Some(row_capture_limits),
+                replay_access_limits: Some(row_capture_limits),
+                ..TransactionApplyOptions::materialized()
+            },
+        )?;
+        Ok((
+            state,
+            index_capture.expect("index change capture was requested for this transaction"),
+            row_capture.expect("row change capture was requested for this transaction"),
+            replay_access.expect("replay access capture was requested for this transaction"),
+        ))
+    }
+
     pub fn stage_transaction_with_row_changes(
         &self,
         transaction: RelationalTransaction,
@@ -1263,7 +1429,11 @@ impl RelationalState {
     ) -> Result<(Self, RelationalRowChangeCapture), RelationalError> {
         self.require_materialized_rows("relational transaction")?;
         admit_transaction(&transaction, limits)?;
-        let (state, _, capture) = apply_transaction_inner(
+        let TransactionApplyResult {
+            state,
+            row_capture: capture,
+            ..
+        } = apply_transaction_inner(
             self,
             transaction,
             limits,
@@ -1276,6 +1446,39 @@ impl RelationalState {
         Ok((
             state,
             capture.expect("row change capture was requested for this transaction"),
+        ))
+    }
+
+    pub fn stage_transaction_with_row_changes_and_replay_access(
+        &self,
+        transaction: RelationalTransaction,
+        limits: RelationalMutationLimits,
+        overflow_config: RelationalOverflowConfig,
+        capture_limits: RelationalRowChangeCaptureLimits,
+    ) -> Result<(Self, RelationalRowChangeCapture, RelationalReplayAccessSet), RelationalError>
+    {
+        self.require_materialized_rows("relational transaction")?;
+        admit_transaction(&transaction, limits)?;
+        let TransactionApplyResult {
+            state,
+            row_capture: capture,
+            replay_access,
+            ..
+        } = apply_transaction_inner(
+            self,
+            transaction,
+            limits,
+            overflow_config,
+            TransactionApplyOptions {
+                row_capture_limits: Some(capture_limits),
+                replay_access_limits: Some(capture_limits),
+                ..TransactionApplyOptions::materialized()
+            },
+        )?;
+        Ok((
+            state,
+            capture.expect("row change capture was requested for this transaction"),
+            replay_access.expect("replay access capture was requested for this transaction"),
         ))
     }
 
@@ -1333,7 +1536,12 @@ impl RelationalState {
                     .to_string(),
             ));
         }
-        let (state, index_capture, row_capture) = apply_transaction_inner(
+        let TransactionApplyResult {
+            state,
+            index_capture,
+            row_capture,
+            ..
+        } = apply_transaction_inner(
             self,
             transaction,
             limits,
@@ -1341,6 +1549,7 @@ impl RelationalState {
             TransactionApplyOptions {
                 index_capture_limits: Some(index_capture_limits),
                 row_capture_limits: Some(row_capture_limits),
+                replay_access_limits: None,
                 constraint_index: None,
                 index_mode: TransactionIndexMode::AuthoritativeRecovery,
             },
@@ -1409,7 +1618,12 @@ impl RelationalState {
                     .to_string(),
             ));
         }
-        let (state, index_capture, row_capture) = apply_transaction_inner(
+        let TransactionApplyResult {
+            state,
+            index_capture,
+            row_capture,
+            ..
+        } = apply_transaction_inner(
             self,
             transaction,
             limits,
@@ -1417,6 +1631,7 @@ impl RelationalState {
             TransactionApplyOptions {
                 index_capture_limits: Some(index_capture_limits),
                 row_capture_limits: Some(row_capture_limits),
+                replay_access_limits: None,
                 constraint_index: Some(constraint_index),
                 index_mode: TransactionIndexMode::Authoritative,
             },
@@ -1425,6 +1640,118 @@ impl RelationalState {
             state,
             index_capture.expect("index change capture was requested for this transaction"),
             row_capture.expect("row change capture was requested for this transaction"),
+        ))
+    }
+
+    /// Stages authoritative DML and captures the exact bounded primary-key
+    /// access set that must accompany the logical WAL transaction.
+    pub fn stage_transaction_with_authoritative_replay_access(
+        &self,
+        transaction: RelationalTransaction,
+        limits: RelationalMutationLimits,
+        overflow_config: RelationalOverflowConfig,
+        index_capture_limits: RelationalIndexChangeCaptureLimits,
+        row_capture_limits: RelationalRowChangeCaptureLimits,
+        constraint_index: &dyn RelationalConstraintIndex,
+    ) -> Result<
+        (
+            Self,
+            RelationalIndexChangeCapture,
+            RelationalRowChangeCapture,
+            RelationalReplayAccessSet,
+        ),
+        RelationalError,
+    > {
+        self.require_materialized_rows("relational transaction")?;
+        admit_transaction(&transaction, limits)?;
+        if transaction.changes_index_schema() {
+            return Err(RelationalError::Admission(
+                "authoritative relational replay access rejects schema-changing transactions until new canonical row and index generations are published"
+                    .to_string(),
+            ));
+        }
+        let TransactionApplyResult {
+            state,
+            index_capture,
+            row_capture,
+            replay_access,
+        } = apply_transaction_inner(
+            self,
+            transaction,
+            limits,
+            overflow_config,
+            TransactionApplyOptions {
+                index_capture_limits: Some(index_capture_limits),
+                row_capture_limits: Some(row_capture_limits),
+                replay_access_limits: Some(row_capture_limits),
+                constraint_index: Some(constraint_index),
+                index_mode: TransactionIndexMode::Authoritative,
+            },
+        )?;
+        Ok((
+            state,
+            index_capture.expect("index change capture was requested for this transaction"),
+            row_capture.expect("row change capture was requested for this transaction"),
+            replay_access.expect("replay access capture was requested for this transaction"),
+        ))
+    }
+
+    /// Replays authoritative DML and rejects any drift from the access set
+    /// authenticated by the WAL record.
+    pub fn stage_transaction_for_authoritative_recovery_with_replay_access(
+        &self,
+        transaction: RelationalTransaction,
+        limits: RelationalMutationLimits,
+        overflow_config: RelationalOverflowConfig,
+        index_capture_limits: RelationalIndexChangeCaptureLimits,
+        row_capture_limits: RelationalRowChangeCaptureLimits,
+        expected_replay_access: &RelationalReplayAccessSet,
+    ) -> Result<
+        (
+            Self,
+            RelationalIndexChangeCapture,
+            RelationalRowChangeCapture,
+        ),
+        RelationalError,
+    > {
+        self.require_materialized_rows("relational recovery")?;
+        admit_transaction(&transaction, limits)?;
+        if transaction.changes_index_schema() {
+            return Err(RelationalError::Admission(
+                "authoritative relational recovery rejects schema-changing WAL until new canonical row and index generations are published"
+                    .to_string(),
+            ));
+        }
+        let TransactionApplyResult {
+            state,
+            index_capture,
+            row_capture,
+            replay_access,
+        } = apply_transaction_inner(
+            self,
+            transaction,
+            limits,
+            overflow_config,
+            TransactionApplyOptions {
+                index_capture_limits: Some(index_capture_limits),
+                row_capture_limits: Some(row_capture_limits),
+                replay_access_limits: Some(row_capture_limits),
+                constraint_index: None,
+                index_mode: TransactionIndexMode::AuthoritativeRecovery,
+            },
+        )?;
+        let replay_access =
+            replay_access.expect("replay access capture was requested for recovery");
+        if &replay_access != expected_replay_access {
+            return Err(RelationalError::Corruption(
+                "relational WAL replay access set does not match the recovered transaction"
+                    .to_string(),
+            ));
+        }
+        Ok((
+            state,
+            index_capture.expect("index change capture was requested for recovery"),
+            row_capture.expect("row change capture was requested for recovery"),
         ))
     }
 
@@ -2175,7 +2502,7 @@ fn apply_transaction(
         overflow_config,
         TransactionApplyOptions::materialized(),
     )
-    .map(|(state, _, _)| state)
+    .map(|result| result.state)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2189,6 +2516,7 @@ enum TransactionIndexMode {
 struct TransactionApplyOptions<'a> {
     index_capture_limits: Option<RelationalIndexChangeCaptureLimits>,
     row_capture_limits: Option<RelationalRowChangeCaptureLimits>,
+    replay_access_limits: Option<RelationalRowChangeCaptureLimits>,
     constraint_index: Option<&'a dyn RelationalConstraintIndex>,
     index_mode: TransactionIndexMode,
 }
@@ -2198,6 +2526,7 @@ impl TransactionApplyOptions<'_> {
         Self {
             index_capture_limits: None,
             row_capture_limits: None,
+            replay_access_limits: None,
             constraint_index: None,
             index_mode: TransactionIndexMode::Materialized,
         }
@@ -2213,7 +2542,11 @@ fn apply_transaction_with_index_changes(
     constraint_index: Option<&dyn RelationalConstraintIndex>,
     index_mode: TransactionIndexMode,
 ) -> Result<(RelationalState, RelationalIndexChangeCapture), RelationalError> {
-    let (state, capture, _) = apply_transaction_inner(
+    let TransactionApplyResult {
+        state,
+        index_capture: capture,
+        ..
+    } = apply_transaction_inner(
         state,
         transaction,
         limits,
@@ -2221,6 +2554,7 @@ fn apply_transaction_with_index_changes(
         TransactionApplyOptions {
             index_capture_limits: Some(capture_limits),
             row_capture_limits: None,
+            replay_access_limits: None,
             constraint_index,
             index_mode,
         },
@@ -2231,23 +2565,24 @@ fn apply_transaction_with_index_changes(
     ))
 }
 
+struct TransactionApplyResult {
+    state: RelationalState,
+    index_capture: Option<RelationalIndexChangeCapture>,
+    row_capture: Option<RelationalRowChangeCapture>,
+    replay_access: Option<RelationalReplayAccessSet>,
+}
+
 fn apply_transaction_inner(
     state: &RelationalState,
     transaction: RelationalTransaction,
     limits: RelationalMutationLimits,
     overflow_config: RelationalOverflowConfig,
     options: TransactionApplyOptions<'_>,
-) -> Result<
-    (
-        RelationalState,
-        Option<RelationalIndexChangeCapture>,
-        Option<RelationalRowChangeCapture>,
-    ),
-    RelationalError,
-> {
+) -> Result<TransactionApplyResult, RelationalError> {
     let TransactionApplyOptions {
         index_capture_limits,
         row_capture_limits,
+        replay_access_limits,
         constraint_index,
         index_mode,
     } = options;
@@ -2267,6 +2602,7 @@ fn apply_transaction_inner(
     }
     let mut touched = BTreeSet::new();
     let mut changed_keys = BTreeMap::<String, BTreeSet<RelationalKey>>::new();
+    let mut replay_access_tracker = replay_access_limits.map(RelationalReplayAccessTracker::new);
     let mut full_index_rebuild = BTreeSet::new();
     for write in transaction.writes {
         match write {
@@ -2447,6 +2783,9 @@ fn apply_transaction_inner(
                 let segment = Arc::make_mut(segment);
                 let mut keys = Vec::new();
                 for (key, row) in segment.rows.iter() {
+                    if let Some(tracker) = replay_access_tracker.as_mut() {
+                        tracker.record(&table, key)?;
+                    }
                     if predicate_truth(schema, row, &predicate)? == Some(true) {
                         keys.push(key.clone());
                         if keys.len() > limits.max_rows.get() {
@@ -2479,9 +2818,12 @@ fn apply_transaction_inner(
                     &table,
                     &assignments,
                     &predicate,
-                    limits,
-                    overflow_config,
-                    changed_keys.entry(table.clone()).or_default(),
+                    UpdateApplyContext {
+                        limits,
+                        overflow_config,
+                        changed_keys: changed_keys.entry(table.clone()).or_default(),
+                        replay_access_tracker: replay_access_tracker.as_mut(),
+                    },
                 )?;
                 touched.insert(table);
             }
@@ -2515,6 +2857,12 @@ fn apply_transaction_inner(
             capture_limits,
         )
     });
+    let replay_access = if let Some(mut tracker) = replay_access_tracker {
+        tracker.record_changed_keys(&changed_keys)?;
+        Some(tracker.finish())
+    } else {
+        None
+    };
     match (index_mode, constraint_index) {
         (TransactionIndexMode::Materialized, None) => {
             validate_foreign_keys_incremental(state, &next, &changed_keys, &full_index_rebuild)?;
@@ -2539,7 +2887,12 @@ fn apply_transaction_inner(
             ));
         }
     }
-    Ok((next, index_capture, row_capture))
+    Ok(TransactionApplyResult {
+        state: next,
+        index_capture,
+        row_capture,
+        replay_access,
+    })
 }
 
 struct UpsertIndexContext<'a> {
@@ -2652,6 +3005,7 @@ fn apply_upsert(
         let segment = Arc::make_mut(segment);
         if let Some(existing_primary_key) = existing_primary_key {
             if matches!(action, RelationalConflictAction::DoNothing) {
+                changed_keys.insert(existing_primary_key);
                 continue;
             }
             let existing = segment
@@ -2755,15 +3109,26 @@ fn conflict_primary_key(
     Ok(primary_key)
 }
 
+struct UpdateApplyContext<'a> {
+    limits: RelationalMutationLimits,
+    overflow_config: RelationalOverflowConfig,
+    changed_keys: &'a mut BTreeSet<RelationalKey>,
+    replay_access_tracker: Option<&'a mut RelationalReplayAccessTracker>,
+}
+
 fn apply_update(
     state: &mut RelationalState,
     table: &str,
     assignments: &[RelationalUpdateAssignment],
     predicate: &RelationalPredicate,
-    limits: RelationalMutationLimits,
-    overflow_config: RelationalOverflowConfig,
-    changed_keys: &mut BTreeSet<RelationalKey>,
+    context: UpdateApplyContext<'_>,
 ) -> Result<(), RelationalError> {
+    let UpdateApplyContext {
+        limits,
+        overflow_config,
+        changed_keys,
+        mut replay_access_tracker,
+    } = context;
     let schema = Arc::clone(
         state
             .schemas
@@ -2813,6 +3178,9 @@ fn apply_update(
         .ok_or_else(|| RelationalError::Schema(format!("unknown table {table}")))?;
     let mut matched = Vec::new();
     for (key, row) in segment.rows.iter() {
+        if let Some(tracker) = replay_access_tracker.as_deref_mut() {
+            tracker.record(table, key)?;
+        }
         if predicate_truth(&schema, row, predicate)? == Some(true) {
             matched.push((key.clone(), row.clone()));
             if matched.len() > limits.max_rows.get() {
@@ -3384,6 +3752,16 @@ fn estimated_row_change_encoding_bytes(change: &RelationalRowChange) -> Option<u
         .checked_add(change.table.len())?
         .checked_add(key_bytes)?
         .checked_add(row_bytes)
+}
+
+fn estimated_replay_access_encoding_bytes(change: &RelationalReplayAccess) -> Option<usize> {
+    const FIXED_BYTES: usize = 2 * 8;
+    let key_bytes = ordered_key::encode_ordered_relational_key(&change.primary_key)
+        .ok()?
+        .len();
+    FIXED_BYTES
+        .checked_add(change.table.len())?
+        .checked_add(key_bytes)
 }
 
 fn row_capture_limit_invalidated(

@@ -1151,16 +1151,35 @@ checkpoint decode omits those posting maps, requires the bound persistent view
 before serving, and derives WAL-recovery plus live changes directly from
 before/after rows. Constraints are checked against that view before WAL; replay
 of an already-durable authoritative transaction does not revalidate it through
-the absent posting oracle. Because v1 WAL retains logical `UPSERT`, recovery
-resolves a non-primary conflict target by scanning canonical rows without
-building resident postings; the scan MUST reject multiple matches as
-corruption. An ordinary materialized mutation against an omitted state fails
-closed instead of silently bypassing constraints. Generation publication also
-derives entries from canonical rows and never consumes the oracle. When
-postings are omitted, SQL planning uses a conservative row-count estimate (or
-one row for a complete unique key) and leaves the actual bounded cardinality
-discovery to the demand reader; planning MUST NOT rebuild or scan the persistent
-index merely to obtain an estimate.
+the absent posting oracle.
+
+Every schema-stable DML record that has canonical row capture MUST also carry a
+strictly ordered, duplicate-free replay access set containing every primary key
+needed to reproduce the complete transaction. This is a predicate-read and
+mutation working set, not a net-change list: every row evaluated by an
+`UPDATE` or `DELETE` predicate remains present even when it does not match, as
+does a row inserted and deleted in one transaction, a primary key changed and
+later restored, or an existing conflict row read by `UPSERT ... DO NOTHING`.
+Capture is incremental, uses the canonical row overlay entry and byte limits,
+and rejects before WAL append when either limit is exceeded; a broad predicate
+scan therefore cannot create an unbounded recovery contract merely because it
+changes few or no rows. The WAL envelope authenticates the set with the logical
+transaction. The encoder MUST enforce the WAL decoder's entry, value, and
+record-byte limits before append, so custom capture limits cannot create a
+durable record that reopen rejects. Writable recovery currently replays against
+the materialized state and recomputes the set, rejecting any drift as
+corruption. The next sparse-writable stage may hydrate only this authenticated
+set before replaying logical `UPDATE`, `DELETE`, and `UPSERT`; it MUST NOT infer
+a smaller set or fall back to a database-sized row scan. Schema-changing
+records remain checkpoint barriers and do not use this contract.
+
+An ordinary materialized mutation against an omitted state fails closed instead
+of silently bypassing constraints. Generation publication derives entries from
+canonical rows and never consumes the oracle. When postings are omitted, SQL
+planning uses a conservative row-count estimate (or one row for a complete
+unique key) and leaves the actual bounded cardinality discovery to the demand
+reader; planning MUST NOT rebuild or scan the persistent index merely to obtain
+an estimate.
 
 ### WAL index recovery
 

@@ -685,9 +685,19 @@ impl GraphStore {
                                 .to_string(),
                         ));
                     }
+                    if batch.replay_access.is_none() {
+                        return Err(SkeinError::Storage(
+                            "authoritative relational WAL is missing its exact replay access set"
+                                .to_string(),
+                        ));
+                    }
                 } else {
-                    self.stage_recovered_relational_transaction(batch.transaction, expected_epoch)
-                        .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                    self.stage_recovered_relational_transaction(
+                        batch.transaction,
+                        batch.replay_access,
+                        expected_epoch,
+                    )
+                    .map_err(|error| SkeinError::Storage(error.to_string()))?;
                 }
             }
             WalOp::RelationalSnapshot { record } => {

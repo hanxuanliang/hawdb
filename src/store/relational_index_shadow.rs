@@ -31,9 +31,9 @@ use skein_storage::{
     RelationalIndexRecoveryReader, RelationalIndexRecoveryReport, RelationalIndexRole,
     RelationalIndexShadowBuildReport, RelationalIndexShadowConfig, RelationalIndexShadowError,
     RelationalIndexShadowManifest, RelationalIndexShadowReader, RelationalIndexShadowWriter,
-    RelationalKey, RelationalRecoveryFence, RelationalRecoverySourceIdentity, RelationalScalarType,
-    RelationalTableSchema, RelationalTransaction, RelationalValue, StorageResidencyMode,
-    RELATIONAL_PRIMARY_INDEX_NAME,
+    RelationalKey, RelationalRecoveryFence, RelationalRecoverySourceIdentity,
+    RelationalReplayAccessSet, RelationalScalarType, RelationalTableSchema, RelationalTransaction,
+    RelationalValue, StorageResidencyMode, RELATIONAL_PRIMARY_INDEX_NAME,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -1632,6 +1632,7 @@ impl GraphStore {
     pub(super) fn stage_recovered_relational_transaction(
         &mut self,
         transaction: RelationalTransaction,
+        replay_access: Option<RelationalReplayAccessSet>,
         expected_epoch: u64,
     ) -> Result<(), skein_storage::RelationalError> {
         let authoritative = self
@@ -1652,14 +1653,21 @@ impl GraphStore {
         let row_limits = self.relational_row_recovery_capture_limits();
         let (next, index_capture, row_capture) = match (index_limits, row_limits) {
             (Some(index_limits), Some(row_limits)) if authoritative => {
+                let replay_access = replay_access.as_ref().ok_or_else(|| {
+                    skein_storage::RelationalError::Corruption(
+                        "authoritative relational WAL is missing its exact replay access set"
+                            .to_string(),
+                    )
+                })?;
                 let (next, index_capture, row_capture) = self
                     .relational_state
-                    .stage_transaction_for_authoritative_recovery_with_row_changes(
+                    .stage_transaction_for_authoritative_recovery_with_replay_access(
                         transaction,
                         self.relational_mutation_limits,
                         self.relational_overflow_config,
                         index_limits,
                         row_limits,
+                        replay_access,
                     )?;
                 (next, Some(index_capture), Some(row_capture))
             }

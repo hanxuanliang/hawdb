@@ -232,7 +232,11 @@ crash; read-only recovery remains fail closed.
     fallback and a clean checkpoint no longer constructs that oracle. The
     read-only authoritative WAL path now reuses exact pre-published row/index
     deltas without reconstructing that oracle. The remaining online dependency
-    is writable WAL recovery; removing it requires a demand-hydrated sparse
+    is writable WAL recovery. Schema-stable DML now persists a bounded exact
+    primary-key replay access set, including predicate non-matches and
+    transiently touched keys, and writable recovery recomputes and verifies it
+    before accepting the record.
+    The next stage must hydrate only that authenticated set into a sparse
     mutation workspace before the full oracle can be kept only in offline
     qualification code.
 

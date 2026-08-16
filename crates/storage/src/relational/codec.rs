@@ -3,10 +3,10 @@ use super::{
     RelationalColumnSchema, RelationalComparisonOp, RelationalConflictAction, RelationalError,
     RelationalForeignKeySchema, RelationalIndexSchema, RelationalInsertMode, RelationalKey,
     RelationalOverflowRef, RelationalOverflowSegment, RelationalPredicate,
-    RelationalReferentialAction, RelationalRow, RelationalScalarType, RelationalState,
-    RelationalTableSchema, RelationalTableSegment, RelationalTransaction,
-    RelationalUpdateAssignment, RelationalUpdateValue, RelationalUpsertAssignment,
-    RelationalUpsertValue, RelationalValue, RelationalWrite,
+    RelationalReferentialAction, RelationalReplayAccess, RelationalReplayAccessSet, RelationalRow,
+    RelationalScalarType, RelationalState, RelationalTableSchema, RelationalTableSegment,
+    RelationalTransaction, RelationalUpdateAssignment, RelationalUpdateValue,
+    RelationalUpsertAssignment, RelationalUpsertValue, RelationalValue, RelationalWrite,
 };
 use crate::{
     ContentDigest, FileSegmentRangeReader, SegmentReadRange, DEFAULT_MAX_CHECKPOINT_ENCODED_BYTES,
@@ -130,6 +130,7 @@ impl RelationalDecodeLimits {
 pub struct RelationalWalBatch {
     pub epoch: u64,
     pub transaction: RelationalTransaction,
+    pub replay_access: Option<RelationalReplayAccessSet>,
 }
 
 #[derive(Debug, Clone)]
@@ -149,12 +150,58 @@ pub fn encode_relational_wal_batch(
     epoch: u64,
     transaction: &RelationalTransaction,
 ) -> Result<Vec<u8>, RelationalError> {
+    encode_relational_wal_batch_with_replay_access(epoch, transaction, None)
+}
+
+pub fn encode_relational_wal_batch_with_replay_access(
+    epoch: u64,
+    transaction: &RelationalTransaction,
+    replay_access: Option<&RelationalReplayAccessSet>,
+) -> Result<Vec<u8>, RelationalError> {
+    let limits = RelationalDecodeLimits::wal();
+    if transaction.writes.len() > limits.max_writes {
+        return Err(RelationalError::Admission(format!(
+            "WAL contains {} writes, exceeding decoder limit {}",
+            transaction.writes.len(),
+            limits.max_writes
+        )));
+    }
+    if replay_access.is_some_and(|access| access.entries().len() > limits.max_rows) {
+        return Err(RelationalError::Admission(format!(
+            "WAL replay access set exceeds decoder entry limit {} before WAL append",
+            limits.max_rows
+        )));
+    }
     let mut payload = Encoder::default();
     payload.count(transaction.writes.len(), "WAL writes")?;
     for write in &transaction.writes {
         payload.write(write)?;
     }
-    encode_envelope(WAL_MAGIC, epoch, payload.finish())
+    payload.u8(u8::from(replay_access.is_some()));
+    if let Some(replay_access) = replay_access {
+        payload.count(replay_access.entries().len(), "WAL replay access entries")?;
+        for entry in replay_access.entries() {
+            payload.string(&entry.table)?;
+            payload.key(&entry.primary_key)?;
+        }
+    }
+    if payload.value_count > limits.max_values {
+        return Err(RelationalError::Admission(format!(
+            "WAL contains {} values, exceeding decoder limit {} before WAL append",
+            payload.value_count, limits.max_values
+        )));
+    }
+    let payload = payload.finish();
+    let record_bytes = HEADER_BYTES.checked_add(payload.len()).ok_or_else(|| {
+        RelationalError::Admission("relational WAL record size overflow".to_string())
+    })?;
+    if record_bytes > limits.max_record_bytes {
+        return Err(RelationalError::Admission(format!(
+            "relational WAL record contains {record_bytes} bytes, exceeding decoder limit {} before WAL append",
+            limits.max_record_bytes
+        )));
+    }
+    encode_envelope(WAL_MAGIC, epoch, payload)
 }
 
 pub fn decode_relational_wal_batch(
@@ -168,10 +215,24 @@ pub fn decode_relational_wal_batch(
     for _ in 0..write_count {
         writes.push(decoder.write()?);
     }
+    let replay_access = if decoder.boolean("WAL replay access presence")? {
+        let entry_count = decoder.count(limits.max_rows, "WAL replay access entries")?;
+        let mut entries = Vec::with_capacity(entry_count);
+        for _ in 0..entry_count {
+            entries.push(RelationalReplayAccess {
+                table: decoder.string()?,
+                primary_key: decoder.key()?,
+            });
+        }
+        Some(RelationalReplayAccessSet::from_decoded_entries(entries)?)
+    } else {
+        None
+    };
     decoder.finish()?;
     Ok(RelationalWalBatch {
         epoch,
         transaction: RelationalTransaction { writes },
+        replay_access,
     })
 }
 
@@ -634,6 +695,7 @@ fn decode_envelope<'a>(
 #[derive(Default)]
 struct Encoder {
     bytes: Vec<u8>,
+    value_count: usize,
 }
 
 impl Encoder {
@@ -697,6 +759,9 @@ impl Encoder {
     }
 
     fn value(&mut self, value: &RelationalValue) -> Result<(), RelationalError> {
+        self.value_count = self.value_count.checked_add(1).ok_or_else(|| {
+            RelationalError::Admission("encoded value count overflow".to_string())
+        })?;
         match value {
             RelationalValue::Null => self.u8(0),
             RelationalValue::Boolean(value) => {
@@ -733,6 +798,14 @@ impl Encoder {
     fn row(&mut self, row: &RelationalRow) -> Result<(), RelationalError> {
         self.count(row.values().len(), "row values")?;
         for value in row.values() {
+            self.value(value)?;
+        }
+        Ok(())
+    }
+
+    fn key(&mut self, key: &RelationalKey) -> Result<(), RelationalError> {
+        self.count(key.0.len(), "key values")?;
+        for value in &key.0 {
             self.value(value)?;
         }
         Ok(())
@@ -1373,6 +1446,17 @@ impl<I: DecodeInput> Decoder<I> {
             .map(|_| self.value())
             .collect::<Result<Vec<_>, _>>()?;
         Ok(RelationalRow::new(values))
+    }
+
+    fn key(&mut self) -> Result<RelationalKey, RelationalError> {
+        let value_count = self.count(
+            self.limits.max_values.saturating_sub(self.values),
+            "key values",
+        )?;
+        let values = (0..value_count)
+            .map(|_| self.value())
+            .collect::<Result<_, _>>()?;
+        Ok(RelationalKey(values))
     }
 
     fn table_schema(&mut self) -> Result<RelationalTableSchema, RelationalError> {

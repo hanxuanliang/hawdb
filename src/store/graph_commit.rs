@@ -1713,12 +1713,12 @@ impl GraphStore {
             let authoritative_index = self.authoritative_relational_constraint_index()?;
             let index_limits = self.relational_index_live_capture_limits();
             let row_limits = self.relational_row_live_capture_limits();
-            let (next, index_capture, row_capture) =
+            let (next, index_capture, row_capture, replay_access) =
                 match (authoritative_index.as_ref(), index_limits, row_limits) {
                     (Some(index), Some(index_limits), Some(row_limits)) => {
-                        let (next, index_capture, row_capture) = self
+                        let (next, index_capture, row_capture, replay_access) = self
                             .relational_state
-                            .stage_transaction_with_authoritative_index_and_row_changes(
+                            .stage_transaction_with_authoritative_replay_access(
                                 transaction.clone(),
                                 self.relational_mutation_limits,
                                 self.relational_overflow_config,
@@ -1727,7 +1727,12 @@ impl GraphStore {
                                 index,
                             )
                             .map_err(map_relational_staging_error)?;
-                        (next, Some(index_capture), Some(row_capture))
+                        (
+                            next,
+                            Some(index_capture),
+                            Some(row_capture),
+                            Some(replay_access),
+                        )
                     }
                     (Some(index), Some(index_limits), None) => {
                         let (next, capture) = self
@@ -1740,12 +1745,12 @@ impl GraphStore {
                                 index,
                             )
                             .map_err(map_relational_staging_error)?;
-                        (next, Some(capture), None)
+                        (next, Some(capture), None, None)
                     }
                     (None, Some(index_limits), Some(row_limits)) => {
-                        let (next, index_capture, row_capture) = self
+                        let (next, index_capture, row_capture, replay_access) = self
                             .relational_state
-                            .stage_transaction_with_index_and_row_changes(
+                            .stage_transaction_with_index_row_and_replay_access(
                                 transaction.clone(),
                                 self.relational_mutation_limits,
                                 self.relational_overflow_config,
@@ -1753,7 +1758,12 @@ impl GraphStore {
                                 row_limits,
                             )
                             .map_err(map_relational_staging_error)?;
-                        (next, Some(index_capture), Some(row_capture))
+                        (
+                            next,
+                            Some(index_capture),
+                            Some(row_capture),
+                            Some(replay_access),
+                        )
                     }
                     (None, Some(index_limits), None) => {
                         let (next, capture) = self
@@ -1765,19 +1775,19 @@ impl GraphStore {
                                 index_limits,
                             )
                             .map_err(map_relational_staging_error)?;
-                        (next, Some(capture), None)
+                        (next, Some(capture), None, None)
                     }
                     (_, None, Some(row_limits)) => {
-                        let (next, capture) = self
+                        let (next, capture, replay_access) = self
                             .relational_state
-                            .stage_transaction_with_row_changes(
+                            .stage_transaction_with_row_changes_and_replay_access(
                                 transaction.clone(),
                                 self.relational_mutation_limits,
                                 self.relational_overflow_config,
                                 row_limits,
                             )
                             .map_err(map_relational_staging_error)?;
-                        (next, None, Some(capture))
+                        (next, None, Some(capture), Some(replay_access))
                     }
                     (_, None, None) => (
                         self.relational_state
@@ -1789,13 +1799,28 @@ impl GraphStore {
                             .map_err(map_relational_staging_error)?,
                         None,
                         None,
+                        None,
                     ),
                 };
             staged_relational_state = Some(next);
             staged_relational_index_capture = index_capture;
             staged_relational_row_capture = row_capture;
-            let record = encode_relational_wal_batch(next_commit_epoch, &transaction)
-                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            let replay_access = replay_access.filter(|_| {
+                matches!(
+                    staged_relational_row_capture.as_ref(),
+                    Some(skein_storage::RelationalRowChangeCapture::Captured { .. })
+                )
+            });
+            let record = if let Some(replay_access) = replay_access.as_ref() {
+                encode_relational_wal_batch_with_replay_access(
+                    next_commit_epoch,
+                    &transaction,
+                    Some(replay_access),
+                )
+            } else {
+                encode_relational_wal_batch(next_commit_epoch, &transaction)
+            }
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
             ops.push(WalOp::Relational {
                 record: Arc::from(record),
             });
