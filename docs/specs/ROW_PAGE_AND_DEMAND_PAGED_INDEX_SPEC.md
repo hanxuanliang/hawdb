@@ -1437,11 +1437,13 @@ same bounded byte image that is decoded; a verifier MUST NOT reopen the path.
 The configured limit is a storage-subsystem budget and MUST NOT be derived by
 assuming that 512 MiB is the default process limit.
 
-This bound is a fail-closed transition guard, not proof that graph metadata
-residency is independent of graph size. Until block descriptors move behind a
-demand-paged root, production qualification MUST report both the configured
-aggregate limit and selected encoded manifest bytes, and MUST reject a selected
-generation that exceeds the limit.
+This bound remains a fail-closed transition guard for selected graph manifests.
+Canonical adjacency descriptors are no longer part of that graph-size-dependent
+manifest image: the outer durable manifest binds one compact descriptor root,
+and normal open admits and verifies only that root while page payloads remain
+cold. Other manifest-backed graph structures MUST still report both the
+configured aggregate limit and selected encoded manifest bytes, and MUST reject
+a selected generation that exceeds the limit.
 
 ### Graph descriptor page v1
 
@@ -1462,23 +1464,25 @@ of publication and serving activation:
 - a bound decode validates the outer range, digest, artifact class, physical
   identity, source epoch, and key range against the same admitted page bytes;
 - physical generation belongs to the page reference rather than the selecting
-  root, so a later COW publisher may reuse immutable pages without changing
-  their identity;
+  root. The format can therefore support later COW reuse, but canonical
+  adjacency v1 requires every reachable page to belong to the selected
+  generation. Cross-generation graph references remain rejected until a
+  retained-closure and reclamation contract is activated;
 - the default page ceiling is 512 KiB and the default descriptor-value ceiling
   is 448 KiB. These are per-page format admissions, not resident-memory policy
   or evidence that 512 MiB is Skein's default process budget.
 
-`ImmutableGraphDescriptorPage` is not selected by any production manifest yet.
-The canonical adjacency writer now emits the first shadow tree described below,
-but demand serving, cache/pin accounting, deep scrub, recovery selection, and
-differential activation remain separate contracts. Until those contracts
-replace the manifest-owned descriptor vectors, the aggregate graph-manifest
-open budget remains authoritative.
+`ImmutableGraphDescriptorPage` now serves canonical adjacency through a compact,
+generation-bound root selected by the outer durable manifest. Descriptor pages
+remain cold until a prefix scan or explicit deep scrub reads them. Page payloads
+are admitted independently of the graph-manifest open budget and use the shared
+byte-bounded storage cache.
 
-### Canonical adjacency shadow descriptor root v1
+### Canonical adjacency demand descriptor root v1
 
-Every canonical adjacency checkpoint additionally persists an unselected
-descriptor tree without changing the current reader:
+Every canonical adjacency checkpoint persists one complete adjacency artifact
+and descriptor tree, then selects their exact identity through the outer durable
+manifest:
 
 - the leaf key is the big-endian tuple `(direction, endpoint, relationship
   type, minimum neighbor, block id)`, so byte order is descriptor order;
@@ -1500,25 +1504,41 @@ descriptor tree without changing the current reader:
   the bounded checksummed root is synchronized and published last. Descriptor
   artifacts are immutable within one generation and publication refuses to
   replace an existing destination. A root publication failure therefore
-  leaves no newly selectable shadow root;
+  leaves no newly selectable root;
 - the root binds graph class, selecting generation, source commit epoch, page
   artifact identity/length/CRC32C/SHA-256, counts, tree height, and the exact
   immutable root-page reference. Empty adjacency publishes an empty artifact
   with the integrity digest of the empty byte string;
+- the outer durable manifest binds the selected generation and source commit
+  epoch, exact relationship and two-direction entry counts, the adjacency
+  artifact length/CRC32C/SHA-256, and the descriptor-root
+  length/CRC32C/SHA-256. Manifest-last publication is the only activation
+  transition. Missing fields, generation drift, source-epoch drift, count
+  disagreement, or root/data identity drift fail open closed;
 - root-only reopen reads at most `max_root_bytes`, validates its checksum and
   structure, and checks the page artifact length without reading page payload.
-  Whole-artifact digest verification belongs to deep scrub; later demand reads
-  verify each selected page through its bound per-page digests;
-- checkpoint discard, abandoned-candidate cleanup, and generation reclamation
-  recognize both shadow files. They are deliberately absent from backup and
-  the outer durable manifest while unselected.
+  Demand prefix scans independently admit page count, storage bytes, emitted
+  descriptors, and tree height. Each page is verified against its exact parent
+  reference before decode and cached by store, selected generation, page
+  identity, content digest, and representation kind;
+- endpoint and optional relationship-type scans stop after the ordered prefix
+  ends, then read only the referenced adjacency blocks. Reports expose selected
+  generation, descriptor pages/bytes/cache outcomes, block reads, decoded
+  records, and early stop. Capacity rejection is local to the request;
+- physical page, block, digest, key-range, or generation corruption poisons the
+  shared reader handle. Admission and cache-capacity rejection do not poison it;
+- explicit deep scrub bypasses the cache, hashes the complete descriptor-page
+  and adjacency artifacts, visits every reachable page and descriptor, decodes
+  every block, and requires a contiguous block-id/range closure with exact page,
+  descriptor, block, record, and byte counts;
+- backup, restore validation, derived-artifact repair, checkpoint discard,
+  abandoned-candidate cleanup, and generation reclamation retain or verify the
+  adjacency artifact, descriptor page artifact, and descriptor root as one
+  selected closure.
 
-The legacy text adjacency manifest and its resident descriptor vector remain
-the production serving source in this stage. Consequently this shadow writer
-proves bounded construction and publish-last recovery ordering, but it does not
-yet prove graph-size-independent startup RSS. Activation requires a separate
-demand reader, corruption poison/cache/pin accounting, deep scrub, differential
-query evidence, and an explicit outer-manifest selection change.
+The production path does not write or reopen a text adjacency manifest and does
+not retain a graph-sized descriptor vector. A resident manifest remains only as
+a codec-test oracle; it is not a durable compatibility path.
 
 ## Demand paging and cache ownership
 

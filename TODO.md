@@ -270,20 +270,22 @@ crash; read-only recovery remains fail closed.
     representative artifacts are checked in; synthetic fixtures and policy
     reports alone do not prove peak RSS.
 - [ ] Differentially qualify and production-activate persistent graph indexes.
-  - Normal open now admits the aggregate encoded canonical, spill, adjacency,
-    and property-projection manifest bytes before allocation, verifies each
-    selected manifest from one bounded byte image, and exposes the configured
-    limit plus selected bytes. This is the fail-closed guard for constrained
-    profiles, not the final scale property. The unselected graph descriptor
-    page v1 format now provides bounded leaf/interior pages, cross-generation
-    physical references, strict key/value/range admission, and bound
-    CRC32C/SHA-256 verification. The canonical adjacency checkpoint now streams
-    those descriptors through bounded level runs, publishes its page artifact
-    before a checksummed root, reopens the root without reading page payload,
-    and leaves production serving on the legacy manifest. Next add the bound
-    demand reader and explicitly activate this root, then migrate the remaining
-    graph block descriptors before claiming that startup metadata residency is
-    independent of graph/index entry count.
+  - Normal open admits aggregate encoded canonical, spill, and
+    property-projection manifest bytes before allocation, verifies each selected
+    manifest from one bounded byte image, and exposes the configured limit plus
+    selected bytes. Canonical adjacency no longer keeps its descriptors in that
+    graph-size-dependent image: descriptor page v1 provides bounded
+    leaf/interior pages, strict key/value/range admission, and bound
+    CRC32C/SHA-256 verification. The checkpoint streams descriptors through
+    bounded level runs, publishes its page artifact before a checksummed root,
+    and activates the exact root and adjacency artifact through the outer
+    manifest. Normal open reads only the compact root; endpoint scans use the
+    bound demand reader and shared cache, while deep scrub verifies the complete
+    uncached closure. Canonical adjacency v1 rejects cross-generation page
+    references until retained-closure reclamation is formalized. Next migrate
+    the remaining graph block descriptors and collect representative
+    production-copy evidence before claiming that all graph/index startup
+    metadata residency is independent of entry count.
   - The independent general graph-storage release artifact now has a bounded
     `skein-graph-storage-qualification` collector over the existing typed
     runner. It binds one caller-owned read-only database to a strict plan,

@@ -326,18 +326,15 @@ fn assess_artifacts(
             .ok_or_else(|| {
                 SkeinError::Storage("canonical adjacency publication is missing".to_string())
             })?;
-            let published = reader.manifest();
-            if published.relationship_count != canonical_relationship_count {
+            if reader.relationship_count() != canonical_relationship_count {
                 return Err(SkeinError::Storage(
                     "canonical adjacency relationship count mismatch".to_string(),
                 ));
             }
-            validate_artifact_file_identity(
-                reader.path(),
-                published.artifact_len,
-                published.artifact_digest.0,
-                &published.artifact_sha256.to_string(),
-            )
+            reader
+                .deep_scrub()
+                .map(|_| ())
+                .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))
         }),
         assess_one(DerivedArtifactKind::PersistentPropertyProjection, || {
             let cache = Arc::new(SegmentCache::new(options.segment_cache_capacity_bytes));

@@ -4,9 +4,9 @@ use super::{
 };
 use crate::error::{Result, SkeinError};
 use crate::store::{
-    canonical_adjacency_artifact_generation_file, canonical_adjacency_manifest_generation_file,
-    file_checksum, property_projection_artifact_generation_file,
-    property_projection_manifest_generation_file, sync_parent_dir, DurableManifest, MANIFEST_FILE,
+    canonical_adjacency_artifact_generation_file, file_checksum,
+    property_projection_artifact_generation_file, property_projection_manifest_generation_file,
+    sync_parent_dir, DurableManifest, MANIFEST_FILE,
 };
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
@@ -253,7 +253,8 @@ fn target_files(kind: DerivedArtifactKind, generation: u64) -> Vec<String> {
     match kind {
         DerivedArtifactKind::CanonicalAdjacency => vec![
             canonical_adjacency_artifact_generation_file(generation),
-            canonical_adjacency_manifest_generation_file(generation),
+            skein_storage::canonical_adjacency_descriptor_page_file(generation),
+            skein_storage::canonical_adjacency_descriptor_root_file(generation),
         ],
         DerivedArtifactKind::PersistentPropertyProjection => vec![
             property_projection_artifact_generation_file(generation),

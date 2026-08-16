@@ -30,10 +30,6 @@ pub(super) fn canonical_adjacency_artifact_generation_file(generation: u64) -> S
     format!("adjacency.{generation}.skein")
 }
 
-pub(super) fn canonical_adjacency_manifest_generation_file(generation: u64) -> String {
-    format!("adjacency.{generation}.manifest.skein")
-}
-
 pub(super) fn property_spill_artifact_generation_file(generation: u64) -> String {
     format!("properties.{generation}.skein")
 }
@@ -59,13 +55,6 @@ pub(super) fn parse_generation_file(name: &str, prefix: &str) -> Option<u64> {
 
 pub(super) fn parse_canonical_manifest_generation_file(name: &str) -> Option<u64> {
     name.strip_prefix("canonical.")?
-        .strip_suffix(".manifest.skein")?
-        .parse()
-        .ok()
-}
-
-pub(super) fn parse_canonical_adjacency_manifest_generation_file(name: &str) -> Option<u64> {
-    name.strip_prefix("adjacency.")?
         .strip_suffix(".manifest.skein")?
         .parse()
         .ok()
@@ -151,7 +140,6 @@ pub(super) fn storage_generation_for_file(name: &str) -> Option<u64> {
         .or_else(|| parse_generation_file(name, "canonical."))
         .or_else(|| parse_canonical_manifest_generation_file(name))
         .or_else(|| parse_generation_file(name, "adjacency."))
-        .or_else(|| parse_canonical_adjacency_manifest_generation_file(name))
         .or_else(|| parse_canonical_adjacency_descriptor_generation_file(name))
         .or_else(|| parse_generation_file(name, "properties."))
         .or_else(|| parse_property_spill_manifest_generation_file(name))

@@ -20,9 +20,12 @@ Files:
   relationship segments with per-segment digests, record bounds, adaptive
   endpoint Bloom filters, exact-property Bloom summaries, and the artifact's
   property key table.
-- `adjacency.<generation>.skein` and
-  `adjacency.<generation>.manifest.skein`: rebuildable, generation-bound
-  canonical adjacency used by out-of-core traversal.
+- `adjacency.<generation>.skein`,
+  `adjacency-descriptors-<generation>.pages.skein`, and
+  `adjacency-descriptors-<generation>.root.skein`: rebuildable,
+  generation-bound canonical adjacency blocks plus the demand-paged descriptor
+  tree used by out-of-core traversal. The outer manifest binds the exact data
+  and descriptor-root identities; there is no separate adjacency manifest.
 - `property-index.<generation>.skein` and
   `property-index.<generation>.manifest.skein`: rebuildable, generation-bound
   persistent property projection. The property spill artifact remains part of
@@ -54,8 +57,8 @@ Recovery:
    be acknowledged and passed to `DatabaseDoctor::apply_wal_tail_repair`
    before any bytes are discarded.
 8. In materialized mode, rebuild in-memory adjacency and property indexes. In
-   out-of-core mode, retain the immutable canonical reader and keep only the
-   bounded mutation delta resident.
+   out-of-core mode, retain immutable canonical and adjacency demand readers
+   and keep only the bounded mutation delta resident.
 9. Validate that every recovered relationship references existing source and
    target nodes before accepting the graph state.
 10. Verify projected graph artifacts when present. Corrupt artifacts are
@@ -63,10 +66,11 @@ Recovery:
    state.
 
 Checkpoint publication writes the new canonical artifact, canonical manifest,
-checkpoint image, and next WAL generation before atomically replacing
-`manifest.skein`. The manifest's durable replay LSN prevents a crash between
-checkpoint persistence and old-WAL reclamation from replaying checkpointed
-mutations twice. Checkpoint, manifest, and projected graph artifact publication write a
+canonical adjacency data, descriptor pages and descriptor root, checkpoint
+image, and next WAL generation before atomically replacing `manifest.skein`.
+The manifest's durable replay LSN prevents a crash between checkpoint
+persistence and old-WAL reclamation from replaying checkpointed mutations
+twice. Checkpoint, manifest, and projected graph artifact publication write a
 temporary file, sync the file contents, atomically rename it into place, and
 sync the parent directory. Checkpoint and projected graph artifact payloads use
 zstd inside the required V1 checksummed binary envelope. Manifest files remain
@@ -280,7 +284,15 @@ block; dense groups are split into bounded blocks and store complete
 relationship rows to avoid random canonical row lookups. The external merge
 uses key-only heap entries, bounded fan-in, and streaming block digests. A
 missing or invalid adjacency metadata fails the V1 open rather than falling
-back to partial traversal behavior.
+back to partial traversal behavior. The outer durable manifest selects exact
+adjacency-data and descriptor-root identities. Normal open verifies the compact
+root without loading descriptor pages; endpoint scans demand-read only the
+ordered prefix and referenced blocks through the shared byte-bounded cache.
+Independent page, byte, descriptor, and tree-height limits bound each scan.
+Physical corruption poisons the handle, while admission rejection does not.
+Explicit deep scrub bypasses the cache and verifies the complete descriptor and
+adjacency closure. Backup, restore, repair, and reclamation retain the data,
+descriptor pages, and root together.
 
 `DatabaseDoctor::derived_artifact_health` verifies the full-file CRC32C and
 SHA-256 identity of the active adjacency and persistent property projection

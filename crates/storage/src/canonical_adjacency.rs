@@ -1,10 +1,16 @@
 use crate::canonical::{decode_relationship, encode_relationship, CanonicalScanControl};
+use crate::graph_descriptor_tree::demand::{
+    GraphDescriptorTreeDemandReader, GraphDescriptorTreeReadLimits, GraphDescriptorTreeReadReport,
+    GraphDescriptorTreeScanControl,
+};
 use crate::{
-    durable_replace_file, AdjacencyDirection, AdjacencyLayout, ContentDigest,
-    FileSegmentRangeReader, GraphDescriptorKind, GraphDescriptorTreeBuildConfig,
+    content_digest, durable_replace_file, AdjacencyDirection, AdjacencyLayout, ContentDigest,
+    FileSegmentRangeReader, GraphDescriptorKind, GraphDescriptorPageError,
+    GraphDescriptorTreeArtifactMetadata, GraphDescriptorTreeBuildConfig,
     GraphDescriptorTreeBuilder, GraphDescriptorTreeError, GraphDescriptorTreePaths,
-    GraphDescriptorTreeWriteOutput, ManifestGeneration, NodeId, PreparedGraphDescriptorTree,
-    RelRecord, SegmentCache, SegmentRangeRead, SegmentReadError, SegmentReadRange, StoreId,
+    GraphDescriptorTreeRootReader, GraphDescriptorTreeWriteOutput, ManifestGeneration, NodeId,
+    PreparedGraphDescriptorTree, RelRecord, SegmentCache, SegmentRangeRead, SegmentReadError,
+    SegmentReadRange, StoreId,
 };
 use skein_core::{RelTypeId, Value};
 use skein_integrity::{Crc32cHasher, IntegrityHasher, Sha256Digest};
@@ -13,9 +19,10 @@ use std::collections::BinaryHeap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 const ARTIFACT_HEADER: &[u8; 16] = b"SKEINADJACENCY01";
@@ -496,9 +503,42 @@ pub struct CanonicalAdjacencyBuildReport {
 
 #[derive(Debug, Clone)]
 pub struct CanonicalAdjacencyWriteOutput {
-    pub manifest: CanonicalAdjacencyManifest,
+    pub generation: ManifestGeneration,
+    pub artifact: CanonicalAdjacencyArtifactMetadata,
+    pub resident_manifest: Option<CanonicalAdjacencyManifest>,
     pub report: CanonicalAdjacencyBuildReport,
     pub descriptor_tree: Option<GraphDescriptorTreeWriteOutput>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalAdjacencyArtifactMetadata {
+    pub encoded_len: u64,
+    pub encoded_crc32c: u64,
+    pub encoded_sha256: Sha256Digest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalAdjacencyGenerationArtifacts {
+    pub generation: u64,
+    pub source_commit_epoch: u64,
+    pub relationship_count: u64,
+    pub entry_count: u64,
+    pub adjacency_artifact: CanonicalAdjacencyArtifactMetadata,
+    pub descriptor_root_artifact: GraphDescriptorTreeArtifactMetadata,
+}
+
+impl CanonicalAdjacencyWriteOutput {
+    pub fn generation_artifacts(&self) -> Option<CanonicalAdjacencyGenerationArtifacts> {
+        let descriptor_tree = self.descriptor_tree.as_ref()?;
+        Some(CanonicalAdjacencyGenerationArtifacts {
+            generation: self.generation.0,
+            source_commit_epoch: descriptor_tree.root.source_commit_epoch,
+            relationship_count: self.report.relationship_count,
+            entry_count: self.report.entry_count,
+            adjacency_artifact: self.artifact,
+            descriptor_root_artifact: descriptor_tree.root_artifact,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -592,6 +632,17 @@ impl CanonicalAdjacencyWriter {
     where
         R: IntoIterator<Item = Result<RelRecord, CanonicalAdjacencyError>>,
     {
+        reject_existing_immutable_artifact(path, "canonical adjacency data")?;
+        if let Some((paths, _, _)) = &descriptor_tree {
+            reject_existing_immutable_artifact(
+                &paths.page_artifact,
+                "canonical adjacency descriptor pages",
+            )?;
+            reject_existing_immutable_artifact(
+                &paths.root_manifest,
+                "canonical adjacency descriptor root",
+            )?;
+        }
         let mut runs = SpillRuns::new(path, generation, self.config);
         let mut chunk = Vec::new();
         let mut chunk_bytes = 0u64;
@@ -651,7 +702,11 @@ impl CanonicalAdjacencyWriter {
                 peak_resident_bytes = peak_resident_bytes.max(chunk_bytes);
                 chunk.push(entry);
             }
-            relationship_count = relationship_count.saturating_add(1);
+            relationship_count = relationship_count.checked_add(1).ok_or_else(|| {
+                CanonicalAdjacencyError::Corrupt(
+                    "canonical adjacency relationship count overflow".to_string(),
+                )
+            })?;
         }
         if !chunk.is_empty() {
             runs.spill(&mut chunk)?;
@@ -749,14 +804,22 @@ impl CanonicalAdjacencyWriter {
                 heap.push(Reverse((next, run_index)));
             }
         }
-        let (manifest, sparse_block_count, dense_block_count, prepared_descriptor_tree) =
-            artifact.finish(relationship_count)?;
+        let FinishedArtifact {
+            artifact,
+            entry_count,
+            resident_manifest,
+            sparse_block_count,
+            dense_block_count,
+            descriptor_tree: prepared_descriptor_tree,
+        } = artifact.finish(relationship_count)?;
         Ok((
             CanonicalAdjacencyWriteOutput {
-                manifest,
+                generation,
+                artifact,
+                resident_manifest,
                 report: CanonicalAdjacencyBuildReport {
                     relationship_count,
-                    entry_count: relationship_count.saturating_mul(2),
+                    entry_count,
                     sparse_block_count,
                     dense_block_count,
                     spill_run_count: runs.next_run_sequence,
@@ -995,13 +1058,22 @@ struct ArtifactBuilder {
     generation: ManifestGeneration,
     config: CanonicalAdjacencyConfig,
     artifact_len: u64,
-    blocks: Vec<CanonicalAdjacencyBlockDescriptor>,
+    resident_blocks: Option<Vec<CanonicalAdjacencyBlockDescriptor>>,
     group: Option<PendingGroup>,
     next_block_id: u64,
     entry_count: u64,
     sparse_block_count: u64,
     dense_block_count: u64,
     descriptor_tree: Option<GraphDescriptorTreeBuilder>,
+}
+
+struct FinishedArtifact {
+    artifact: CanonicalAdjacencyArtifactMetadata,
+    entry_count: u64,
+    resident_manifest: Option<CanonicalAdjacencyManifest>,
+    sparse_block_count: u64,
+    dense_block_count: u64,
+    descriptor_tree: Option<PreparedGraphDescriptorTree>,
 }
 
 impl ArtifactBuilder {
@@ -1015,13 +1087,14 @@ impl ArtifactBuilder {
         let mut digest = IntegrityHasher::new();
         write_hashed(&mut writer, &mut digest, ARTIFACT_HEADER)?;
         write_hashed(&mut writer, &mut digest, &generation.0.to_le_bytes())?;
+        let collect_resident_manifest = descriptor_tree.is_none();
         Ok(Self {
             writer,
             digest,
             generation,
             config,
             artifact_len: ARTIFACT_HEADER.len() as u64 + 8,
-            blocks: Vec::new(),
+            resident_blocks: collect_resident_manifest.then(Vec::new),
             group: None,
             next_block_id: BLOCK_ID_BASE,
             entry_count: 0,
@@ -1068,7 +1141,9 @@ impl ArtifactBuilder {
             self.push_dense_entry(&mut group, entry)?;
         }
         self.group = Some(group);
-        self.entry_count = self.entry_count.saturating_add(1);
+        self.entry_count = self.entry_count.checked_add(1).ok_or_else(|| {
+            CanonicalAdjacencyError::Corrupt("canonical adjacency entry count overflow".to_string())
+        })?;
         Ok(())
     }
 
@@ -1244,14 +1319,30 @@ impl ArtifactBuilder {
             content_digest: ContentDigest(block_digest.finish()),
             record_count,
         };
-        self.artifact_len = self.artifact_len.saturating_add(length.get());
-        self.next_block_id = self.next_block_id.saturating_add(1);
+        self.artifact_len = self.artifact_len.checked_add(length.get()).ok_or_else(|| {
+            CanonicalAdjacencyError::Corrupt(
+                "canonical adjacency artifact length overflow".to_string(),
+            )
+        })?;
+        self.next_block_id = self.next_block_id.checked_add(1).ok_or_else(|| {
+            CanonicalAdjacencyError::Corrupt("canonical adjacency block id overflow".to_string())
+        })?;
         match layout {
             AdjacencyLayout::Sparse => {
-                self.sparse_block_count = self.sparse_block_count.saturating_add(1)
+                self.sparse_block_count =
+                    self.sparse_block_count.checked_add(1).ok_or_else(|| {
+                        CanonicalAdjacencyError::Corrupt(
+                            "canonical adjacency sparse block count overflow".to_string(),
+                        )
+                    })?;
             }
             AdjacencyLayout::Dense => {
-                self.dense_block_count = self.dense_block_count.saturating_add(1)
+                self.dense_block_count =
+                    self.dense_block_count.checked_add(1).ok_or_else(|| {
+                        CanonicalAdjacencyError::Corrupt(
+                            "canonical adjacency dense block count overflow".to_string(),
+                        )
+                    })?;
             }
         }
         if let Some(descriptor_tree) = &mut self.descriptor_tree {
@@ -1260,7 +1351,9 @@ impl ArtifactBuilder {
                 descriptor.encode_descriptor_tree_value().to_vec(),
             )?;
         }
-        self.blocks.push(descriptor);
+        if let Some(blocks) = &mut self.resident_blocks {
+            blocks.push(descriptor);
+        }
         group.block.clear();
         group.block_bytes = 0;
         Ok(())
@@ -1269,41 +1362,56 @@ impl ArtifactBuilder {
     fn finish(
         mut self,
         relationship_count: u64,
-    ) -> Result<
-        (
-            CanonicalAdjacencyManifest,
-            u64,
-            u64,
-            Option<PreparedGraphDescriptorTree>,
-        ),
-        CanonicalAdjacencyError,
-    > {
+    ) -> Result<FinishedArtifact, CanonicalAdjacencyError> {
         self.finish_group()?;
         self.writer.flush()?;
         self.writer.get_ref().sync_all()?;
         let artifact_integrity = self.digest.finish();
-        let manifest = CanonicalAdjacencyManifest {
-            generation: self.generation,
-            artifact_id: ARTIFACT_ID,
-            artifact_len: self.artifact_len,
-            artifact_digest: ContentDigest(artifact_integrity.crc32c.as_u64()),
-            artifact_sha256: artifact_integrity.sha256,
-            relationship_count,
-            entry_count: self.entry_count,
-            blocks: self.blocks,
+        let artifact = CanonicalAdjacencyArtifactMetadata {
+            encoded_len: self.artifact_len,
+            encoded_crc32c: artifact_integrity.crc32c.as_u64(),
+            encoded_sha256: artifact_integrity.sha256,
         };
-        manifest.validate()?;
+        let resident_manifest =
+            self.resident_blocks
+                .take()
+                .map(|blocks| CanonicalAdjacencyManifest {
+                    generation: self.generation,
+                    artifact_id: ARTIFACT_ID,
+                    artifact_len: artifact.encoded_len,
+                    artifact_digest: ContentDigest(artifact.encoded_crc32c),
+                    artifact_sha256: artifact.encoded_sha256,
+                    relationship_count,
+                    entry_count: self.entry_count,
+                    blocks,
+                });
+        if let Some(manifest) = &resident_manifest {
+            manifest.validate()?;
+        }
+        let expected_entries = relationship_count.checked_mul(2).ok_or_else(|| {
+            CanonicalAdjacencyError::Corrupt(
+                "canonical adjacency relationship count overflow".to_string(),
+            )
+        })?;
+        if self.entry_count != expected_entries {
+            return Err(CanonicalAdjacencyError::Corrupt(format!(
+                "canonical adjacency wrote {} entries for {relationship_count} relationships",
+                self.entry_count
+            )));
+        }
         let descriptor_tree = self
             .descriptor_tree
             .take()
             .map(GraphDescriptorTreeBuilder::finish)
             .transpose()?;
-        Ok((
-            manifest,
-            self.sparse_block_count,
-            self.dense_block_count,
+        Ok(FinishedArtifact {
+            artifact,
+            entry_count: self.entry_count,
+            resident_manifest,
+            sparse_block_count: self.sparse_block_count,
+            dense_block_count: self.dense_block_count,
             descriptor_tree,
-        ))
+        })
     }
 }
 
@@ -1348,6 +1456,14 @@ impl PendingGroup {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CanonicalAdjacencyReadReport {
+    pub generation: u64,
+    pub descriptor_pages_visited: u64,
+    pub descriptor_page_bytes_decoded: u64,
+    pub descriptor_storage_bytes_read: u64,
+    pub descriptors_examined: u64,
+    pub descriptor_cache_hits: u64,
+    pub descriptor_cache_misses: u64,
+    pub descriptor_cache_admission_rejections: u64,
     pub blocks_considered: u64,
     pub blocks_read: u64,
     pub bytes_read: u64,
@@ -1358,12 +1474,35 @@ pub struct CanonicalAdjacencyReadReport {
     pub dense_blocks_read: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CanonicalAdjacencyScrubReport {
+    pub descriptor_pages_checked: u64,
+    pub descriptors_checked: u64,
+    pub descriptor_bytes_checked: u64,
+    pub adjacency_blocks_checked: u64,
+    pub adjacency_records_checked: u64,
+    pub adjacency_bytes_hashed: u64,
+}
+
+#[derive(Debug, Clone)]
+enum CanonicalAdjacencyDescriptorBackend {
+    Resident(Arc<CanonicalAdjacencyManifest>),
+    Demand(GraphDescriptorTreeDemandReader),
+}
+
 #[derive(Debug, Clone)]
 pub struct CanonicalAdjacencyReader {
     path: PathBuf,
-    manifest: CanonicalAdjacencyManifest,
+    generation: ManifestGeneration,
+    artifact_len: u64,
+    artifact_digest: ContentDigest,
+    artifact_sha256: Sha256Digest,
+    relationship_count: u64,
+    entry_count: u64,
+    descriptors: CanonicalAdjacencyDescriptorBackend,
     range_reader: FileSegmentRangeReader,
     max_block_bytes: NonZeroU64,
+    poisoned: Arc<AtomicBool>,
 }
 
 impl CanonicalAdjacencyReader {
@@ -1411,9 +1550,84 @@ impl CanonicalAdjacencyReader {
         range_reader.register(manifest.artifact_id, path.clone());
         Ok(Self {
             path,
-            manifest,
+            generation: manifest.generation,
+            artifact_len: manifest.artifact_len,
+            artifact_digest: manifest.artifact_digest,
+            artifact_sha256: manifest.artifact_sha256,
+            relationship_count: manifest.relationship_count,
+            entry_count: manifest.entry_count,
+            descriptors: CanonicalAdjacencyDescriptorBackend::Resident(Arc::new(manifest)),
             range_reader,
             max_block_bytes,
+            poisoned: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    pub fn open_demand_paged(
+        path: impl Into<PathBuf>,
+        binding: CanonicalAdjacencyGenerationArtifacts,
+        root_reader: GraphDescriptorTreeRootReader,
+        descriptor_config: GraphDescriptorTreeBuildConfig,
+        cache: Arc<SegmentCache>,
+        store_id: StoreId,
+        max_block_bytes: NonZeroU64,
+    ) -> Result<Self, CanonicalAdjacencyError> {
+        if binding.generation == 0
+            || binding.adjacency_artifact.encoded_len < ARTIFACT_HEADER.len() as u64 + 8
+            || binding.entry_count
+                != binding.relationship_count.checked_mul(2).ok_or_else(|| {
+                    CanonicalAdjacencyError::Corrupt(
+                        "canonical adjacency relationship count overflow".to_string(),
+                    )
+                })?
+        {
+            return Err(CanonicalAdjacencyError::Corrupt(
+                "canonical adjacency generation binding has invalid counts or artifact length"
+                    .to_string(),
+            ));
+        }
+        let root = root_reader.root();
+        if root.kind != GraphDescriptorKind::CanonicalAdjacency
+            || root.generation != binding.generation
+            || root.source_commit_epoch != binding.source_commit_epoch
+            || root.page_artifact_id != CANONICAL_ADJACENCY_DESCRIPTOR_ARTIFACT_ID
+            || root.root.is_some() != (binding.entry_count != 0)
+        {
+            return Err(CanonicalAdjacencyError::Corrupt(
+                "canonical adjacency descriptor root does not match its generation binding"
+                    .to_string(),
+            ));
+        }
+        let path = path.into();
+        validate_artifact_header(
+            &path,
+            binding.generation,
+            binding.adjacency_artifact.encoded_len,
+        )?;
+        let demand = GraphDescriptorTreeDemandReader::open(
+            root_reader,
+            descriptor_config,
+            Arc::clone(&cache),
+            store_id,
+        )?;
+        let mut range_reader = FileSegmentRangeReader::new().with_cache(
+            cache,
+            store_id,
+            ManifestGeneration(binding.generation),
+        );
+        range_reader.register(ARTIFACT_ID, path.clone());
+        Ok(Self {
+            path,
+            generation: ManifestGeneration(binding.generation),
+            artifact_len: binding.adjacency_artifact.encoded_len,
+            artifact_digest: ContentDigest(binding.adjacency_artifact.encoded_crc32c),
+            artifact_sha256: binding.adjacency_artifact.encoded_sha256,
+            relationship_count: binding.relationship_count,
+            entry_count: binding.entry_count,
+            descriptors: CanonicalAdjacencyDescriptorBackend::Demand(demand),
+            range_reader,
+            max_block_bytes,
+            poisoned: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -1421,8 +1635,24 @@ impl CanonicalAdjacencyReader {
         &self.path
     }
 
-    pub fn manifest(&self) -> &CanonicalAdjacencyManifest {
-        &self.manifest
+    pub const fn generation(&self) -> ManifestGeneration {
+        self.generation
+    }
+
+    pub const fn artifact_len(&self) -> u64 {
+        self.artifact_len
+    }
+
+    pub const fn relationship_count(&self) -> u64 {
+        self.relationship_count
+    }
+
+    pub const fn entry_count(&self) -> u64 {
+        self.entry_count
+    }
+
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
     }
 
     pub fn estimate_endpoint_entries(
@@ -1430,19 +1660,62 @@ impl CanonicalAdjacencyReader {
         endpoint: NodeId,
         direction: AdjacencyDirection,
         rel_type: Option<RelTypeId>,
-    ) -> u64 {
-        let direction = direction_tag(direction);
-        let start = self.manifest.blocks.partition_point(|block| {
-            (direction_tag(block.direction), block.endpoint.0) < (direction, endpoint.0)
-        });
-        let end = self.manifest.blocks.partition_point(|block| {
-            (direction_tag(block.direction), block.endpoint.0) <= (direction, endpoint.0)
-        });
-        self.manifest.blocks[start..end]
-            .iter()
-            .filter(|block| rel_type.is_none_or(|expected| block.rel_type == expected))
-            .map(|block| u64::from(block.record_count))
-            .sum()
+    ) -> Result<u64, CanonicalAdjacencyError> {
+        self.ensure_healthy()?;
+        match &self.descriptors {
+            CanonicalAdjacencyDescriptorBackend::Resident(manifest) => {
+                let direction = direction_tag(direction);
+                let start = manifest.blocks.partition_point(|block| {
+                    (direction_tag(block.direction), block.endpoint.0) < (direction, endpoint.0)
+                });
+                let end = manifest.blocks.partition_point(|block| {
+                    (direction_tag(block.direction), block.endpoint.0) <= (direction, endpoint.0)
+                });
+                Ok(manifest.blocks[start..end]
+                    .iter()
+                    .filter(|block| rel_type.is_none_or(|expected| block.rel_type == expected))
+                    .map(|block| u64::from(block.record_count))
+                    .sum())
+            }
+            CanonicalAdjacencyDescriptorBackend::Demand(demand) => {
+                let prefix = descriptor_prefix(endpoint, direction, rel_type);
+                let mut count = 0u64;
+                let mut decode_error = None;
+                let result = demand.scan_prefix(
+                    &prefix,
+                    GraphDescriptorTreeReadLimits::default(),
+                    |key, value| {
+                        match CanonicalAdjacencyBlockDescriptor::decode_descriptor_tree_entry(
+                            key, value,
+                        ) {
+                            Ok(block) => {
+                                count = match count.checked_add(u64::from(block.record_count)) {
+                                    Some(count) => count,
+                                    None => {
+                                        decode_error = Some(CanonicalAdjacencyError::Corrupt(
+                                            "canonical adjacency estimate overflow".to_string(),
+                                        ));
+                                        return Ok(GraphDescriptorTreeScanControl::Stop);
+                                    }
+                                };
+                                Ok(GraphDescriptorTreeScanControl::Continue)
+                            }
+                            Err(error) => {
+                                decode_error = Some(error);
+                                Ok(GraphDescriptorTreeScanControl::Stop)
+                            }
+                        }
+                    },
+                );
+                let result = match (result, decode_error) {
+                    (_, Some(error)) => Err(error),
+                    (Err(error), None) => Err(error.into()),
+                    (Ok(_), None) => Ok(count),
+                };
+                self.poison_on_physical_failure(&result);
+                result
+            }
+        }
     }
 
     pub fn scan_endpoint_control(
@@ -1472,53 +1745,133 @@ impl CanonicalAdjacencyReader {
             CanonicalAdjacencyEntry,
         ) -> Result<CanonicalScanControl, CanonicalAdjacencyError>,
     ) -> Result<(CanonicalAdjacencyReadReport, CanonicalScanControl), CanonicalAdjacencyError> {
-        let direction = direction_tag(direction);
-        let start = self.manifest.blocks.partition_point(|block| {
-            (direction_tag(block.direction), block.endpoint.0) < (direction, endpoint.0)
-        });
-        let end = self.manifest.blocks.partition_point(|block| {
-            (direction_tag(block.direction), block.endpoint.0) <= (direction, endpoint.0)
-        });
-        let mut report = CanonicalAdjacencyReadReport::default();
-        for block in &self.manifest.blocks[start..end] {
-            report.blocks_considered = report.blocks_considered.saturating_add(1);
-            if rel_type.is_some_and(|expected| block.rel_type != expected) {
-                continue;
+        self.ensure_healthy()?;
+        let result = match &self.descriptors {
+            CanonicalAdjacencyDescriptorBackend::Resident(manifest) => {
+                let direction_tagged = direction_tag(direction);
+                let start = manifest.blocks.partition_point(|block| {
+                    (direction_tag(block.direction), block.endpoint.0)
+                        < (direction_tagged, endpoint.0)
+                });
+                let end = manifest.blocks.partition_point(|block| {
+                    (direction_tag(block.direction), block.endpoint.0)
+                        <= (direction_tagged, endpoint.0)
+                });
+                self.scan_blocks(
+                    manifest.blocks[start..end]
+                        .iter()
+                        .filter(|block| rel_type.is_none_or(|expected| block.rel_type == expected)),
+                    consumer,
+                )
             }
-            let read = self.read_block(block)?;
-            report.blocks_read = report.blocks_read.saturating_add(1);
-            report.bytes_read = report.bytes_read.saturating_add(read.payload.len() as u64);
-            report.cache_hits = report.cache_hits.saturating_add(u64::from(read.cache_hit));
-            report.cache_misses = report
-                .cache_misses
-                .saturating_add(u64::from(read.cache_miss));
-            match block.layout {
-                AdjacencyLayout::Sparse => {
-                    report.sparse_blocks_read = report.sparse_blocks_read.saturating_add(1)
-                }
-                AdjacencyLayout::Dense => {
-                    report.dense_blocks_read = report.dense_blocks_read.saturating_add(1)
-                }
-            }
-            let mut control = CanonicalScanControl::Continue;
-            decode_block(
-                &read.payload,
-                self.manifest.generation,
-                block,
-                |relationship| {
-                    if control == CanonicalScanControl::Stop {
-                        return Ok(());
+            CanonicalAdjacencyDescriptorBackend::Demand(demand) => {
+                let prefix = descriptor_prefix(endpoint, direction, rel_type);
+                let mut report = CanonicalAdjacencyReadReport {
+                    generation: self.generation.0,
+                    ..CanonicalAdjacencyReadReport::default()
+                };
+                let mut scan_control = CanonicalScanControl::Continue;
+                let mut scan_error = None;
+                let descriptor_result = demand.scan_prefix(
+                    &prefix,
+                    GraphDescriptorTreeReadLimits::default(),
+                    |key, value| {
+                        let step = CanonicalAdjacencyBlockDescriptor::decode_descriptor_tree_entry(
+                            key, value,
+                        )
+                        .and_then(|block| {
+                            report.blocks_considered =
+                                report.blocks_considered.checked_add(1).ok_or_else(|| {
+                                    CanonicalAdjacencyError::Corrupt(
+                                        "canonical adjacency block accounting overflow".to_string(),
+                                    )
+                                })?;
+                            self.scan_one_block(&block, &mut report, &mut consumer)
+                        });
+                        match step {
+                            Ok(control) => {
+                                scan_control = control;
+                                Ok(if control == CanonicalScanControl::Stop {
+                                    GraphDescriptorTreeScanControl::Stop
+                                } else {
+                                    GraphDescriptorTreeScanControl::Continue
+                                })
+                            }
+                            Err(error) => {
+                                scan_error = Some(error);
+                                Ok(GraphDescriptorTreeScanControl::Stop)
+                            }
+                        }
+                    },
+                );
+                match (descriptor_result, scan_error) {
+                    (_, Some(error)) => Err(error),
+                    (Err(error), None) => Err(error.into()),
+                    (Ok((descriptor_report, _)), None) => {
+                        report.record_descriptor_read(descriptor_report);
+                        Ok((report, scan_control))
                     }
-                    control = consumer(relationship)?;
-                    report.records_decoded = report.records_decoded.saturating_add(1);
-                    Ok(())
-                },
-            )?;
+                }
+            }
+        };
+        self.poison_on_physical_failure(&result);
+        result
+    }
+
+    fn scan_blocks<'a>(
+        &self,
+        blocks: impl IntoIterator<Item = &'a CanonicalAdjacencyBlockDescriptor>,
+        mut consumer: impl FnMut(
+            CanonicalAdjacencyEntry,
+        ) -> Result<CanonicalScanControl, CanonicalAdjacencyError>,
+    ) -> Result<(CanonicalAdjacencyReadReport, CanonicalScanControl), CanonicalAdjacencyError> {
+        let mut report = CanonicalAdjacencyReadReport {
+            generation: self.generation.0,
+            ..CanonicalAdjacencyReadReport::default()
+        };
+        for block in blocks {
+            report.blocks_considered = report.blocks_considered.saturating_add(1);
+            let control = self.scan_one_block(block, &mut report, &mut consumer)?;
             if control == CanonicalScanControl::Stop {
                 return Ok((report, control));
             }
         }
         Ok((report, CanonicalScanControl::Continue))
+    }
+
+    fn scan_one_block(
+        &self,
+        block: &CanonicalAdjacencyBlockDescriptor,
+        report: &mut CanonicalAdjacencyReadReport,
+        consumer: &mut impl FnMut(
+            CanonicalAdjacencyEntry,
+        ) -> Result<CanonicalScanControl, CanonicalAdjacencyError>,
+    ) -> Result<CanonicalScanControl, CanonicalAdjacencyError> {
+        let read = self.read_block(block)?;
+        report.blocks_read = report.blocks_read.saturating_add(1);
+        report.bytes_read = report.bytes_read.saturating_add(read.payload.len() as u64);
+        report.cache_hits = report.cache_hits.saturating_add(u64::from(read.cache_hit));
+        report.cache_misses = report
+            .cache_misses
+            .saturating_add(u64::from(read.cache_miss));
+        match block.layout {
+            AdjacencyLayout::Sparse => {
+                report.sparse_blocks_read = report.sparse_blocks_read.saturating_add(1)
+            }
+            AdjacencyLayout::Dense => {
+                report.dense_blocks_read = report.dense_blocks_read.saturating_add(1)
+            }
+        }
+        let mut control = CanonicalScanControl::Continue;
+        decode_block(&read.payload, self.generation, block, |relationship| {
+            if control == CanonicalScanControl::Stop {
+                return Ok(());
+            }
+            control = consumer(relationship)?;
+            report.records_decoded = report.records_decoded.saturating_add(1);
+            Ok(())
+        })?;
+        Ok(control)
     }
 
     fn read_block(
@@ -1533,7 +1886,7 @@ impl CanonicalAdjacencyReader {
         }
         self.range_reader
             .read_range_with_report(&SegmentReadRange {
-                artifact_id: self.manifest.artifact_id,
+                artifact_id: ARTIFACT_ID,
                 segment_ids: vec![block.block_id],
                 offset: block.offset,
                 length: block.length,
@@ -1541,6 +1894,281 @@ impl CanonicalAdjacencyReader {
             })
             .map_err(CanonicalAdjacencyError::from)
     }
+
+    pub fn deep_scrub(&self) -> Result<CanonicalAdjacencyScrubReport, CanonicalAdjacencyError> {
+        self.ensure_healthy()?;
+        let result = self.deep_scrub_inner();
+        self.poison_on_physical_failure(&result);
+        result
+    }
+
+    fn deep_scrub_inner(&self) -> Result<CanonicalAdjacencyScrubReport, CanonicalAdjacencyError> {
+        let adjacency_bytes_hashed = self.verify_whole_artifact()?;
+        let mut artifact = File::open(&self.path)?;
+        let mut expected_offset = (ARTIFACT_HEADER.len() + 8) as u64;
+        let mut expected_block_id = BLOCK_ID_BASE;
+        let mut blocks_checked = 0u64;
+        let mut records_checked = 0u64;
+        let mut visit_block = |block: &CanonicalAdjacencyBlockDescriptor| {
+            if block.offset != expected_offset || block.block_id != expected_block_id {
+                return Err(CanonicalAdjacencyError::Corrupt(format!(
+                    "canonical adjacency descriptor closure is not contiguous at block {}",
+                    block.block_id
+                )));
+            }
+            let encoded = read_block_uncached(&mut artifact, block, self.max_block_bytes)?;
+            let mut decoded = 0u64;
+            decode_block(&encoded, self.generation, block, |_| {
+                decoded = decoded.checked_add(1).ok_or_else(|| {
+                    CanonicalAdjacencyError::Corrupt(
+                        "canonical adjacency scrub record count overflow".to_string(),
+                    )
+                })?;
+                Ok(())
+            })?;
+            records_checked = records_checked.checked_add(decoded).ok_or_else(|| {
+                CanonicalAdjacencyError::Corrupt(
+                    "canonical adjacency scrub total record count overflow".to_string(),
+                )
+            })?;
+            blocks_checked = blocks_checked.checked_add(1).ok_or_else(|| {
+                CanonicalAdjacencyError::Corrupt(
+                    "canonical adjacency scrub block count overflow".to_string(),
+                )
+            })?;
+            expected_offset = expected_offset
+                .checked_add(block.length.get())
+                .ok_or_else(|| {
+                    CanonicalAdjacencyError::Corrupt(
+                        "canonical adjacency scrub artifact offset overflow".to_string(),
+                    )
+                })?;
+            expected_block_id = expected_block_id.checked_add(1).ok_or_else(|| {
+                CanonicalAdjacencyError::Corrupt(
+                    "canonical adjacency scrub block id overflow".to_string(),
+                )
+            })?;
+            Ok(())
+        };
+
+        let (descriptor_pages_checked, descriptors_checked, descriptor_bytes_checked) = match &self
+            .descriptors
+        {
+            CanonicalAdjacencyDescriptorBackend::Resident(manifest) => {
+                for block in &manifest.blocks {
+                    visit_block(block)?;
+                }
+                (0, manifest.blocks.len() as u64, 0)
+            }
+            CanonicalAdjacencyDescriptorBackend::Demand(demand) => {
+                let mut visit_error = None;
+                let scrub = demand.deep_visit(|key, value| {
+                    let result =
+                        CanonicalAdjacencyBlockDescriptor::decode_descriptor_tree_entry(key, value)
+                            .and_then(|block| visit_block(&block));
+                    match result {
+                        Ok(()) => Ok(GraphDescriptorTreeScanControl::Continue),
+                        Err(error) => {
+                            visit_error = Some(error);
+                            Ok(GraphDescriptorTreeScanControl::Stop)
+                        }
+                    }
+                });
+                match (scrub, visit_error) {
+                    (_, Some(error)) => return Err(error),
+                    (Err(error), None) => return Err(error.into()),
+                    (Ok(report), None) => (
+                        report.checked_pages,
+                        report.checked_descriptors,
+                        report.page_bytes_decoded,
+                    ),
+                }
+            }
+        };
+        if expected_offset != self.artifact_len
+            || records_checked != self.entry_count
+            || blocks_checked != descriptors_checked
+        {
+            return Err(CanonicalAdjacencyError::Corrupt(format!(
+                "canonical adjacency scrub closure bytes/records/blocks {expected_offset}/{records_checked}/{blocks_checked} do not match {}/{}/{}",
+                self.artifact_len, self.entry_count, descriptors_checked
+            )));
+        }
+        Ok(CanonicalAdjacencyScrubReport {
+            descriptor_pages_checked,
+            descriptors_checked,
+            descriptor_bytes_checked,
+            adjacency_blocks_checked: blocks_checked,
+            adjacency_records_checked: records_checked,
+            adjacency_bytes_hashed,
+        })
+    }
+
+    fn verify_whole_artifact(&self) -> Result<u64, CanonicalAdjacencyError> {
+        let mut file = File::open(&self.path)?;
+        if file.metadata()?.len() != self.artifact_len {
+            return Err(CanonicalAdjacencyError::Corrupt(
+                "canonical adjacency artifact length changed after open".to_string(),
+            ));
+        }
+        let mut hasher = IntegrityHasher::new();
+        let mut buffer = vec![0u8; 64 * 1024];
+        let mut total = 0u64;
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            total = total.checked_add(read as u64).ok_or_else(|| {
+                CanonicalAdjacencyError::Corrupt(
+                    "canonical adjacency scrub byte count overflow".to_string(),
+                )
+            })?;
+        }
+        let digest = hasher.finish();
+        if digest.crc32c.as_u64() != self.artifact_digest.0 || digest.sha256 != self.artifact_sha256
+        {
+            return Err(CanonicalAdjacencyError::Corrupt(
+                "canonical adjacency artifact checksum mismatch during scrub".to_string(),
+            ));
+        }
+        Ok(total)
+    }
+
+    fn ensure_healthy(&self) -> Result<(), CanonicalAdjacencyError> {
+        if self.is_poisoned() {
+            return Err(CanonicalAdjacencyError::Corrupt(
+                "canonical adjacency reader is poisoned by an earlier physical failure".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn poison_on_physical_failure<T>(&self, result: &Result<T, CanonicalAdjacencyError>) {
+        if result.as_ref().is_err_and(error_requires_poison) {
+            self.poisoned.store(true, Ordering::Release);
+        }
+    }
+}
+
+impl CanonicalAdjacencyReadReport {
+    fn record_descriptor_read(&mut self, report: GraphDescriptorTreeReadReport) {
+        self.descriptor_pages_visited = report.pages_visited;
+        self.descriptor_page_bytes_decoded = report.page_bytes_decoded;
+        self.descriptor_storage_bytes_read = report.storage_bytes_read;
+        self.descriptors_examined = report.descriptors_emitted;
+        self.descriptor_cache_hits = report.cache_hits;
+        self.descriptor_cache_misses = report.cache_misses;
+        self.descriptor_cache_admission_rejections = report.cache_admission_rejections;
+    }
+}
+
+fn descriptor_prefix(
+    endpoint: NodeId,
+    direction: AdjacencyDirection,
+    rel_type: Option<RelTypeId>,
+) -> Vec<u8> {
+    let mut prefix = Vec::with_capacity(if rel_type.is_some() { 13 } else { 9 });
+    prefix.push(direction_tag(direction));
+    prefix.extend_from_slice(&endpoint.0.to_be_bytes());
+    if let Some(rel_type) = rel_type {
+        prefix.extend_from_slice(&rel_type.0.to_be_bytes());
+    }
+    prefix
+}
+
+fn validate_artifact_header(
+    path: &Path,
+    generation: u64,
+    expected_len: u64,
+) -> Result<(), CanonicalAdjacencyError> {
+    let metadata = fs::metadata(path)?;
+    if metadata.len() != expected_len {
+        return Err(CanonicalAdjacencyError::Corrupt(format!(
+            "canonical adjacency artifact length mismatch: expected {expected_len}, got {}",
+            metadata.len()
+        )));
+    }
+    let mut header = [0u8; 24];
+    File::open(path)?.read_exact(&mut header)?;
+    if &header[..16] != ARTIFACT_HEADER {
+        return Err(CanonicalAdjacencyError::Corrupt(
+            "canonical adjacency artifact has an invalid header".to_string(),
+        ));
+    }
+    let stored_generation = u64::from_le_bytes(header[16..24].try_into().expect("fixed header"));
+    if stored_generation != generation {
+        return Err(CanonicalAdjacencyError::Corrupt(format!(
+            "canonical adjacency artifact generation {stored_generation} does not match binding {generation}"
+        )));
+    }
+    Ok(())
+}
+
+fn read_block_uncached(
+    file: &mut File,
+    block: &CanonicalAdjacencyBlockDescriptor,
+    max_block_bytes: NonZeroU64,
+) -> Result<Vec<u8>, CanonicalAdjacencyError> {
+    if block.length.get() > max_block_bytes.get() {
+        return Err(CanonicalAdjacencyError::BlockTooLarge {
+            block_bytes: block.length.get(),
+            max_bytes: max_block_bytes.get(),
+        });
+    }
+    let length = usize::try_from(block.length.get()).map_err(|_| {
+        CanonicalAdjacencyError::BlockTooLarge {
+            block_bytes: block.length.get(),
+            max_bytes: usize::MAX as u64,
+        }
+    })?;
+    file.seek(SeekFrom::Start(block.offset))?;
+    let mut encoded = vec![0u8; length];
+    file.read_exact(&mut encoded)?;
+    if content_digest(&encoded) != block.content_digest {
+        return Err(CanonicalAdjacencyError::Corrupt(format!(
+            "canonical adjacency block {} failed content digest verification",
+            block.block_id
+        )));
+    }
+    Ok(encoded)
+}
+
+fn error_requires_poison(error: &CanonicalAdjacencyError) -> bool {
+    match error {
+        CanonicalAdjacencyError::Io(_)
+        | CanonicalAdjacencyError::Read(_)
+        | CanonicalAdjacencyError::Corrupt(_) => true,
+        CanonicalAdjacencyError::DescriptorTree(error) => matches!(
+            error,
+            GraphDescriptorTreeError::Io(_)
+                | GraphDescriptorTreeError::Page(GraphDescriptorPageError::Corrupt(_))
+                | GraphDescriptorTreeError::Corrupt(_)
+        ),
+        CanonicalAdjacencyError::Source(_)
+        | CanonicalAdjacencyError::RecordTooLarge { .. }
+        | CanonicalAdjacencyError::MemoryBudgetExceeded { .. }
+        | CanonicalAdjacencyError::SpillBudgetExceeded { .. }
+        | CanonicalAdjacencyError::SpillRunBudgetExceeded { .. }
+        | CanonicalAdjacencyError::BlockTooLarge { .. } => false,
+    }
+}
+
+fn reject_existing_immutable_artifact(
+    path: &Path,
+    artifact: &str,
+) -> Result<(), CanonicalAdjacencyError> {
+    if path.exists() {
+        return Err(CanonicalAdjacencyError::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "immutable {artifact} artifact {} already exists",
+                path.display()
+            ),
+        )));
+    }
+    Ok(())
 }
 
 fn decode_block(
@@ -1890,8 +2518,12 @@ mod tests {
         assert!(output.report.spill_run_count > 1);
         assert!(output.report.sparse_block_count > 0);
         assert!(output.report.dense_block_count > 1);
+        let resident_manifest = output
+            .resident_manifest
+            .as_ref()
+            .expect("resident writer emits a manifest for codec tests");
         let manifest =
-            CanonicalAdjacencyManifest::decode(&output.manifest.encode().unwrap()).unwrap();
+            CanonicalAdjacencyManifest::decode(&resident_manifest.encode().unwrap()).unwrap();
         let cache = Arc::new(SegmentCache::new(1024 * 1024));
         let reader = CanonicalAdjacencyReader::open(
             &path,
@@ -1966,7 +2598,7 @@ mod tests {
     }
 
     #[test]
-    fn writer_publishes_unselected_descriptor_root_after_adjacency_artifact() {
+    fn writer_publishes_descriptor_root_after_adjacency_artifact() {
         let root = test_path("descriptor-root");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
@@ -2007,10 +2639,14 @@ mod tests {
             .unwrap();
         let descriptor_tree = output
             .descriptor_tree
-            .expect("shadow descriptor tree is published");
+            .expect("descriptor tree is published");
         assert_eq!(
             descriptor_tree.root.descriptor_count,
-            output.manifest.blocks.len() as u64
+            output
+                .report
+                .sparse_block_count
+                .checked_add(output.report.dense_block_count)
+                .unwrap()
         );
         assert!(adjacency_path.exists());
         let reader =
@@ -2018,6 +2654,248 @@ mod tests {
                 .unwrap();
         assert_eq!(reader.root(), &descriptor_tree.root);
         assert_eq!(reader.report().page_payload_bytes_read, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn writer_refuses_to_replace_an_existing_adjacency_generation() {
+        let root = test_path("immutable-generation");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let adjacency_path = root.join("adjacency.7.skein");
+        let descriptor_paths = GraphDescriptorTreePaths::new(
+            root.join(canonical_adjacency_descriptor_page_file(7)),
+            root.join(canonical_adjacency_descriptor_root_file(7)),
+        );
+        let writer = CanonicalAdjacencyWriter::new(CanonicalAdjacencyConfig::default());
+        writer
+            .write_fallible_with_descriptor_tree(
+                &adjacency_path,
+                descriptor_paths.clone(),
+                ManifestGeneration(7),
+                29,
+                GraphDescriptorTreeBuildConfig::default(),
+                [Ok(relationship(1, 1, 2, 3))],
+            )
+            .unwrap();
+        let adjacency_before = fs::read(&adjacency_path).unwrap();
+        let pages_before = fs::read(&descriptor_paths.page_artifact).unwrap();
+        let root_before = fs::read(&descriptor_paths.root_manifest).unwrap();
+
+        let error = writer
+            .write_fallible_with_descriptor_tree(
+                &adjacency_path,
+                descriptor_paths.clone(),
+                ManifestGeneration(7),
+                30,
+                GraphDescriptorTreeBuildConfig::default(),
+                [Ok(relationship(2, 3, 4, 3))],
+            )
+            .expect_err("an existing adjacency generation must be immutable");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "immutable canonical adjacency data artifact {} already exists",
+                adjacency_path.display()
+            )
+        );
+        assert_eq!(fs::read(&adjacency_path).unwrap(), adjacency_before);
+        assert_eq!(
+            fs::read(&descriptor_paths.page_artifact).unwrap(),
+            pages_before
+        );
+        assert_eq!(
+            fs::read(&descriptor_paths.root_manifest).unwrap(),
+            root_before
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn demand_reader_matches_resident_manifest_and_scrubs_without_cache_warming() {
+        let root = test_path("demand-reader");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let adjacency_path = root.join("adjacency.7.skein");
+        let descriptor_paths = GraphDescriptorTreePaths::new(
+            root.join(canonical_adjacency_descriptor_page_file(7)),
+            root.join(canonical_adjacency_descriptor_root_file(7)),
+        );
+        let descriptor_config = GraphDescriptorTreeBuildConfig {
+            page_limits: crate::GraphDescriptorPageLimits {
+                max_page_bytes: NonZeroUsize::new(512).unwrap(),
+                max_entries: NonZeroUsize::new(4).unwrap(),
+                max_key_bytes: NonZeroUsize::new(64).unwrap(),
+                max_value_bytes: NonZeroUsize::new(128).unwrap(),
+            },
+            max_root_bytes: NonZeroUsize::new(4096).unwrap(),
+            max_page_count: NonZeroU64::new(4096).unwrap(),
+            max_page_artifact_bytes: NonZeroU64::new(8 * 1024 * 1024).unwrap(),
+            max_intermediate_bytes: NonZeroU64::new(8 * 1024 * 1024).unwrap(),
+        };
+        let relationships = (0..256)
+            .map(|index| {
+                relationship(
+                    index + 1,
+                    index % 7 + 1,
+                    index + 100,
+                    (index % 3 + 1) as u32,
+                )
+            })
+            .collect::<Vec<_>>();
+        let expected_ids = relationships
+            .iter()
+            .filter(|relationship| {
+                relationship.source == NodeId(1) && relationship.rel_type == RelTypeId(1)
+            })
+            .map(|relationship| relationship.id)
+            .collect::<Vec<_>>();
+        let output = CanonicalAdjacencyWriter::new(CanonicalAdjacencyConfig {
+            target_block_bytes: NonZeroU64::new(256).unwrap(),
+            dense_degree_threshold: NonZeroUsize::new(4).unwrap(),
+            ..CanonicalAdjacencyConfig::default()
+        })
+        .write_fallible_with_descriptor_tree(
+            &adjacency_path,
+            descriptor_paths.clone(),
+            ManifestGeneration(7),
+            29,
+            descriptor_config,
+            relationships.clone().into_iter().map(Ok),
+        )
+        .unwrap();
+        let binding = output.generation_artifacts().unwrap();
+        let max_block_bytes = NonZeroU64::new(16 * 1024 * 1024).unwrap();
+        assert!(output.resident_manifest.is_none());
+        let cache = Arc::new(SegmentCache::new(128 * 1024));
+        let root_reader = GraphDescriptorTreeRootReader::open_bound(
+            descriptor_paths.clone(),
+            output
+                .descriptor_tree
+                .as_ref()
+                .unwrap()
+                .generation_artifacts(),
+            descriptor_config,
+        )
+        .unwrap();
+        let demand = CanonicalAdjacencyReader::open_demand_paged(
+            &adjacency_path,
+            binding,
+            root_reader,
+            descriptor_config,
+            Arc::clone(&cache),
+            StoreId(41),
+            max_block_bytes,
+        )
+        .unwrap();
+
+        let collect = |reader: &CanonicalAdjacencyReader| {
+            let mut ids = Vec::new();
+            let (report, control) = reader
+                .scan_endpoint_control(
+                    NodeId(1),
+                    AdjacencyDirection::Outgoing,
+                    Some(RelTypeId(1)),
+                    |relationship| {
+                        ids.push(relationship.id);
+                        Ok(CanonicalScanControl::Continue)
+                    },
+                )
+                .unwrap();
+            assert_eq!(control, CanonicalScanControl::Continue);
+            (ids, report)
+        };
+        let (cold_ids, cold) = collect(&demand);
+        assert_eq!(cold_ids, expected_ids);
+        assert_eq!(cold.generation, 7);
+        assert!(cold.descriptor_pages_visited > 0);
+        assert!(cold.descriptor_page_bytes_decoded > 0);
+        assert!(cold.descriptor_storage_bytes_read > 0);
+        assert!(cold.descriptor_cache_misses > 0);
+        assert_eq!(
+            demand
+                .estimate_endpoint_entries(
+                    NodeId(1),
+                    AdjacencyDirection::Outgoing,
+                    Some(RelTypeId(1)),
+                )
+                .unwrap(),
+            expected_ids.len() as u64
+        );
+
+        let (_, warm) = collect(&demand);
+        assert!(warm.descriptor_cache_hits > 0);
+        assert_eq!(
+            warm.descriptor_page_bytes_decoded,
+            cold.descriptor_page_bytes_decoded
+        );
+        assert_eq!(warm.descriptor_storage_bytes_read, 0);
+        let mut stopped_ids = Vec::new();
+        let (stopped, control) = demand
+            .scan_endpoint_control(
+                NodeId(1),
+                AdjacencyDirection::Outgoing,
+                Some(RelTypeId(1)),
+                |relationship| {
+                    stopped_ids.push(relationship.id);
+                    Ok(CanonicalScanControl::Stop)
+                },
+            )
+            .unwrap();
+        assert_eq!(control, CanonicalScanControl::Stop);
+        assert_eq!(stopped_ids.len(), 1);
+        assert_eq!(stopped.records_decoded, 1);
+
+        let cache_before_scrub = cache.snapshot();
+        let scrub = demand.deep_scrub().unwrap();
+        assert_eq!(
+            scrub.descriptors_checked,
+            output
+                .report
+                .sparse_block_count
+                .checked_add(output.report.dense_block_count)
+                .unwrap()
+        );
+        assert_eq!(scrub.adjacency_records_checked, binding.entry_count);
+        assert_eq!(
+            scrub.adjacency_bytes_hashed,
+            binding.adjacency_artifact.encoded_len
+        );
+        assert_eq!(cache.snapshot(), cache_before_scrub);
+
+        let admission_root = GraphDescriptorTreeRootReader::open_bound(
+            descriptor_paths,
+            output
+                .descriptor_tree
+                .as_ref()
+                .unwrap()
+                .generation_artifacts(),
+            descriptor_config,
+        )
+        .unwrap();
+        let admission_reader = CanonicalAdjacencyReader::open_demand_paged(
+            &adjacency_path,
+            binding,
+            admission_root,
+            descriptor_config,
+            Arc::new(SegmentCache::new(128 * 1024)),
+            StoreId(42),
+            NonZeroU64::new(1).unwrap(),
+        )
+        .unwrap();
+        let error = admission_reader
+            .scan_endpoint_control(
+                NodeId(1),
+                AdjacencyDirection::Outgoing,
+                Some(RelTypeId(1)),
+                |_| Ok(CanonicalScanControl::Continue),
+            )
+            .expect_err("block byte admission must reject before allocation");
+        assert!(matches!(
+            error,
+            CanonicalAdjacencyError::BlockTooLarge { .. }
+        ));
+        assert!(!admission_reader.is_poisoned());
         fs::remove_dir_all(root).unwrap();
     }
 }

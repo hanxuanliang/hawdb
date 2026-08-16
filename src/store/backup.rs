@@ -1,34 +1,38 @@
 //! Backup manifest handling and storage backup validation and restore.
 
 use super::{
-    canonical_adjacency_artifact_generation_file, canonical_adjacency_manifest_generation_file,
-    canonical_artifact_generation_file, canonical_manifest_generation_file,
-    checkpoint_generation_file, checksum_bytes, decode_string, encode_string,
-    parse_canonical_adjacency_manifest_generation_file, parse_canonical_manifest_generation_file,
-    parse_generation_file, parse_property_projection_manifest_generation_file,
+    canonical_adjacency_artifact_generation_file, canonical_artifact_generation_file,
+    canonical_manifest_generation_file, checkpoint_generation_file, checksum_bytes, decode_string,
+    encode_string, parse_canonical_adjacency_descriptor_generation_file,
+    parse_canonical_manifest_generation_file, parse_generation_file,
+    parse_property_projection_manifest_generation_file,
     parse_property_spill_manifest_generation_file, parse_relational_index_artifact_generation_file,
     parse_relational_index_manifest_generation_file, parse_relational_overflow_generation_file,
     parse_relational_row_generation_file, parse_u64, property_projection_artifact_generation_file,
     property_projection_manifest_generation_file, property_spill_artifact_generation_file,
     property_spill_manifest_generation_file, read_durable_text_bytes_with_limit,
     relational_checkpoint_generation_file, relational_checkpoint_metadata, source_scan,
-    split_checkpoint_checksum, sync_parent_dir, wal_generation_file, BackupFileEntry,
-    BackupManifest, DurableManifest, BACKUP_HEADER_V1, BACKUP_MANIFEST_FILE, MANIFEST_FILE,
-    STABLE_ID_MAPPING_FILE,
+    split_checkpoint_checksum, store_id_for_path, sync_parent_dir, wal_generation_file,
+    BackupFileEntry, BackupManifest, DurableManifest, BACKUP_HEADER_V1, BACKUP_MANIFEST_FILE,
+    MANIFEST_FILE, STABLE_ID_MAPPING_FILE,
 };
 use crate::error::{Result, SkeinError};
 use skein_integrity::{IntegrityHasher, Sha256Digest};
 use skein_storage::{
-    decode_relational_checkpoint_file, durable_replace_file, CanonicalAdjacencyManifest,
-    CanonicalSegmentManifest, ManifestGeneration, PersistentPropertyProjectionManifest,
-    PropertySpillManifest, RelationalDecodeLimits, RelationalIndexArtifactMetadata,
-    RelationalIndexGenerationIdentity, RelationalIndexShadowConfig, RelationalIndexShadowReader,
-    StorageRestoreReport,
+    decode_relational_checkpoint_file, durable_replace_file, CanonicalAdjacencyConfig,
+    CanonicalAdjacencyReader, CanonicalSegmentManifest, GraphDescriptorKind,
+    GraphDescriptorTreeBuildConfig, GraphDescriptorTreeGenerationArtifacts,
+    GraphDescriptorTreePaths, GraphDescriptorTreeRootReader, ManifestGeneration,
+    PersistentPropertyProjectionManifest, PropertySpillManifest, RelationalDecodeLimits,
+    RelationalIndexArtifactMetadata, RelationalIndexGenerationIdentity,
+    RelationalIndexShadowConfig, RelationalIndexShadowReader, SegmentCache, StorageRestoreReport,
 };
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::num::NonZeroU64;
 use std::path::Path;
+use std::sync::Arc;
 
 impl BackupManifest {
     fn load(path: &Path) -> Result<Self> {
@@ -195,7 +199,7 @@ fn validate_backup_file_name(name: &str) -> Result<()> {
         || parse_generation_file(name, "canonical.").is_some()
         || parse_canonical_manifest_generation_file(name).is_some()
         || parse_generation_file(name, "adjacency.").is_some()
-        || parse_canonical_adjacency_manifest_generation_file(name).is_some()
+        || parse_canonical_adjacency_descriptor_generation_file(name).is_some()
         || parse_generation_file(name, "properties.").is_some()
         || parse_property_spill_manifest_generation_file(name).is_some()
         || parse_generation_file(name, "property-index.").is_some()
@@ -454,15 +458,16 @@ pub(super) fn validate_backup_files(
             ));
         }
     }
-    if let (Some(expected_len), Some(expected_checksum)) = (
-        manifest.canonical_adjacency_manifest_encoded_len,
-        manifest.canonical_adjacency_manifest_encoded_checksum,
-    ) {
-        let adjacency_manifest_name = canonical_adjacency_manifest_generation_file(generation);
+    if let Some(binding) = manifest.canonical_adjacency_generation_artifacts {
         let adjacency_artifact_name = canonical_adjacency_artifact_generation_file(generation);
+        let descriptor_page_name =
+            skein_storage::canonical_adjacency_descriptor_page_file(generation);
+        let descriptor_root_name =
+            skein_storage::canonical_adjacency_descriptor_root_file(generation);
         for required in [
-            adjacency_manifest_name.as_str(),
             adjacency_artifact_name.as_str(),
+            descriptor_page_name.as_str(),
+            descriptor_root_name.as_str(),
         ] {
             if !names.contains(required) {
                 return Err(SkeinError::Storage(format!(
@@ -470,35 +475,80 @@ pub(super) fn validate_backup_files(
                 )));
             }
         }
-        let encoded_manifest = files
+        let descriptor_root = files
             .iter()
-            .find(|file| file.name == adjacency_manifest_name)
-            .expect("required canonical adjacency manifest must exist");
-        if encoded_manifest.encoded_len != expected_len
-            || encoded_manifest.encoded_checksum != expected_checksum
-            || manifest.canonical_adjacency_manifest_encoded_sha256 != Some(encoded_manifest.sha256)
+            .find(|file| file.name == descriptor_root_name)
+            .expect("required canonical adjacency descriptor root must exist");
+        if descriptor_root.encoded_len != binding.descriptor_root_artifact.encoded_len
+            || descriptor_root.encoded_checksum
+                != u64::from(binding.descriptor_root_artifact.encoded_crc32c)
+            || descriptor_root.sha256 != binding.descriptor_root_artifact.encoded_sha256
         {
             return Err(SkeinError::Storage(
-                "backup canonical adjacency manifest metadata does not match the durable manifest"
+                "backup canonical adjacency descriptor root does not match the durable manifest"
                     .to_string(),
             ));
         }
-        let adjacency_manifest_text = fs::read_to_string(root.join(&adjacency_manifest_name))?;
-        let adjacency_manifest = CanonicalAdjacencyManifest::decode(&adjacency_manifest_text)
-            .map_err(|error| SkeinError::Storage(error.to_string()))?;
         let adjacency_artifact = files
             .iter()
             .find(|file| file.name == adjacency_artifact_name)
             .expect("required canonical adjacency artifact must exist");
-        if adjacency_manifest.artifact_len != adjacency_artifact.encoded_len
-            || adjacency_manifest.artifact_digest.0 != adjacency_artifact.encoded_checksum
-            || adjacency_manifest.artifact_sha256 != adjacency_artifact.sha256
+        if binding.adjacency_artifact.encoded_len != adjacency_artifact.encoded_len
+            || binding.adjacency_artifact.encoded_crc32c != adjacency_artifact.encoded_checksum
+            || binding.adjacency_artifact.encoded_sha256 != adjacency_artifact.sha256
         {
             return Err(SkeinError::Storage(
-                "backup canonical adjacency artifact metadata does not match its manifest"
+                "backup canonical adjacency artifact metadata does not match its durable binding"
                     .to_string(),
             ));
         }
+        let descriptor_config = GraphDescriptorTreeBuildConfig::default();
+        let descriptor_paths = GraphDescriptorTreePaths::new(
+            root.join(&descriptor_page_name),
+            root.join(&descriptor_root_name),
+        );
+        let root_reader = GraphDescriptorTreeRootReader::open_bound(
+            descriptor_paths,
+            GraphDescriptorTreeGenerationArtifacts {
+                kind: GraphDescriptorKind::CanonicalAdjacency,
+                generation: binding.generation,
+                source_commit_epoch: binding.source_commit_epoch,
+                root_artifact: binding.descriptor_root_artifact,
+            },
+            descriptor_config,
+        )
+        .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+        let descriptor_page = files
+            .iter()
+            .find(|file| file.name == descriptor_page_name)
+            .expect("required canonical adjacency descriptor pages must exist");
+        if descriptor_page.encoded_len != root_reader.root().page_artifact_len
+            || descriptor_page.encoded_checksum != root_reader.root().page_artifact_crc32c.as_u64()
+            || descriptor_page.sha256 != root_reader.root().page_artifact_sha256
+        {
+            return Err(SkeinError::Storage(
+                "backup canonical adjacency descriptor pages do not match their root".to_string(),
+            ));
+        }
+        let config = CanonicalAdjacencyConfig::default();
+        let max_block_bytes = NonZeroU64::new(
+            config
+                .target_block_bytes
+                .get()
+                .max(config.max_record_bytes.get().saturating_add(1024)),
+        )
+        .expect("canonical adjacency maximum block size is non-zero");
+        CanonicalAdjacencyReader::open_demand_paged(
+            root.join(&adjacency_artifact_name),
+            binding,
+            root_reader,
+            descriptor_config,
+            Arc::new(SegmentCache::new(0)),
+            store_id_for_path(root)?,
+            max_block_bytes,
+        )
+        .and_then(|reader| reader.deep_scrub())
+        .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
     }
     if let (Some(expected_len), Some(expected_checksum)) = (
         manifest.property_spill_manifest_encoded_len,

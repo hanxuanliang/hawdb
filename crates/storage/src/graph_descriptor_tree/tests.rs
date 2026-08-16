@@ -92,6 +92,42 @@ fn streaming_tree_round_trips_with_bounded_residency() {
 }
 
 #[test]
+fn bound_open_rejects_root_artifact_or_identity_drift() {
+    let directory = TestDirectory::new("bound-root");
+    let output = build(directory.path(), 32);
+    GraphDescriptorTreeRootReader::open_bound(
+        paths(directory.path()),
+        output.generation_artifacts(),
+        tiny_config(),
+    )
+    .unwrap();
+
+    let mut artifact_drift = output.generation_artifacts();
+    artifact_drift.root_artifact.encoded_sha256 = Sha256Digest::from_bytes([0x5a; 32]);
+    let error = GraphDescriptorTreeRootReader::open_bound(
+        paths(directory.path()),
+        artifact_drift,
+        tiny_config(),
+    )
+    .err()
+    .expect("root artifact drift must fail closed");
+    assert!(error.to_string().contains("canonical artifact binding"));
+
+    let mut identity_drift = output.generation_artifacts();
+    identity_drift.source_commit_epoch += 1;
+    let error = GraphDescriptorTreeRootReader::open_bound(
+        paths(directory.path()),
+        identity_drift,
+        tiny_config(),
+    )
+    .err()
+    .expect("root identity drift must fail closed");
+    assert!(error
+        .to_string()
+        .contains("does not match canonical binding"));
+}
+
+#[test]
 fn empty_tree_publishes_a_bound_empty_artifact() {
     let directory = TestDirectory::new("empty");
     let output = build(directory.path(), 0);

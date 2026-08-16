@@ -412,7 +412,7 @@ impl GraphStore {
                     )?,
                     _ => unreachable!("canonical base iterators are created together"),
                 };
-            let canonical_adjacency_manifest_artifact = match adjacency_relationships {
+            let canonical_adjacency_artifacts = match adjacency_relationships {
                 Some(relationships) => durable.write_canonical_adjacency(
                     relationships,
                     generation,
@@ -674,7 +674,7 @@ impl GraphStore {
                     checkpoint: checkpoint_artifact,
                     relational_checkpoint: relational_checkpoint_artifact,
                     canonical_manifest: canonical_manifest_artifact,
-                    canonical_adjacency_manifest: canonical_adjacency_manifest_artifact,
+                    canonical_adjacency: canonical_adjacency_artifacts,
                     property_spill_manifest: property_spill_manifest_artifact,
                     property_projection_manifest: property_projection_manifest_artifact,
                     relational_row: relational_row_report.generation_artifacts,
@@ -881,14 +881,6 @@ impl GraphStore {
             .map(CanonicalSegmentReader::manifest)
     }
 
-    pub fn canonical_adjacency_manifest(&self) -> Option<&CanonicalAdjacencyManifest> {
-        self.durable
-            .as_ref()?
-            .canonical_adjacency
-            .as_ref()
-            .map(CanonicalAdjacencyReader::manifest)
-    }
-
     pub fn property_spill_manifest(&self) -> Option<&PropertySpillManifest> {
         self.durable
             .as_ref()?
@@ -928,7 +920,7 @@ impl GraphStore {
             canonical_adjacency_artifact_bytes: self
                 .canonical_adjacency
                 .as_ref()
-                .map_or(0, |reader| reader.manifest().artifact_len),
+                .map_or(0, CanonicalAdjacencyReader::artifact_len),
             persistent_property_projection_artifact_bytes: self
                 .persistent_property_projection
                 .as_ref()

@@ -27,6 +27,7 @@ pub enum RepresentationKind {
     RelationalIndexRecoveryDelta,
     RelationalRowPageSlot,
     StableIdentityPageSlot,
+    CanonicalAdjacencyDescriptorPage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

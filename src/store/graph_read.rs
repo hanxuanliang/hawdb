@@ -1470,8 +1470,9 @@ impl GraphStore {
                 consumer,
             );
         };
-        let adjacency_entries =
-            adjacency.estimate_endpoint_entries(node_id, direction, Some(rel_type));
+        let adjacency_entries = adjacency
+            .estimate_endpoint_entries(node_id, direction, Some(rel_type))
+            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
         if probe.estimated_entries() > adjacency_entries {
             return self.visit_adjacent_relationships_filter_fallback(
                 node_id,

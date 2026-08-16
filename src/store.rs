@@ -55,10 +55,10 @@ mod statistics_refresh;
 #[path = "store/wal_codec.rs"]
 mod wal_codec;
 use artifact_files::{
-    canonical_adjacency_artifact_generation_file, canonical_adjacency_manifest_generation_file,
-    canonical_artifact_generation_file, canonical_manifest_generation_file,
-    checkpoint_generation_file, cleanup_abandoned_checkpoint_preparations, has_storage_artifacts,
-    parse_canonical_adjacency_manifest_generation_file, parse_canonical_manifest_generation_file,
+    canonical_adjacency_artifact_generation_file, canonical_artifact_generation_file,
+    canonical_manifest_generation_file, checkpoint_generation_file,
+    cleanup_abandoned_checkpoint_preparations, has_storage_artifacts,
+    parse_canonical_adjacency_descriptor_generation_file, parse_canonical_manifest_generation_file,
     parse_generation_file, parse_property_projection_manifest_generation_file,
     parse_property_spill_manifest_generation_file, parse_relational_index_artifact_generation_file,
     parse_relational_index_manifest_generation_file,
@@ -132,12 +132,12 @@ use skein_storage::{
 pub use skein_storage::{
     AdjacencyDirection, AdjacencyGroupConsistencyMismatch, AdjacencyGroupKey, AdjacencyGroupStats,
     AdjacencyLayout, CanonicalAdjacencyBuildReport, CanonicalAdjacencyConfig,
-    CanonicalAdjacencyEntry, CanonicalAdjacencyManifest, CanonicalAdjacencyReadReport,
-    CanonicalAdjacencyReader, CanonicalAdjacencyWriter, CanonicalScanControl,
-    CanonicalSegmentConfig, CanonicalSegmentManifest, CanonicalSegmentReader,
-    CanonicalSegmentWriter, ConnectedNodesCreate, DurabilityPolicy, DurableCompression,
-    FileSegmentRangeReader, GraphMutation, ManifestGeneration, MatchedRelationshipCopyMerge,
-    MatchedRelationshipCreate, MatchedRelationshipMerge, MatchedRelationshipRetargetMerge,
+    CanonicalAdjacencyEntry, CanonicalAdjacencyReadReport, CanonicalAdjacencyReader,
+    CanonicalAdjacencyWriter, CanonicalScanControl, CanonicalSegmentConfig,
+    CanonicalSegmentManifest, CanonicalSegmentReader, CanonicalSegmentWriter, ConnectedNodesCreate,
+    DurabilityPolicy, DurableCompression, FileSegmentRangeReader, GraphMutation,
+    ManifestGeneration, MatchedRelationshipCopyMerge, MatchedRelationshipCreate,
+    MatchedRelationshipMerge, MatchedRelationshipRetargetMerge,
     MatchedRelationshipSourceRetargetMerge, MutationLimits, NodeId, NodeRecord, NodeSetAssignment,
     NodeSetValue, OrderedAdjacencyEntry, PersistentPropertyProjectionConfig,
     PersistentPropertyProjectionDefinition, PersistentPropertyProjectionError,
@@ -194,7 +194,6 @@ const MANIFEST_HEADER_V1: &str = "SKEIN_MANIFEST_V1";
 const BACKUP_MANIFEST_FILE: &str = "backup.skein";
 const BACKUP_HEADER_V1: &str = "SKEIN_BACKUP_V1";
 const CANONICAL_MANIFEST_MAX_BYTES: u64 = 256 * 1024 * 1024;
-const CANONICAL_ADJACENCY_MANIFEST_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 const PROPERTY_SPILL_MANIFEST_MAX_BYTES: u64 = 256 * 1024 * 1024;
 const PROPERTY_PROJECTION_MANIFEST_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 const CHECKPOINT_TEMPORARY_SPACE_MULTIPLIER: u64 = 4;
@@ -5739,20 +5738,20 @@ fn estimated_value_bytes(value: &Value) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_adjacency_artifact_generation_file, canonical_adjacency_manifest_generation_file,
-        canonical_manifest_generation_file, checksum_bytes, compute_statistics,
-        encode_durable_text, property_projection_artifact_generation_file,
-        property_spill_artifact_generation_file, read_durable_text, restore_storage_backup,
-        retain_supported_property_statistics, set_checkpoint_failpoint, set_wal_apply_failpoint,
-        source_scan, AdjacencyConsolidationPlan, AdjacencyDirection, AdjacencyGroupStats,
-        AdjacencyLayout, CheckpointPublishStage, ConnectedNodesCreate, CowSegmentedMap,
-        DatabaseDoctor, DegreeStatisticsEntry, DegreeStatisticsKey, DurableCompression,
-        DurableManifest, GraphScanControl, GraphStore, NodeId, NodeRecord, NodeSetAssignment,
-        NodeSetValue, OrderedAdjacencyEntry, PersistentGraphIndexClass, ProjectedGraphDefinition,
-        PropertyFilter, RelId, RelRecord, RelTypeId, RelationshipDeleteRequest,
-        ScanPruningStrategy, ScanPruningTargetKind, SearchProjectionGraphChange,
-        SourceScanCandidateRead, WalDoctorOptions, COW_MAP_TARGET_SEGMENT_BYTES,
-        DENSE_ADJACENCY_DEGREE_THRESHOLD, DURABLE_COMPRESSION_HEADER, MANIFEST_FILE,
+        canonical_adjacency_artifact_generation_file, canonical_manifest_generation_file,
+        checksum_bytes, compute_statistics, encode_durable_text,
+        property_projection_artifact_generation_file, property_spill_artifact_generation_file,
+        read_durable_text, restore_storage_backup, retain_supported_property_statistics,
+        set_checkpoint_failpoint, set_wal_apply_failpoint, source_scan, AdjacencyConsolidationPlan,
+        AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, CheckpointPublishStage,
+        ConnectedNodesCreate, CowSegmentedMap, DatabaseDoctor, DegreeStatisticsEntry,
+        DegreeStatisticsKey, DurableCompression, DurableManifest, GraphScanControl, GraphStore,
+        NodeId, NodeRecord, NodeSetAssignment, NodeSetValue, OrderedAdjacencyEntry,
+        PersistentGraphIndexClass, ProjectedGraphDefinition, PropertyFilter, RelId, RelRecord,
+        RelTypeId, RelationshipDeleteRequest, ScanPruningStrategy, ScanPruningTargetKind,
+        SearchProjectionGraphChange, SourceScanCandidateRead, WalDoctorOptions,
+        COW_MAP_TARGET_SEGMENT_BYTES, DENSE_ADJACENCY_DEGREE_THRESHOLD, DURABLE_COMPRESSION_HEADER,
+        MANIFEST_FILE,
     };
     use crate::schema::{Catalog, GraphStatistics, LabelId, PropertyType, TableKind};
     use crate::value::Value;
@@ -6445,7 +6444,17 @@ mod tests {
             store.backup_to(&catalog, &backup).unwrap()
         };
         assert!(report.generation > 0);
-        assert_eq!(report.file_count, 18);
+        assert_eq!(report.file_count, 19);
+        assert!(backup
+            .join(skein_storage::canonical_adjacency_descriptor_page_file(
+                report.generation
+            ))
+            .exists());
+        assert!(backup
+            .join(skein_storage::canonical_adjacency_descriptor_root_file(
+                report.generation
+            ))
+            .exists());
 
         let restore = restore_storage_backup(&backup, &restored).unwrap();
         assert_eq!(restore.generation, report.generation);
@@ -6750,7 +6759,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_rejects_graph_manifest_budget_before_selecting_candidate() {
+    fn checkpoint_uses_compact_adjacency_root_and_enforces_manifest_budget_before_selection() {
         let path = unique_test_dir("checkpoint_graph_manifest_budget");
         let replay_config = WalReplayConfig {
             max_graph_manifest_open_bytes: 64 * 1024,
@@ -6799,6 +6808,41 @@ mod tests {
             })
             .collect();
         store.commit_mutations(&mut catalog, mutations).unwrap();
+        store.checkpoint(&catalog).unwrap();
+        assert_eq!(store.durable.as_ref().unwrap().checkpoint_epoch, 2);
+        assert!(
+            store
+                .durable
+                .as_ref()
+                .unwrap()
+                .graph_manifest_encoded_bytes()
+                <= replay_config.max_graph_manifest_open_bytes
+        );
+
+        store
+            .commit_mutations(
+                &mut catalog,
+                vec![GraphMutation::MergeConnectedNodes(ConnectedNodesCreate {
+                    source_label: "Memory".to_string(),
+                    source_properties: properties([(
+                        "id",
+                        Value::String("source-513".to_string()),
+                    )]),
+                    rel_type: "MENTIONS".to_string(),
+                    rel_properties: BTreeMap::new(),
+                    target_label: "Entity".to_string(),
+                    target_properties: properties([(
+                        "id",
+                        Value::String("target-513".to_string()),
+                    )]),
+                })],
+            )
+            .unwrap();
+        store
+            .durable
+            .as_mut()
+            .unwrap()
+            .set_graph_manifest_open_budget_bytes(1);
         let error = store.checkpoint(&catalog).unwrap_err();
         assert!(
             error
@@ -6806,9 +6850,9 @@ mod tests {
                 .contains("aggregate encoded graph manifest bytes during open"),
             "unexpected graph manifest checkpoint admission error: {error}"
         );
-        assert_eq!(store.durable.as_ref().unwrap().checkpoint_epoch, 1);
+        assert_eq!(store.durable.as_ref().unwrap().checkpoint_epoch, 2);
         let selected_manifest = DurableManifest::load(&path.join(MANIFEST_FILE)).unwrap();
-        assert_eq!(selected_manifest.checkpoint_epoch, 1);
+        assert_eq!(selected_manifest.checkpoint_epoch, 2);
         drop(store);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -6881,7 +6925,15 @@ mod tests {
                     .unwrap();
             }
             store.checkpoint(&catalog).unwrap();
-            let manifest = store.canonical_adjacency_manifest().unwrap();
+            let adjacency = store
+                .durable
+                .as_ref()
+                .and_then(|durable| durable.canonical_adjacency.as_ref())
+                .unwrap();
+            let cache_before_scrub = store.segment_cache_snapshot().unwrap();
+            let scrub = adjacency.deep_scrub().unwrap();
+            assert_eq!(store.segment_cache_snapshot().unwrap(), cache_before_scrub);
+            assert!(!path.join("adjacency.1.manifest.skein").exists());
             let descriptor_reader = skein_storage::GraphDescriptorTreeRootReader::open(
                 skein_storage::GraphDescriptorTreePaths::new(
                     path.join(skein_storage::canonical_adjacency_descriptor_page_file(1)),
@@ -6892,7 +6944,7 @@ mod tests {
             .unwrap();
             assert_eq!(
                 descriptor_reader.root().descriptor_count,
-                manifest.blocks.len() as u64
+                scrub.descriptors_checked
             );
             assert_eq!(
                 descriptor_reader.root().source_commit_epoch,
@@ -6900,20 +6952,7 @@ mod tests {
             );
             assert_eq!(descriptor_reader.report().page_payload_bytes_read, 0);
             let mention_type = catalog.rel_type_id("MENTIONS").unwrap();
-            let outgoing = manifest
-                .blocks
-                .iter()
-                .filter(|block| {
-                    block.direction == AdjacencyDirection::Outgoing
-                        && block.endpoint == source
-                        && block.rel_type == mention_type
-                })
-                .collect::<Vec<_>>();
-            assert!(!outgoing.is_empty());
-            assert!(outgoing
-                .iter()
-                .all(|block| block.layout == AdjacencyLayout::Dense));
-            corrupt_offset = outgoing[0].offset + 48;
+            corrupt_offset = 24 + 48;
 
             let mut relationship_ids = Vec::new();
             store
@@ -6928,6 +6967,12 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(relationship_ids.len(), 70);
+            let cold = store.storage_residency_report().graph_index_reads;
+            assert!(cold.adjacency_dense_blocks_read > 0);
+            assert!(cold.adjacency_descriptor_pages_visited > 0);
+            assert!(cold.adjacency_descriptor_page_bytes_decoded > 0);
+            assert!(cold.adjacency_descriptor_storage_bytes_read > 0);
+            assert!(cold.adjacency_descriptor_cache_misses > 0);
 
             let target = store
                 .create_node(&mut catalog, "Entity", BTreeMap::new())
@@ -6949,6 +6994,13 @@ mod tests {
                 .unwrap();
             assert_eq!(relationship_ids.len(), 71);
             assert!(relationship_ids.contains(&first_relationship));
+            let warm = store
+                .storage_residency_report()
+                .graph_index_reads
+                .delta_since(cold);
+            assert!(warm.adjacency_descriptor_cache_hits > 0);
+            assert!(warm.adjacency_descriptor_page_bytes_decoded > 0);
+            assert_eq!(warm.adjacency_descriptor_storage_bytes_read, 0);
         }
         {
             let mut file = OpenOptions::new()
@@ -6982,12 +7034,21 @@ mod tests {
                 error.to_string().contains("content digest verification"),
                 "unexpected adjacency corruption error: {error}"
             );
+            let poisoned = store
+                .visit_adjacent_relationships_owned(
+                    source,
+                    Some(mention_type),
+                    AdjacencyDirection::Outgoing,
+                    |_| GraphScanControl::Continue,
+                )
+                .unwrap_err();
+            assert!(poisoned.to_string().contains("poisoned"));
         }
         std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
-    fn out_of_core_checkpoint_requires_adjacency_metadata() {
+    fn out_of_core_checkpoint_requires_adjacency_generation_binding() {
         let path = unique_test_dir("canonical_adjacency_required");
         let replay_config = WalReplayConfig {
             residency_mode: StorageResidencyMode::OutOfCore,
@@ -7020,7 +7081,7 @@ mod tests {
             .lines()
             .filter(|line| !line.starts_with("checksum\t"))
             .map(|line| {
-                if line.starts_with("canonical_adjacency_manifest_") {
+                if line.starts_with("canonical_adjacency_") {
                     let (field, _) = line.split_once('\t').unwrap();
                     format!("{field}\tnone")
                 } else {
@@ -7036,7 +7097,10 @@ mod tests {
         )
         .unwrap();
         fs::remove_file(path.join(canonical_adjacency_artifact_generation_file(1))).unwrap();
-        fs::remove_file(path.join(canonical_adjacency_manifest_generation_file(1))).unwrap();
+        fs::remove_file(path.join(skein_storage::canonical_adjacency_descriptor_page_file(1)))
+            .unwrap();
+        fs::remove_file(path.join(skein_storage::canonical_adjacency_descriptor_root_file(1)))
+            .unwrap();
 
         let mut catalog = Catalog::default();
         let error = GraphStore::open_with_durability_and_replay_config(
@@ -8948,7 +9012,7 @@ mod tests {
         assert!(path.join("canonical.2.skein").exists());
         assert!(path.join("canonical.2.manifest.skein").exists());
         assert!(path.join("adjacency.2.skein").exists());
-        assert!(path.join("adjacency.2.manifest.skein").exists());
+        assert!(!path.join("adjacency.2.manifest.skein").exists());
         assert!(path
             .join(skein_storage::canonical_adjacency_descriptor_page_file(2))
             .exists());
@@ -8974,7 +9038,7 @@ mod tests {
         assert!(path.join("canonical.3.skein").exists());
         assert!(path.join("canonical.3.manifest.skein").exists());
         assert!(path.join("adjacency.3.skein").exists());
-        assert!(path.join("adjacency.3.manifest.skein").exists());
+        assert!(!path.join("adjacency.3.manifest.skein").exists());
         assert!(path
             .join(skein_storage::canonical_adjacency_descriptor_page_file(3))
             .exists());

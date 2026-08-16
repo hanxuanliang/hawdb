@@ -2,15 +2,15 @@
 //! manifest, and loading of published derived artifacts.
 
 use super::{
-    canonical_adjacency_artifact_generation_file, canonical_adjacency_manifest_generation_file,
-    canonical_artifact_generation_file, canonical_manifest_generation_file,
-    checkpoint_generation_file, checkpoint_publish_failpoint, checksum_bytes,
-    cleanup_abandoned_checkpoint_preparations, copy_backup_file, decode_projected_graph_artifacts,
-    derived_repair, doctor, elapsed_micros, encode_binary_wal_header, encode_binary_wal_record,
-    encode_bool, encode_durable_text, encode_index_kind, encode_nullable, encode_optional_sha256,
-    encode_optional_u64, encode_property_type, encode_schema_object_state, encode_string,
-    encode_string_vec, encode_table_kind, encode_u64_vec, encode_value_vec, file_checksum,
-    frame_binary_wal_record, has_storage_artifacts, parse_optional_sha256, parse_optional_u64,
+    canonical_adjacency_artifact_generation_file, canonical_artifact_generation_file,
+    canonical_manifest_generation_file, checkpoint_generation_file, checkpoint_publish_failpoint,
+    checksum_bytes, cleanup_abandoned_checkpoint_preparations, copy_backup_file,
+    decode_projected_graph_artifacts, derived_repair, doctor, elapsed_micros,
+    encode_binary_wal_header, encode_binary_wal_record, encode_bool, encode_durable_text,
+    encode_index_kind, encode_nullable, encode_optional_sha256, encode_optional_u64,
+    encode_property_type, encode_schema_object_state, encode_string, encode_string_vec,
+    encode_table_kind, encode_u64_vec, encode_value_vec, file_checksum, frame_binary_wal_record,
+    has_storage_artifacts, parse_optional_sha256, parse_optional_u64,
     parse_relational_overflow_extent_generation_file,
     parse_relational_row_page_artifact_generation_file, parse_u64, process_crash_failpoint,
     property_projection_artifact_generation_file, property_projection_manifest_generation_file,
@@ -22,10 +22,10 @@ use super::{
     validate_search_projection_checkpoint_changes, validate_storage_version, verify_integrity,
     wal_generation_file, wal_group_sync_failpoint, CheckpointPublishStage, ProjectedGraphArtifact,
     WalCursorEvent, WalEntry, WalOp, WalOpenOutcome, WalRecordCursor, BACKUP_MANIFEST_FILE,
-    CANONICAL_ADJACENCY_MANIFEST_MAX_BYTES, CANONICAL_MANIFEST_MAX_BYTES, CHECKPOINT_HEADER_V1,
-    MANIFEST_FILE, MANIFEST_HEADER_V1, PROJECTED_GRAPHS_FILE,
-    PROPERTY_PROJECTION_MANIFEST_MAX_BYTES, PROPERTY_SPILL_MANIFEST_MAX_BYTES,
-    STABLE_ID_MAPPING_FILE, STORAGE_VERSION, WAL_BINARY_FILE_HEADER_BYTES,
+    CANONICAL_MANIFEST_MAX_BYTES, CHECKPOINT_HEADER_V1, MANIFEST_FILE, MANIFEST_HEADER_V1,
+    PROJECTED_GRAPHS_FILE, PROPERTY_PROJECTION_MANIFEST_MAX_BYTES,
+    PROPERTY_SPILL_MANIFEST_MAX_BYTES, STABLE_ID_MAPPING_FILE, STORAGE_VERSION,
+    WAL_BINARY_FILE_HEADER_BYTES,
 };
 use crate::error::{Result, SkeinError};
 use crate::schema::{Catalog, GraphStatistics};
@@ -34,25 +34,27 @@ use crate::value::Value;
 use skein_integrity::{integrity_digest, Sha256Digest};
 use skein_storage::{
     decode_relational_checkpoint_file, durable_replace_file,
-    encode_relational_checkpoint_to_writer, CanonicalAdjacencyConfig, CanonicalAdjacencyManifest,
-    CanonicalAdjacencyReader, CanonicalAdjacencyWriter, CanonicalSegmentConfig,
-    CanonicalSegmentError, CanonicalSegmentManifest, CanonicalSegmentReader,
-    CanonicalSegmentWriter, DatabaseDirectoryLease, DurabilityPolicy, DurableCompression,
-    FileSegmentRangeReader, GraphDescriptorTreeBuildConfig, GraphDescriptorTreePaths,
-    ManifestGeneration, NodeId, NodeRecord, PersistentPropertyProjectionConfig,
-    PersistentPropertyProjectionDefinition, PersistentPropertyProjectionManifest,
-    PersistentPropertyProjectionReader, PersistentPropertyProjectionRecord,
-    PersistentPropertyProjectionWriter, ProjectedGraphDefinition, PropertySpillConfig,
-    PropertySpillManifest, PropertySpillReader, RelId, RelRecord, RelationalDecodeLimits,
-    RelationalIndexArtifactMetadata, RelationalIndexGenerationArtifacts,
-    RelationalOverflowArtifactMetadata, RelationalOverflowGenerationArtifacts,
-    RelationalRowPageArtifactMetadata, RelationalRowPageGenerationArtifacts, RelationalState,
-    ScanSegmentManifest, SearchProjectionGraphChange, SegmentCache, StableIdentityKey,
-    StableIdentityMappingConfig, StableIdentityMappingError, StableIdentityMappingReader,
-    StableIdentityMappingWriter, StableIdentityMaterializeLimits, StorageBackupReport,
-    StorageDebtController, StoragePressureSignals, StorageScrubReport, StoreId,
-    StoreStableIdMapping, WalReplayConfig, WalSyncGroupFlush, WalSyncGroupProgress,
-    WalSyncGroupState,
+    encode_relational_checkpoint_to_writer, CanonicalAdjacencyArtifactMetadata,
+    CanonicalAdjacencyConfig, CanonicalAdjacencyGenerationArtifacts, CanonicalAdjacencyReader,
+    CanonicalAdjacencyWriter, CanonicalSegmentConfig, CanonicalSegmentError,
+    CanonicalSegmentManifest, CanonicalSegmentReader, CanonicalSegmentWriter,
+    DatabaseDirectoryLease, DurabilityPolicy, DurableCompression, FileSegmentRangeReader,
+    GraphDescriptorKind, GraphDescriptorTreeArtifactMetadata, GraphDescriptorTreeBuildConfig,
+    GraphDescriptorTreeGenerationArtifacts, GraphDescriptorTreePaths,
+    GraphDescriptorTreeRootReader, ManifestGeneration, NodeId, NodeRecord,
+    PersistentPropertyProjectionConfig, PersistentPropertyProjectionDefinition,
+    PersistentPropertyProjectionManifest, PersistentPropertyProjectionReader,
+    PersistentPropertyProjectionRecord, PersistentPropertyProjectionWriter,
+    ProjectedGraphDefinition, PropertySpillConfig, PropertySpillManifest, PropertySpillReader,
+    RelId, RelRecord, RelationalDecodeLimits, RelationalIndexArtifactMetadata,
+    RelationalIndexGenerationArtifacts, RelationalOverflowArtifactMetadata,
+    RelationalOverflowGenerationArtifacts, RelationalRowPageArtifactMetadata,
+    RelationalRowPageGenerationArtifacts, RelationalState, ScanSegmentManifest,
+    SearchProjectionGraphChange, SegmentCache, StableIdentityKey, StableIdentityMappingConfig,
+    StableIdentityMappingError, StableIdentityMappingReader, StableIdentityMappingWriter,
+    StableIdentityMaterializeLimits, StorageBackupReport, StorageDebtController,
+    StoragePressureSignals, StorageScrubReport, StoreId, StoreStableIdMapping, WalReplayConfig,
+    WalSyncGroupFlush, WalSyncGroupProgress, WalSyncGroupState,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -83,9 +85,7 @@ pub(super) struct DurableStore {
     canonical_manifest_encoded_len: Option<u64>,
     canonical_manifest_encoded_checksum: Option<u64>,
     canonical_manifest_encoded_sha256: Option<Sha256Digest>,
-    canonical_adjacency_manifest_encoded_len: Option<u64>,
-    canonical_adjacency_manifest_encoded_checksum: Option<u64>,
-    canonical_adjacency_manifest_encoded_sha256: Option<Sha256Digest>,
+    canonical_adjacency_generation_artifacts: Option<CanonicalAdjacencyGenerationArtifacts>,
     property_spill_manifest_encoded_len: Option<u64>,
     property_spill_manifest_encoded_checksum: Option<u64>,
     property_spill_manifest_encoded_sha256: Option<Sha256Digest>,
@@ -274,11 +274,16 @@ impl DurableArtifactMetadata {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CanonicalAdjacencyCheckpointArtifacts {
+    pub(super) generation: CanonicalAdjacencyGenerationArtifacts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct CheckpointManifestArtifacts {
     pub(super) checkpoint: DurableArtifactMetadata,
     pub(super) relational_checkpoint: Option<DurableArtifactMetadata>,
     pub(super) canonical_manifest: DurableArtifactMetadata,
-    pub(super) canonical_adjacency_manifest: DurableArtifactMetadata,
+    pub(super) canonical_adjacency: CanonicalAdjacencyCheckpointArtifacts,
     pub(super) property_spill_manifest: DurableArtifactMetadata,
     pub(super) property_projection_manifest: DurableArtifactMetadata,
     pub(super) relational_row: RelationalRowPageGenerationArtifacts,
@@ -494,7 +499,7 @@ impl DurableStore {
             .transpose()?
             .flatten();
         if let (Some(canonical), Some(adjacency)) = (&canonical_segments, &canonical_adjacency)
-            && canonical.manifest().relationship_count != adjacency.manifest().relationship_count
+            && canonical.manifest().relationship_count != adjacency.relationship_count()
         {
             return Err(SkeinError::Storage(
                 "canonical adjacency relationship count does not match canonical segments"
@@ -527,12 +532,8 @@ impl DurableStore {
             canonical_manifest_encoded_len: manifest.canonical_manifest_encoded_len,
             canonical_manifest_encoded_checksum: manifest.canonical_manifest_encoded_checksum,
             canonical_manifest_encoded_sha256: manifest.canonical_manifest_encoded_sha256,
-            canonical_adjacency_manifest_encoded_len: manifest
-                .canonical_adjacency_manifest_encoded_len,
-            canonical_adjacency_manifest_encoded_checksum: manifest
-                .canonical_adjacency_manifest_encoded_checksum,
-            canonical_adjacency_manifest_encoded_sha256: manifest
-                .canonical_adjacency_manifest_encoded_sha256,
+            canonical_adjacency_generation_artifacts: manifest
+                .canonical_adjacency_generation_artifacts,
             property_spill_manifest_encoded_len: manifest.property_spill_manifest_encoded_len,
             property_spill_manifest_encoded_checksum: manifest
                 .property_spill_manifest_encoded_checksum,
@@ -588,10 +589,16 @@ impl DurableStore {
         self.max_graph_manifest_open_bytes
     }
 
+    #[cfg(test)]
+    pub(super) fn set_graph_manifest_open_budget_bytes(&mut self, max_bytes: u64) {
+        self.max_graph_manifest_open_bytes = max_bytes;
+    }
+
     pub(super) fn graph_manifest_encoded_bytes(&self) -> u64 {
         [
             self.canonical_manifest_encoded_len,
-            self.canonical_adjacency_manifest_encoded_len,
+            self.canonical_adjacency_generation_artifacts
+                .map(|binding| binding.descriptor_root_artifact.encoded_len),
             self.property_spill_manifest_encoded_len,
             self.property_projection_manifest_encoded_len,
         ]
@@ -605,6 +612,10 @@ impl DurableStore {
         artifacts: &CheckpointManifestArtifacts,
     ) -> Result<()> {
         let mut budget = GraphManifestOpenBudget::new(self.max_graph_manifest_open_bytes);
+        let adjacency_root = artifacts
+            .canonical_adjacency
+            .generation
+            .descriptor_root_artifact;
         for (artifact, metadata, format_max_bytes) in [
             (
                 "canonical manifest",
@@ -617,9 +628,15 @@ impl DurableStore {
                 PROPERTY_SPILL_MANIFEST_MAX_BYTES,
             ),
             (
-                "canonical adjacency manifest",
-                artifacts.canonical_adjacency_manifest,
-                CANONICAL_ADJACENCY_MANIFEST_MAX_BYTES,
+                "canonical adjacency descriptor root",
+                DurableArtifactMetadata {
+                    encoded_len: adjacency_root.encoded_len,
+                    encoded_checksum: u64::from(adjacency_root.encoded_crc32c),
+                    encoded_sha256: adjacency_root.encoded_sha256,
+                },
+                GraphDescriptorTreeBuildConfig::default()
+                    .max_root_bytes
+                    .get() as u64,
             ),
             (
                 "property projection manifest",
@@ -798,17 +815,18 @@ impl DurableStore {
                         .join(canonical_manifest_generation_file(generation)),
                 );
             }
-            if self.canonical_adjacency_manifest_encoded_len.is_some() {
+            if self.canonical_adjacency_generation_artifacts.is_some() {
                 sources.insert(
                     canonical_adjacency_artifact_generation_file(generation),
                     self.root_path
                         .join(canonical_adjacency_artifact_generation_file(generation)),
                 );
-                sources.insert(
-                    canonical_adjacency_manifest_generation_file(generation),
-                    self.root_path
-                        .join(canonical_adjacency_manifest_generation_file(generation)),
-                );
+                for name in [
+                    skein_storage::canonical_adjacency_descriptor_page_file(generation),
+                    skein_storage::canonical_adjacency_descriptor_root_file(generation),
+                ] {
+                    sources.insert(name.clone(), self.root_path.join(name));
+                }
             }
             if self.property_spill_manifest_encoded_len.is_some() {
                 sources.insert(
@@ -1085,35 +1103,74 @@ impl DurableStore {
             )?;
         }
 
-        if let (Some(expected_len), Some(expected_checksum), Some(expected_sha256)) = (
-            manifest.canonical_adjacency_manifest_encoded_len,
-            manifest.canonical_adjacency_manifest_encoded_checksum,
-            manifest.canonical_adjacency_manifest_encoded_sha256,
-        ) {
-            let generation = manifest
-                .checkpoint_generation
-                .expect("validated adjacency metadata has a checkpoint generation");
-            let manifest_path = self
-                .root_path
-                .join(canonical_adjacency_manifest_generation_file(generation));
+        if let Some(binding) = manifest.canonical_adjacency_generation_artifacts {
+            let descriptor_config = GraphDescriptorTreeBuildConfig::default();
+            let descriptor_paths = GraphDescriptorTreePaths::new(
+                self.root_path
+                    .join(skein_storage::canonical_adjacency_descriptor_page_file(
+                        binding.generation,
+                    )),
+                self.root_path
+                    .join(skein_storage::canonical_adjacency_descriptor_root_file(
+                        binding.generation,
+                    )),
+            );
             scrub.verify_path(
-                &manifest_path,
-                expected_len,
-                expected_checksum,
-                expected_sha256,
-                "canonical adjacency manifest",
+                &descriptor_paths.root_manifest,
+                binding.descriptor_root_artifact.encoded_len,
+                u64::from(binding.descriptor_root_artifact.encoded_crc32c),
+                binding.descriptor_root_artifact.encoded_sha256,
+                "canonical adjacency descriptor root",
             )?;
-            let artifact = CanonicalAdjacencyManifest::decode(&fs::read_to_string(&manifest_path)?)
-                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            let root_reader = GraphDescriptorTreeRootReader::open_bound(
+                descriptor_paths.clone(),
+                GraphDescriptorTreeGenerationArtifacts {
+                    kind: GraphDescriptorKind::CanonicalAdjacency,
+                    generation: binding.generation,
+                    source_commit_epoch: binding.source_commit_epoch,
+                    root_artifact: binding.descriptor_root_artifact,
+                },
+                descriptor_config,
+            )
+            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
             scrub.verify_path(
-                &self
-                    .root_path
-                    .join(canonical_adjacency_artifact_generation_file(generation)),
-                artifact.artifact_len,
-                artifact.artifact_digest.0,
-                artifact.artifact_sha256,
+                &descriptor_paths.page_artifact,
+                root_reader.root().page_artifact_len,
+                root_reader.root().page_artifact_crc32c.as_u64(),
+                root_reader.root().page_artifact_sha256,
+                "canonical adjacency descriptor pages",
+            )?;
+            let adjacency_path = self
+                .root_path
+                .join(canonical_adjacency_artifact_generation_file(
+                    binding.generation,
+                ));
+            scrub.verify_path(
+                &adjacency_path,
+                binding.adjacency_artifact.encoded_len,
+                binding.adjacency_artifact.encoded_crc32c,
+                binding.adjacency_artifact.encoded_sha256,
                 "canonical adjacency artifact",
             )?;
+            let config = CanonicalAdjacencyConfig::default();
+            let max_block_bytes = NonZeroU64::new(
+                config
+                    .target_block_bytes
+                    .get()
+                    .max(config.max_record_bytes.get().saturating_add(1024)),
+            )
+            .expect("canonical adjacency maximum block size is non-zero");
+            CanonicalAdjacencyReader::open_demand_paged(
+                adjacency_path,
+                binding,
+                root_reader,
+                descriptor_config,
+                Arc::clone(&self.segment_cache),
+                self.store_id,
+                max_block_bytes,
+            )
+            .and_then(|reader| reader.deep_scrub())
+            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
         }
 
         if let (Some(expected_len), Some(expected_checksum), Some(expected_sha256)) = (
@@ -1665,7 +1722,7 @@ impl DurableStore {
         generation: u64,
         source_commit_epoch: u64,
         config: CanonicalAdjacencyConfig,
-    ) -> Result<DurableArtifactMetadata>
+    ) -> Result<CanonicalAdjacencyCheckpointArtifacts>
     where
         R: IntoIterator<
             Item = std::result::Result<RelRecord, skein_storage::CanonicalAdjacencyError>,
@@ -1701,33 +1758,32 @@ impl DurableStore {
             .map_err(|error| SkeinError::Storage(error.to_string()))?;
         let descriptor_tree = output.descriptor_tree.as_ref().ok_or_else(|| {
             SkeinError::Storage(
-                "canonical adjacency checkpoint omitted its shadow descriptor root".to_string(),
+                "canonical adjacency checkpoint omitted its descriptor root".to_string(),
             )
         })?;
+        let expected_descriptor_count = output
+            .report
+            .sparse_block_count
+            .checked_add(output.report.dense_block_count)
+            .ok_or_else(|| {
+                SkeinError::Storage("canonical adjacency descriptor count overflow".to_string())
+            })?;
         if descriptor_tree.root.generation != generation
             || descriptor_tree.root.source_commit_epoch != source_commit_epoch
-            || descriptor_tree.root.descriptor_count != output.manifest.blocks.len() as u64
+            || descriptor_tree.root.descriptor_count != expected_descriptor_count
         {
             return Err(SkeinError::Storage(
-                "canonical adjacency shadow descriptor root identity is inconsistent".to_string(),
+                "canonical adjacency descriptor root identity is inconsistent".to_string(),
             ));
         }
-        let encoded = output
-            .manifest
-            .encode()
-            .map_err(|error| SkeinError::Storage(error.to_string()))?;
-        let metadata = DurableArtifactMetadata::for_bytes(encoded.as_bytes());
-        let manifest_path = self
-            .root_path
-            .join(canonical_adjacency_manifest_generation_file(generation));
-        let tmp_path = manifest_path.with_extension("skein.tmp");
-        {
-            let mut file = File::create(&tmp_path)?;
-            file.write_all(encoded.as_bytes())?;
-            file.sync_all()?;
-        }
-        durable_replace_file(&tmp_path, &manifest_path)?;
-        Ok(metadata)
+        let generation_artifacts = output.generation_artifacts().ok_or_else(|| {
+            SkeinError::Storage(
+                "canonical adjacency checkpoint omitted its generation binding".to_string(),
+            )
+        })?;
+        Ok(CanonicalAdjacencyCheckpointArtifacts {
+            generation: generation_artifacts,
+        })
     }
 
     pub(super) fn write_persistent_property_projection<N>(
@@ -2206,7 +2262,6 @@ impl DurableStore {
             canonical_artifact_generation_file(generation),
             canonical_manifest_generation_file(generation),
             canonical_adjacency_artifact_generation_file(generation),
-            canonical_adjacency_manifest_generation_file(generation),
             skein_storage::canonical_adjacency_descriptor_page_file(generation),
             skein_storage::canonical_adjacency_descriptor_root_file(generation),
             property_spill_artifact_generation_file(generation),
@@ -2418,7 +2473,7 @@ impl DurableStore {
             checkpoint,
             relational_checkpoint,
             canonical_manifest,
-            canonical_adjacency_manifest,
+            canonical_adjacency,
             property_spill_manifest,
             property_projection_manifest,
             relational_row,
@@ -2433,15 +2488,7 @@ impl DurableStore {
             canonical_manifest_encoded_len: Some(canonical_manifest.encoded_len),
             canonical_manifest_encoded_checksum: Some(canonical_manifest.encoded_checksum),
             canonical_manifest_encoded_sha256: Some(canonical_manifest.encoded_sha256),
-            canonical_adjacency_manifest_encoded_len: Some(
-                canonical_adjacency_manifest.encoded_len,
-            ),
-            canonical_adjacency_manifest_encoded_checksum: Some(
-                canonical_adjacency_manifest.encoded_checksum,
-            ),
-            canonical_adjacency_manifest_encoded_sha256: Some(
-                canonical_adjacency_manifest.encoded_sha256,
-            ),
+            canonical_adjacency_generation_artifacts: Some(canonical_adjacency.generation),
             property_spill_manifest_encoded_len: Some(property_spill_manifest.encoded_len),
             property_spill_manifest_encoded_checksum: Some(
                 property_spill_manifest.encoded_checksum,
@@ -2487,12 +2534,8 @@ impl DurableStore {
         self.canonical_manifest_encoded_len = manifest.canonical_manifest_encoded_len;
         self.canonical_manifest_encoded_checksum = manifest.canonical_manifest_encoded_checksum;
         self.canonical_manifest_encoded_sha256 = manifest.canonical_manifest_encoded_sha256;
-        self.canonical_adjacency_manifest_encoded_len =
-            manifest.canonical_adjacency_manifest_encoded_len;
-        self.canonical_adjacency_manifest_encoded_checksum =
-            manifest.canonical_adjacency_manifest_encoded_checksum;
-        self.canonical_adjacency_manifest_encoded_sha256 =
-            manifest.canonical_adjacency_manifest_encoded_sha256;
+        self.canonical_adjacency_generation_artifacts =
+            manifest.canonical_adjacency_generation_artifacts;
         self.property_spill_manifest_encoded_len = manifest.property_spill_manifest_encoded_len;
         self.property_spill_manifest_encoded_checksum =
             manifest.property_spill_manifest_encoded_checksum;
@@ -2543,7 +2586,7 @@ impl DurableStore {
         )?;
         if let (Some(canonical), Some(adjacency)) =
             (&self.canonical_segments, &self.canonical_adjacency)
-            && canonical.manifest().relationship_count != adjacency.manifest().relationship_count
+            && canonical.manifest().relationship_count != adjacency.relationship_count()
         {
             return Err(SkeinError::Storage(
                 "canonical adjacency relationship count does not match canonical segments"
@@ -2661,9 +2704,8 @@ pub(super) struct DurableManifest {
     pub(super) canonical_manifest_encoded_len: Option<u64>,
     pub(super) canonical_manifest_encoded_checksum: Option<u64>,
     pub(super) canonical_manifest_encoded_sha256: Option<Sha256Digest>,
-    pub(super) canonical_adjacency_manifest_encoded_len: Option<u64>,
-    pub(super) canonical_adjacency_manifest_encoded_checksum: Option<u64>,
-    pub(super) canonical_adjacency_manifest_encoded_sha256: Option<Sha256Digest>,
+    pub(super) canonical_adjacency_generation_artifacts:
+        Option<CanonicalAdjacencyGenerationArtifacts>,
     pub(super) property_spill_manifest_encoded_len: Option<u64>,
     pub(super) property_spill_manifest_encoded_checksum: Option<u64>,
     pub(super) property_spill_manifest_encoded_sha256: Option<Sha256Digest>,
@@ -2707,6 +2749,84 @@ struct RelationalRootManifestFields {
     manifest_encoded_len: Option<u64>,
     manifest_encoded_checksum: Option<u64>,
     manifest_encoded_sha256: Option<Sha256Digest>,
+}
+
+#[derive(Default)]
+struct CanonicalAdjacencyGenerationFields {
+    generation: Option<u64>,
+    source_commit_epoch: Option<u64>,
+    relationship_count: Option<u64>,
+    entry_count: Option<u64>,
+    artifact_encoded_len: Option<u64>,
+    artifact_encoded_crc32c: Option<u64>,
+    artifact_encoded_sha256: Option<Sha256Digest>,
+    descriptor_root_encoded_len: Option<u64>,
+    descriptor_root_encoded_crc32c: Option<u64>,
+    descriptor_root_encoded_sha256: Option<Sha256Digest>,
+}
+
+impl CanonicalAdjacencyGenerationFields {
+    fn finish(self) -> Result<Option<CanonicalAdjacencyGenerationArtifacts>> {
+        let presence = [
+            self.generation.is_some(),
+            self.source_commit_epoch.is_some(),
+            self.relationship_count.is_some(),
+            self.entry_count.is_some(),
+            self.artifact_encoded_len.is_some(),
+            self.artifact_encoded_crc32c.is_some(),
+            self.artifact_encoded_sha256.is_some(),
+            self.descriptor_root_encoded_len.is_some(),
+            self.descriptor_root_encoded_crc32c.is_some(),
+            self.descriptor_root_encoded_sha256.is_some(),
+        ];
+        if presence.iter().all(|present| !present) {
+            return Ok(None);
+        }
+        if !presence.iter().all(|present| *present) {
+            return Err(SkeinError::Storage(
+                "manifest canonical adjacency generation binding is incomplete".to_string(),
+            ));
+        }
+        Ok(Some(CanonicalAdjacencyGenerationArtifacts {
+            generation: self.generation.expect("complete binding has generation"),
+            source_commit_epoch: self
+                .source_commit_epoch
+                .expect("complete binding has source commit epoch"),
+            relationship_count: self
+                .relationship_count
+                .expect("complete binding has relationship count"),
+            entry_count: self.entry_count.expect("complete binding has entry count"),
+            adjacency_artifact: CanonicalAdjacencyArtifactMetadata {
+                encoded_len: self
+                    .artifact_encoded_len
+                    .expect("complete binding has adjacency artifact length"),
+                encoded_crc32c: self
+                    .artifact_encoded_crc32c
+                    .expect("complete binding has adjacency artifact CRC32C"),
+                encoded_sha256: self
+                    .artifact_encoded_sha256
+                    .expect("complete binding has adjacency artifact SHA-256"),
+            },
+            descriptor_root_artifact: GraphDescriptorTreeArtifactMetadata {
+                encoded_len: self
+                    .descriptor_root_encoded_len
+                    .expect("complete binding has descriptor root length"),
+                encoded_crc32c: u32::try_from(
+                    self.descriptor_root_encoded_crc32c
+                        .expect("complete binding has descriptor root CRC32C"),
+                )
+                .map_err(|_| {
+                    SkeinError::Storage(
+                        "canonical adjacency descriptor root checksum exceeds CRC32C range"
+                            .to_string(),
+                    )
+                })?,
+                encoded_sha256: self
+                    .descriptor_root_encoded_sha256
+                    .expect("complete binding has descriptor root SHA-256"),
+            },
+        }))
+    }
 }
 
 impl RelationalRootManifestFields {
@@ -2883,9 +3003,7 @@ impl DurableManifest {
             canonical_manifest_encoded_len: None,
             canonical_manifest_encoded_checksum: None,
             canonical_manifest_encoded_sha256: None,
-            canonical_adjacency_manifest_encoded_len: None,
-            canonical_adjacency_manifest_encoded_checksum: None,
-            canonical_adjacency_manifest_encoded_sha256: None,
+            canonical_adjacency_generation_artifacts: None,
             property_spill_manifest_encoded_len: None,
             property_spill_manifest_encoded_checksum: None,
             property_spill_manifest_encoded_sha256: None,
@@ -2938,16 +3056,40 @@ impl DurableManifest {
                 "manifest canonical segment metadata is incomplete".to_string(),
             ));
         }
-        if !artifact_metadata_presence_consistent(
-            self.canonical_adjacency_manifest_encoded_len,
-            self.canonical_adjacency_manifest_encoded_checksum,
-            self.canonical_adjacency_manifest_encoded_sha256,
-        ) {
-            return Err(SkeinError::Storage(
-                "manifest canonical adjacency metadata is incomplete".to_string(),
-            ));
+        if let Some(binding) = self.canonical_adjacency_generation_artifacts {
+            if binding.generation == 0
+                || binding.generation != self.checkpoint_epoch
+                || binding.source_commit_epoch != self.checkpoint_commit_epoch
+            {
+                return Err(SkeinError::Storage(format!(
+                    "manifest canonical adjacency generation/epoch {}/{} does not match checkpoint {}/{}",
+                    binding.generation,
+                    binding.source_commit_epoch,
+                    self.checkpoint_epoch,
+                    self.checkpoint_commit_epoch
+                )));
+            }
+            if binding.adjacency_artifact.encoded_len == 0
+                || binding.descriptor_root_artifact.encoded_len == 0
+            {
+                return Err(SkeinError::Storage(
+                    "manifest canonical adjacency artifacts must not be empty".to_string(),
+                ));
+            }
+            if binding.entry_count
+                != binding.relationship_count.checked_mul(2).ok_or_else(|| {
+                    SkeinError::Storage(
+                        "manifest canonical adjacency relationship count overflow".to_string(),
+                    )
+                })?
+            {
+                return Err(SkeinError::Storage(
+                    "manifest canonical adjacency entry count must be twice its relationship count"
+                        .to_string(),
+                ));
+            }
         }
-        if self.canonical_adjacency_manifest_encoded_len.is_some()
+        if self.canonical_adjacency_generation_artifacts.is_some()
             && self.canonical_manifest_encoded_len.is_none()
         {
             return Err(SkeinError::Storage(
@@ -2955,7 +3097,7 @@ impl DurableManifest {
             ));
         }
         if self.canonical_manifest_encoded_len.is_some()
-            && self.canonical_adjacency_manifest_encoded_len.is_none()
+            && self.canonical_adjacency_generation_artifacts.is_none()
         {
             return Err(SkeinError::Storage(
                 "manifest canonical segments require canonical adjacency".to_string(),
@@ -3100,9 +3242,7 @@ impl DurableManifest {
                     || self.canonical_manifest_encoded_len.is_some()
                     || self.canonical_manifest_encoded_checksum.is_some()
                     || self.canonical_manifest_encoded_sha256.is_some()
-                    || self.canonical_adjacency_manifest_encoded_len.is_some()
-                    || self.canonical_adjacency_manifest_encoded_checksum.is_some()
-                    || self.canonical_adjacency_manifest_encoded_sha256.is_some()
+                    || self.canonical_adjacency_generation_artifacts.is_some()
                     || self.property_spill_manifest_encoded_len.is_some()
                     || self.property_spill_manifest_encoded_checksum.is_some()
                     || self.property_spill_manifest_encoded_sha256.is_some()
@@ -3138,6 +3278,7 @@ impl DurableManifest {
             ));
         }
         let mut manifest = Self::initial_generation();
+        let mut canonical_adjacency = CanonicalAdjacencyGenerationFields::default();
         let mut relational_row = RelationalRootManifestFields::default();
         let mut relational_overflow = RelationalRootManifestFields::default();
         let mut relational_index = RelationalIndexManifestFields::default();
@@ -3183,17 +3324,47 @@ impl DurableManifest {
                     manifest.canonical_manifest_encoded_sha256 =
                         parse_optional_sha256(raw, "canonical manifest encoded SHA-256")?;
                 }
-                ["canonical_adjacency_manifest_encoded_len", raw] => {
-                    manifest.canonical_adjacency_manifest_encoded_len =
-                        parse_optional_u64(raw, "canonical adjacency manifest encoded length")?;
+                ["canonical_adjacency_generation", raw] => {
+                    canonical_adjacency.generation =
+                        parse_optional_u64(raw, "canonical adjacency generation")?;
                 }
-                ["canonical_adjacency_manifest_encoded_checksum", raw] => {
-                    manifest.canonical_adjacency_manifest_encoded_checksum =
-                        parse_optional_u64(raw, "canonical adjacency manifest encoded checksum")?;
+                ["canonical_adjacency_source_commit_epoch", raw] => {
+                    canonical_adjacency.source_commit_epoch =
+                        parse_optional_u64(raw, "canonical adjacency source commit epoch")?;
                 }
-                ["canonical_adjacency_manifest_encoded_sha256", raw] => {
-                    manifest.canonical_adjacency_manifest_encoded_sha256 =
-                        parse_optional_sha256(raw, "canonical adjacency manifest encoded SHA-256")?;
+                ["canonical_adjacency_relationship_count", raw] => {
+                    canonical_adjacency.relationship_count =
+                        parse_optional_u64(raw, "canonical adjacency relationship count")?;
+                }
+                ["canonical_adjacency_entry_count", raw] => {
+                    canonical_adjacency.entry_count =
+                        parse_optional_u64(raw, "canonical adjacency entry count")?;
+                }
+                ["canonical_adjacency_artifact_encoded_len", raw] => {
+                    canonical_adjacency.artifact_encoded_len =
+                        parse_optional_u64(raw, "canonical adjacency artifact encoded length")?;
+                }
+                ["canonical_adjacency_artifact_encoded_crc32c", raw] => {
+                    canonical_adjacency.artifact_encoded_crc32c =
+                        parse_optional_u64(raw, "canonical adjacency artifact CRC32C")?;
+                }
+                ["canonical_adjacency_artifact_encoded_sha256", raw] => {
+                    canonical_adjacency.artifact_encoded_sha256 =
+                        parse_optional_sha256(raw, "canonical adjacency artifact SHA-256")?;
+                }
+                ["canonical_adjacency_descriptor_root_encoded_len", raw] => {
+                    canonical_adjacency.descriptor_root_encoded_len = parse_optional_u64(
+                        raw,
+                        "canonical adjacency descriptor root encoded length",
+                    )?;
+                }
+                ["canonical_adjacency_descriptor_root_encoded_crc32c", raw] => {
+                    canonical_adjacency.descriptor_root_encoded_crc32c =
+                        parse_optional_u64(raw, "canonical adjacency descriptor root CRC32C")?;
+                }
+                ["canonical_adjacency_descriptor_root_encoded_sha256", raw] => {
+                    canonical_adjacency.descriptor_root_encoded_sha256 =
+                        parse_optional_sha256(raw, "canonical adjacency descriptor root SHA-256")?;
                 }
                 ["property_spill_manifest_encoded_len", raw] => {
                     manifest.property_spill_manifest_encoded_len =
@@ -3354,9 +3525,16 @@ impl DurableManifest {
             "canonical_manifest_encoded_len",
             "canonical_manifest_encoded_checksum",
             "canonical_manifest_encoded_sha256",
-            "canonical_adjacency_manifest_encoded_len",
-            "canonical_adjacency_manifest_encoded_checksum",
-            "canonical_adjacency_manifest_encoded_sha256",
+            "canonical_adjacency_generation",
+            "canonical_adjacency_source_commit_epoch",
+            "canonical_adjacency_relationship_count",
+            "canonical_adjacency_entry_count",
+            "canonical_adjacency_artifact_encoded_len",
+            "canonical_adjacency_artifact_encoded_crc32c",
+            "canonical_adjacency_artifact_encoded_sha256",
+            "canonical_adjacency_descriptor_root_encoded_len",
+            "canonical_adjacency_descriptor_root_encoded_crc32c",
+            "canonical_adjacency_descriptor_root_encoded_sha256",
             "property_spill_manifest_encoded_len",
             "property_spill_manifest_encoded_checksum",
             "property_spill_manifest_encoded_sha256",
@@ -3402,6 +3580,7 @@ impl DurableManifest {
             }
         }
         manifest.relational_row_generation_artifacts = relational_row.finish_row()?;
+        manifest.canonical_adjacency_generation_artifacts = canonical_adjacency.finish()?;
         manifest.relational_overflow_generation_artifacts =
             relational_overflow.finish_overflow()?;
         manifest.relational_index_generation_artifacts = relational_index.finish()?;
@@ -3447,17 +3626,59 @@ impl DurableManifest {
             "canonical_manifest_encoded_sha256\t{}\n",
             encode_optional_sha256(self.canonical_manifest_encoded_sha256)
         ));
+        let canonical_adjacency = self.canonical_adjacency_generation_artifacts;
         body.push_str(&format!(
-            "canonical_adjacency_manifest_encoded_len\t{}\n",
-            encode_optional_u64(self.canonical_adjacency_manifest_encoded_len)
+            "canonical_adjacency_generation\t{}\n",
+            encode_optional_u64(canonical_adjacency.map(|binding| binding.generation))
         ));
         body.push_str(&format!(
-            "canonical_adjacency_manifest_encoded_checksum\t{}\n",
-            encode_optional_u64(self.canonical_adjacency_manifest_encoded_checksum)
+            "canonical_adjacency_source_commit_epoch\t{}\n",
+            encode_optional_u64(canonical_adjacency.map(|binding| binding.source_commit_epoch))
         ));
         body.push_str(&format!(
-            "canonical_adjacency_manifest_encoded_sha256\t{}\n",
-            encode_optional_sha256(self.canonical_adjacency_manifest_encoded_sha256)
+            "canonical_adjacency_relationship_count\t{}\n",
+            encode_optional_u64(canonical_adjacency.map(|binding| binding.relationship_count))
+        ));
+        body.push_str(&format!(
+            "canonical_adjacency_entry_count\t{}\n",
+            encode_optional_u64(canonical_adjacency.map(|binding| binding.entry_count))
+        ));
+        body.push_str(&format!(
+            "canonical_adjacency_artifact_encoded_len\t{}\n",
+            encode_optional_u64(
+                canonical_adjacency.map(|binding| binding.adjacency_artifact.encoded_len)
+            )
+        ));
+        body.push_str(&format!(
+            "canonical_adjacency_artifact_encoded_crc32c\t{}\n",
+            encode_optional_u64(
+                canonical_adjacency.map(|binding| binding.adjacency_artifact.encoded_crc32c)
+            )
+        ));
+        body.push_str(&format!(
+            "canonical_adjacency_artifact_encoded_sha256\t{}\n",
+            encode_optional_sha256(
+                canonical_adjacency.map(|binding| binding.adjacency_artifact.encoded_sha256)
+            )
+        ));
+        body.push_str(&format!(
+            "canonical_adjacency_descriptor_root_encoded_len\t{}\n",
+            encode_optional_u64(
+                canonical_adjacency.map(|binding| binding.descriptor_root_artifact.encoded_len)
+            )
+        ));
+        body.push_str(&format!(
+            "canonical_adjacency_descriptor_root_encoded_crc32c\t{}\n",
+            encode_optional_u64(
+                canonical_adjacency
+                    .map(|binding| { u64::from(binding.descriptor_root_artifact.encoded_crc32c) })
+            )
+        ));
+        body.push_str(&format!(
+            "canonical_adjacency_descriptor_root_encoded_sha256\t{}\n",
+            encode_optional_sha256(
+                canonical_adjacency.map(|binding| binding.descriptor_root_artifact.encoded_sha256)
+            )
         ));
         body.push_str(&format!(
             "property_spill_manifest_encoded_len\t{}\n",
@@ -3893,11 +4114,7 @@ pub(super) fn load_published_canonical_adjacency(
     store_id: StoreId,
     open_budget: &mut GraphManifestOpenBudget,
 ) -> Result<Option<CanonicalAdjacencyReader>> {
-    let (Some(expected_len), Some(expected_checksum), Some(expected_sha256)) = (
-        durable_manifest.canonical_adjacency_manifest_encoded_len,
-        durable_manifest.canonical_adjacency_manifest_encoded_checksum,
-        durable_manifest.canonical_adjacency_manifest_encoded_sha256,
-    ) else {
+    let Some(binding) = durable_manifest.canonical_adjacency_generation_artifacts else {
         return Ok(None);
     };
     let generation = durable_manifest.checkpoint_generation.ok_or_else(|| {
@@ -3905,29 +4122,36 @@ pub(super) fn load_published_canonical_adjacency(
             "canonical adjacency metadata requires a checkpoint generation".to_string(),
         )
     })?;
-    let manifest_path = root.join(canonical_adjacency_manifest_generation_file(generation));
-    let encoded = read_bound_graph_manifest(
-        &manifest_path,
-        expected_len,
-        expected_checksum,
-        expected_sha256,
-        CANONICAL_ADJACENCY_MANIFEST_MAX_BYTES,
-        "canonical adjacency manifest",
-        open_budget,
-    )?;
-    let text = std::str::from_utf8(&encoded).map_err(|error| {
-        SkeinError::Storage(format!(
-            "canonical adjacency manifest is not UTF-8: {error}"
-        ))
-    })?;
-    let manifest = CanonicalAdjacencyManifest::decode(text)
-        .map_err(|error| SkeinError::Storage(error.to_string()))?;
-    if manifest.generation != ManifestGeneration(generation) {
+    if binding.generation != generation {
         return Err(SkeinError::Storage(format!(
             "canonical adjacency generation {} does not match durable generation {generation}",
-            manifest.generation.0
+            binding.generation
         )));
     }
+    open_budget.admit(
+        binding.descriptor_root_artifact.encoded_len,
+        "canonical adjacency descriptor root",
+    )?;
+    let descriptor_config = GraphDescriptorTreeBuildConfig::default();
+    let descriptor_paths = GraphDescriptorTreePaths::new(
+        root.join(skein_storage::canonical_adjacency_descriptor_page_file(
+            generation,
+        )),
+        root.join(skein_storage::canonical_adjacency_descriptor_root_file(
+            generation,
+        )),
+    );
+    let root_reader = GraphDescriptorTreeRootReader::open_bound(
+        descriptor_paths,
+        GraphDescriptorTreeGenerationArtifacts {
+            kind: GraphDescriptorKind::CanonicalAdjacency,
+            generation: binding.generation,
+            source_commit_epoch: binding.source_commit_epoch,
+            root_artifact: binding.descriptor_root_artifact,
+        },
+        descriptor_config,
+    )
+    .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
     let config = CanonicalAdjacencyConfig::default();
     let max_block_bytes = NonZeroU64::new(
         config
@@ -3936,13 +4160,15 @@ pub(super) fn load_published_canonical_adjacency(
             .max(config.max_record_bytes.get().saturating_add(1024)),
     )
     .expect("canonical adjacency maximum block size is non-zero");
-    CanonicalAdjacencyReader::open(
+    CanonicalAdjacencyReader::open_demand_paged(
         root.join(canonical_adjacency_artifact_generation_file(generation)),
-        manifest,
+        binding,
+        root_reader,
+        descriptor_config,
         cache,
         store_id,
         max_block_bytes,
     )
     .map(Some)
-    .map_err(|error| SkeinError::Storage(error.to_string()))
+    .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))
 }

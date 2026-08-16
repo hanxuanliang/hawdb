@@ -251,6 +251,21 @@ pub struct GraphDescriptorTreeOpenReport {
     pub page_payload_bytes_read: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraphDescriptorTreeArtifactMetadata {
+    pub encoded_len: u64,
+    pub encoded_crc32c: u32,
+    pub encoded_sha256: Sha256Digest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraphDescriptorTreeGenerationArtifacts {
+    pub kind: GraphDescriptorKind,
+    pub generation: u64,
+    pub source_commit_epoch: u64,
+    pub root_artifact: GraphDescriptorTreeArtifactMetadata,
+}
+
 #[derive(Debug)]
 pub enum GraphDescriptorTreeError {
     Io(std::io::Error),
@@ -405,6 +420,7 @@ fn validate_root(
 }
 
 mod builder;
+pub(crate) mod demand;
 pub use builder::GraphDescriptorTreeBuilder;
 
 #[derive(Debug)]
@@ -446,9 +462,15 @@ impl PreparedGraphDescriptorTree {
             return Err(error);
         }
         self.published = true;
+        let root_integrity = integrity_digest(&self.encoded_root);
         Ok(GraphDescriptorTreeWriteOutput {
             root: self.root.clone(),
             report: self.report,
+            root_artifact: GraphDescriptorTreeArtifactMetadata {
+                encoded_len: self.encoded_root.len() as u64,
+                encoded_crc32c: root_integrity.crc32c.get(),
+                encoded_sha256: root_integrity.sha256,
+            },
         })
     }
 
@@ -476,6 +498,18 @@ impl Drop for PreparedGraphDescriptorTree {
 pub struct GraphDescriptorTreeWriteOutput {
     pub root: GraphDescriptorTreeRoot,
     pub report: GraphDescriptorTreeBuildReport,
+    pub root_artifact: GraphDescriptorTreeArtifactMetadata,
+}
+
+impl GraphDescriptorTreeWriteOutput {
+    pub const fn generation_artifacts(&self) -> GraphDescriptorTreeGenerationArtifacts {
+        GraphDescriptorTreeGenerationArtifacts {
+            kind: self.root.kind,
+            generation: self.root.generation,
+            source_commit_epoch: self.root.source_commit_epoch,
+            root_artifact: self.root_artifact,
+        }
+    }
 }
 
 pub struct GraphDescriptorTreeRootReader {
@@ -489,8 +523,50 @@ impl GraphDescriptorTreeRootReader {
         paths: GraphDescriptorTreePaths,
         config: GraphDescriptorTreeBuildConfig,
     ) -> Result<Self, GraphDescriptorTreeError> {
+        Self::open_inner(paths, None, config)
+    }
+
+    pub fn open_bound(
+        paths: GraphDescriptorTreePaths,
+        binding: GraphDescriptorTreeGenerationArtifacts,
+        config: GraphDescriptorTreeBuildConfig,
+    ) -> Result<Self, GraphDescriptorTreeError> {
+        Self::open_inner(paths, Some(binding), config)
+    }
+
+    fn open_inner(
+        paths: GraphDescriptorTreePaths,
+        binding: Option<GraphDescriptorTreeGenerationArtifacts>,
+        config: GraphDescriptorTreeBuildConfig,
+    ) -> Result<Self, GraphDescriptorTreeError> {
         let encoded = read_bounded_root(&paths.root_manifest, config.max_root_bytes)?;
+        if let Some(binding) = binding {
+            let digest = integrity_digest(&encoded);
+            if encoded.len() as u64 != binding.root_artifact.encoded_len
+                || digest.crc32c.get() != binding.root_artifact.encoded_crc32c
+                || digest.sha256 != binding.root_artifact.encoded_sha256
+            {
+                return Err(corrupt(
+                    "graph descriptor root does not match its canonical artifact binding",
+                ));
+            }
+        }
         let root = GraphDescriptorTreeRoot::decode(&encoded, config)?;
+        if let Some(binding) = binding
+            && (root.kind != binding.kind
+                || root.generation != binding.generation
+                || root.source_commit_epoch != binding.source_commit_epoch)
+        {
+            return Err(corrupt(format!(
+                "graph descriptor root identity {:?}/{}/{} does not match canonical binding {:?}/{}/{}",
+                root.kind,
+                root.generation,
+                root.source_commit_epoch,
+                binding.kind,
+                binding.generation,
+                binding.source_commit_epoch
+            )));
+        }
         let actual_len = File::open(&paths.page_artifact)?.metadata()?.len();
         if actual_len != root.page_artifact_len {
             return Err(corrupt(format!(
