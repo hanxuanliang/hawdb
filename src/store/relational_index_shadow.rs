@@ -32,8 +32,9 @@ use skein_storage::{
     RelationalIndexShadowBuildReport, RelationalIndexShadowConfig, RelationalIndexShadowError,
     RelationalIndexShadowManifest, RelationalIndexShadowReader, RelationalIndexShadowWriter,
     RelationalKey, RelationalRecoveryFence, RelationalRecoverySourceIdentity,
-    RelationalReplayAccessSet, RelationalScalarType, RelationalTableSchema, RelationalTransaction,
-    RelationalValue, StorageResidencyMode, RELATIONAL_PRIMARY_INDEX_NAME,
+    RelationalReplayAccessSet, RelationalScalarType, RelationalSparseRecoveryStage,
+    RelationalTableSchema, RelationalTransaction, RelationalValue, StorageResidencyMode,
+    RELATIONAL_PRIMARY_INDEX_NAME,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -1659,16 +1660,33 @@ impl GraphStore {
                             .to_string(),
                     )
                 })?;
-                let (next, index_capture, row_capture) = self
-                    .relational_state
-                    .stage_transaction_for_authoritative_recovery_with_replay_access(
-                        transaction,
-                        self.relational_mutation_limits,
-                        self.relational_overflow_config,
-                        index_limits,
-                        row_limits,
-                        replay_access,
-                    )?;
+                let (next, index_capture, row_capture) =
+                    if self.relational_state.canonical_row_metadata_only() {
+                        let hydrated_access = self
+                            .hydrate_sparse_relational_recovery_access(replay_access, row_limits)?;
+                        self.relational_state
+                            .stage_sparse_transaction_for_authoritative_recovery_with_replay_access(
+                                RelationalSparseRecoveryStage {
+                                    transaction,
+                                    hydrated_access,
+                                    mutation_limits: self.relational_mutation_limits,
+                                    overflow_config: self.relational_overflow_config,
+                                    index_capture_limits: index_limits,
+                                    row_capture_limits: row_limits,
+                                    expected_replay_access: replay_access,
+                                },
+                            )?
+                    } else {
+                        self.relational_state
+                            .stage_transaction_for_authoritative_recovery_with_replay_access(
+                                transaction,
+                                self.relational_mutation_limits,
+                                self.relational_overflow_config,
+                                index_limits,
+                                row_limits,
+                                replay_access,
+                            )?
+                    };
                 (next, Some(index_capture), Some(row_capture))
             }
             (Some(index_limits), Some(row_limits)) => {

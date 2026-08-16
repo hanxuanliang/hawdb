@@ -15,6 +15,10 @@ Operations == {"insert", "delete", "noop"}
 MaxWorkspaceEntries == 1
 
 VisibleRows(base, present, deleted) == (base \ deleted) \cup present
+DeltaReadKeys(present, deleted, access) ==
+    access \intersect (present \cup deleted)
+CheckpointReadKeys(present, deleted, access) ==
+    access \ (present \cup deleted)
 
 VARIABLES
     phase,
@@ -167,10 +171,28 @@ WorkspaceIsBounded ==
     phase \in {"hydrated", "replayed"} =>
         Cardinality(authenticatedAccess) <= MaxWorkspaceEntries
 
+HydrationSourcesPartitionAccess ==
+    phase = "hydrated" =>
+        /\ DeltaReadKeys(deltaPresent, deltaDeleted, authenticatedAccess)
+             \intersect
+             CheckpointReadKeys(deltaPresent, deltaDeleted, authenticatedAccess) = {}
+        /\ DeltaReadKeys(deltaPresent, deltaDeleted, authenticatedAccess)
+             \cup
+             CheckpointReadKeys(deltaPresent, deltaDeleted, authenticatedAccess)
+             = authenticatedAccess
+
 StagedDeltaPrecedesCheckpoint ==
     phase = "hydrated" =>
         workspaceRows = authenticatedAccess \intersect
             ((baseRows \ deltaDeleted) \cup deltaPresent)
+
+StagedTombstonesMaskCheckpoint ==
+    phase = "hydrated" =>
+        workspaceRows \intersect deltaDeleted = {}
+
+StagedPresentRowsPrecedeCheckpoint ==
+    phase = "hydrated" =>
+        authenticatedAccess \intersect deltaPresent \subseteq workspaceRows
 
 CommittedCountIsExact ==
     phase = "committed" => logicalRowCount = Cardinality(logicalRows)

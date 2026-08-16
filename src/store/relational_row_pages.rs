@@ -2,13 +2,16 @@
 
 use super::{GraphStore, RelationalRowStorageResidencyReport};
 use skein_storage::{
-    RelationalOverflowRootReader, RelationalRecoveryFence, RelationalRecoverySourceIdentity,
-    RelationalRowChangeCapture, RelationalRowChangeCaptureLimits, RelationalRowDeltaBuilder,
-    RelationalRowDeltaConfig, RelationalRowDeltaError, RelationalRowDeltaReader,
-    RelationalRowDeltaReport, RelationalRowPageLiveError, RelationalRowPageMutationPlanner,
-    RelationalRowPagePublicationConfig, RelationalRowPageReadView,
-    RelationalRowPageReadViewIdentity, RelationalRowPageRootReader,
-    RelationalRowPageSnapshotReader, RelationalRowPageTableDelta, RelationalState, SegmentCache,
+    RelationalError, RelationalHydrationBudget, RelationalOverflowRootReader,
+    RelationalRecoveryFence, RelationalRecoverySourceIdentity, RelationalReplayAccessSet,
+    RelationalRow, RelationalRowChangeCapture, RelationalRowChangeCaptureLimits,
+    RelationalRowDeltaBuilder, RelationalRowDeltaConfig, RelationalRowDeltaError,
+    RelationalRowDeltaReader, RelationalRowDeltaReport, RelationalRowPageLiveError,
+    RelationalRowPageMutationPlanner, RelationalRowPagePublicationConfig,
+    RelationalRowPageReadView, RelationalRowPageReadViewIdentity, RelationalRowPageRecoveredValue,
+    RelationalRowPageRootReader, RelationalRowPageSnapshotReadError,
+    RelationalRowPageSnapshotReadLimits, RelationalRowPageSnapshotReader,
+    RelationalRowPageTableDelta, RelationalSparseRecoveryRow, RelationalState, SegmentCache,
     StorageResidencyMode, StoreId,
 };
 use std::collections::BTreeMap;
@@ -517,6 +520,180 @@ impl GraphStore {
             })
     }
 
+    /// Hydrates exactly one authenticated WAL access set without attaching the
+    /// checkpoint rows to the metadata-only relational state.
+    ///
+    /// Earlier WAL rows are read from the unpublished recovery builder first;
+    /// only misses reach the immutable checkpoint root. Sparse staging admits
+    /// the returned vector again before it can affect logical row counts.
+    pub(super) fn hydrate_sparse_relational_recovery_access(
+        &self,
+        replay_access: &RelationalReplayAccessSet,
+        limits: RelationalRowChangeCaptureLimits,
+    ) -> Result<Vec<RelationalSparseRecoveryRow>, RelationalError> {
+        if !self.relational_state.canonical_row_metadata_only() {
+            return Err(RelationalError::Admission(
+                "sparse WAL hydration requires canonical metadata-only relational state"
+                    .to_string(),
+            ));
+        }
+        if replay_access.entries().len() > limits.max_entries.get() {
+            return Err(RelationalError::Admission(format!(
+                "sparse WAL hydration contains {} entries, exceeding limit {}",
+                replay_access.entries().len(),
+                limits.max_entries
+            )));
+        }
+        let builder = self
+            .relational_row_pages
+            .recovery_builder
+            .as_ref()
+            .ok_or_else(|| {
+                RelationalError::Corruption(
+                    "sparse WAL hydration requires an unpublished row recovery builder".to_string(),
+                )
+            })?;
+        let view = self
+            .relational_row_pages
+            .read_view
+            .as_ref()
+            .ok_or_else(|| {
+                RelationalError::Corruption(
+                    "sparse WAL hydration requires a pinned checkpoint row view".to_string(),
+                )
+            })?;
+        let resources = self
+            .relational_row_pages
+            .serving_resources
+            .as_ref()
+            .ok_or_else(|| {
+                RelationalError::Corruption(
+                    "sparse WAL hydration requires pinned row serving resources".to_string(),
+                )
+            })?;
+        let base_view = Arc::new(RelationalRowPageReadView::from_base(view.pinned_base()));
+        let reader = RelationalRowPageSnapshotReader::new(
+            base_view,
+            Arc::clone(&resources.base_overflow),
+            None,
+            Arc::clone(&resources.cache),
+            resources.store_id,
+        )
+        .map_err(map_sparse_snapshot_read_error)?;
+        let max_bytes = limits.max_bytes.get();
+        let mut hydration = RelationalHydrationBudget {
+            max_rows: limits.max_entries.get(),
+            max_compressed_bytes: max_bytes,
+            max_decompressed_bytes: max_bytes,
+            max_memory_bytes: max_bytes,
+            ..RelationalHydrationBudget::default()
+        };
+        let task = skein_core::RuntimeTaskContext::default();
+        let mut requested_fields = BTreeMap::<String, Vec<usize>>::new();
+        let mut hydrated = Vec::with_capacity(replay_access.entries().len());
+        let mut read_bytes = 0usize;
+        for access in replay_access.entries() {
+            let schema = self
+                .relational_state
+                .table_schema(&access.table)
+                .ok_or_else(|| {
+                    RelationalError::Corruption(format!(
+                        "sparse WAL access references unknown table {}",
+                        access.table
+                    ))
+                })?;
+            let column_count = schema.columns.len();
+            let fields = requested_fields
+                .entry(access.table.clone())
+                .or_insert_with(|| (0..column_count).collect());
+            let (staged, recovery_report) = builder
+                .lookup_staged(&access.table, &access.primary_key)
+                .map_err(map_sparse_row_delta_error)?;
+            charge_sparse_recovery_read_bytes(
+                &mut read_bytes,
+                recovery_report.bytes_read,
+                max_bytes,
+            )?;
+            let row = match staged {
+                Some(RelationalRowPageRecoveredValue::Present(row)) => Some(
+                    self.relational_state
+                        .hydrate_sparse_recovery_row_with_context(
+                            &row,
+                            &mut hydration,
+                            Some(&task),
+                        )?,
+                ),
+                Some(RelationalRowPageRecoveredValue::Deleted) => None,
+                None => {
+                    let remaining_bytes = max_bytes.checked_sub(read_bytes).ok_or_else(|| {
+                        RelationalError::Admission(
+                            "sparse WAL hydration read-byte accounting underflow".to_string(),
+                        )
+                    })?;
+                    let Some(remaining_bytes) = NonZeroUsize::new(remaining_bytes) else {
+                        return Err(RelationalError::Admission(format!(
+                            "sparse WAL hydration exhausted its {max_bytes}-byte read limit"
+                        )));
+                    };
+                    let mut snapshot_limits = RelationalRowPageSnapshotReadLimits {
+                        max_overlay_entries: limits.max_entries,
+                        max_overlay_bytes: limits.max_bytes,
+                        ..RelationalRowPageSnapshotReadLimits::default()
+                    };
+                    snapshot_limits.demand.max_bytes = remaining_bytes;
+                    let (projected, point_report) = reader
+                        .point_projected(
+                            &access.table,
+                            &access.primary_key,
+                            fields,
+                            snapshot_limits,
+                            &mut hydration,
+                            &task,
+                        )
+                        .map_err(map_sparse_snapshot_read_error)?;
+                    charge_sparse_recovery_read_bytes(
+                        &mut read_bytes,
+                        u64::try_from(point_report.demand.bytes_read).map_err(|_| {
+                            RelationalError::Admission(
+                                "sparse WAL checkpoint read bytes exceed u64".to_string(),
+                            )
+                        })?,
+                        max_bytes,
+                    )?;
+                    projected
+                        .map(|projected| {
+                            if projected.fields.len() != column_count
+                                || projected
+                                    .fields
+                                    .iter()
+                                    .enumerate()
+                                    .any(|(ordinal, field)| field.ordinal != ordinal)
+                            {
+                                return Err(RelationalError::Corruption(format!(
+                                    "sparse WAL point read returned an incomplete row for {}",
+                                    access.table
+                                )));
+                            }
+                            Ok(RelationalRow::new(
+                                projected
+                                    .fields
+                                    .into_iter()
+                                    .map(|field| field.value)
+                                    .collect(),
+                            ))
+                        })
+                        .transpose()?
+                }
+            };
+            hydrated.push(RelationalSparseRecoveryRow {
+                table: access.table.clone(),
+                primary_key: access.primary_key.clone(),
+                row,
+            });
+        }
+        Ok(hydrated)
+    }
+
     pub(super) fn record_relational_row_recovery_capture(
         &mut self,
         epoch: u64,
@@ -924,6 +1101,67 @@ impl GraphStore {
     }
 }
 
+fn map_sparse_row_delta_error(error: RelationalRowDeltaError) -> RelationalError {
+    match error {
+        RelationalRowDeltaError::Admission(message)
+        | RelationalRowDeltaError::Invalidated(message) => RelationalError::Admission(message),
+        RelationalRowDeltaError::RequiresCheckpoint { tables } => {
+            RelationalError::Admission(format!(
+                "sparse WAL hydration requires a relational checkpoint for tables {}",
+                tables.join(",")
+            ))
+        }
+        RelationalRowDeltaError::Corrupt(message)
+        | RelationalRowDeltaError::Durability(message) => RelationalError::Corruption(message),
+        error @ (RelationalRowDeltaError::Publication(_)
+        | RelationalRowDeltaError::Row(_)
+        | RelationalRowDeltaError::StaleGeneration { .. }
+        | RelationalRowDeltaError::StaleBase { .. }) => {
+            RelationalError::Corruption(error.to_string())
+        }
+    }
+}
+
+fn charge_sparse_recovery_read_bytes(
+    read_bytes: &mut usize,
+    additional: u64,
+    max_bytes: usize,
+) -> Result<(), RelationalError> {
+    let additional = usize::try_from(additional).map_err(|_| {
+        RelationalError::Admission(
+            "sparse WAL hydration read bytes exceed platform capacity".to_string(),
+        )
+    })?;
+    let next = read_bytes.checked_add(additional).ok_or_else(|| {
+        RelationalError::Admission("sparse WAL hydration read-byte counter overflow".to_string())
+    })?;
+    if next > max_bytes {
+        return Err(RelationalError::Admission(format!(
+            "sparse WAL hydration reads require {next} bytes, exceeding limit {max_bytes}"
+        )));
+    }
+    *read_bytes = next;
+    Ok(())
+}
+
+fn map_sparse_snapshot_read_error(error: RelationalRowPageSnapshotReadError) -> RelationalError {
+    match error {
+        RelationalRowPageSnapshotReadError::Admission(message) => {
+            RelationalError::Admission(message)
+        }
+        RelationalRowPageSnapshotReadError::Stopped(reason) => {
+            RelationalError::Admission(reason.to_string())
+        }
+        RelationalRowPageSnapshotReadError::MissingTable(table) => RelationalError::Corruption(
+            format!("sparse WAL snapshot is missing authenticated table {table}"),
+        ),
+        RelationalRowPageSnapshotReadError::Corrupt(message)
+        | RelationalRowPageSnapshotReadError::Durability(message) => {
+            RelationalError::Corruption(message)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -933,12 +1171,14 @@ mod tests {
     use skein_storage::{
         relational_overflow_extent_file, relational_overflow_manifest_generation_file,
         relational_row_page_manifest_generation_file, DurabilityPolicy, RelationalColumnSchema,
-        RelationalHydrationBudget, RelationalIndexMode, RelationalInsertMode, RelationalKey,
-        RelationalMutationLimits, RelationalOverflowConfig, RelationalRow,
-        RelationalRowPagePublicationConfig, RelationalRowPagePublisher,
-        RelationalRowPageRootReader, RelationalRowPageSnapshotReadLimits, RelationalScalarType,
-        RelationalTableSchema, RelationalTransaction, RelationalValue, RelationalWrite,
-        StorageResidencyMode, WalReplayConfig, RELATIONAL_INDEX_RECOVERY_MANIFEST_FILE,
+        RelationalComparisonOp, RelationalHydrationBudget, RelationalIndexMode,
+        RelationalInsertMode, RelationalKey, RelationalMutationLimits, RelationalOverflowConfig,
+        RelationalPredicate, RelationalRow, RelationalRowPagePublicationConfig,
+        RelationalRowPagePublisher, RelationalRowPageRootReader,
+        RelationalRowPageSnapshotReadLimits, RelationalScalarType, RelationalTableSchema,
+        RelationalTransaction, RelationalUpdateAssignment, RelationalUpdateValue, RelationalValue,
+        RelationalWrite, StorageResidencyMode, WalReplayConfig,
+        RELATIONAL_INDEX_RECOVERY_MANIFEST_FILE,
     };
     use std::collections::BTreeMap;
 
@@ -1113,6 +1353,170 @@ mod tests {
                 .unwrap()
         ));
 
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn sparse_writable_recovery_hydrates_checkpoint_and_prior_wal_rows() {
+        let seed = WalReplayConfig {
+            relational_index_mode: RelationalIndexMode::Shadow,
+            ..WalReplayConfig::default()
+        };
+        let path = seed_row_root("sparse-writable-hydration", seed);
+        let replay = WalReplayConfig {
+            residency_mode: StorageResidencyMode::OutOfCore,
+            relational_index_mode: RelationalIndexMode::Authoritative,
+            ..WalReplayConfig::default()
+        };
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::open_with_durability_and_replay_config(
+            &path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            replay,
+        )
+        .unwrap();
+        let index_limits = store.relational_index_live_capture_limits().unwrap();
+        let row_limits = store.relational_row_live_capture_limits().unwrap();
+        let first = RelationalTransaction {
+            writes: vec![RelationalWrite::Insert {
+                table: "documents".to_string(),
+                rows: vec![row(2, "two")],
+                mode: RelationalInsertMode::Error,
+            }],
+        };
+        let index = store
+            .authoritative_relational_constraint_index()
+            .unwrap()
+            .unwrap();
+        let (after_first, _, _, first_access) = store
+            .relational_state
+            .stage_transaction_with_authoritative_replay_access(
+                first.clone(),
+                store.relational_mutation_limits,
+                store.relational_overflow_config,
+                index_limits,
+                row_limits,
+                &index,
+            )
+            .unwrap();
+        let checkpoint_probe = RelationalTransaction {
+            writes: vec![RelationalWrite::DeleteByPrimaryKey {
+                table: "documents".to_string(),
+                keys: vec![key(1)],
+            }],
+        };
+        let index = store
+            .authoritative_relational_constraint_index()
+            .unwrap()
+            .unwrap();
+        let (_, _, _, checkpoint_access) = store
+            .relational_state
+            .stage_transaction_with_authoritative_replay_access(
+                checkpoint_probe,
+                store.relational_mutation_limits,
+                store.relational_overflow_config,
+                index_limits,
+                row_limits,
+                &index,
+            )
+            .unwrap();
+        let second = RelationalTransaction {
+            writes: vec![RelationalWrite::UpdateWhere {
+                table: "documents".to_string(),
+                assignments: vec![RelationalUpdateAssignment {
+                    column: "body".to_string(),
+                    value: RelationalUpdateValue::Value(RelationalValue::Text(
+                        "updated".to_string(),
+                    )),
+                }],
+                predicate: RelationalPredicate::Compare {
+                    column: "body".to_string(),
+                    op: RelationalComparisonOp::Eq,
+                    value: RelationalValue::Text("two".to_string()),
+                },
+            }],
+        };
+        let index = store
+            .authoritative_relational_constraint_index()
+            .unwrap()
+            .unwrap();
+        let (expected, _, _, second_access) = after_first
+            .stage_transaction_with_authoritative_replay_access(
+                second.clone(),
+                store.relational_mutation_limits,
+                store.relational_overflow_config,
+                index_limits,
+                row_limits,
+                &index,
+            )
+            .unwrap();
+        assert_eq!(first_access.entries().len(), 1);
+        assert_eq!(second_access.entries().len(), 2);
+
+        let base = store
+            .relational_row_pages
+            .read_view
+            .as_ref()
+            .unwrap()
+            .pinned_base();
+        store.relational_state = RelationalState::from_canonical_row_root(base.manifest()).unwrap();
+        store.mount_relational_row_pages_for_recovery().unwrap();
+        store.mount_relational_index_shadow_for_recovery();
+
+        let read_budget_error = store
+            .hydrate_sparse_relational_recovery_access(
+                &checkpoint_access,
+                RelationalRowChangeCaptureLimits {
+                    max_entries: row_limits.max_entries,
+                    max_bytes: NonZeroUsize::new(1).unwrap(),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            read_budget_error,
+            RelationalError::Admission(message) if message.contains("byte")
+        ));
+
+        store
+            .stage_recovered_relational_transaction(first, Some(first_access), 2)
+            .unwrap();
+        assert!(store.relational_state.canonical_row_metadata_only());
+        assert!(!store.relational_state.materialized_rows_resident());
+        assert_eq!(store.relational_state.row_count("documents"), 2);
+        assert!(matches!(
+            store
+                .relational_row_pages
+                .recovery_builder
+                .as_ref()
+                .unwrap()
+                .lookup_staged("documents", &key(2))
+                .unwrap()
+                .0,
+            Some(RelationalRowPageRecoveredValue::Present(value)) if value == row(2, "two")
+        ));
+
+        store
+            .stage_recovered_relational_transaction(second, Some(second_access), 3)
+            .unwrap();
+        assert!(store.relational_state.canonical_row_metadata_only());
+        assert_eq!(
+            store.relational_state.row_count("documents"),
+            expected.row_count("documents")
+        );
+        assert!(matches!(
+            store
+                .relational_row_pages
+                .recovery_builder
+                .as_ref()
+                .unwrap()
+                .lookup_staged("documents", &key(2))
+                .unwrap()
+                .0,
+            Some(RelationalRowPageRecoveredValue::Present(value)) if value == row(2, "updated")
+        ));
+
+        drop(store);
         std::fs::remove_dir_all(path).unwrap();
     }
 
@@ -1967,7 +2371,7 @@ mod tests {
         std::fs::remove_dir_all(restored).unwrap();
     }
 
-    fn seed_row_root_with_wal_insert(name: &str, replay: WalReplayConfig) -> std::path::PathBuf {
+    fn seed_row_root(name: &str, replay: WalReplayConfig) -> std::path::PathBuf {
         let path = unique_test_dir(name);
         let mut catalog = Catalog::default();
         let mut store = GraphStore::open_with_durability_and_replay_config(
@@ -1993,6 +2397,20 @@ mod tests {
             )
             .unwrap();
         store.checkpoint(&catalog).unwrap();
+        drop(store);
+        path
+    }
+
+    fn seed_row_root_with_wal_insert(name: &str, replay: WalReplayConfig) -> std::path::PathBuf {
+        let path = seed_row_root(name, replay);
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::open_with_durability_and_replay_config(
+            &path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            replay,
+        )
+        .unwrap();
         store
             .commit_relational_transaction(
                 &mut catalog,

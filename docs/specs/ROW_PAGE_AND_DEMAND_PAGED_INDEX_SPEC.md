@@ -437,20 +437,27 @@ WAL, a missing artifact, or any identity drift rejects open. Writable recovery
 still uses the materialized recovery state until the demand-hydrated sparse
 mutation workspace is wired through both recovery and later live commits.
 
-The storage crate provides the first writable sparse-recovery boundary without
-changing the production open selector. `RelationalRowDeltaBuilder::lookup_staged`
-resolves a primary key from the bounded dirty map first and then from immutable
-recovery runs newest-first, using the same checksummed decoder as a published
-reader. `RelationalState::stage_sparse_transaction_for_authoritative_recovery_with_replay_access`
-accepts one explicit hydrated result for every authenticated access-set entry,
-including explicit absence. It rejects missing, reordered, duplicate, unknown,
-unhydrated, oversized, or byte-over-budget input before replay. The temporary
-materialized workspace contains only those entries, reuses the existing logical
-transaction implementation as the differential oracle, compares the recomputed
-access set, advances exact detached row counts, retains only newly created
-content-addressed overflow segments, and is then discarded. Older unreachable
-recovery overflow segments may remain until checkpoint because proving them
-unreachable would require scanning rows outside the bounded workspace.
+The storage crate and `GraphStore` provide the writable sparse-recovery path
+without changing the production open selector. For every authenticated WAL
+access, `GraphStore::hydrate_sparse_relational_recovery_access` probes
+`RelationalRowDeltaBuilder::lookup_staged` first. The builder resolves the
+bounded dirty map before immutable recovery runs newest-first, using the same
+checksummed decoder as a published reader. A miss is demand-read from the
+generation-pinned checkpoint root. This preserves read-after-earlier-WAL
+semantics without attaching either source to the relational state. Delta-run
+and checkpoint logical bytes share one cumulative per-record read budget;
+checkpoint point reads receive only the remaining byte allowance.
+`RelationalState::stage_sparse_transaction_for_authoritative_recovery_with_replay_access`
+then accepts one explicit hydrated result for every authenticated access-set
+entry, including explicit absence. It rejects missing, reordered, duplicate,
+unknown, unhydrated, oversized, or byte-over-budget input before replay. The
+temporary materialized workspace contains only those entries, reuses the
+existing logical transaction implementation as the differential oracle,
+compares the recomputed access set, advances exact detached row counts, retains
+only newly created content-addressed overflow segments, and is then discarded.
+Older unreachable recovery overflow segments may remain until checkpoint
+because proving them unreachable would require scanning rows outside the
+bounded workspace.
 
 This primitive does not by itself enable metadata-only writable open. The
 `GraphStore` selector MUST continue loading the materialized recovery state until
