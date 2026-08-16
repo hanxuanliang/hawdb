@@ -11,8 +11,10 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 const PAGE_MAGIC: &[u8; 8] = b"SKGDPG01";
 const PAGE_VERSION: u16 = 1;
-const PAGE_HEADER_BYTES: usize = 84;
-const FIELD_HEADER_BYTES: usize = 6;
+pub(crate) const GRAPH_DESCRIPTOR_PAGE_HEADER_BYTES: usize = 84;
+pub(crate) const GRAPH_DESCRIPTOR_FIELD_HEADER_BYTES: usize = 6;
+const PAGE_HEADER_BYTES: usize = GRAPH_DESCRIPTOR_PAGE_HEADER_BYTES;
+const FIELD_HEADER_BYTES: usize = GRAPH_DESCRIPTOR_FIELD_HEADER_BYTES;
 const INTERIOR_ENTRY_FIELD: u16 = 1;
 const LEAF_ENTRY_FIELD: u16 = 2;
 
@@ -72,7 +74,7 @@ pub enum GraphDescriptorKind {
 }
 
 impl GraphDescriptorKind {
-    const fn tag(self) -> u8 {
+    pub(crate) const fn tag(self) -> u8 {
         match self {
             Self::CanonicalSegment => 1,
             Self::PropertySpill => 2,
@@ -81,7 +83,7 @@ impl GraphDescriptorKind {
         }
     }
 
-    fn from_tag(tag: u8) -> Result<Self, GraphDescriptorPageError> {
+    pub(crate) fn from_tag(tag: u8) -> Result<Self, GraphDescriptorPageError> {
         match tag {
             1 => Ok(Self::CanonicalSegment),
             2 => Ok(Self::PropertySpill),
@@ -691,7 +693,7 @@ fn decode_body(
     }
 }
 
-fn encode_page_ref(
+pub(crate) fn encode_page_ref(
     reference: &GraphDescriptorPageRef,
 ) -> Result<Vec<u8>, GraphDescriptorPageError> {
     let mut encoded = Vec::new();
@@ -707,7 +709,7 @@ fn encode_page_ref(
     Ok(encoded)
 }
 
-fn decode_page_ref(
+pub(crate) fn decode_page_ref(
     encoded: &[u8],
     limits: GraphDescriptorPageLimits,
 ) -> Result<GraphDescriptorPageRef, GraphDescriptorPageError> {

@@ -38,20 +38,21 @@ use skein_storage::{
     CanonicalAdjacencyReader, CanonicalAdjacencyWriter, CanonicalSegmentConfig,
     CanonicalSegmentError, CanonicalSegmentManifest, CanonicalSegmentReader,
     CanonicalSegmentWriter, DatabaseDirectoryLease, DurabilityPolicy, DurableCompression,
-    FileSegmentRangeReader, ManifestGeneration, NodeId, NodeRecord,
-    PersistentPropertyProjectionConfig, PersistentPropertyProjectionDefinition,
-    PersistentPropertyProjectionManifest, PersistentPropertyProjectionReader,
-    PersistentPropertyProjectionRecord, PersistentPropertyProjectionWriter,
-    ProjectedGraphDefinition, PropertySpillConfig, PropertySpillManifest, PropertySpillReader,
-    RelId, RelRecord, RelationalDecodeLimits, RelationalIndexArtifactMetadata,
-    RelationalIndexGenerationArtifacts, RelationalOverflowArtifactMetadata,
-    RelationalOverflowGenerationArtifacts, RelationalRowPageArtifactMetadata,
-    RelationalRowPageGenerationArtifacts, RelationalState, ScanSegmentManifest,
-    SearchProjectionGraphChange, SegmentCache, StableIdentityKey, StableIdentityMappingConfig,
-    StableIdentityMappingError, StableIdentityMappingReader, StableIdentityMappingWriter,
-    StableIdentityMaterializeLimits, StorageBackupReport, StorageDebtController,
-    StoragePressureSignals, StorageScrubReport, StoreId, StoreStableIdMapping, WalReplayConfig,
-    WalSyncGroupFlush, WalSyncGroupProgress, WalSyncGroupState,
+    FileSegmentRangeReader, GraphDescriptorTreeBuildConfig, GraphDescriptorTreePaths,
+    ManifestGeneration, NodeId, NodeRecord, PersistentPropertyProjectionConfig,
+    PersistentPropertyProjectionDefinition, PersistentPropertyProjectionManifest,
+    PersistentPropertyProjectionReader, PersistentPropertyProjectionRecord,
+    PersistentPropertyProjectionWriter, ProjectedGraphDefinition, PropertySpillConfig,
+    PropertySpillManifest, PropertySpillReader, RelId, RelRecord, RelationalDecodeLimits,
+    RelationalIndexArtifactMetadata, RelationalIndexGenerationArtifacts,
+    RelationalOverflowArtifactMetadata, RelationalOverflowGenerationArtifacts,
+    RelationalRowPageArtifactMetadata, RelationalRowPageGenerationArtifacts, RelationalState,
+    ScanSegmentManifest, SearchProjectionGraphChange, SegmentCache, StableIdentityKey,
+    StableIdentityMappingConfig, StableIdentityMappingError, StableIdentityMappingReader,
+    StableIdentityMappingWriter, StableIdentityMaterializeLimits, StorageBackupReport,
+    StorageDebtController, StoragePressureSignals, StorageScrubReport, StoreId,
+    StoreStableIdMapping, WalReplayConfig, WalSyncGroupFlush, WalSyncGroupProgress,
+    WalSyncGroupState,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -1662,6 +1663,7 @@ impl DurableStore {
         &self,
         relationships: R,
         generation: u64,
+        source_commit_epoch: u64,
         config: CanonicalAdjacencyConfig,
     ) -> Result<DurableArtifactMetadata>
     where
@@ -1672,13 +1674,44 @@ impl DurableStore {
         let artifact_path = self
             .root_path
             .join(canonical_adjacency_artifact_generation_file(generation));
+        let descriptor_paths = GraphDescriptorTreePaths::new(
+            self.root_path
+                .join(skein_storage::canonical_adjacency_descriptor_page_file(
+                    generation,
+                )),
+            self.root_path
+                .join(skein_storage::canonical_adjacency_descriptor_root_file(
+                    generation,
+                )),
+        );
+        let descriptor_config = GraphDescriptorTreeBuildConfig {
+            max_page_artifact_bytes: config.max_spill_bytes,
+            max_intermediate_bytes: config.max_spill_bytes,
+            ..GraphDescriptorTreeBuildConfig::default()
+        };
         let output = CanonicalAdjacencyWriter::new(config)
-            .write_fallible(
+            .write_fallible_with_descriptor_tree(
                 &artifact_path,
+                descriptor_paths,
                 ManifestGeneration(generation),
+                source_commit_epoch,
+                descriptor_config,
                 relationships,
             )
             .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        let descriptor_tree = output.descriptor_tree.as_ref().ok_or_else(|| {
+            SkeinError::Storage(
+                "canonical adjacency checkpoint omitted its shadow descriptor root".to_string(),
+            )
+        })?;
+        if descriptor_tree.root.generation != generation
+            || descriptor_tree.root.source_commit_epoch != source_commit_epoch
+            || descriptor_tree.root.descriptor_count != output.manifest.blocks.len() as u64
+        {
+            return Err(SkeinError::Storage(
+                "canonical adjacency shadow descriptor root identity is inconsistent".to_string(),
+            ));
+        }
         let encoded = output
             .manifest
             .encode()
@@ -2174,6 +2207,8 @@ impl DurableStore {
             canonical_manifest_generation_file(generation),
             canonical_adjacency_artifact_generation_file(generation),
             canonical_adjacency_manifest_generation_file(generation),
+            skein_storage::canonical_adjacency_descriptor_page_file(generation),
+            skein_storage::canonical_adjacency_descriptor_root_file(generation),
             property_spill_artifact_generation_file(generation),
             property_spill_manifest_generation_file(generation),
             property_projection_artifact_generation_file(generation),

@@ -277,10 +277,13 @@ crash; read-only recovery remains fail closed.
     profiles, not the final scale property. The unselected graph descriptor
     page v1 format now provides bounded leaf/interior pages, cross-generation
     physical references, strict key/value/range admission, and bound
-    CRC32C/SHA-256 verification. Next publish and activate the canonical
-    adjacency descriptor root, then migrate the remaining graph block
-    descriptors before claiming that startup metadata residency is independent
-    of graph/index entry count.
+    CRC32C/SHA-256 verification. The canonical adjacency checkpoint now streams
+    those descriptors through bounded level runs, publishes its page artifact
+    before a checksummed root, reopens the root without reading page payload,
+    and leaves production serving on the legacy manifest. Next add the bound
+    demand reader and explicitly activate this root, then migrate the remaining
+    graph block descriptors before claiming that startup metadata residency is
+    independent of graph/index entry count.
   - The independent general graph-storage release artifact now has a bounded
     `skein-graph-storage-qualification` collector over the existing typed
     runner. It binds one caller-owned read-only database to a strict plan,

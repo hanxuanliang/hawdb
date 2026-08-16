@@ -7,6 +7,7 @@ pub mod column_group;
 pub mod config;
 pub mod durability;
 pub mod graph_descriptor_page;
+pub mod graph_descriptor_tree;
 pub mod ids;
 pub mod index_page;
 pub mod mutation;
@@ -41,10 +42,11 @@ pub use canonical::{
     CanonicalSegmentManifest, CanonicalSegmentReader, CanonicalSegmentWriter,
 };
 pub use canonical_adjacency::{
+    canonical_adjacency_descriptor_page_file, canonical_adjacency_descriptor_root_file,
     CanonicalAdjacencyBlockDescriptor, CanonicalAdjacencyBuildReport, CanonicalAdjacencyConfig,
     CanonicalAdjacencyEntry, CanonicalAdjacencyError, CanonicalAdjacencyManifest,
     CanonicalAdjacencyReadReport, CanonicalAdjacencyReader, CanonicalAdjacencyWriteOutput,
-    CanonicalAdjacencyWriter,
+    CanonicalAdjacencyWriter, CANONICAL_ADJACENCY_DESCRIPTOR_ARTIFACT_ID,
 };
 pub use column_group::{
     deletion::DeletionVector,
@@ -81,6 +83,12 @@ pub use graph_descriptor_page::{
     GraphDescriptorPageRef, ImmutableGraphDescriptorPage, ImmutableGraphDescriptorPageBody,
     DEFAULT_GRAPH_DESCRIPTOR_KEY_BYTES, DEFAULT_GRAPH_DESCRIPTOR_PAGE_BYTES,
     DEFAULT_GRAPH_DESCRIPTOR_PAGE_ENTRIES, DEFAULT_GRAPH_DESCRIPTOR_VALUE_BYTES,
+};
+pub use graph_descriptor_tree::{
+    GraphDescriptorTreeBuildConfig, GraphDescriptorTreeBuildReport, GraphDescriptorTreeBuilder,
+    GraphDescriptorTreeError, GraphDescriptorTreeOpenReport, GraphDescriptorTreePaths,
+    GraphDescriptorTreeRoot, GraphDescriptorTreeRootReader, GraphDescriptorTreeWriteOutput,
+    PreparedGraphDescriptorTree,
 };
 pub use ids::{NodeId, NodeRecord, RelId, RelRecord};
 pub use index_page::{

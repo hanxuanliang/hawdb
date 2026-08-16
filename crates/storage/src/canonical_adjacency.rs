@@ -1,8 +1,10 @@
 use crate::canonical::{decode_relationship, encode_relationship, CanonicalScanControl};
 use crate::{
     durable_replace_file, AdjacencyDirection, AdjacencyLayout, ContentDigest,
-    FileSegmentRangeReader, ManifestGeneration, NodeId, RelRecord, SegmentCache, SegmentRangeRead,
-    SegmentReadError, SegmentReadRange, StoreId,
+    FileSegmentRangeReader, GraphDescriptorKind, GraphDescriptorTreeBuildConfig,
+    GraphDescriptorTreeBuilder, GraphDescriptorTreeError, GraphDescriptorTreePaths,
+    GraphDescriptorTreeWriteOutput, ManifestGeneration, NodeId, PreparedGraphDescriptorTree,
+    RelRecord, SegmentCache, SegmentRangeRead, SegmentReadError, SegmentReadRange, StoreId,
 };
 use skein_core::{RelTypeId, Value};
 use skein_integrity::{Crc32cHasher, IntegrityHasher, Sha256Digest};
@@ -21,10 +23,23 @@ const BLOCK_HEADER: &[u8; 8] = b"SKNADJ01";
 const RUN_HEADER: &[u8; 8] = b"SKNADJR1";
 const MANIFEST_HEADER: &str = "SKEIN_CANONICAL_ADJACENCY_MANIFEST_V1";
 const ARTIFACT_ID: u64 = 0x534b_4144_4a41_4331;
+pub const CANONICAL_ADJACENCY_DESCRIPTOR_ARTIFACT_ID: u64 = 0x534b_4744_4144_4a31;
 const BLOCK_ID_BASE: u64 = 1 << 63;
 const ENTRY_FIXED_BYTES: u64 = 1 + 8 + 4 + 8 + 8 + 4;
 const BLOCK_ENTRY_FIXED_BYTES: u64 = 8 + 8 + 4;
 const BLOCK_FIXED_BYTES: u64 = 8 + 8 + 8 + 1 + 1 + 8 + 4 + 4;
+const DESCRIPTOR_VALUE_MAGIC: &[u8; 8] = b"SKADDS01";
+const DESCRIPTOR_VALUE_VERSION: u16 = 1;
+const DESCRIPTOR_KEY_BYTES: usize = 29;
+const DESCRIPTOR_VALUE_BYTES: usize = 80;
+
+pub fn canonical_adjacency_descriptor_page_file(generation: u64) -> String {
+    format!("adjacency-descriptors-{generation}.pages.skein")
+}
+
+pub fn canonical_adjacency_descriptor_root_file(generation: u64) -> String {
+    format!("adjacency-descriptors-{generation}.root.skein")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CanonicalAdjacencyConfig {
@@ -62,6 +77,7 @@ impl Default for CanonicalAdjacencyConfig {
 pub enum CanonicalAdjacencyError {
     Io(std::io::Error),
     Read(SegmentReadError),
+    DescriptorTree(GraphDescriptorTreeError),
     Source(String),
     Corrupt(String),
     RecordTooLarge {
@@ -91,6 +107,7 @@ impl Display for CanonicalAdjacencyError {
         match self {
             Self::Io(error) => Display::fmt(error, formatter),
             Self::Read(error) => Display::fmt(error, formatter),
+            Self::DescriptorTree(error) => Display::fmt(error, formatter),
             Self::Source(message) | Self::Corrupt(message) => formatter.write_str(message),
             Self::RecordTooLarge {
                 record_bytes,
@@ -136,6 +153,7 @@ impl Error for CanonicalAdjacencyError {
         match self {
             Self::Io(error) => Some(error),
             Self::Read(error) => Some(error),
+            Self::DescriptorTree(error) => Some(error),
             _ => None,
         }
     }
@@ -153,6 +171,12 @@ impl From<SegmentReadError> for CanonicalAdjacencyError {
     }
 }
 
+impl From<GraphDescriptorTreeError> for CanonicalAdjacencyError {
+    fn from(error: GraphDescriptorTreeError) -> Self {
+        Self::DescriptorTree(error)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalAdjacencyBlockDescriptor {
     pub block_id: u64,
@@ -166,6 +190,108 @@ pub struct CanonicalAdjacencyBlockDescriptor {
     pub length: NonZeroU64,
     pub content_digest: ContentDigest,
     pub record_count: u32,
+}
+
+impl CanonicalAdjacencyBlockDescriptor {
+    pub fn descriptor_tree_key(&self) -> [u8; DESCRIPTOR_KEY_BYTES] {
+        let mut key = [0u8; DESCRIPTOR_KEY_BYTES];
+        key[0] = direction_tag(self.direction);
+        key[1..9].copy_from_slice(&self.endpoint.0.to_be_bytes());
+        key[9..13].copy_from_slice(&self.rel_type.0.to_be_bytes());
+        key[13..21].copy_from_slice(&self.min_neighbor.0.to_be_bytes());
+        key[21..29].copy_from_slice(&self.block_id.to_be_bytes());
+        key
+    }
+
+    pub fn encode_descriptor_tree_value(&self) -> [u8; DESCRIPTOR_VALUE_BYTES] {
+        let mut encoded = [0u8; DESCRIPTOR_VALUE_BYTES];
+        encoded[..8].copy_from_slice(DESCRIPTOR_VALUE_MAGIC);
+        encoded[8..10].copy_from_slice(&DESCRIPTOR_VALUE_VERSION.to_le_bytes());
+        encoded[12..20].copy_from_slice(&self.block_id.to_le_bytes());
+        encoded[20] = direction_tag(self.direction);
+        encoded[21] = layout_tag(self.layout);
+        encoded[24..32].copy_from_slice(&self.endpoint.0.to_le_bytes());
+        encoded[32..36].copy_from_slice(&self.rel_type.0.to_le_bytes());
+        encoded[36..40].copy_from_slice(&self.record_count.to_le_bytes());
+        encoded[40..48].copy_from_slice(&self.min_neighbor.0.to_le_bytes());
+        encoded[48..56].copy_from_slice(&self.max_neighbor.0.to_le_bytes());
+        encoded[56..64].copy_from_slice(&self.offset.to_le_bytes());
+        encoded[64..72].copy_from_slice(&self.length.get().to_le_bytes());
+        encoded[72..80].copy_from_slice(&self.content_digest.0.to_le_bytes());
+        encoded
+    }
+
+    pub fn decode_descriptor_tree_entry(
+        key: &[u8],
+        encoded: &[u8],
+    ) -> Result<Self, CanonicalAdjacencyError> {
+        if key.len() != DESCRIPTOR_KEY_BYTES
+            || encoded.len() != DESCRIPTOR_VALUE_BYTES
+            || &encoded[..8] != DESCRIPTOR_VALUE_MAGIC
+        {
+            return Err(CanonicalAdjacencyError::Corrupt(
+                "canonical adjacency descriptor tree entry has an invalid header or length"
+                    .to_string(),
+            ));
+        }
+        let version = u16::from_le_bytes(encoded[8..10].try_into().expect("fixed version"));
+        let flags = u16::from_le_bytes(encoded[10..12].try_into().expect("fixed flags"));
+        if version != DESCRIPTOR_VALUE_VERSION || flags != 0 || encoded[22..24] != [0u8; 2] {
+            return Err(CanonicalAdjacencyError::Corrupt(format!(
+                "canonical adjacency descriptor tree entry has unsupported version {version}, flags {flags}, or reserved fields"
+            )));
+        }
+        let descriptor = Self {
+            block_id: u64::from_le_bytes(encoded[12..20].try_into().expect("fixed block id")),
+            direction: direction_from_tag(encoded[20])?,
+            layout: layout_from_tag(encoded[21])?,
+            endpoint: NodeId(u64::from_le_bytes(
+                encoded[24..32].try_into().expect("fixed endpoint"),
+            )),
+            rel_type: RelTypeId(u32::from_le_bytes(
+                encoded[32..36].try_into().expect("fixed relationship type"),
+            )),
+            record_count: u32::from_le_bytes(
+                encoded[36..40].try_into().expect("fixed record count"),
+            ),
+            min_neighbor: NodeId(u64::from_le_bytes(
+                encoded[40..48].try_into().expect("fixed minimum neighbor"),
+            )),
+            max_neighbor: NodeId(u64::from_le_bytes(
+                encoded[48..56].try_into().expect("fixed maximum neighbor"),
+            )),
+            offset: u64::from_le_bytes(encoded[56..64].try_into().expect("fixed offset")),
+            length: NonZeroU64::new(u64::from_le_bytes(
+                encoded[64..72].try_into().expect("fixed length"),
+            ))
+            .ok_or_else(|| {
+                CanonicalAdjacencyError::Corrupt(
+                    "canonical adjacency descriptor tree block length is zero".to_string(),
+                )
+            })?,
+            content_digest: ContentDigest(u64::from_le_bytes(
+                encoded[72..80].try_into().expect("fixed digest"),
+            )),
+        };
+        if descriptor.block_id < BLOCK_ID_BASE
+            || descriptor.record_count == 0
+            || descriptor.min_neighbor > descriptor.max_neighbor
+            || descriptor.descriptor_tree_key().as_slice() != key
+        {
+            return Err(CanonicalAdjacencyError::Corrupt(
+                "canonical adjacency descriptor tree key and value are inconsistent".to_string(),
+            ));
+        }
+        descriptor
+            .offset
+            .checked_add(descriptor.length.get())
+            .ok_or_else(|| {
+                CanonicalAdjacencyError::Corrupt(
+                    "canonical adjacency descriptor tree block range overflows u64".to_string(),
+                )
+            })?;
+        Ok(descriptor)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -372,6 +498,7 @@ pub struct CanonicalAdjacencyBuildReport {
 pub struct CanonicalAdjacencyWriteOutput {
     pub manifest: CanonicalAdjacencyManifest,
     pub report: CanonicalAdjacencyBuildReport,
+    pub descriptor_tree: Option<GraphDescriptorTreeWriteOutput>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -423,6 +550,43 @@ impl CanonicalAdjacencyWriter {
         &self,
         path: &Path,
         generation: ManifestGeneration,
+        relationships: R,
+    ) -> Result<CanonicalAdjacencyWriteOutput, CanonicalAdjacencyError>
+    where
+        R: IntoIterator<Item = Result<RelRecord, CanonicalAdjacencyError>>,
+    {
+        self.write_fallible_internal(path, generation, None, relationships)
+    }
+
+    pub fn write_fallible_with_descriptor_tree<R>(
+        &self,
+        path: &Path,
+        descriptor_paths: GraphDescriptorTreePaths,
+        generation: ManifestGeneration,
+        source_commit_epoch: u64,
+        descriptor_config: GraphDescriptorTreeBuildConfig,
+        relationships: R,
+    ) -> Result<CanonicalAdjacencyWriteOutput, CanonicalAdjacencyError>
+    where
+        R: IntoIterator<Item = Result<RelRecord, CanonicalAdjacencyError>>,
+    {
+        self.write_fallible_internal(
+            path,
+            generation,
+            Some((descriptor_paths, source_commit_epoch, descriptor_config)),
+            relationships,
+        )
+    }
+
+    fn write_fallible_internal<R>(
+        &self,
+        path: &Path,
+        generation: ManifestGeneration,
+        descriptor_tree: Option<(
+            GraphDescriptorTreePaths,
+            u64,
+            GraphDescriptorTreeBuildConfig,
+        )>,
         relationships: R,
     ) -> Result<CanonicalAdjacencyWriteOutput, CanonicalAdjacencyError>
     where
@@ -501,8 +665,9 @@ impl CanonicalAdjacencyWriter {
             relationship_count,
             peak_resident_bytes,
             &runs,
+            descriptor_tree,
         );
-        let output = match result {
+        let (mut output, prepared_descriptor_tree) = match result {
             Ok(output) => output,
             Err(error) => {
                 let _ = fs::remove_file(&tmp_path);
@@ -510,6 +675,9 @@ impl CanonicalAdjacencyWriter {
             }
         };
         durable_replace_file(&tmp_path, path)?;
+        if let Some(prepared) = prepared_descriptor_tree {
+            output.descriptor_tree = Some(prepared.publish()?);
+        }
         Ok(output)
     }
 
@@ -520,9 +688,32 @@ impl CanonicalAdjacencyWriter {
         relationship_count: u64,
         peak_resident_bytes: u64,
         runs: &SpillRuns,
-    ) -> Result<CanonicalAdjacencyWriteOutput, CanonicalAdjacencyError> {
+        descriptor_tree: Option<(
+            GraphDescriptorTreePaths,
+            u64,
+            GraphDescriptorTreeBuildConfig,
+        )>,
+    ) -> Result<
+        (
+            CanonicalAdjacencyWriteOutput,
+            Option<PreparedGraphDescriptorTree>,
+        ),
+        CanonicalAdjacencyError,
+    > {
         let file = File::create(path)?;
-        let mut artifact = ArtifactBuilder::new(file, generation, self.config)?;
+        let descriptor_tree = descriptor_tree
+            .map(|(paths, source_commit_epoch, config)| {
+                GraphDescriptorTreeBuilder::create(
+                    paths,
+                    GraphDescriptorKind::CanonicalAdjacency,
+                    generation.0,
+                    source_commit_epoch,
+                    CANONICAL_ADJACENCY_DESCRIPTOR_ARTIFACT_ID,
+                    config,
+                )
+            })
+            .transpose()?;
+        let mut artifact = ArtifactBuilder::new(file, generation, self.config, descriptor_tree)?;
         let mut readers = runs
             .paths
             .iter()
@@ -558,20 +749,24 @@ impl CanonicalAdjacencyWriter {
                 heap.push(Reverse((next, run_index)));
             }
         }
-        let (manifest, sparse_block_count, dense_block_count) =
+        let (manifest, sparse_block_count, dense_block_count, prepared_descriptor_tree) =
             artifact.finish(relationship_count)?;
-        Ok(CanonicalAdjacencyWriteOutput {
-            manifest,
-            report: CanonicalAdjacencyBuildReport {
-                relationship_count,
-                entry_count: relationship_count.saturating_mul(2),
-                sparse_block_count,
-                dense_block_count,
-                spill_run_count: runs.next_run_sequence,
-                spill_bytes: runs.spill_bytes,
-                peak_resident_bytes,
+        Ok((
+            CanonicalAdjacencyWriteOutput {
+                manifest,
+                report: CanonicalAdjacencyBuildReport {
+                    relationship_count,
+                    entry_count: relationship_count.saturating_mul(2),
+                    sparse_block_count,
+                    dense_block_count,
+                    spill_run_count: runs.next_run_sequence,
+                    spill_bytes: runs.spill_bytes,
+                    peak_resident_bytes,
+                },
+                descriptor_tree: None,
             },
-        })
+            prepared_descriptor_tree,
+        ))
     }
 }
 
@@ -806,6 +1001,7 @@ struct ArtifactBuilder {
     entry_count: u64,
     sparse_block_count: u64,
     dense_block_count: u64,
+    descriptor_tree: Option<GraphDescriptorTreeBuilder>,
 }
 
 impl ArtifactBuilder {
@@ -813,6 +1009,7 @@ impl ArtifactBuilder {
         file: File,
         generation: ManifestGeneration,
         config: CanonicalAdjacencyConfig,
+        descriptor_tree: Option<GraphDescriptorTreeBuilder>,
     ) -> Result<Self, CanonicalAdjacencyError> {
         let mut writer = BufWriter::new(file);
         let mut digest = IntegrityHasher::new();
@@ -830,6 +1027,7 @@ impl ArtifactBuilder {
             entry_count: 0,
             sparse_block_count: 0,
             dense_block_count: 0,
+            descriptor_tree,
         })
     }
 
@@ -1056,6 +1254,12 @@ impl ArtifactBuilder {
                 self.dense_block_count = self.dense_block_count.saturating_add(1)
             }
         }
+        if let Some(descriptor_tree) = &mut self.descriptor_tree {
+            descriptor_tree.push(
+                descriptor.descriptor_tree_key().to_vec(),
+                descriptor.encode_descriptor_tree_value().to_vec(),
+            )?;
+        }
         self.blocks.push(descriptor);
         group.block.clear();
         group.block_bytes = 0;
@@ -1065,7 +1269,15 @@ impl ArtifactBuilder {
     fn finish(
         mut self,
         relationship_count: u64,
-    ) -> Result<(CanonicalAdjacencyManifest, u64, u64), CanonicalAdjacencyError> {
+    ) -> Result<
+        (
+            CanonicalAdjacencyManifest,
+            u64,
+            u64,
+            Option<PreparedGraphDescriptorTree>,
+        ),
+        CanonicalAdjacencyError,
+    > {
         self.finish_group()?;
         self.writer.flush()?;
         self.writer.get_ref().sync_all()?;
@@ -1081,7 +1293,17 @@ impl ArtifactBuilder {
             blocks: self.blocks,
         };
         manifest.validate()?;
-        Ok((manifest, self.sparse_block_count, self.dense_block_count))
+        let descriptor_tree = self
+            .descriptor_tree
+            .take()
+            .map(GraphDescriptorTreeBuilder::finish)
+            .transpose()?;
+        Ok((
+            manifest,
+            self.sparse_block_count,
+            self.dense_block_count,
+            descriptor_tree,
+        ))
     }
 }
 
@@ -1664,6 +1886,7 @@ mod tests {
                 relationships.into_iter().map(Ok),
             )
             .unwrap();
+        assert!(output.descriptor_tree.is_none());
         assert!(output.report.spill_run_count > 1);
         assert!(output.report.sparse_block_count > 0);
         assert!(output.report.dense_block_count > 1);
@@ -1699,6 +1922,102 @@ mod tests {
             .file_name()
             .to_string_lossy()
             .contains(".run.")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn descriptor_tree_entry_codec_is_order_preserving_and_symmetric() {
+        let first = CanonicalAdjacencyBlockDescriptor {
+            block_id: BLOCK_ID_BASE,
+            direction: AdjacencyDirection::Outgoing,
+            layout: AdjacencyLayout::Sparse,
+            endpoint: NodeId(9),
+            rel_type: RelTypeId(3),
+            min_neighbor: NodeId(10),
+            max_neighbor: NodeId(20),
+            offset: 48,
+            length: NonZeroU64::new(512).unwrap(),
+            content_digest: ContentDigest(17),
+            record_count: 4,
+        };
+        let mut second = first.clone();
+        second.block_id += 1;
+        second.min_neighbor = NodeId(21);
+        second.max_neighbor = NodeId(30);
+        assert!(first.descriptor_tree_key() < second.descriptor_tree_key());
+        assert_eq!(
+            CanonicalAdjacencyBlockDescriptor::decode_descriptor_tree_entry(
+                &first.descriptor_tree_key(),
+                &first.encode_descriptor_tree_value(),
+            )
+            .unwrap(),
+            first
+        );
+
+        let mut drifted_key = first.descriptor_tree_key();
+        drifted_key[20] ^= 1;
+        assert!(
+            CanonicalAdjacencyBlockDescriptor::decode_descriptor_tree_entry(
+                &drifted_key,
+                &first.encode_descriptor_tree_value(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn writer_publishes_unselected_descriptor_root_after_adjacency_artifact() {
+        let root = test_path("descriptor-root");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let adjacency_path = root.join("adjacency.7.skein");
+        let descriptor_paths = GraphDescriptorTreePaths::new(
+            root.join(canonical_adjacency_descriptor_page_file(7)),
+            root.join(canonical_adjacency_descriptor_root_file(7)),
+        );
+        let descriptor_config = GraphDescriptorTreeBuildConfig {
+            page_limits: crate::GraphDescriptorPageLimits {
+                max_page_bytes: NonZeroUsize::new(512).unwrap(),
+                max_entries: NonZeroUsize::new(4).unwrap(),
+                max_key_bytes: NonZeroUsize::new(64).unwrap(),
+                max_value_bytes: NonZeroUsize::new(128).unwrap(),
+            },
+            max_root_bytes: NonZeroUsize::new(4096).unwrap(),
+            max_page_count: NonZeroU64::new(4096).unwrap(),
+            max_page_artifact_bytes: NonZeroU64::new(8 * 1024 * 1024).unwrap(),
+            max_intermediate_bytes: NonZeroU64::new(8 * 1024 * 1024).unwrap(),
+        };
+        let relationships = (0..128).map(|index| {
+            Ok(relationship(
+                index + 1,
+                index % 11 + 1,
+                index + 100,
+                (index % 3 + 1) as u32,
+            ))
+        });
+        let output = CanonicalAdjacencyWriter::new(CanonicalAdjacencyConfig::default())
+            .write_fallible_with_descriptor_tree(
+                &adjacency_path,
+                descriptor_paths.clone(),
+                ManifestGeneration(7),
+                29,
+                descriptor_config,
+                relationships,
+            )
+            .unwrap();
+        let descriptor_tree = output
+            .descriptor_tree
+            .expect("shadow descriptor tree is published");
+        assert_eq!(
+            descriptor_tree.root.descriptor_count,
+            output.manifest.blocks.len() as u64
+        );
+        assert!(adjacency_path.exists());
+        let reader =
+            crate::GraphDescriptorTreeRootReader::open(descriptor_paths, descriptor_config)
+                .unwrap();
+        assert_eq!(reader.root(), &descriptor_tree.root);
+        assert_eq!(reader.report().page_payload_bytes_read, 0);
         fs::remove_dir_all(root).unwrap();
     }
 }

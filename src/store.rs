@@ -6882,6 +6882,23 @@ mod tests {
             }
             store.checkpoint(&catalog).unwrap();
             let manifest = store.canonical_adjacency_manifest().unwrap();
+            let descriptor_reader = skein_storage::GraphDescriptorTreeRootReader::open(
+                skein_storage::GraphDescriptorTreePaths::new(
+                    path.join(skein_storage::canonical_adjacency_descriptor_page_file(1)),
+                    path.join(skein_storage::canonical_adjacency_descriptor_root_file(1)),
+                ),
+                skein_storage::GraphDescriptorTreeBuildConfig::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                descriptor_reader.root().descriptor_count,
+                manifest.blocks.len() as u64
+            );
+            assert_eq!(
+                descriptor_reader.root().source_commit_epoch,
+                store.commit_epoch
+            );
+            assert_eq!(descriptor_reader.report().page_payload_bytes_read, 0);
             let mention_type = catalog.rel_type_id("MENTIONS").unwrap();
             let outgoing = manifest
                 .blocks
@@ -8758,6 +8775,12 @@ mod tests {
             .contains("checkpoint source changed before publication"));
         assert!(!path.join("checkpoint.1.skein").exists());
         assert!(!path.join("wal.1.skein").exists());
+        assert!(!path
+            .join(skein_storage::canonical_adjacency_descriptor_page_file(1))
+            .exists());
+        assert!(!path
+            .join(skein_storage::canonical_adjacency_descriptor_root_file(1))
+            .exists());
         assert!(!path.join(".checkpoint.1.prepare").exists());
         drop(source);
         drop(store);
@@ -8848,6 +8871,16 @@ mod tests {
                             .generation,
                         generation
                     );
+                    assert!(path
+                        .join(skein_storage::canonical_adjacency_descriptor_page_file(
+                            generation
+                        ))
+                        .exists());
+                    assert!(path
+                        .join(skein_storage::canonical_adjacency_descriptor_root_file(
+                            generation
+                        ))
+                        .exists());
                 }
                 None => {
                     assert!(!path
@@ -8859,6 +8892,12 @@ mod tests {
                         .join(skein_storage::relational_overflow_manifest_generation_file(
                             1
                         ))
+                        .exists());
+                    assert!(!path
+                        .join(skein_storage::canonical_adjacency_descriptor_page_file(1))
+                        .exists());
+                    assert!(!path
+                        .join(skein_storage::canonical_adjacency_descriptor_root_file(1))
                         .exists());
                 }
             }
@@ -8884,6 +8923,12 @@ mod tests {
         assert!(!path.join("canonical.1.manifest.skein").exists());
         assert!(!path.join("adjacency.1.skein").exists());
         assert!(!path.join("adjacency.1.manifest.skein").exists());
+        assert!(!path
+            .join(skein_storage::canonical_adjacency_descriptor_page_file(1))
+            .exists());
+        assert!(!path
+            .join(skein_storage::canonical_adjacency_descriptor_root_file(1))
+            .exists());
         assert!(!path.join("properties.1.skein").exists());
         assert!(!path.join("properties.1.manifest.skein").exists());
         assert!(!path.join("property-index.1.skein").exists());
@@ -8904,6 +8949,12 @@ mod tests {
         assert!(path.join("canonical.2.manifest.skein").exists());
         assert!(path.join("adjacency.2.skein").exists());
         assert!(path.join("adjacency.2.manifest.skein").exists());
+        assert!(path
+            .join(skein_storage::canonical_adjacency_descriptor_page_file(2))
+            .exists());
+        assert!(path
+            .join(skein_storage::canonical_adjacency_descriptor_root_file(2))
+            .exists());
         assert!(path.join("properties.2.skein").exists());
         assert!(path.join("properties.2.manifest.skein").exists());
         assert!(path.join("property-index.2.skein").exists());
@@ -8924,6 +8975,12 @@ mod tests {
         assert!(path.join("canonical.3.manifest.skein").exists());
         assert!(path.join("adjacency.3.skein").exists());
         assert!(path.join("adjacency.3.manifest.skein").exists());
+        assert!(path
+            .join(skein_storage::canonical_adjacency_descriptor_page_file(3))
+            .exists());
+        assert!(path
+            .join(skein_storage::canonical_adjacency_descriptor_root_file(3))
+            .exists());
         assert!(path.join("properties.3.skein").exists());
         assert!(path.join("properties.3.manifest.skein").exists());
         assert!(path.join("property-index.3.skein").exists());

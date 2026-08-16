@@ -1469,10 +1469,56 @@ of publication and serving activation:
   or evidence that 512 MiB is Skein's default process budget.
 
 `ImmutableGraphDescriptorPage` is not selected by any production manifest yet.
-The canonical adjacency writer, publish-last root, demand reader, cache/pin
-accounting, deep scrub, recovery, and differential activation remain separate
-contracts. Until those contracts replace the manifest-owned descriptor vectors,
-the aggregate graph-manifest open budget remains authoritative.
+The canonical adjacency writer now emits the first shadow tree described below,
+but demand serving, cache/pin accounting, deep scrub, recovery selection, and
+differential activation remain separate contracts. Until those contracts
+replace the manifest-owned descriptor vectors, the aggregate graph-manifest
+open budget remains authoritative.
+
+### Canonical adjacency shadow descriptor root v1
+
+Every canonical adjacency checkpoint additionally persists an unselected
+descriptor tree without changing the current reader:
+
+- the leaf key is the big-endian tuple `(direction, endpoint, relationship
+  type, minimum neighbor, block id)`, so byte order is descriptor order;
+- the fixed-width value carries a version, block identity, direction, layout,
+  endpoint/type, record count, neighbor bounds, exact adjacency artifact range,
+  and block CRC32C. Decode rejects reserved fields, zero lengths/counts, range
+  overflow, and any key/value disagreement;
+- construction retains one leaf or interior group. Completed page references
+  are written to a bounded intermediate run. Each later level streams the
+  previous run into interior pages and another run, so descriptor count does
+  not determine builder RSS. Interior fanout must be at least two, ensuring
+  that every non-root level strictly reduces the reference count;
+- page count, page-artifact bytes, and cumulative intermediate bytes are hard
+  admissions. Checked counters reject overflow rather than saturating. The
+  build report records descriptor, leaf/interior page, artifact, root, spill,
+  and conservative peak-resident bytes;
+- the adjacency artifact is synchronized and atomically replaced first. The
+  descriptor page artifact was already synchronized, is published second, and
+  the bounded checksummed root is synchronized and published last. Descriptor
+  artifacts are immutable within one generation and publication refuses to
+  replace an existing destination. A root publication failure therefore
+  leaves no newly selectable shadow root;
+- the root binds graph class, selecting generation, source commit epoch, page
+  artifact identity/length/CRC32C/SHA-256, counts, tree height, and the exact
+  immutable root-page reference. Empty adjacency publishes an empty artifact
+  with the integrity digest of the empty byte string;
+- root-only reopen reads at most `max_root_bytes`, validates its checksum and
+  structure, and checks the page artifact length without reading page payload.
+  Whole-artifact digest verification belongs to deep scrub; later demand reads
+  verify each selected page through its bound per-page digests;
+- checkpoint discard, abandoned-candidate cleanup, and generation reclamation
+  recognize both shadow files. They are deliberately absent from backup and
+  the outer durable manifest while unselected.
+
+The legacy text adjacency manifest and its resident descriptor vector remain
+the production serving source in this stage. Consequently this shadow writer
+proves bounded construction and publish-last recovery ordering, but it does not
+yet prove graph-size-independent startup RSS. Activation requires a separate
+demand reader, corruption poison/cache/pin accounting, deep scrub, differential
+query evidence, and an explicit outer-manifest selection change.
 
 ## Demand paging and cache ownership
 

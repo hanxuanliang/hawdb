@@ -4,7 +4,8 @@ EXTENDS FiniteSets, Naturals
 (***************************************************************************)
 (* Graph descriptor pages are immutable physical copies. A candidate root  *)
 (* becomes selectable only after every referenced page is durable. Opening  *)
-(* a reader pins one complete generation but does not warm descriptor pages. *)
+(* a shadow reader pins one complete generation but does not warm descriptor  *)
+(* pages. Publishing this root does not activate the production serving path. *)
 (* A lookup admits at most MaxResidentPages and pins the selected page until *)
 (* completion. Corruption fails the reader closed and poisons the handle.    *)
 (***************************************************************************)
@@ -21,8 +22,10 @@ VARIABLES
     durablePages,
     candidateGeneration,
     candidatePages,
-    selectedGeneration,
-    selectedPages,
+    shadowGeneration,
+    shadowPages,
+    servingGeneration,
+    servingPages,
     readerGeneration,
     readerPages,
     readerState,
@@ -35,8 +38,10 @@ vars == <<
     durablePages,
     candidateGeneration,
     candidatePages,
-    selectedGeneration,
-    selectedPages,
+    shadowGeneration,
+    shadowPages,
+    servingGeneration,
+    servingPages,
     readerGeneration,
     readerPages,
     readerState,
@@ -50,8 +55,10 @@ Init ==
     /\ durablePages = {}
     /\ candidateGeneration = 0
     /\ candidatePages = {}
-    /\ selectedGeneration = 0
-    /\ selectedPages = {}
+    /\ shadowGeneration = 0
+    /\ shadowPages = {}
+    /\ servingGeneration = 0
+    /\ servingPages = {}
     /\ readerGeneration = 0
     /\ readerPages = {}
     /\ readerState = "closed"
@@ -63,11 +70,12 @@ Init ==
 StartCandidate ==
     /\ candidateGeneration = 0
     /\ \E generation \in Generations:
-          /\ generation # selectedGeneration
+          /\ generation # shadowGeneration
           /\ candidateGeneration' = generation
     /\ candidatePages' = {}
     /\ UNCHANGED <<
-        durablePages, selectedGeneration, selectedPages, readerGeneration,
+        durablePages, shadowGeneration, shadowPages, servingGeneration,
+        servingPages, readerGeneration,
         readerPages, readerState, residentPages, pinnedPage, corruptPages,
         poisoned
        >>
@@ -79,7 +87,8 @@ WriteCandidatePage ==
           /\ candidatePages' = candidatePages \union {copy}
           /\ durablePages' = durablePages \union {copy}
     /\ UNCHANGED <<
-        candidateGeneration, selectedGeneration, selectedPages,
+        candidateGeneration, shadowGeneration, shadowPages,
+        servingGeneration, servingPages,
         readerGeneration, readerPages, readerState, residentPages, pinnedPage,
         corruptPages, poisoned
        >>
@@ -88,12 +97,13 @@ PublishCandidateRoot ==
     /\ candidateGeneration \in Generations
     /\ candidatePages = CompleteGeneration(candidateGeneration)
     /\ candidatePages \subseteq durablePages
-    /\ selectedGeneration' = candidateGeneration
-    /\ selectedPages' = candidatePages
+    /\ shadowGeneration' = candidateGeneration
+    /\ shadowPages' = candidatePages
     /\ candidateGeneration' = 0
     /\ candidatePages' = {}
     /\ UNCHANGED <<
-        durablePages, readerGeneration, readerPages, readerState,
+        durablePages, servingGeneration, servingPages, readerGeneration,
+        readerPages, readerState,
         residentPages, pinnedPage, corruptPages, poisoned
        >>
 
@@ -102,7 +112,8 @@ CrashCandidate ==
     /\ candidateGeneration' = 0
     /\ candidatePages' = {}
     /\ UNCHANGED <<
-        durablePages, selectedGeneration, selectedPages, readerGeneration,
+        durablePages, shadowGeneration, shadowPages, servingGeneration,
+        servingPages, readerGeneration,
         readerPages, readerState, residentPages, pinnedPage, corruptPages,
         poisoned
        >>
@@ -110,14 +121,15 @@ CrashCandidate ==
 OpenPinnedReader ==
     /\ readerState = "closed"
     /\ ~poisoned
-    /\ selectedGeneration \in Generations
-    /\ readerGeneration' = selectedGeneration
-    /\ readerPages' = selectedPages
+    /\ shadowGeneration \in Generations
+    /\ readerGeneration' = shadowGeneration
+    /\ readerPages' = shadowPages
     /\ readerState' = "open"
     /\ pinnedPage' = NoPage
     /\ UNCHANGED <<
         durablePages, candidateGeneration, candidatePages,
-        selectedGeneration, selectedPages, residentPages, corruptPages,
+        shadowGeneration, shadowPages, servingGeneration, servingPages,
+        residentPages, corruptPages,
         poisoned
        >>
 
@@ -130,7 +142,8 @@ BeginDemandRead ==
     /\ readerState' = "reading"
     /\ UNCHANGED <<
         durablePages, candidateGeneration, candidatePages,
-        selectedGeneration, selectedPages, readerGeneration, readerPages,
+        shadowGeneration, shadowPages, servingGeneration, servingPages,
+        readerGeneration, readerPages,
         corruptPages, poisoned
        >>
 
@@ -140,7 +153,8 @@ CompleteDemandRead ==
     /\ readerState' = "succeeded"
     /\ UNCHANGED <<
         durablePages, candidateGeneration, candidatePages,
-        selectedGeneration, selectedPages, readerGeneration, readerPages,
+        shadowGeneration, shadowPages, servingGeneration, servingPages,
+        readerGeneration, readerPages,
         residentPages, pinnedPage, corruptPages, poisoned
        >>
 
@@ -151,7 +165,8 @@ RejectCorruptPage ==
     /\ poisoned' = TRUE
     /\ UNCHANGED <<
         durablePages, candidateGeneration, candidatePages,
-        selectedGeneration, selectedPages, readerGeneration, readerPages,
+        shadowGeneration, shadowPages, servingGeneration, servingPages,
+        readerGeneration, readerPages,
         residentPages, pinnedPage, corruptPages
        >>
 
@@ -161,7 +176,8 @@ ReleaseSuccessfulRead ==
     /\ pinnedPage' = NoPage
     /\ UNCHANGED <<
         durablePages, candidateGeneration, candidatePages,
-        selectedGeneration, selectedPages, readerGeneration, readerPages,
+        shadowGeneration, shadowPages, servingGeneration, servingPages,
+        readerGeneration, readerPages,
         residentPages, corruptPages, poisoned
        >>
 
@@ -173,7 +189,8 @@ CloseReader ==
     /\ pinnedPage' = NoPage
     /\ UNCHANGED <<
         durablePages, candidateGeneration, candidatePages,
-        selectedGeneration, selectedPages, residentPages, corruptPages,
+        shadowGeneration, shadowPages, servingGeneration, servingPages,
+        residentPages, corruptPages,
         poisoned
        >>
 
@@ -184,7 +201,8 @@ InjectCorruption ==
           corruptPages' = corruptPages \union {copy}
     /\ UNCHANGED <<
         durablePages, candidateGeneration, candidatePages,
-        selectedGeneration, selectedPages, readerGeneration, readerPages,
+        shadowGeneration, shadowPages, servingGeneration, servingPages,
+        readerGeneration, readerPages,
         readerState, residentPages, pinnedPage, poisoned
        >>
 
@@ -207,8 +225,10 @@ TypeOK ==
     /\ durablePages \subseteq PageCopies
     /\ candidateGeneration \in Generations \union {0}
     /\ candidatePages \subseteq PageCopies
-    /\ selectedGeneration \in Generations \union {0}
-    /\ selectedPages \subseteq PageCopies
+    /\ shadowGeneration \in Generations \union {0}
+    /\ shadowPages \subseteq PageCopies
+    /\ servingGeneration \in Generations \union {0}
+    /\ servingPages \subseteq PageCopies
     /\ readerGeneration \in Generations \union {0}
     /\ readerPages \subseteq PageCopies
     /\ readerState \in ReaderStates
@@ -217,14 +237,18 @@ TypeOK ==
     /\ corruptPages \subseteq PageCopies
     /\ poisoned \in BOOLEAN
 
-SelectedRootIsComplete ==
-    selectedGeneration = 0
-        \/ (selectedPages = CompleteGeneration(selectedGeneration)
-            /\ selectedPages \subseteq durablePages)
+ShadowRootIsComplete ==
+    shadowGeneration = 0
+        \/ (shadowPages = CompleteGeneration(shadowGeneration)
+            /\ shadowPages \subseteq durablePages)
 
 CandidateIsNeverVisible ==
     candidateGeneration = 0
-        \/ selectedGeneration # candidateGeneration
+        \/ shadowGeneration # candidateGeneration
+
+ShadowPublicationDoesNotActivateServing ==
+    /\ servingGeneration = 0
+    /\ servingPages = {}
 
 PinnedReaderIsComplete ==
     readerGeneration = 0

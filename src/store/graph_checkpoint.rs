@@ -416,11 +416,13 @@ impl GraphStore {
                 Some(relationships) => durable.write_canonical_adjacency(
                     relationships,
                     generation,
+                    commit_epoch,
                     build_config.adjacency,
                 )?,
                 None => durable.write_canonical_adjacency(
                     self.relationships.values().cloned().map(Ok),
                     generation,
+                    commit_epoch,
                     build_config.adjacency,
                 )?,
             };
