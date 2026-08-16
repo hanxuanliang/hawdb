@@ -133,6 +133,12 @@ pub(super) fn validate_read_storage(
         {
             blockers.push("content_store_read_open_epoch_mismatch".to_string());
         }
+        validate_open_timings(
+            open,
+            "/latency_micros",
+            "content_store_read_open_timing_invalid",
+            &mut blockers,
+        );
     }
     if opens.len() != contracts_by_name.len() || open_names.len() != contracts_by_name.len() {
         blockers.push("content_store_read_open_count_mismatch".to_string());
@@ -729,6 +735,12 @@ fn validate_mutation_case(
     {
         blockers.push("content_store_mutation_wal_replay_invalid".to_string());
     }
+    validate_open_timings(
+        replay,
+        "/total_open_latency_micros",
+        "content_store_mutation_wal_open_timing_invalid",
+        blockers,
+    );
     if unsigned(recovered, "/row_recovery_delta_entries").unwrap_or_default() == 0
         || unsigned(recovered, "/index_recovery_delta_entries").unwrap_or_default() == 0
     {
@@ -742,6 +754,12 @@ fn validate_mutation_case(
     {
         blockers.push("content_store_mutation_manifest_open_invalid".to_string());
     }
+    validate_open_timings(
+        manifest,
+        "/total_open_latency_micros",
+        "content_store_mutation_manifest_open_timing_invalid",
+        blockers,
+    );
     if unsigned(final_storage, "/row_recovery_delta_entries") != Some(0)
         || unsigned(final_storage, "/index_recovery_delta_entries") != Some(0)
         || unsigned(final_storage, "/row_live_entries") != Some(0)
@@ -812,6 +830,46 @@ fn mutation_sequence(case: &Value) -> Option<Vec<(u64, String, String)>> {
         .collect::<Option<Vec<_>>>()?;
     sequence.sort_unstable_by_key(|(operation, _, _)| *operation);
     (!sequence.is_empty()).then_some(sequence)
+}
+
+fn validate_open_timings(
+    evidence: &Value,
+    external_total_pointer: &str,
+    blocker: &str,
+    blockers: &mut Vec<String>,
+) {
+    let Some(timings) = evidence.pointer("/open_timings") else {
+        blockers.push(blocker.to_string());
+        return;
+    };
+    let phase_sum = [
+        "/durable_manifest_open_micros",
+        "/checkpoint_root_open_micros",
+        "/wal_replay_micros",
+        "/post_replay_open_micros",
+    ]
+    .into_iter()
+    .try_fold(0u64, |sum, pointer| {
+        unsigned(timings, pointer).map(|value| sum.saturating_add(value))
+    });
+    let accounted = unsigned(timings, "/accounted_micros");
+    let unaccounted = unsigned(timings, "/unaccounted_micros");
+    let internal_total = unsigned(timings, "/total_open_micros");
+    let external_total = unsigned(evidence, external_total_pointer);
+    let valid = phase_sum.is_some()
+        && phase_sum == accounted
+        && accounted
+            .zip(unaccounted)
+            .is_some_and(|(accounted, unaccounted)| {
+                accounted.saturating_add(unaccounted) == internal_total.unwrap_or(u64::MAX)
+            })
+        && boolean(timings, "/consistent") == Some(true)
+        && internal_total
+            .zip(external_total)
+            .is_some_and(|(internal, external)| internal <= external);
+    if !valid {
+        blockers.push(blocker.to_string());
+    }
 }
 
 fn validate_verification(

@@ -239,7 +239,13 @@ Skein copy read-only with authoritative indexes, reopen once per frozen SQL
 case, retain distinct cold and warm runs, compare every output with an offline
 digest, obtain one runtime-governor permit per measured read, and redact paths,
 parameters, and rows. The report MUST retain the governor's derived capacity,
-dynamic budget, and admission/completion deltas. A case is not ready when its
+dynamic budget, and admission/completion deltas. Every open MUST retain the
+engine-measured durable-manifest, checkpoint/root, WAL-replay, post-replay, and
+total-open intervals. The four sequential phase intervals use one monotonic
+clock, their saturated sum MUST NOT exceed the total, and the engine total MUST
+NOT exceed the caller's enclosing open measurement. Release evaluation MUST
+recompute those relations from the raw fields rather than trusting a reported
+`consistent` value. A case is not ready when its
 selected generation changes across opens, row and index epochs diverge, either
 canonical artifact does not exceed the cache, an access wave is rejected by
 the cache, a pin leaks, or an explicit row, payload, I/O, RSS, or page-fault

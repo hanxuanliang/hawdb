@@ -1,9 +1,9 @@
 use super::evidence::execute_qualified_read;
 use super::resource::{process_evidence, runtime_memory_evidence};
 use super::{
-    ContentStoreProcessResourceEvidence, ContentStoreResourceProfileKind,
-    ContentStoreRowPageReadPhase, ContentStoreRowPageReadReport, ContentStoreRuntimeMemoryEvidence,
-    CONTENT_STORE_512_MIB_CAPABILITY_BYTES,
+    ContentStoreOpenTimingEvidence, ContentStoreProcessResourceEvidence,
+    ContentStoreResourceProfileKind, ContentStoreRowPageReadPhase, ContentStoreRowPageReadReport,
+    ContentStoreRuntimeMemoryEvidence, CONTENT_STORE_512_MIB_CAPABILITY_BYTES,
 };
 use crate::evidence_digest::{hash_bytes, hash_value};
 use crate::production_graph::validate_production_identity_for_current_target;
@@ -119,6 +119,7 @@ pub struct ProductionContentStoreResidencyEvidence {
 pub struct ProductionContentStoreOpenEvidence {
     pub case_name: String,
     pub latency_micros: u64,
+    pub open_timings: ContentStoreOpenTimingEvidence,
     pub recovered_commit_epoch: u64,
     pub replayed_wal_entries: usize,
     pub replayed_wal_bytes: u64,
@@ -279,6 +280,10 @@ pub fn run_production_content_store_storage_qualification(
         let open_latency_micros = elapsed_micros(open_started);
         let process_after_open = ProcessMemorySnapshot::capture()?;
         let recovery = database.storage_recovery_report();
+        let open_timings = ContentStoreOpenTimingEvidence::from(recovery.open_timings);
+        if !open_timings.consistent || open_timings.total_open_micros > open_latency_micros {
+            blocker_codes.push("content_store_open_timing_invalid".to_string());
+        }
         let observed = residency_evidence(
             database.commit_epoch(),
             &database.storage_residency_report(),
@@ -295,6 +300,7 @@ pub fn run_production_content_store_storage_qualification(
         opens.push(ProductionContentStoreOpenEvidence {
             case_name: read_case.case_name.clone(),
             latency_micros: open_latency_micros,
+            open_timings,
             recovered_commit_epoch: recovery.recovered_commit_epoch,
             replayed_wal_entries: recovery.replayed_wal_entries,
             replayed_wal_bytes: recovery.replayed_wal_bytes,
@@ -1082,6 +1088,8 @@ mod tests {
             release.content_store_read.blocker_codes
         );
         assert_eq!(report.opens.len(), 1);
+        assert!(report.opens[0].open_timings.consistent);
+        assert!(report.opens[0].open_timings.total_open_micros <= report.opens[0].latency_micros);
         assert_eq!(report.runs.len(), 2);
         assert_eq!(report.runtime_governor.admissions_delta, 2);
         assert_eq!(report.runtime_governor.completions_delta, 2);

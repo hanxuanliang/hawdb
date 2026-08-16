@@ -39,7 +39,9 @@ pub use production::*;
 pub use production_mutation::*;
 use resource::{qualify_content_store_resources, ContentStoreResourceProbeConfig};
 use serde::Serialize;
-use skein::{Database, DurabilityPolicy, RelationalIndexMode, Result, SkeinError};
+use skein::{
+    Database, DurabilityPolicy, RelationalIndexMode, Result, SkeinError, StorageOpenTimings,
+};
 use source_ownership::qualify_source_ownership_move;
 use source_replacement::qualify_source_chunk_replacement;
 use space_merge_ownership::qualify_space_merge_ownership;
@@ -61,6 +63,33 @@ pub enum ContentStoreResourceProfileKind {
     Capability512Mib,
     DesktopBound8Gib,
     ConfiguredWorkload,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ContentStoreOpenTimingEvidence {
+    pub durable_manifest_open_micros: u64,
+    pub checkpoint_root_open_micros: u64,
+    pub wal_replay_micros: u64,
+    pub post_replay_open_micros: u64,
+    pub accounted_micros: u64,
+    pub unaccounted_micros: u64,
+    pub total_open_micros: u64,
+    pub consistent: bool,
+}
+
+impl From<StorageOpenTimings> for ContentStoreOpenTimingEvidence {
+    fn from(timings: StorageOpenTimings) -> Self {
+        Self {
+            durable_manifest_open_micros: timings.durable_manifest_open_micros,
+            checkpoint_root_open_micros: timings.checkpoint_root_open_micros,
+            wal_replay_micros: timings.wal_replay_micros,
+            post_replay_open_micros: timings.post_replay_open_micros,
+            accounted_micros: timings.accounted_micros(),
+            unaccounted_micros: timings.unaccounted_micros(),
+            total_open_micros: timings.total_open_micros,
+            consistent: timings.is_consistent(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -105,7 +105,7 @@ pub use projection::{
     ProjectedGraphDefinition, ProjectedGraphStatus, PropertyIndexProjectionRebuildAction,
     SchemaMaintenanceAction, SchemaMaintenancePlanItem, SearchProjectionChangefeedReadiness,
     SearchProjectionChangefeedStatus, SearchProjectionGraphChange, SearchProjectionMutationId,
-    StorageReclamationWatermark, StorageRecoveryReport, StoreStableIdMapping,
+    StorageOpenTimings, StorageReclamationWatermark, StorageRecoveryReport, StoreStableIdMapping,
 };
 pub use property_projection::{
     persistent_composite_property_identity, PersistentPropertyProjectionBlockDescriptor,

@@ -537,12 +537,14 @@ case budget.
 After writes, the runner drops all handles and reopens the dirty replica before
 checkpoint. This open MUST replay non-empty WAL into current row and index
 recovery views, preserve every verification digest, and report its total open
-latency and replayed entries and bytes. It then checkpoints, reopens again, and
+latency, engine-measured manifest, checkpoint/root, WAL-replay and post-replay
+intervals, and replayed entries and bytes. It then checkpoints, reopens again, and
 requires a manifest-selected current view with no WAL replay and no remaining
 live or recovery delta. These two open shapes are retained independently; the
-runner does not subtract their wall-clock durations and label the difference
-as exact WAL replay time. Exact phase timings require engine instrumentation
-rather than an inferred benchmark value.
+runner uses the engine's monotonic phase instrumentation and does not subtract
+the two wall-clock durations to infer WAL replay time. The phase sum must fit
+inside both the engine total and the caller's enclosing measurement, and the
+release evaluator recomputes that invariant from raw evidence.
 
 The writer matrix uses the same resource-profile meanings as the read-only
 gate. `Capability512Mib` proves that an explicitly configured Skein workload can

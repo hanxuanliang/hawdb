@@ -21,9 +21,11 @@ and algorithms outside active routes are not implied backlog items.
   - The typed read-only Content Store runner now binds frozen SQL cases to the
     production identity, reopens a fresh cold cache per case, retains cold and
     warm runs, and rejects relational row/index generation drift, undersized
-    artifacts, cache rejection, leaked pins, or explicit resource-budget
-    violations. Run it against the imported representative Skein copy; its
-    synthetic contract test is not production evidence.
+    artifacts, cache rejection, leaked pins, invalid engine-measured manifest,
+    checkpoint/root, WAL-replay, post-replay, or total-open timing partitions,
+    or explicit resource-budget violations. Run it against the imported
+    representative Skein copy; its synthetic contract test is not production
+    evidence.
   - The typed writable Content Store runner now requires four distinct
     disposable replicas separate from the read-only source, exercises frozen
     insert/update transactions at exactly 1, 4, 8, and 10 writers, retains
@@ -240,20 +242,6 @@ crash; read-only recovery remains fail closed.
     host/cgroup ceiling takes precedence. Retain this item until the constrained
     capability and production-profile workload artifacts are checked in; the
     policy report alone does not prove peak RSS.
-  - Because no storage format has shipped, activation is destructive: remove
-    the ordinary materialized row selector instead of retaining a compatibility
-    or rollback path. The read-only authoritative serving handle now has no row
-    fallback and a clean checkpoint no longer constructs that oracle. The
-    read-only authoritative WAL path now reuses exact pre-published row/index
-    deltas without reconstructing that oracle. The remaining online dependency
-    is writable WAL recovery. Schema-stable DML now persists a bounded exact
-    primary-key replay access set, including predicate non-matches and
-    transiently touched keys, and writable recovery recomputes and verifies it
-    before accepting the record.
-    The next stage must hydrate only that authenticated set into a sparse
-    mutation workspace before the full oracle can be kept only in offline
-    qualification code.
-
 - [ ] Differentially qualify and production-activate persistent graph indexes.
   - Equality, range, full-text, ordered composite-equality, relationship
     equality/range, forward adjacency, and reverse adjacency projections are

@@ -32,6 +32,7 @@ pub struct StorageReclamationWatermark {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StorageRecoveryReport {
+    pub open_timings: StorageOpenTimings,
     pub durable: bool,
     pub recovery_mode: crate::RecoveryMode,
     pub max_wal_replay_entries: Option<usize>,
@@ -50,6 +51,39 @@ pub struct StorageRecoveryReport {
     pub discarded_wal_tail_bytes: u64,
     pub torn_tail_reason: Option<String>,
     pub recovered_commit_epoch: u64,
+}
+
+/// Monotonic elapsed-time observations for one durable database open.
+///
+/// These measurements are deliberately separated from recovery correctness:
+/// they make manifest/root work and WAL replay independently observable
+/// without changing which durable state is accepted. The phase intervals are
+/// sequential and therefore their saturated sum must not exceed the total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StorageOpenTimings {
+    pub durable_manifest_open_micros: u64,
+    pub checkpoint_root_open_micros: u64,
+    pub wal_replay_micros: u64,
+    pub post_replay_open_micros: u64,
+    pub total_open_micros: u64,
+}
+
+impl StorageOpenTimings {
+    pub fn accounted_micros(self) -> u64 {
+        self.durable_manifest_open_micros
+            .saturating_add(self.checkpoint_root_open_micros)
+            .saturating_add(self.wal_replay_micros)
+            .saturating_add(self.post_replay_open_micros)
+    }
+
+    pub fn unaccounted_micros(self) -> u64 {
+        self.total_open_micros
+            .saturating_sub(self.accounted_micros())
+    }
+
+    pub fn is_consistent(self) -> bool {
+        self.accounted_micros() <= self.total_open_micros
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

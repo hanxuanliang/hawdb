@@ -108,6 +108,34 @@ fn content_store_mutation_top_level_ready_cannot_hide_recovery_or_latency_drift(
 }
 
 #[test]
+fn content_store_release_gate_recomputes_open_timing_partitions() {
+    let expected = identity("linux", "x86_64");
+    let mut read = content_store_read(&expected);
+    read["opens"][0]["open_timings"]["accounted_micros"] = serde_json::json!(9);
+    let mut mutation = content_store_mutation_matrix(&expected);
+    mutation["cases"][0]["wal_replay_open"]["open_timings"]["total_open_micros"] =
+        serde_json::json!(101);
+    let report = evaluate_production_release_qualification_bundle(
+        ProductionReleaseQualificationArtifacts {
+            content_store_read: Some(read),
+            content_store_mutation_matrix: Some(mutation),
+            ..ProductionReleaseQualificationArtifacts::default()
+        },
+        expected,
+        ProductionReleaseQualificationPolicy::default(),
+    );
+
+    assert!(report
+        .content_store_read
+        .blocker_codes
+        .contains(&"content_store_read_open_timing_invalid".to_string()));
+    assert!(report
+        .content_store_mutation_matrix
+        .blocker_codes
+        .contains(&"content_store_mutation_wal_open_timing_invalid".to_string()));
+}
+
+#[test]
 fn content_store_mutation_matrix_rejects_duplicate_writer_shapes() {
     let expected = identity("linux", "x86_64");
     let mut artifact = content_store_mutation_matrix(&expected);
@@ -626,12 +654,33 @@ fn content_store_read(identity: &ProductionQualificationIdentity) -> Value {
         "opens": [{
             "case_name": "message_lookup",
             "latency_micros": 10,
+            "open_timings": content_store_open_timings(8, 1),
             "recovered_commit_epoch": identity.canonical_graph_commit_epoch,
             "replayed_wal_entries": 0,
             "replayed_wal_bytes": 0,
             "process": content_store_process(),
         }],
         "runs": [run(0, "cold", 0, 1), run(1, "warm", 1, 0)],
+    })
+}
+
+fn content_store_open_timings(total_open_micros: u64, wal_replay_micros: u64) -> Value {
+    let durable_manifest_open_micros = 1;
+    let checkpoint_root_open_micros = 1;
+    let post_replay_open_micros = 1;
+    let accounted_micros = durable_manifest_open_micros
+        + checkpoint_root_open_micros
+        + wal_replay_micros
+        + post_replay_open_micros;
+    serde_json::json!({
+        "durable_manifest_open_micros": durable_manifest_open_micros,
+        "checkpoint_root_open_micros": checkpoint_root_open_micros,
+        "wal_replay_micros": wal_replay_micros,
+        "post_replay_open_micros": post_replay_open_micros,
+        "accounted_micros": accounted_micros,
+        "unaccounted_micros": total_open_micros.saturating_sub(accounted_micros),
+        "total_open_micros": total_open_micros,
+        "consistent": true,
     })
 }
 
@@ -749,6 +798,7 @@ fn content_store_mutation_case(
         },
         "wal_replay_open": {
             "total_open_latency_micros": 100,
+            "open_timings": content_store_open_timings(80, 50),
             "checkpoint_commit_epoch": identity.canonical_graph_commit_epoch,
             "recovered_commit_epoch": committed_epoch,
             "replayed_wal_entries": operation_count,
@@ -758,6 +808,7 @@ fn content_store_mutation_case(
         },
         "manifest_only_open": {
             "total_open_latency_micros": 50,
+            "open_timings": content_store_open_timings(40, 0),
             "checkpoint_commit_epoch": committed_epoch,
             "recovered_commit_epoch": committed_epoch,
             "replayed_wal_entries": 0,

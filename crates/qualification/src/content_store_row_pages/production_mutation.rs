@@ -1,7 +1,7 @@
 use super::resource::process_evidence;
 use super::{
-    ContentStoreProcessResourceEvidence, ContentStoreResourceProfileKind,
-    CONTENT_STORE_512_MIB_CAPABILITY_BYTES,
+    ContentStoreOpenTimingEvidence, ContentStoreProcessResourceEvidence,
+    ContentStoreResourceProfileKind, CONTENT_STORE_512_MIB_CAPABILITY_BYTES,
 };
 use crate::evidence_digest::{hash_bytes, hash_value, rows_sha256};
 use crate::production_graph::validate_production_identity_for_current_target;
@@ -165,6 +165,7 @@ pub struct ProductionContentStoreMutationStorageEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProductionContentStoreMutationRecoveryEvidence {
     pub total_open_latency_micros: u64,
+    pub open_timings: ContentStoreOpenTimingEvidence,
     pub checkpoint_commit_epoch: Option<u64>,
     pub recovered_commit_epoch: u64,
     pub replayed_wal_entries: usize,
@@ -943,6 +944,11 @@ fn collect_case_blockers(inputs: CaseBlockerInputs<'_>, blockers: &mut Vec<Strin
     {
         blockers.push("content_store_mutation_wal_replay_evidence_invalid".to_string());
     }
+    if !wal_replay.open_timings.consistent
+        || wal_replay.open_timings.total_open_micros > wal_replay.total_open_latency_micros
+    {
+        blockers.push("content_store_mutation_wal_open_timing_invalid".to_string());
+    }
     if recovered.row_recovery_delta_entries == 0 || recovered.index_recovery_delta_entries == 0 {
         blockers.push("content_store_mutation_recovery_delta_evidence_missing".to_string());
     }
@@ -952,6 +958,11 @@ fn collect_case_blockers(inputs: CaseBlockerInputs<'_>, blockers: &mut Vec<Strin
         || manifest_only.checkpoint_commit_epoch != Some(committed_epoch)
     {
         blockers.push("content_store_mutation_manifest_open_evidence_invalid".to_string());
+    }
+    if !manifest_only.open_timings.consistent
+        || manifest_only.open_timings.total_open_micros > manifest_only.total_open_latency_micros
+    {
+        blockers.push("content_store_mutation_manifest_open_timing_invalid".to_string());
     }
     if final_storage.row_recovery_delta_entries != 0
         || final_storage.index_recovery_delta_entries != 0
@@ -1079,6 +1090,7 @@ fn recovery_evidence(
 ) -> ProductionContentStoreMutationRecoveryEvidence {
     ProductionContentStoreMutationRecoveryEvidence {
         total_open_latency_micros,
+        open_timings: report.open_timings.into(),
         checkpoint_commit_epoch: report.checkpoint_commit_epoch,
         recovered_commit_epoch: report.recovered_commit_epoch,
         replayed_wal_entries: report.replayed_wal_entries,
@@ -1321,7 +1333,13 @@ mod tests {
                 case.operation_count as u64
             );
             assert!(case.wal_replay_open.replayed_wal_entries > 0);
+            assert!(case.wal_replay_open.open_timings.consistent);
+            assert!(
+                case.wal_replay_open.open_timings.total_open_micros
+                    <= case.wal_replay_open.total_open_latency_micros
+            );
             assert_eq!(case.manifest_only_open.replayed_wal_entries, 0);
+            assert!(case.manifest_only_open.open_timings.consistent);
             assert_eq!(case.replay_verification, case.checkpoint_verification);
             assert_eq!(case.commit_p95_regression_per_million, 0);
         }

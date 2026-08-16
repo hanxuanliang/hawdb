@@ -156,11 +156,11 @@ pub use skein_storage::{
     SegmentCache, SegmentCacheSnapshot, SegmentRangeReader, SegmentReadError,
     SegmentReadExecutionError, SegmentReadExecutionReport, SegmentReadExecutor, SegmentReadPayload,
     SegmentReadRange, SegmentReadSchedule, SegmentReadScheduler, SegmentReadWave,
-    StorageBackupReport, StorageDebtController, StoragePressureReasonCode, StoragePressureSignals,
-    StoragePressureSnapshot, StoragePressureState, StorageReclamationWatermark,
-    StorageRecoveryReport, StorageResidencyMode, StorageRestoreReport, StorageScrubReport, StoreId,
-    StoreStableIdMapping, WalReplayConfig, STORAGE_PRESSURE_DELAY_RATIO_PER_MILLION,
-    STORAGE_PRESSURE_SOFT_RATIO_PER_MILLION,
+    StorageBackupReport, StorageDebtController, StorageOpenTimings, StoragePressureReasonCode,
+    StoragePressureSignals, StoragePressureSnapshot, StoragePressureState,
+    StorageReclamationWatermark, StorageRecoveryReport, StorageResidencyMode, StorageRestoreReport,
+    StorageScrubReport, StoreId, StoreStableIdMapping, WalReplayConfig,
+    STORAGE_PRESSURE_DELAY_RATIO_PER_MILLION, STORAGE_PRESSURE_SOFT_RATIO_PER_MILLION,
 };
 pub use skein_storage::{RelationalIndexArtifactMetadata, RelationalIndexGenerationArtifacts};
 pub(crate) use skein_storage::{WalSyncGroupFlush, WalSyncGroupProgress};
@@ -1857,6 +1857,8 @@ impl GraphStore {
                     .to_string(),
             ));
         }
+        let total_open_started = std::time::Instant::now();
+        let durable_manifest_open_started = std::time::Instant::now();
         let durable = match mode {
             DurableOpenMode::CreateIfMissing => DurableStore::open(
                 path.as_ref(),
@@ -1875,8 +1877,25 @@ impl GraphStore {
                 replay_config.max_batch_operations,
             )?,
         };
-        let (mut store, _) = Self::finish_open(durable, catalog, replay_config)?;
+        let durable_manifest_open_micros = elapsed_micros(durable_manifest_open_started);
+        let (mut store, _) = Self::finish_open(
+            durable,
+            catalog,
+            replay_config,
+            durable_manifest_open_micros,
+        )?;
+        let activation_started = std::time::Instant::now();
         store.activate_out_of_core_relational_rows()?;
+        store
+            .storage_recovery_report
+            .open_timings
+            .post_replay_open_micros = store
+            .storage_recovery_report
+            .open_timings
+            .post_replay_open_micros
+            .saturating_add(elapsed_micros(activation_started));
+        store.storage_recovery_report.open_timings.total_open_micros =
+            elapsed_micros(total_open_started);
         Ok(store)
     }
 
@@ -1884,6 +1903,7 @@ impl GraphStore {
         durable: DurableStore,
         catalog: &mut Catalog,
         replay_config: WalReplayConfig,
+        durable_manifest_open_micros: u64,
     ) -> Result<(Self, Catalog)> {
         let mut store = Self {
             next_node_id: 0,
@@ -1937,6 +1957,7 @@ impl GraphStore {
         {
             store.relational_state.omit_materialized_index_postings();
         }
+        let checkpoint_root_open_started = std::time::Instant::now();
         store.load_checkpoint(catalog, replay_config)?;
         if replay_config.graph_columnar_shadow_checkpoint {
             // Mounted between checkpoint load and WAL replay so replayed
@@ -1945,14 +1966,26 @@ impl GraphStore {
         }
         store.mount_relational_row_pages_for_recovery()?;
         store.mount_relational_index_shadow_for_recovery();
+        let checkpoint_root_open_micros = elapsed_micros(checkpoint_root_open_started);
         let checkpoint_catalog = catalog.clone();
-        store.storage_recovery_report = store.replay_wal(catalog, replay_config)?;
+        let wal_replay_started = std::time::Instant::now();
+        let mut storage_recovery_report = store.replay_wal(catalog, replay_config)?;
+        let wal_replay_micros = elapsed_micros(wal_replay_started);
+        let post_replay_open_started = std::time::Instant::now();
         store.validate_authoritative_relational_index_open()?;
         store.validate_relationship_endpoints()?;
         store.refresh_basic_statistics_epoch();
         store.load_projected_graph_artifacts()?;
         store.load_stable_id_mapping()?;
         store.load_source_scan_manifest()?;
+        storage_recovery_report.open_timings = StorageOpenTimings {
+            durable_manifest_open_micros,
+            checkpoint_root_open_micros,
+            wal_replay_micros,
+            post_replay_open_micros: elapsed_micros(post_replay_open_started),
+            total_open_micros: 0,
+        };
+        store.storage_recovery_report = storage_recovery_report;
         Ok((store, checkpoint_catalog))
     }
 
@@ -1965,6 +1998,8 @@ impl GraphStore {
                 "derived repair requires strict WAL replay".to_string(),
             ));
         }
+        let total_open_started = std::time::Instant::now();
+        let durable_manifest_open_started = std::time::Instant::now();
         let durable = DurableStore::open_for_derived_repair(
             path,
             DurabilityPolicy::default(),
@@ -1973,9 +2008,16 @@ impl GraphStore {
             replay_config.max_record_bytes,
             replay_config.max_batch_operations,
         )?;
+        let durable_manifest_open_micros = elapsed_micros(durable_manifest_open_started);
         let mut recovered_catalog = Catalog::default();
-        let (store, checkpoint_catalog) =
-            Self::finish_open(durable, &mut recovered_catalog, replay_config)?;
+        let (mut store, checkpoint_catalog) = Self::finish_open(
+            durable,
+            &mut recovered_catalog,
+            replay_config,
+            durable_manifest_open_micros,
+        )?;
+        store.storage_recovery_report.open_timings.total_open_micros =
+            elapsed_micros(total_open_started);
         Ok((store, recovered_catalog, checkpoint_catalog))
     }
 

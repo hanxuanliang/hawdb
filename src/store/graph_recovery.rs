@@ -937,6 +937,7 @@ impl GraphStore {
                 )));
             }
             return Ok(StorageRecoveryReport {
+                open_timings: Default::default(),
                 durable: true,
                 recovery_mode: config.recovery_mode,
                 max_wal_replay_entries: config.max_entries,
@@ -1097,6 +1098,7 @@ impl GraphStore {
             durable.wal_commit_epoch = self.commit_epoch;
         }
         Ok(StorageRecoveryReport {
+            open_timings: Default::default(),
             durable: true,
             recovery_mode: config.recovery_mode,
             max_wal_replay_entries: config.max_entries,

@@ -1489,6 +1489,12 @@ fn storage_recovery_report_tracks_wal_replay_boundary() {
     assert!(!report.torn_tail_ignored);
     assert_eq!(report.torn_tail_reason, None);
     assert_eq!(report.recovered_commit_epoch, 3);
+    assert!(report.open_timings.is_consistent());
+    assert!(report.open_timings.wal_replay_micros <= report.open_timings.total_open_micros);
+    assert_eq!(
+        report.open_timings.accounted_micros() + report.open_timings.unaccounted_micros(),
+        report.open_timings.total_open_micros
+    );
 
     std::fs::remove_dir_all(path).unwrap();
 }

@@ -2578,6 +2578,15 @@ fn storage_recovery_report_json(
     serde_json::json!({
         "protocol": "skein-storage-recovery-report",
         "storage_version": storage_version,
+        "open_timings": {
+            "durable_manifest_open_micros": report.open_timings.durable_manifest_open_micros,
+            "checkpoint_root_open_micros": report.open_timings.checkpoint_root_open_micros,
+            "wal_replay_micros": report.open_timings.wal_replay_micros,
+            "post_replay_open_micros": report.open_timings.post_replay_open_micros,
+            "accounted_micros": report.open_timings.accounted_micros(),
+            "unaccounted_micros": report.open_timings.unaccounted_micros(),
+            "total_open_micros": report.open_timings.total_open_micros,
+        },
         "durable": report.durable,
         "recovery_mode": recovery_mode_name(report.recovery_mode),
         "max_wal_replay_entries": report.max_wal_replay_entries,
@@ -2603,6 +2612,7 @@ fn storage_recovery_report_json(
                 && report.max_wal_replay_bytes.is_some()
                 && report.max_wal_record_bytes.is_some(),
             "torn_tail_clean": !report.torn_tail_ignored || report.torn_tail_repaired,
+            "open_timing_consistent": report.open_timings.is_consistent(),
         },
     })
 }

@@ -374,6 +374,7 @@ fn read_json_file(path: &Path) -> Result<serde_json::Value> {
 mod tests {
     use super::{run_nowledge_mem_library_readiness, run_nowledge_mem_library_readiness_report};
     use crate::{Database, NowledgeMemGraphMode, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES};
+    use serde_json::Value;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -478,8 +479,47 @@ mod tests {
         assert!(!typed.readiness.readiness_by_area.query_family.ready);
         assert!(typed.open_report.graph_opened);
         assert!(!typed.open_report.search_projection_opened);
-        assert_eq!(typed.json(), readiness);
+        let typed_json = typed.json();
+        assert_storage_open_timing_contract(&readiness);
+        assert_storage_open_timing_contract(&typed_json);
+        assert_eq!(
+            normalize_storage_open_timings(typed_json),
+            normalize_storage_open_timings(readiness)
+        );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn assert_storage_open_timing_contract(readiness: &Value) {
+        let timings = &readiness["storage_recovery"]["open_timings"];
+        let phase_sum = [
+            "durable_manifest_open_micros",
+            "checkpoint_root_open_micros",
+            "wal_replay_micros",
+            "post_replay_open_micros",
+        ]
+        .into_iter()
+        .map(|field| timings[field].as_u64().unwrap())
+        .sum::<u64>();
+        let accounted = timings["accounted_micros"].as_u64().unwrap();
+        let unaccounted = timings["unaccounted_micros"].as_u64().unwrap();
+        let total = timings["total_open_micros"].as_u64().unwrap();
+
+        assert_eq!(phase_sum, accounted);
+        assert_eq!(accounted + unaccounted, total);
+        assert_eq!(
+            readiness["storage_recovery"]["readiness"]["open_timing_consistent"],
+            Value::Bool(true)
+        );
+    }
+
+    fn normalize_storage_open_timings(mut readiness: Value) -> Value {
+        let timings = readiness["storage_recovery"]["open_timings"]
+            .as_object_mut()
+            .unwrap();
+        for value in timings.values_mut() {
+            *value = Value::from(0);
+        }
+        readiness
     }
 
     #[test]

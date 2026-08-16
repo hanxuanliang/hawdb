@@ -1325,11 +1325,12 @@ scan therefore cannot create an unbounded recovery contract merely because it
 changes few or no rows. The WAL envelope authenticates the set with the logical
 transaction. The encoder MUST enforce the WAL decoder's entry, value, and
 record-byte limits before append, so custom capture limits cannot create a
-durable record that reopen rejects. Writable recovery currently replays against
-the materialized state and recomputes the set, rejecting any drift as
-corruption. The next sparse-writable stage may hydrate only this authenticated
-set before replaying logical `UPDATE`, `DELETE`, and `UPSERT`; it MUST NOT infer
-a smaller set or fall back to a database-sized row scan. Schema-changing
+durable record that reopen rejects. Writable metadata-only recovery hydrates
+exactly this authenticated set from the pinned checkpoint and previously staged
+recovery deltas into a bounded sparse workspace before replaying logical
+`UPDATE`, `DELETE`, and `UPSERT`. It recomputes the access set and rejects any
+drift as corruption; it MUST NOT infer a smaller set, construct the complete
+materialized state, or fall back to a database-sized row scan. Schema-changing
 records remain checkpoint barriers and do not use this contract.
 
 An ordinary materialized mutation against an omitted state fails closed instead

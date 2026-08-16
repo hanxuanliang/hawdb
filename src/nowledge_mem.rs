@@ -47,7 +47,10 @@ use crate::{
         NOWLEDGE_MEM_SEARCH_ROUTE_OWNERSHIP_PROTOCOL, REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES,
         REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES,
     },
-    store::{RecoveryMode, ScanPruningReport, ScanPruningStrategy, StorageRecoveryReport},
+    store::{
+        RecoveryMode, ScanPruningReport, ScanPruningStrategy, StorageOpenTimings,
+        StorageRecoveryReport,
+    },
     workload_fixtures::{
         NowledgeGraphRouteWorkloadFixtureReport, NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL,
     },
@@ -4677,6 +4680,7 @@ pub struct NowledgeMemStorageRecoveryReport {
     pub protocol: String,
     pub present: bool,
     pub ready: bool,
+    pub open_timings: StorageOpenTimings,
     pub durable: bool,
     pub recovery_mode: RecoveryMode,
     pub checkpoint_epoch: Option<u64>,
@@ -4700,6 +4704,7 @@ pub struct NowledgeMemStorageRecoveryReport {
     pub wal_replay_bounded: bool,
     pub replay_boundary_consistent: bool,
     pub torn_tail_clean: bool,
+    pub open_timing_consistent: bool,
     pub blocker_codes: Vec<String>,
 }
 
@@ -4718,6 +4723,7 @@ impl NowledgeMemStorageRecoveryReport {
         let replay_boundary_consistent = storage_recovery_replay_boundary_consistent(report);
         let torn_tail_clean = (!report.torn_tail_ignored && report.torn_tail_reason.is_none())
             || report.torn_tail_repaired;
+        let open_timing_consistent = report.open_timings.is_consistent();
         let mut blocker_codes = Vec::new();
         if !durable_recovery_observed {
             blocker_codes.push("durable_recovery_not_observed".to_string());
@@ -4734,11 +4740,15 @@ impl NowledgeMemStorageRecoveryReport {
         if !torn_tail_clean {
             blocker_codes.push("torn_tail_observed".to_string());
         }
+        if !open_timing_consistent {
+            blocker_codes.push("storage_open_timing_inconsistent".to_string());
+        }
 
         Self {
             protocol: "skein-storage-recovery-report".to_string(),
             present: true,
             ready: blocker_codes.is_empty(),
+            open_timings: report.open_timings,
             durable: report.durable,
             recovery_mode: report.recovery_mode,
             checkpoint_epoch: report.checkpoint_epoch,
@@ -4762,6 +4772,7 @@ impl NowledgeMemStorageRecoveryReport {
             wal_replay_bounded,
             replay_boundary_consistent,
             torn_tail_clean,
+            open_timing_consistent,
             blocker_codes,
         }
     }
@@ -4771,6 +4782,15 @@ impl NowledgeMemStorageRecoveryReport {
             "protocol": self.protocol,
             "present": self.present,
             "ready": self.ready,
+            "open_timings": {
+                "durable_manifest_open_micros": self.open_timings.durable_manifest_open_micros,
+                "checkpoint_root_open_micros": self.open_timings.checkpoint_root_open_micros,
+                "wal_replay_micros": self.open_timings.wal_replay_micros,
+                "post_replay_open_micros": self.open_timings.post_replay_open_micros,
+                "accounted_micros": self.open_timings.accounted_micros(),
+                "unaccounted_micros": self.open_timings.unaccounted_micros(),
+                "total_open_micros": self.open_timings.total_open_micros,
+            },
             "durable": self.durable,
             "recovery_mode": recovery_mode_name(self.recovery_mode),
             "checkpoint_epoch": self.checkpoint_epoch,
@@ -4795,6 +4815,7 @@ impl NowledgeMemStorageRecoveryReport {
                 "wal_replay_bounded": self.wal_replay_bounded,
                 "replay_boundary_consistent": self.replay_boundary_consistent,
                 "torn_tail_clean": self.torn_tail_clean,
+                "open_timing_consistent": self.open_timing_consistent,
             },
             "blocker_codes": self.blocker_codes,
         })
@@ -12919,9 +12940,9 @@ mod tests {
         SearchProjectionRow, SkeinLightningInitialImportCheckpoint,
         SkeinLightningInitialImportCutoverCatchUpReport,
         SkeinLightningInitialImportDocumentIdentity, SkeinLightningInitialImportReadinessInputs,
-        StorageRecoveryReport, StorageResidencyMode, StorageResourceProfileLimits,
-        VectorRecallValidationOptions, VectorRecallValidationReport, WorkClass,
-        PRODUCTION_QUALIFICATION_POLICY_VERSION, VECTOR_RECALL_VALIDATION_PROTOCOL,
+        StorageOpenTimings, StorageRecoveryReport, StorageResidencyMode,
+        StorageResourceProfileLimits, VectorRecallValidationOptions, VectorRecallValidationReport,
+        WorkClass, PRODUCTION_QUALIFICATION_POLICY_VERSION, VECTOR_RECALL_VALIDATION_PROTOCOL,
     };
     use std::collections::BTreeMap;
     use std::sync::mpsc;
@@ -16561,6 +16582,7 @@ mod tests {
     fn storage_recovery_report_exposes_typed_readiness_summary() {
         let report =
             NowledgeMemStorageRecoveryReport::from_storage_report(&StorageRecoveryReport {
+                open_timings: Default::default(),
                 durable: true,
                 recovery_mode: RecoveryMode::Strict,
                 max_wal_replay_entries: Some(16),
@@ -16595,9 +16617,45 @@ mod tests {
     }
 
     #[test]
+    fn storage_recovery_report_rejects_inconsistent_open_timings() {
+        let report =
+            NowledgeMemStorageRecoveryReport::from_storage_report(&StorageRecoveryReport {
+                open_timings: StorageOpenTimings {
+                    durable_manifest_open_micros: 2,
+                    total_open_micros: 1,
+                    ..StorageOpenTimings::default()
+                },
+                durable: true,
+                recovery_mode: RecoveryMode::Strict,
+                max_wal_replay_entries: Some(16),
+                max_wal_replay_bytes: Some(4096),
+                max_wal_record_bytes: Some(1024),
+                checkpoint_epoch: Some(3),
+                checkpoint_commit_epoch: Some(11),
+                wal_present: true,
+                wal_replay_start_lsn: Some(4),
+                next_lsn_after_replay: Some(7),
+                replayed_wal_entries: 3,
+                torn_tail_ignored: false,
+                torn_tail_reason: None,
+                recovered_commit_epoch: 14,
+                ..StorageRecoveryReport::default()
+            });
+
+        assert!(!report.open_timing_consistent);
+        assert!(!report.ready);
+        assert_eq!(
+            report.blocker_codes,
+            vec!["storage_open_timing_inconsistent".to_string()]
+        );
+        assert_eq!(report.json()["readiness"]["open_timing_consistent"], false);
+    }
+
+    #[test]
     fn storage_lifecycle_decision_reports_ready_for_clean_recovery() {
         let recovery =
             NowledgeMemStorageRecoveryReport::from_storage_report(&StorageRecoveryReport {
+                open_timings: Default::default(),
                 durable: true,
                 recovery_mode: RecoveryMode::Strict,
                 max_wal_replay_entries: Some(16),
@@ -16641,6 +16699,7 @@ mod tests {
     fn storage_lifecycle_decision_recommends_wal_tail_repair() {
         let recovery =
             NowledgeMemStorageRecoveryReport::from_storage_report(&StorageRecoveryReport {
+                open_timings: Default::default(),
                 durable: true,
                 recovery_mode: RecoveryMode::DoctorRepairTornTail,
                 max_wal_replay_entries: Some(16),
@@ -16704,6 +16763,7 @@ mod tests {
     fn storage_lifecycle_decision_recommends_checkpoint_for_missing_boundary() {
         let recovery =
             NowledgeMemStorageRecoveryReport::from_storage_report(&StorageRecoveryReport {
+                open_timings: Default::default(),
                 durable: true,
                 recovery_mode: RecoveryMode::Strict,
                 max_wal_replay_entries: Some(16),
@@ -16743,6 +16803,7 @@ mod tests {
     fn storage_recovery_report_recomputes_typed_readiness_from_raw_fields() {
         let report =
             NowledgeMemStorageRecoveryReport::from_storage_report(&StorageRecoveryReport {
+                open_timings: Default::default(),
                 durable: true,
                 recovery_mode: RecoveryMode::Strict,
                 max_wal_replay_entries: Some(2),
@@ -16786,6 +16847,7 @@ mod tests {
     fn storage_recovery_report_rejects_inconsistent_replay_boundary() {
         let report =
             NowledgeMemStorageRecoveryReport::from_storage_report(&StorageRecoveryReport {
+                open_timings: Default::default(),
                 durable: true,
                 recovery_mode: RecoveryMode::Strict,
                 max_wal_replay_entries: Some(16),
