@@ -17,6 +17,8 @@ rust_library(
         "src/content_store_row_pages/isolation.rs",
         "src/content_store_row_pages/production.rs",
         "src/content_store_row_pages/production_mutation.rs",
+        "src/content_store_row_pages/production_overflow_compaction.rs",
+        "src/content_store_row_pages/production_overflow_compaction/tests.rs",
         "src/content_store_row_pages/resource.rs",
         "src/content_store_row_pages/space_merge_ownership.rs",
         "src/content_store_row_pages/source_ownership.rs",

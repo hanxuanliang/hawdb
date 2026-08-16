@@ -5,6 +5,7 @@ mod fixture;
 mod isolation;
 mod production;
 mod production_mutation;
+mod production_overflow_compaction;
 mod resource;
 mod source_ownership;
 mod source_replacement;
@@ -37,6 +38,7 @@ use fixture::{
 use isolation::qualify_content_store_isolation;
 pub use production::*;
 pub use production_mutation::*;
+pub use production_overflow_compaction::*;
 use resource::{qualify_content_store_resources, ContentStoreResourceProbeConfig};
 use serde::Serialize;
 use skein::{

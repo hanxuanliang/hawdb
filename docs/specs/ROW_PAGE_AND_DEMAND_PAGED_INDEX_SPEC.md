@@ -767,6 +767,37 @@ do not increase the admitted resident-memory reservation. Production-copy RSS,
 page-fault, elapsed-time, write-amplification, and reclaimed-byte evidence
 remains an activation gate rather than an implementation invariant.
 
+`run_production_content_store_overflow_compaction_qualification` is the typed
+collector for that activation gate. Its input is an existing caller-owned
+disposable writable replica bound to the exact source revision, target,
+configuration, dataset fingerprint, and initial commit epoch. The collector
+MUST NOT copy or mutate the source production database. It requires
+`OutOfCore` plus `Authoritative` serving, a metadata-only row checkpoint, a
+non-zero segment cache, an overflow-bearing row artifact larger than that
+cache, a declared memory profile, and frozen parameterized SQL verification
+cases with offline result digests and hard row, payload, intermediate-row,
+page, and byte budgets.
+
+The collector records process steady and peak RSS, supported page-fault
+counters, elapsed time, runtime-governor admission, scan and spill bounds,
+new-or-grown durable artifact bytes, write amplification relative to the
+published live overflow extent bytes, reclaimable descriptors, and physically
+removed extent files and bytes. It verifies the SQL result digests before and
+after compaction. It then advances the disposable replica by one parameterized
+Cypher qualification marker and publishes a later checkpoint so physical
+reclamation is observable, scrubs the selected durable closure, reopens the
+replica, and repeats the SQL verification. The report contains no replica path
+or business payload. Missing counters requested by policy, mismatched
+generation or epoch identity, payload hydration during the closure scan,
+budget excess, absent physical deletion, scrub failure, or reopen drift blocks
+activation.
+
+The 512 MiB resource kind is an explicitly configured low-memory capability
+run. It is not selected automatically and does not redefine the desktop
+capacity policy. The 8 GiB desktop kind retains dynamic admission and a 2 GiB
+maximum Skein capacity; its measured RSS limits remain separately declared in
+the qualification input.
+
 ### Relational row-root v1 publication
 
 `RelationalRowPagePublisher` publishes a generation through five immutable or

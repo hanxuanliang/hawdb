@@ -183,7 +183,7 @@ fn value_payload_bytes(value: &Value) -> u64 {
     }
 }
 
-fn regular_file_bytes_by_name(path: &Path) -> Result<BTreeMap<String, u64>> {
+pub(super) fn regular_file_bytes_by_name(path: &Path) -> Result<BTreeMap<String, u64>> {
     let mut files = BTreeMap::new();
     for entry in std::fs::read_dir(path)? {
         let entry = entry?;

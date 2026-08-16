@@ -173,10 +173,15 @@ crash; read-only recovery remains fail closed.
     Exact full-scan overflow compaction is now a separately admitted typed
     maintenance operation with zero-hydration closure scanning, bounded
     external sorting, fresh physical rewrite, manifest-last selection, pinned
-    reader retention, and TLA+ coverage. Retain this item until a production
-    copy demonstrates repeated-checkpoint reclaimable bytes, physical deletion,
-    RSS, page faults, elapsed time, and write amplification under its declared
-    resource profile.
+    reader retention, and TLA+ coverage. A typed production collector now runs
+    on a caller-owned disposable replica, binds the exact initial identity,
+    verifies frozen SQL digests before compaction, after publication, and after
+    reopen, advances one Cypher marker plus a later checkpoint, scrubs the
+    selected closure, and records reclaimable descriptors, physical deletion,
+    RSS, page faults, elapsed time, governor admission, and write amplification.
+    Retain this item until representative production-copy reports under the
+    explicitly configured 512 MiB capability and dynamic 8 GiB desktop profile
+    have been retained and admitted by release policy.
   - The typed runner now qualifies `content_documents`, `thread_messages`,
     `content_chunks`, and `content_anchors` using the frozen PostgreSQL statement
     corpus and graph-plus-relational commits that publish one shared epoch.

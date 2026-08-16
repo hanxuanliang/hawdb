@@ -83,6 +83,8 @@ pub struct ProductionContentStoreStorageQualificationConfig {
 pub struct ProductionContentStoreResidencyEvidence {
     pub database_commit_epoch: u64,
     pub row_serving: bool,
+    pub row_materialized_rows_resident: bool,
+    pub row_checkpoint_state_metadata_only: bool,
     pub row_base_generation: Option<u64>,
     pub row_recovery_delta_generation: Option<u64>,
     pub row_base_commit_epoch: Option<u64>,
@@ -92,6 +94,7 @@ pub struct ProductionContentStoreResidencyEvidence {
     pub row_root_key_artifact_bytes: u64,
     pub row_overflow_extent_artifact_bytes: u64,
     pub row_overflow_descriptor_artifact_bytes: u64,
+    pub row_overflow_extent_count: u64,
     pub row_canonical_artifact_bytes: u64,
     pub row_recovery_delta_artifact_bytes: u64,
     pub row_live_entries: usize,
@@ -498,78 +501,37 @@ fn validate_config(
                 .to_string(),
         ));
     }
-    if config.read_cases.is_empty() {
-        return Err(SkeinError::Semantic(
-            "production Content Store qualification requires at least one read case".to_string(),
-        ));
-    }
-    if config.configured_available_memory_bytes == 0 {
-        return Err(SkeinError::Semantic(
-            "production Content Store qualification requires a non-zero configured memory profile"
-                .to_string(),
-        ));
-    }
-    match config.resource_profile_kind {
-        ContentStoreResourceProfileKind::Capability512Mib
-            if config.configured_available_memory_bytes
-                != CONTENT_STORE_512_MIB_CAPABILITY_BYTES =>
-        {
-            return Err(SkeinError::Semantic(format!(
-                "production Content Store 512 MiB capability must declare {CONTENT_STORE_512_MIB_CAPABILITY_BYTES} bytes"
-            )));
-        }
-        ContentStoreResourceProfileKind::DesktopBound8Gib
-            if config.configured_available_memory_bytes != CONTENT_STORE_DESKTOP_8_GIB_BYTES =>
-        {
-            return Err(SkeinError::Semantic(format!(
-                "production Content Store desktop profile must declare {CONTENT_STORE_DESKTOP_8_GIB_BYTES} bytes"
-            )));
-        }
-        _ => {}
-    }
-    let desktop_governor = RuntimeGovernorConfig::desktop_bound();
-    match config.resource_profile_kind {
-        ContentStoreResourceProfileKind::Capability512Mib
-            if config.runtime_governor_config.memory_budget_bytes
-                != Some(CONTENT_STORE_512_MIB_CAPABILITY_BYTES) =>
-        {
-            return Err(SkeinError::Semantic(format!(
-                "production Content Store 512 MiB capability requires an explicit {CONTENT_STORE_512_MIB_CAPABILITY_BYTES}-byte governor ceiling"
-            )));
-        }
-        ContentStoreResourceProfileKind::DesktopBound8Gib
-            if config.runtime_governor_config.memory_budget_bytes.is_some()
-                || config.runtime_governor_config.memory_fraction_per_million
-                    != desktop_governor.memory_fraction_per_million
-                || config.runtime_governor_config.fallback_memory_budget_bytes
-                    != desktop_governor.fallback_memory_budget_bytes =>
-        {
-            return Err(SkeinError::Semantic(
-                "production Content Store desktop profile requires the dynamic desktop governor memory policy"
-                    .to_string(),
-            ));
-        }
-        _ => {}
-    }
-    let limits = config.resource_limits;
-    if limits.max_steady_resident_bytes == 0
-        || limits.max_peak_resident_bytes == 0
-        || limits.max_steady_resident_bytes > limits.max_peak_resident_bytes
-        || limits.max_peak_resident_bytes > config.configured_available_memory_bytes
-    {
-        return Err(SkeinError::Semantic(
-            "production Content Store resident-memory limits must be non-zero, ordered, and within the configured profile"
-                .to_string(),
-        ));
-    }
+    validate_resource_profile(
+        config.resource_profile_kind,
+        config.configured_available_memory_bytes,
+        config.runtime_governor_config,
+        config.resource_limits,
+    )?;
     validate_production_identity_for_current_target(
         &config.evidence_binding,
         &config.expected_identity,
     )
     .map_err(|error| SkeinError::Semantic(error.to_string()))?;
 
+    validate_read_cases(
+        &config.read_cases,
+        corpus,
+        config.runtime_governor_config.result_budget_bytes,
+    )
+}
+
+pub(super) fn validate_read_cases(
+    read_cases: &[ProductionContentStoreReadCase],
+    corpus: &ContentStoreSqlCorpus,
+    result_budget_bytes: u64,
+) -> Result<(), SkeinError> {
+    if read_cases.is_empty() {
+        return Err(SkeinError::Semantic(
+            "production Content Store qualification requires at least one read case".to_string(),
+        ));
+    }
     let mut case_names = BTreeSet::new();
-    for read_case in &config.read_cases {
+    for read_case in read_cases {
         if read_case.case_name.trim().is_empty() || !case_names.insert(&read_case.case_name) {
             return Err(SkeinError::Semantic(
                 "production Content Store case names must be non-empty and unique".to_string(),
@@ -597,9 +559,7 @@ fn validate_config(
                 statement.parameters.len()
             )));
         }
-        if u64::try_from(statement.max_payload_bytes).unwrap_or(u64::MAX)
-            > config.runtime_governor_config.result_budget_bytes
-        {
+        if u64::try_from(statement.max_payload_bytes).unwrap_or(u64::MAX) > result_budget_bytes {
             return Err(SkeinError::Semantic(format!(
                 "production Content Store case {} payload budget exceeds the runtime governor result budget",
                 read_case.case_name
@@ -620,7 +580,72 @@ fn validate_config(
     Ok(())
 }
 
-fn residency_evidence(
+pub(super) fn validate_resource_profile(
+    kind: ContentStoreResourceProfileKind,
+    configured_available_memory_bytes: u64,
+    governor: RuntimeGovernorConfig,
+    limits: ProductionContentStoreResourceLimits,
+) -> Result<(), SkeinError> {
+    if configured_available_memory_bytes == 0 {
+        return Err(SkeinError::Semantic(
+            "production Content Store qualification requires a non-zero configured memory profile"
+                .to_string(),
+        ));
+    }
+    match kind {
+        ContentStoreResourceProfileKind::Capability512Mib
+            if configured_available_memory_bytes != CONTENT_STORE_512_MIB_CAPABILITY_BYTES =>
+        {
+            return Err(SkeinError::Semantic(format!(
+                "production Content Store 512 MiB capability must declare {CONTENT_STORE_512_MIB_CAPABILITY_BYTES} bytes"
+            )));
+        }
+        ContentStoreResourceProfileKind::DesktopBound8Gib
+            if configured_available_memory_bytes != CONTENT_STORE_DESKTOP_8_GIB_BYTES =>
+        {
+            return Err(SkeinError::Semantic(format!(
+                "production Content Store desktop profile must declare {CONTENT_STORE_DESKTOP_8_GIB_BYTES} bytes"
+            )));
+        }
+        _ => {}
+    }
+    let desktop_governor = RuntimeGovernorConfig::desktop_bound();
+    match kind {
+        ContentStoreResourceProfileKind::Capability512Mib
+            if governor.memory_budget_bytes != Some(CONTENT_STORE_512_MIB_CAPABILITY_BYTES) =>
+        {
+            return Err(SkeinError::Semantic(format!(
+                "production Content Store 512 MiB capability requires an explicit {CONTENT_STORE_512_MIB_CAPABILITY_BYTES}-byte governor ceiling"
+            )));
+        }
+        ContentStoreResourceProfileKind::DesktopBound8Gib
+            if governor.memory_budget_bytes.is_some()
+                || governor.memory_fraction_per_million
+                    != desktop_governor.memory_fraction_per_million
+                || governor.fallback_memory_budget_bytes
+                    != desktop_governor.fallback_memory_budget_bytes =>
+        {
+            return Err(SkeinError::Semantic(
+                "production Content Store desktop profile requires the dynamic desktop governor memory policy"
+                    .to_string(),
+            ));
+        }
+        _ => {}
+    }
+    if limits.max_steady_resident_bytes == 0
+        || limits.max_peak_resident_bytes == 0
+        || limits.max_steady_resident_bytes > limits.max_peak_resident_bytes
+        || limits.max_peak_resident_bytes > configured_available_memory_bytes
+    {
+        return Err(SkeinError::Semantic(
+            "production Content Store resident-memory limits must be non-zero, ordered, and within the configured profile"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn residency_evidence(
     database_commit_epoch: u64,
     report: &StorageResidencyReport,
 ) -> ProductionContentStoreResidencyEvidence {
@@ -629,6 +654,8 @@ fn residency_evidence(
     ProductionContentStoreResidencyEvidence {
         database_commit_epoch,
         row_serving: rows.serving,
+        row_materialized_rows_resident: rows.materialized_rows_resident,
+        row_checkpoint_state_metadata_only: rows.checkpoint_state_metadata_only,
         row_base_generation: rows.base_generation,
         row_recovery_delta_generation: rows.recovery_delta_generation,
         row_base_commit_epoch: rows.base_commit_epoch,
@@ -638,6 +665,7 @@ fn residency_evidence(
         row_root_key_artifact_bytes: rows.root_key_artifact_bytes,
         row_overflow_extent_artifact_bytes: rows.overflow_extent_artifact_bytes,
         row_overflow_descriptor_artifact_bytes: rows.overflow_descriptor_artifact_bytes,
+        row_overflow_extent_count: rows.overflow_extent_count,
         row_canonical_artifact_bytes: rows.canonical_artifact_bytes(),
         row_recovery_delta_artifact_bytes: rows.recovery_delta_artifact_bytes,
         row_live_entries: rows.live_entries,
@@ -780,7 +808,7 @@ fn collect_resident_blockers(
     }
 }
 
-fn collect_run_process_blockers(
+pub(super) fn collect_run_process_blockers(
     process: &ContentStoreProcessResourceEvidence,
     limits: ProductionContentStoreResourceLimits,
     prefix: &str,
@@ -831,7 +859,7 @@ fn collect_fault_blocker(
     }
 }
 
-fn runtime_governor_evidence(
+pub(super) fn runtime_governor_evidence(
     config: RuntimeGovernorConfig,
     before: RuntimeGovernorSnapshot,
     after: RuntimeGovernorSnapshot,
@@ -887,13 +915,21 @@ fn collect_runtime_governor_blockers(
     {
         blockers.push("content_store_runtime_permit_leak".to_string());
     }
+    collect_runtime_memory_policy_blockers(governor, config.resource_profile_kind, blockers);
+}
+
+pub(super) fn collect_runtime_memory_policy_blockers(
+    governor: &ProductionContentStoreRuntimeGovernorEvidence,
+    resource_profile_kind: ContentStoreResourceProfileKind,
+    blockers: &mut Vec<String>,
+) {
     if governor.memory_capacity_bytes == 0
         || governor.memory_budget_bytes == 0
         || governor.memory_budget_bytes > governor.memory_capacity_bytes
     {
         blockers.push("content_store_runtime_memory_policy_invalid".to_string());
     }
-    match config.resource_profile_kind {
+    match resource_profile_kind {
         ContentStoreResourceProfileKind::Capability512Mib => {
             if governor.configured_memory_ceiling_bytes
                 != Some(CONTENT_STORE_512_MIB_CAPABILITY_BYTES)
@@ -932,14 +968,14 @@ fn same_storage_identity(
         && left.index_visible_commit_epoch == right.index_visible_commit_epoch
 }
 
-fn statement_digest(sql: &str) -> String {
+pub(super) fn statement_digest(sql: &str) -> String {
     let mut hasher = Sha256::new();
     hash_bytes(&mut hasher, b"skein-production-content-store-statement-v1");
     hash_bytes(&mut hasher, sql.as_bytes());
     format!("sha256:{:x}", hasher.finalize())
 }
 
-fn ordered_parameter_digest(parameters: &[Value]) -> String {
+pub(super) fn ordered_parameter_digest(parameters: &[Value]) -> String {
     let mut hasher = Sha256::new();
     hash_bytes(&mut hasher, b"skein-production-content-store-parameters-v1");
     hasher.update((parameters.len() as u64).to_le_bytes());
