@@ -6,6 +6,7 @@ pub mod canonical_adjacency;
 pub mod column_group;
 pub mod config;
 pub mod durability;
+pub mod graph_descriptor_page;
 pub mod ids;
 pub mod index_page;
 pub mod mutation;
@@ -73,6 +74,13 @@ pub use config::{
 pub use durability::{
     durable_replace_file, sync_directory, sync_parent_directory, WalSyncGroupFlush,
     WalSyncGroupProgress, WalSyncGroupState,
+};
+pub use graph_descriptor_page::{
+    GraphDescriptorInteriorEntry, GraphDescriptorKind, GraphDescriptorLeafEntry,
+    GraphDescriptorPageError, GraphDescriptorPageId, GraphDescriptorPageLimits,
+    GraphDescriptorPageRef, ImmutableGraphDescriptorPage, ImmutableGraphDescriptorPageBody,
+    DEFAULT_GRAPH_DESCRIPTOR_KEY_BYTES, DEFAULT_GRAPH_DESCRIPTOR_PAGE_BYTES,
+    DEFAULT_GRAPH_DESCRIPTOR_PAGE_ENTRIES, DEFAULT_GRAPH_DESCRIPTOR_VALUE_BYTES,
 };
 pub use ids::{NodeId, NodeRecord, RelId, RelRecord};
 pub use index_page::{

@@ -19,6 +19,7 @@ STORAGE_MODELS = [
     "SkeinGenerationReclamation",
     "SkeinGossipDelivery",
     "SkeinGraphIndexQualification",
+    "SkeinGraphDescriptorPaging",
     "SkeinIndexPublication",
     "SkeinIndexRecovery",
     "SkeinIndexStatistics",

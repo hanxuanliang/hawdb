@@ -1443,6 +1443,37 @@ demand-paged root, production qualification MUST report both the configured
 aggregate limit and selected encoded manifest bytes, and MUST reject a selected
 generation that exceeds the limit.
 
+### Graph descriptor page v1
+
+Graph descriptor roots use a separate immutable page format because canonical
+segment descriptors can contain three bounded Bloom filters and do not fit the
+relational posting-list page contract. The format is introduced independently
+of publication and serving activation:
+
+- every page binds its graph artifact class, non-zero physical generation,
+  source commit epoch, non-zero page id, entry count, payload length, CRC32C,
+  and SHA-256;
+- a parent reference carries the artifact id, physical generation, page id,
+  exact file range, both integrity digests, and inclusive lower/upper key
+  bounds;
+- leaf keys and descriptor values are non-empty, keys are strictly increasing,
+  and values are explicitly byte-bounded; interior child ranges are strictly
+  ordered and disjoint, and never reference a future physical generation;
+- a bound decode validates the outer range, digest, artifact class, physical
+  identity, source epoch, and key range against the same admitted page bytes;
+- physical generation belongs to the page reference rather than the selecting
+  root, so a later COW publisher may reuse immutable pages without changing
+  their identity;
+- the default page ceiling is 512 KiB and the default descriptor-value ceiling
+  is 448 KiB. These are per-page format admissions, not resident-memory policy
+  or evidence that 512 MiB is Skein's default process budget.
+
+`ImmutableGraphDescriptorPage` is not selected by any production manifest yet.
+The canonical adjacency writer, publish-last root, demand reader, cache/pin
+accounting, deep scrub, recovery, and differential activation remain separate
+contracts. Until those contracts replace the manifest-owned descriptor vectors,
+the aggregate graph-manifest open budget remains authoritative.
+
 ## Demand paging and cache ownership
 
 1. Skein manages page-in/page-out through its own byte-bounded cache. OS swap

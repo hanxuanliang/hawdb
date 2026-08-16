@@ -274,9 +274,13 @@ crash; read-only recovery remains fail closed.
     and property-projection manifest bytes before allocation, verifies each
     selected manifest from one bounded byte image, and exposes the configured
     limit plus selected bytes. This is the fail-closed guard for constrained
-    profiles, not the final scale property. Move graph block descriptors behind
-    bounded demand-paged roots before claiming that startup metadata residency
-    is independent of graph/index entry count.
+    profiles, not the final scale property. The unselected graph descriptor
+    page v1 format now provides bounded leaf/interior pages, cross-generation
+    physical references, strict key/value/range admission, and bound
+    CRC32C/SHA-256 verification. Next publish and activate the canonical
+    adjacency descriptor root, then migrate the remaining graph block
+    descriptors before claiming that startup metadata residency is independent
+    of graph/index entry count.
   - The independent general graph-storage release artifact now has a bounded
     `skein-graph-storage-qualification` collector over the existing typed
     runner. It binds one caller-owned read-only database to a strict plan,
