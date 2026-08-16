@@ -111,6 +111,9 @@ impl GraphDescriptorTreeDemandReader {
     ) -> Result<Self, GraphDescriptorTreeError> {
         let root = Arc::clone(&root_reader.root);
         let representation = match root.kind {
+            GraphDescriptorKind::CanonicalSegment => {
+                RepresentationKind::CanonicalSegmentDescriptorPage
+            }
             GraphDescriptorKind::CanonicalAdjacency => {
                 RepresentationKind::CanonicalAdjacencyDescriptorPage
             }
@@ -118,11 +121,6 @@ impl GraphDescriptorTreeDemandReader {
                 RepresentationKind::PropertyProjectionDescriptorPage
             }
             GraphDescriptorKind::PropertySpill => RepresentationKind::PropertySpillDescriptorPage,
-            kind => {
-                return Err(admission(format!(
-                    "graph descriptor demand reader has no cache representation for {kind:?}"
-                )))
-            }
         };
         Ok(Self {
             root,

@@ -59,7 +59,8 @@ use artifact_files::{
     canonical_manifest_generation_file, checkpoint_generation_file,
     cleanup_abandoned_checkpoint_preparations, has_storage_artifacts,
     parse_canonical_adjacency_descriptor_generation_file, parse_canonical_manifest_generation_file,
-    parse_generation_file, parse_property_projection_descriptor_generation_file,
+    parse_canonical_segment_descriptor_generation_file, parse_generation_file,
+    parse_property_projection_descriptor_generation_file,
     parse_property_projection_manifest_generation_file,
     parse_property_spill_descriptor_generation_file, parse_property_spill_manifest_generation_file,
     parse_relational_index_artifact_generation_file,
@@ -6458,7 +6459,17 @@ mod tests {
             store.backup_to(&catalog, &backup).unwrap()
         };
         assert!(report.generation > 0);
-        assert_eq!(report.file_count, 23);
+        assert_eq!(report.file_count, 25);
+        assert!(backup
+            .join(skein_storage::canonical_segment_descriptor_page_file(
+                report.generation
+            ))
+            .exists());
+        assert!(backup
+            .join(skein_storage::canonical_segment_descriptor_root_file(
+                report.generation
+            ))
+            .exists());
         assert!(backup
             .join(skein_storage::canonical_adjacency_descriptor_page_file(
                 report.generation
@@ -9109,6 +9120,16 @@ mod tests {
                         generation
                     );
                     assert!(path
+                        .join(skein_storage::canonical_segment_descriptor_page_file(
+                            generation
+                        ))
+                        .exists());
+                    assert!(path
+                        .join(skein_storage::canonical_segment_descriptor_root_file(
+                            generation
+                        ))
+                        .exists());
+                    assert!(path
                         .join(skein_storage::canonical_adjacency_descriptor_page_file(
                             generation
                         ))
@@ -9129,6 +9150,12 @@ mod tests {
                         .join(skein_storage::relational_overflow_manifest_generation_file(
                             1
                         ))
+                        .exists());
+                    assert!(!path
+                        .join(skein_storage::canonical_segment_descriptor_page_file(1))
+                        .exists());
+                    assert!(!path
+                        .join(skein_storage::canonical_segment_descriptor_root_file(1))
                         .exists());
                     assert!(!path
                         .join(skein_storage::canonical_adjacency_descriptor_page_file(1))
@@ -9158,6 +9185,12 @@ mod tests {
         assert!(!path.join("wal.1.skein").exists());
         assert!(!path.join("canonical.1.skein").exists());
         assert!(!path.join("canonical.1.manifest.skein").exists());
+        assert!(!path
+            .join(skein_storage::canonical_segment_descriptor_page_file(1))
+            .exists());
+        assert!(!path
+            .join(skein_storage::canonical_segment_descriptor_root_file(1))
+            .exists());
         assert!(!path.join("adjacency.1.skein").exists());
         assert!(!path.join("adjacency.1.manifest.skein").exists());
         assert!(!path
@@ -9184,6 +9217,12 @@ mod tests {
         assert!(path.join("wal.2.skein").exists());
         assert!(path.join("canonical.2.skein").exists());
         assert!(path.join("canonical.2.manifest.skein").exists());
+        assert!(path
+            .join(skein_storage::canonical_segment_descriptor_page_file(2))
+            .exists());
+        assert!(path
+            .join(skein_storage::canonical_segment_descriptor_root_file(2))
+            .exists());
         assert!(path.join("adjacency.2.skein").exists());
         assert!(!path.join("adjacency.2.manifest.skein").exists());
         assert!(path
@@ -9210,6 +9249,12 @@ mod tests {
         assert!(path.join("wal.3.skein").exists());
         assert!(path.join("canonical.3.skein").exists());
         assert!(path.join("canonical.3.manifest.skein").exists());
+        assert!(path
+            .join(skein_storage::canonical_segment_descriptor_page_file(3))
+            .exists());
+        assert!(path
+            .join(skein_storage::canonical_segment_descriptor_root_file(3))
+            .exists());
         assert!(path.join("adjacency.3.skein").exists());
         assert!(!path.join("adjacency.3.manifest.skein").exists());
         assert!(path

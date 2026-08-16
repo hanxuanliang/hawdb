@@ -295,8 +295,13 @@ crash; read-only recovery remains fail closed.
     reclamation. The production spill reader now opens a compact manifest,
     lower-bound seeks one descriptor under independent limits, reads one block,
     exposes descriptor/data cache and I/O accounting, and uses exhaustive
-    uncached deep scrub with sticky physical-failure poison. Next migrate
-    canonical segment descriptors. Collect representative
+    uncached deep scrub with sticky physical-failure poison. Canonical segment
+    checkpoints now shadow-publish an order-preserving descriptor tree after
+    the data artifact, bind its exact root through the selected resident
+    manifest, verify only the bounded root on normal open, and compare the full
+    uncached tree with the resident vector during scrub and backup. Next remove
+    that resident vector and activate bounded point/prefix demand reads in an
+    independent change. Collect representative
     production-copy evidence before claiming that all graph/index startup
     metadata residency is independent of entry count.
   - The independent general graph-storage release artifact now has a bounded

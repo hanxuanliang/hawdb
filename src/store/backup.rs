@@ -4,8 +4,8 @@ use super::{
     canonical_adjacency_artifact_generation_file, canonical_artifact_generation_file,
     canonical_manifest_generation_file, checkpoint_generation_file, checksum_bytes, decode_string,
     encode_string, parse_canonical_adjacency_descriptor_generation_file,
-    parse_canonical_manifest_generation_file, parse_generation_file,
-    parse_property_projection_descriptor_generation_file,
+    parse_canonical_manifest_generation_file, parse_canonical_segment_descriptor_generation_file,
+    parse_generation_file, parse_property_projection_descriptor_generation_file,
     parse_property_projection_manifest_generation_file,
     parse_property_spill_descriptor_generation_file, parse_property_spill_manifest_generation_file,
     parse_relational_index_artifact_generation_file,
@@ -22,15 +22,15 @@ use crate::error::{Result, SkeinError};
 use skein_integrity::{IntegrityHasher, Sha256Digest};
 use skein_storage::{
     decode_relational_checkpoint_file, durable_replace_file, CanonicalAdjacencyConfig,
-    CanonicalAdjacencyReader, CanonicalSegmentManifest, GraphDescriptorKind,
-    GraphDescriptorTreeBuildConfig, GraphDescriptorTreeGenerationArtifacts,
-    GraphDescriptorTreePaths, GraphDescriptorTreeRootReader, ManifestGeneration,
-    PersistentPropertyProjectionConfig, PersistentPropertyProjectionDescriptorTree,
-    PersistentPropertyProjectionManifest, PersistentPropertyProjectionReader,
-    PersistentPropertySpillDescriptorTree, PropertySpillConfig, PropertySpillManifest,
-    PropertySpillReader, RelationalDecodeLimits, RelationalIndexArtifactMetadata,
-    RelationalIndexGenerationIdentity, RelationalIndexShadowConfig, RelationalIndexShadowReader,
-    SegmentCache, StorageRestoreReport,
+    CanonicalAdjacencyReader, CanonicalSegmentConfig, CanonicalSegmentManifest,
+    CanonicalSegmentReader, GraphDescriptorKind, GraphDescriptorTreeBuildConfig,
+    GraphDescriptorTreeGenerationArtifacts, GraphDescriptorTreePaths,
+    GraphDescriptorTreeRootReader, ManifestGeneration, PersistentPropertyProjectionConfig,
+    PersistentPropertyProjectionDescriptorTree, PersistentPropertyProjectionManifest,
+    PersistentPropertyProjectionReader, PersistentPropertySpillDescriptorTree, PropertySpillConfig,
+    PropertySpillManifest, PropertySpillReader, RelationalDecodeLimits,
+    RelationalIndexArtifactMetadata, RelationalIndexGenerationIdentity,
+    RelationalIndexShadowConfig, RelationalIndexShadowReader, SegmentCache, StorageRestoreReport,
 };
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
@@ -203,6 +203,7 @@ fn validate_backup_file_name(name: &str) -> Result<()> {
         || parse_generation_file(name, "relational.").is_some()
         || parse_generation_file(name, "canonical.").is_some()
         || parse_canonical_manifest_generation_file(name).is_some()
+        || parse_canonical_segment_descriptor_generation_file(name).is_some()
         || parse_generation_file(name, "adjacency.").is_some()
         || parse_canonical_adjacency_descriptor_generation_file(name).is_some()
         || parse_generation_file(name, "properties.").is_some()
@@ -426,9 +427,15 @@ pub(super) fn validate_backup_files(
     ) {
         let canonical_manifest_name = canonical_manifest_generation_file(generation);
         let canonical_artifact_name = canonical_artifact_generation_file(generation);
+        let descriptor_page_name =
+            skein_storage::canonical_segment_descriptor_page_file(generation);
+        let descriptor_root_name =
+            skein_storage::canonical_segment_descriptor_root_file(generation);
         for required in [
             canonical_manifest_name.as_str(),
             canonical_artifact_name.as_str(),
+            descriptor_page_name.as_str(),
+            descriptor_root_name.as_str(),
         ] {
             if !names.contains(required) {
                 return Err(SkeinError::Storage(format!(
@@ -452,6 +459,13 @@ pub(super) fn validate_backup_files(
         let canonical_manifest_text = fs::read_to_string(root.join(&canonical_manifest_name))?;
         let canonical_manifest = CanonicalSegmentManifest::decode(&canonical_manifest_text)
             .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        if canonical_manifest.generation != ManifestGeneration(generation)
+            || canonical_manifest.source_commit_epoch != manifest.checkpoint_commit_epoch
+        {
+            return Err(SkeinError::Storage(
+                "backup canonical descriptor identity does not match its checkpoint".to_string(),
+            ));
+        }
         let canonical_artifact = files
             .iter()
             .find(|file| file.name == canonical_artifact_name)
@@ -464,6 +478,64 @@ pub(super) fn validate_backup_files(
                 "backup canonical artifact metadata does not match its manifest".to_string(),
             ));
         }
+        let descriptor_root = files
+            .iter()
+            .find(|file| file.name == descriptor_root_name)
+            .expect("required canonical descriptor root must exist");
+        if descriptor_root.encoded_len != canonical_manifest.descriptor_root_artifact.encoded_len
+            || descriptor_root.encoded_checksum
+                != u64::from(canonical_manifest.descriptor_root_artifact.encoded_crc32c)
+            || descriptor_root.sha256 != canonical_manifest.descriptor_root_artifact.encoded_sha256
+        {
+            return Err(SkeinError::Storage(
+                "backup canonical descriptor root does not match its manifest".to_string(),
+            ));
+        }
+        let descriptor_config = GraphDescriptorTreeBuildConfig::default();
+        let descriptor_paths = GraphDescriptorTreePaths::new(
+            root.join(&descriptor_page_name),
+            root.join(&descriptor_root_name),
+        );
+        let root_reader = GraphDescriptorTreeRootReader::open_bound(
+            descriptor_paths,
+            canonical_manifest.descriptor_generation_artifacts(),
+            descriptor_config,
+        )
+        .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+        if root_reader.root().descriptor_count != canonical_manifest.segment_count {
+            return Err(SkeinError::Storage(
+                "backup canonical descriptor count does not match its manifest".to_string(),
+            ));
+        }
+        let descriptor_page = files
+            .iter()
+            .find(|file| file.name == descriptor_page_name)
+            .expect("required canonical descriptor pages must exist");
+        if descriptor_page.encoded_len != root_reader.root().page_artifact_len
+            || descriptor_page.encoded_checksum != root_reader.root().page_artifact_crc32c.as_u64()
+            || descriptor_page.sha256 != root_reader.root().page_artifact_sha256
+        {
+            return Err(SkeinError::Storage(
+                "backup canonical descriptor pages do not match their root".to_string(),
+            ));
+        }
+        let config = CanonicalSegmentConfig::default();
+        let max_segment_bytes = NonZeroU64::new(
+            config
+                .target_segment_bytes
+                .get()
+                .max(config.max_record_bytes.get().saturating_add(64)),
+        )
+        .expect("canonical segment maximum is non-zero");
+        CanonicalSegmentReader::open(
+            root.join(&canonical_artifact_name),
+            canonical_manifest,
+            Arc::new(SegmentCache::new(0)),
+            store_id_for_path(root)?,
+            max_segment_bytes,
+        )
+        .and_then(|reader| reader.verify_descriptor_shadow())
+        .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
     }
     if let Some(binding) = manifest.canonical_adjacency_generation_artifacts {
         let adjacency_artifact_name = canonical_adjacency_artifact_generation_file(generation);

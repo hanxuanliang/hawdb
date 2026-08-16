@@ -109,8 +109,7 @@ fn bound_open_rejects_root_artifact_or_identity_drift() {
         artifact_drift,
         tiny_config(),
     )
-    .err()
-    .expect("root artifact drift must fail closed");
+    .expect_err("root artifact drift must fail closed");
     assert!(error.to_string().contains("canonical artifact binding"));
 
     let mut identity_drift = output.generation_artifacts();
@@ -120,8 +119,7 @@ fn bound_open_rejects_root_artifact_or_identity_drift() {
         identity_drift,
         tiny_config(),
     )
-    .err()
-    .expect("root identity drift must fail closed");
+    .expect_err("root identity drift must fail closed");
     assert!(error
         .to_string()
         .contains("does not match canonical binding"));
@@ -152,8 +150,7 @@ fn corrupted_root_fails_closed_before_page_payload_reads() {
     encoded[84] ^= 0x40;
     fs::write(&root_path, encoded).unwrap();
     let error = GraphDescriptorTreeRootReader::open(paths(directory.path()), tiny_config())
-        .err()
-        .expect("corrupted root must fail");
+        .expect_err("corrupted root must fail");
     assert!(error.to_string().contains("checksum mismatch"));
 }
 
@@ -204,8 +201,7 @@ fn root_rejects_page_artifact_length_drift_without_reading_pages() {
     file.write_all(&[0]).unwrap();
     file.sync_all().unwrap();
     let error = GraphDescriptorTreeRootReader::open(tree_paths, tiny_config())
-        .err()
-        .expect("artifact length drift must fail");
+        .expect_err("artifact length drift must fail");
     assert!(error.to_string().contains("length mismatch"));
 }
 

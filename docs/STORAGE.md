@@ -16,10 +16,14 @@ Files:
   written through the default zstd compression envelope. Canonical graph rows
   are delegated to the generation's canonical artifact.
 - `canonical.<generation>.skein` and
-  `canonical.<generation>.manifest.skein`: immutable ordered node and
-  relationship segments with per-segment digests, record bounds, adaptive
-  endpoint Bloom filters, exact-property Bloom summaries, and the artifact's
-  property key table.
+  `canonical.<generation>.manifest.skein`, plus
+  `canonical-segment-descriptors-<generation>.pages.skein` and
+  `canonical-segment-descriptors-<generation>.root.skein`: immutable ordered
+  node and relationship segments with per-segment digests, record bounds,
+  adaptive endpoint Bloom filters, exact-property Bloom summaries, and the
+  artifact's property key table. The descriptor pages/root are a bound shadow;
+  reads still use the resident manifest vector until the independent demand
+  activation.
 - `adjacency.<generation>.skein`,
   `adjacency-descriptors-<generation>.pages.skein`, and
   `adjacency-descriptors-<generation>.root.skein`: rebuildable,
@@ -331,6 +335,16 @@ reader, and block-size admission does not. Deep scrub bypasses both caches,
 hashes the complete artifacts, decodes every block, and proves contiguous byte,
 block-id, spill-id, block-count, and value-count closure. Backup validation and
 storage scrub run this exhaustive check.
+
+Canonical segment descriptors are shadow-published through the same immutable
+page tree. A checkpoint synchronizes canonical data first, publishes descriptor
+pages and the root, then binds the source epoch, segment count, and exact root
+integrity in the canonical manifest selected by the outer checkpoint manifest.
+Normal open reads the root but no descriptor page payload. Backup and storage
+scrub exhaustively decode the cold page closure and compare every descriptor
+with the resident manifest oracle. This shadow is not yet the serving path, so
+canonical manifest residency still scales with segment count until the next
+activation stage removes the resident vector.
 
 `DatabaseDoctor::derived_artifact_health` verifies the complete data,
 descriptor-page, descriptor-root, and block closure of the active adjacency and

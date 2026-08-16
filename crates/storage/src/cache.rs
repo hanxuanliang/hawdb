@@ -27,6 +27,7 @@ pub enum RepresentationKind {
     RelationalIndexRecoveryDelta,
     RelationalRowPageSlot,
     StableIdentityPageSlot,
+    CanonicalSegmentDescriptorPage,
     CanonicalAdjacencyDescriptorPage,
     PropertyProjectionDescriptorPage,
     PropertySpillDescriptorPage,

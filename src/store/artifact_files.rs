@@ -60,6 +60,13 @@ pub(super) fn parse_canonical_manifest_generation_file(name: &str) -> Option<u64
         .ok()
 }
 
+pub(super) fn parse_canonical_segment_descriptor_generation_file(name: &str) -> Option<u64> {
+    parse_hyphenated_generation_file(name, "canonical-segment-descriptors-", ".pages.skein")
+        .or_else(|| {
+            parse_hyphenated_generation_file(name, "canonical-segment-descriptors-", ".root.skein")
+        })
+}
+
 pub(super) fn parse_canonical_adjacency_descriptor_generation_file(name: &str) -> Option<u64> {
     parse_hyphenated_generation_file(name, "adjacency-descriptors-", ".pages.skein")
         .or_else(|| parse_hyphenated_generation_file(name, "adjacency-descriptors-", ".root.skein"))
@@ -151,6 +158,7 @@ pub(super) fn storage_generation_for_file(name: &str) -> Option<u64> {
         .or_else(|| parse_generation_file(name, "relational."))
         .or_else(|| parse_generation_file(name, "canonical."))
         .or_else(|| parse_canonical_manifest_generation_file(name))
+        .or_else(|| parse_canonical_segment_descriptor_generation_file(name))
         .or_else(|| parse_generation_file(name, "adjacency."))
         .or_else(|| parse_canonical_adjacency_descriptor_generation_file(name))
         .or_else(|| parse_generation_file(name, "properties."))
@@ -234,6 +242,14 @@ mod tests {
 
     #[test]
     fn graph_descriptor_shadow_files_follow_generation_cleanup() {
+        assert_eq!(
+            storage_generation_for_file("canonical-segment-descriptors-17.pages.skein"),
+            Some(17)
+        );
+        assert_eq!(
+            storage_generation_for_file("canonical-segment-descriptors-17.root.skein"),
+            Some(17)
+        );
         assert_eq!(
             storage_generation_for_file("adjacency-descriptors-17.pages.skein"),
             Some(17)

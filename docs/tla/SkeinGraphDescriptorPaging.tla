@@ -9,10 +9,12 @@ EXTENDS FiniteSets, Naturals
 (* warming descriptor pages; a later selection cannot move that reader. A   *)
 (* lookup admits at most MaxResidentPages and pins one selected page until   *)
 (* completion. Corruption fails the read closed and poisons the handle.      *)
-(* The model is instantiated for canonical adjacency, property projection,    *)
-(* and property-spill descriptor publication and demand reads. A published    *)
-(* descriptor root additionally requires its same-generation data artifact to *)
-(* be durable.                                                                  *)
+(* The model is instantiated for canonical adjacency, property projection,     *)
+(* and property-spill publication and demand reads. Canonical segments use the *)
+(* candidate-data/page/root transitions for shadow publication; their resident *)
+(* descriptor vector remains authoritative until a later activation step. A   *)
+(* published descriptor root additionally requires its same-generation data   *)
+(* artifact to be durable.                                                      *)
 (***************************************************************************)
 
 CONSTANTS Pages, Generations, MaxResidentPages

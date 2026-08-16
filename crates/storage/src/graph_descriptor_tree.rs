@@ -512,6 +512,7 @@ impl GraphDescriptorTreeWriteOutput {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct GraphDescriptorTreeRootReader {
     root: Arc<GraphDescriptorTreeRoot>,
     paths: GraphDescriptorTreePaths,

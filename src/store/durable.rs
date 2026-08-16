@@ -816,6 +816,12 @@ impl DurableStore {
                     self.root_path
                         .join(canonical_manifest_generation_file(generation)),
                 );
+                for name in [
+                    skein_storage::canonical_segment_descriptor_page_file(generation),
+                    skein_storage::canonical_segment_descriptor_root_file(generation),
+                ] {
+                    sources.insert(name.clone(), self.root_path.join(name));
+                }
             }
             if self.canonical_adjacency_generation_artifacts.is_some() {
                 sources.insert(
@@ -1106,15 +1112,78 @@ impl DurableStore {
             )?;
             let artifact = CanonicalSegmentManifest::decode(&fs::read_to_string(&manifest_path)?)
                 .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            if artifact.generation != ManifestGeneration(generation)
+                || artifact.source_commit_epoch != manifest.checkpoint_commit_epoch
+            {
+                return Err(SkeinError::StorageIntegrity(
+                    "canonical descriptor identity does not match its checkpoint during scrub"
+                        .to_string(),
+                ));
+            }
+            let canonical_path = self
+                .root_path
+                .join(canonical_artifact_generation_file(generation));
             scrub.verify_path(
-                &self
-                    .root_path
-                    .join(canonical_artifact_generation_file(generation)),
+                &canonical_path,
                 artifact.artifact_len,
                 artifact.artifact_digest.0,
                 artifact.artifact_sha256,
                 "canonical artifact",
             )?;
+            let descriptor_paths = GraphDescriptorTreePaths::new(
+                self.root_path
+                    .join(skein_storage::canonical_segment_descriptor_page_file(
+                        generation,
+                    )),
+                self.root_path
+                    .join(skein_storage::canonical_segment_descriptor_root_file(
+                        generation,
+                    )),
+            );
+            scrub.verify_path(
+                &descriptor_paths.root_manifest,
+                artifact.descriptor_root_artifact.encoded_len,
+                u64::from(artifact.descriptor_root_artifact.encoded_crc32c),
+                artifact.descriptor_root_artifact.encoded_sha256,
+                "canonical segment descriptor root",
+            )?;
+            let descriptor_config = GraphDescriptorTreeBuildConfig::default();
+            let root_reader = GraphDescriptorTreeRootReader::open_bound(
+                descriptor_paths.clone(),
+                artifact.descriptor_generation_artifacts(),
+                descriptor_config,
+            )
+            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+            if root_reader.root().descriptor_count != artifact.segment_count {
+                return Err(SkeinError::StorageIntegrity(
+                    "canonical descriptor count does not match its manifest during scrub"
+                        .to_string(),
+                ));
+            }
+            scrub.verify_path(
+                &descriptor_paths.page_artifact,
+                root_reader.root().page_artifact_len,
+                root_reader.root().page_artifact_crc32c.as_u64(),
+                root_reader.root().page_artifact_sha256,
+                "canonical segment descriptor pages",
+            )?;
+            let config = CanonicalSegmentConfig::default();
+            let max_segment_bytes = NonZeroU64::new(
+                config
+                    .target_segment_bytes
+                    .get()
+                    .max(config.max_record_bytes.get().saturating_add(64)),
+            )
+            .expect("canonical segment maximum is non-zero");
+            CanonicalSegmentReader::open(
+                canonical_path,
+                artifact,
+                Arc::clone(&self.segment_cache),
+                self.store_id,
+                max_segment_bytes,
+            )
+            .and_then(|reader| reader.verify_descriptor_shadow())
+            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
         }
 
         if let Some(binding) = manifest.canonical_adjacency_generation_artifacts {
@@ -2428,6 +2497,8 @@ impl DurableStore {
             wal_generation_file(generation),
             canonical_artifact_generation_file(generation),
             canonical_manifest_generation_file(generation),
+            skein_storage::canonical_segment_descriptor_page_file(generation),
+            skein_storage::canonical_segment_descriptor_root_file(generation),
             canonical_adjacency_artifact_generation_file(generation),
             skein_storage::canonical_adjacency_descriptor_page_file(generation),
             skein_storage::canonical_adjacency_descriptor_root_file(generation),
@@ -4120,6 +4191,12 @@ fn load_published_canonical_segments(
         return Err(SkeinError::Storage(format!(
             "canonical manifest generation {} does not match durable generation {generation}",
             canonical_manifest.generation.0
+        )));
+    }
+    if canonical_manifest.source_commit_epoch != durable_manifest.checkpoint_commit_epoch {
+        return Err(SkeinError::Storage(format!(
+            "canonical descriptor source epoch {} does not match durable checkpoint epoch {}",
+            canonical_manifest.source_commit_epoch, durable_manifest.checkpoint_commit_epoch
         )));
     }
     let config = CanonicalSegmentConfig::default();
