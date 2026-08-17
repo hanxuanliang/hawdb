@@ -113,6 +113,19 @@ pub(super) fn selected_plan_properties(plan: &PhysicalPlan) -> PhysicalPropertie
             memory_budget: MemoryBudgetClass::RowLinear,
             ..PhysicalProperties::default()
         },
+        PhysicalPlan::IndexNodeUnionSeek {
+            label, branches, ..
+        } => PhysicalProperties {
+            distribution: Distribution::Single,
+            covering_fields: branches
+                .iter()
+                .map(|branch| plan_property_key(label, &branch.property))
+                .collect(),
+            scan_pruning: ScanPruningSupport::Index,
+            vector_precision: VectorPrecision::NotVector,
+            memory_budget: MemoryBudgetClass::RowLinear,
+            ..PhysicalProperties::default()
+        },
         PhysicalPlan::NodeCartesianProductExec { left, right } => {
             let left = selected_plan_properties(left);
             let right = selected_plan_properties(right);

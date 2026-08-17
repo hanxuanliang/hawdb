@@ -132,6 +132,44 @@ pub(super) fn stream_index_node_seek_batches(
     )
 }
 
+pub(super) fn stream_index_node_union_seek_batches(
+    variable: &str,
+    label: &str,
+    branches: &[skein_plan::ExactPropertySeekBranch],
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let memory_account = context.memory_ledger.account(
+        QueryMemoryClass::BlockingState,
+        "IndexNodeUnionSeekExec",
+        context.memory.blocking_operator_bytes,
+    );
+    let batch_memory_account = context.memory_ledger.account(
+        QueryMemoryClass::PipelineBatch,
+        "IndexNodeUnionSeekExec output",
+        context.memory.batch_payload_bytes,
+    );
+    skein_executor::scan::stream_index_node_union_seek_batches(
+        variable,
+        label,
+        branches,
+        NodeScanContext {
+            catalog: context.catalog,
+            store: context.store,
+            execution_limit,
+            memory_budget: context.memory.blocking_operator_bytes,
+            memory_account: &memory_account,
+            batch_memory_budget: context.memory.batch_payload_bytes,
+            batch_memory_account: &batch_memory_account,
+            batch_rows: context.memory.batch_rows.get(),
+            task_context: context.task_context,
+        },
+        context.observer,
+        emit,
+    )
+}
+
 pub(super) fn stream_visited_node_batches(
     variable: &str,
     context: BatchReadContext<'_>,

@@ -1,5 +1,97 @@
 use super::*;
 
+const MAX_EXACT_UNION_LOOKUP_VALUES: usize = 64;
+
+pub(super) fn exact_union_index_seek_candidate(
+    predicates: &[Predicate],
+    full_predicate: &Predicate,
+    scan_variable: &str,
+    label: &str,
+    catalog: &OptimizerCatalog,
+) -> Option<(PhysicalPlan, String)> {
+    let mut branches = Vec::<ExactPropertySeekBranch>::new();
+    let mut lookup_value_count = 0usize;
+    for predicate in predicates {
+        let (variable, property, values) = match predicate {
+            Predicate::PropertyEq {
+                variable,
+                property,
+                value,
+            } => (variable, property, std::slice::from_ref(value)),
+            Predicate::PropertyIn {
+                variable,
+                property,
+                values,
+            } => (variable, property, values.as_slice()),
+            _ => return None,
+        };
+        if variable != scan_variable || !catalog.has_property_index(label, property) {
+            return None;
+        }
+        let branch = if let Some(branch) = branches
+            .iter_mut()
+            .find(|branch| branch.property == *property)
+        {
+            branch
+        } else {
+            branches.push(ExactPropertySeekBranch {
+                property: property.clone(),
+                values: Vec::new(),
+            });
+            branches.last_mut()?
+        };
+        for value in values {
+            if !branch.values.contains(value) {
+                branch.values.push(value.clone());
+                lookup_value_count = lookup_value_count.saturating_add(1);
+                if lookup_value_count > MAX_EXACT_UNION_LOOKUP_VALUES {
+                    return None;
+                }
+            }
+        }
+    }
+    branches.retain(|branch| !branch.values.is_empty());
+    if branches.len() < 2 {
+        return None;
+    }
+
+    let label_count = catalog.label_count(label);
+    let scan_cost = estimate_node_full_scan_cost(label_count);
+    let mut seek_cost = 0u64;
+    let mut estimated_rows = 0u64;
+    for branch in &branches {
+        let branch_rows = catalog.estimate_property_index_in_rows(
+            label,
+            &branch.property,
+            branch.values.len() as u64,
+        );
+        estimated_rows = estimated_rows.saturating_add(branch_rows);
+        seek_cost = seek_cost.saturating_add(estimate_node_index_seek_cost(
+            branch_rows,
+            branch.values.len() as u64,
+        ));
+    }
+    estimated_rows = estimated_rows.min(label_count).max(1);
+    if !node_index_seek_is_cheaper(label_count, seek_cost) {
+        return None;
+    }
+
+    let branch_count = branches.len();
+    Some((
+        PhysicalPlan::FilterExec {
+            predicate: full_predicate.clone(),
+            input: Box::new(PhysicalPlan::IndexNodeUnionSeek {
+                variable: scan_variable.to_string(),
+                label: label.to_string(),
+                branches,
+            }),
+        },
+        format!(
+            "choose IndexNodeUnionSeek for {label}: seek_cost={seek_cost} scan_cost={scan_cost} label_count={label_count} estimated_rows={estimated_rows} branch_count={branch_count} lookup_value_count={lookup_value_count}"
+        ),
+    ))
+}
+
 pub(super) fn index_seek_from_conjunction(
     predicates: &[Predicate],
     full_predicate: &Predicate,

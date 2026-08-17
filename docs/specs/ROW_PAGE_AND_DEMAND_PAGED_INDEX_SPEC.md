@@ -92,7 +92,10 @@ Physical-plan finalization MAY fuse a scalar `Project` with a node access path
 only when every projected expression and residual predicate can be evaluated
 from one node variable. The fused operator MUST retain the selected access
 class: label scan, equality/multi-seek, ordered composite equality, range, or
-full-text. Its required-property set is the union of projected properties,
+full-text. Exact disjunctions over two or more indexed properties MAY retain a
+bounded equality-union access path. The optimizer MUST decline that path when
+any branch is not indexed or when the deduplicated lookup-value count exceeds
+64. Its required-property set is the union of projected properties,
 residual-predicate properties, and access-validation properties. It MUST NOT
 decode an unrelated property merely because that property is present on the
 canonical row.
@@ -110,6 +113,14 @@ The final physical plan, fingerprint, `EXPLAIN`, and scan-pruning report MUST
 identify the retained access class. The optimizer trace MUST expose a distinct
 plan-finalization stage so qualification can distinguish logical rewriting,
 access-path selection, and required-data enforcement.
+
+`IndexNodeUnionSeek` reads each equality branch through its declared index,
+deduplicates candidate node identities before hydration or output, and retains
+the complete `OR` predicate as residual semantic authority. Its deduplication
+set is charged to the query blocking-state budget. A budget failure aborts the
+query; it MUST NOT fall back to an untracked scan or emit a partial result.
+`SkeinPropertyIndexPruning.tla` models the all-branches-declared admission rule
+and proves that set-union deduplication preserves full-scan results.
 
 Composite equality indexes reuse that artifact and serving contract. The
 ordered property-name list is encoded into an unambiguous internal projection

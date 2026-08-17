@@ -1323,6 +1323,150 @@ fn explicit_index_ddl_enables_index_multi_seek_plans_for_property_in() {
 }
 
 #[test]
+fn exact_property_disjunction_uses_bounded_union_seek_and_deduplicates_nodes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'needle', external_id: 'first', title: 'By id'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'second', external_id: 'needle', title: 'By external id'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'needle', external_id: 'needle', title: 'Matches both'})")
+        .unwrap();
+    for id in 0..32 {
+        db.query(&format!(
+            "CREATE (:Memory {{id: 'filler-{id}', external_id: 'external-{id}', title: 'Filler {id}'}})"
+        ))
+        .unwrap();
+    }
+    db.query("CREATE INDEX ON :Memory(id)").unwrap();
+    db.query("CREATE INDEX ON :Memory(external_id)").unwrap();
+
+    let cypher = "MATCH (m:Memory) WHERE m.id = $identity OR m.external_id = $identity RETURN m.title AS title ORDER BY title ASC";
+    let parameters =
+        BTreeMap::from([("identity".to_string(), Value::String("needle".to_string()))]);
+    let explain = db.explain_query_with_params(cypher, &parameters).unwrap();
+    let physical_plan = explain.physical_plan.explain(0);
+    assert!(physical_plan.contains("IndexNodeUnionSeek"));
+    assert!(physical_plan.contains("NodeProjectionScanExec"));
+    assert!(explain
+        .trace
+        .decisions
+        .iter()
+        .any(|decision| decision.contains("choose IndexNodeUnionSeek")));
+    assert!(explain.trace.selected_plan.contains("IndexNodeUnionSeek"));
+
+    let output = db.query_with_params(cypher, &parameters).unwrap();
+    assert_eq!(
+        output
+            .rows
+            .iter()
+            .map(|row| row.get("title").cloned().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            Value::String("By external id".to_string()),
+            Value::String("By id".to_string()),
+            Value::String("Matches both".to_string()),
+        ]
+    );
+    let rebound = db
+        .query_with_params(
+            cypher,
+            &BTreeMap::from([("identity".to_string(), Value::String("first".to_string()))]),
+        )
+        .unwrap();
+    assert_eq!(rebound.rows.len(), 1);
+    assert_eq!(
+        rebound.rows[0].get("title"),
+        Some(&Value::String("By id".to_string()))
+    );
+}
+
+#[test]
+fn exact_property_disjunction_requires_every_union_branch_to_be_indexed() {
+    let mut db = Database::new();
+    for id in 0..32 {
+        db.query(&format!(
+            "CREATE (:Memory {{id: 'id-{id}', external_id: 'external-{id}'}})"
+        ))
+        .unwrap();
+    }
+    db.query("CREATE INDEX ON :Memory(id)").unwrap();
+
+    let explain = db
+        .explain_query(
+            "MATCH (m:Memory) WHERE m.id = 'id-1' OR m.external_id = 'id-1' RETURN m.id AS id",
+        )
+        .unwrap();
+    assert!(!explain
+        .physical_plan
+        .explain(0)
+        .contains("IndexNodeUnionSeek"));
+}
+
+#[test]
+fn exact_property_union_declines_more_than_sixty_four_lookup_values() {
+    let mut db = Database::new();
+    for id in 0..96 {
+        db.query(&format!(
+            "CREATE (:Memory {{id: 'id-{id}', external_id: 'external-{id}'}})"
+        ))
+        .unwrap();
+    }
+    db.query("CREATE INDEX ON :Memory(id)").unwrap();
+    db.query("CREATE INDEX ON :Memory(external_id)").unwrap();
+    let id_values = (0..33)
+        .map(|id| format!("'id-{id}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let external_values = (0..33)
+        .map(|id| format!("'external-{id}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let explain = db
+        .explain_query(&format!(
+            "MATCH (m:Memory) WHERE m.id IN [{id_values}] OR m.external_id IN [{external_values}] RETURN m.id AS id"
+        ))
+        .unwrap();
+    assert!(!explain
+        .physical_plan
+        .explain(0)
+        .contains("IndexNodeUnionSeek"));
+}
+
+#[test]
+fn exact_property_union_deduplication_is_memory_admitted() {
+    let execution_memory = crate::executor::ExecutionMemoryConfig {
+        blocking_operator_bytes: NonZeroUsize::new(64).unwrap(),
+        ..crate::executor::ExecutionMemoryConfig::default()
+    };
+    let mut db = Database::new_with_config(DatabaseConfig {
+        execution_memory,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'needle', external_id: 'first', title: 'One'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'second', external_id: 'needle', title: 'Two'})")
+        .unwrap();
+    for id in 0..32 {
+        db.query(&format!(
+            "CREATE (:Memory {{id: 'filler-{id}', external_id: 'external-{id}', title: 'Filler {id}'}})"
+        ))
+        .unwrap();
+    }
+    db.query("CREATE INDEX ON :Memory(id)").unwrap();
+    db.query("CREATE INDEX ON :Memory(external_id)").unwrap();
+
+    let error = db
+        .query(
+            "MATCH (m:Memory) WHERE m.id = 'needle' OR m.external_id = 'needle' RETURN m.title AS title",
+        )
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("operator state would use 128 bytes"));
+}
+
+#[test]
 fn indexed_property_in_parameter_list_keeps_residual_filters() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'a', title: 'A', lifecycle_state: 'active'})")

@@ -433,10 +433,13 @@ batches remain charged until synchronous emission. `DistinctExec` uses ordered
 spill runs followed by bounded merge deduplication. `NodeCartesianProductExec`
 partitions an oversized build side into bounded spill runs and replays those
 runs for each streamed probe row.
-Sequential node scans and property, composite, range, and text index scans MUST
+Sequential node scans and property, bounded property-union, composite, range,
+and text index scans MUST
 admit each retained row to a query-rooted pipeline batch before insertion. The
 batch MUST flush at the first row-count or resident-byte boundary and MUST keep
-the stable `batch_payload_bytes` rejection for a single oversized row. Graph
+the stable `batch_payload_bytes` rejection for a single oversized row. A
+property-union scan MUST additionally admit every retained deduplication key to
+blocking state before the candidate becomes visible. Graph
 existence predicates and optional degree calculation MUST consume adjacency
 through the visitor API, stop as soon as their result is known, and pass the
 query blocking account into any storage-side ordered merge; they MUST NOT

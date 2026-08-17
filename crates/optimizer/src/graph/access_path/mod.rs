@@ -9,13 +9,14 @@ use super::value_range::{
 use super::{OptimizerCatalog, PhysicalPlan};
 use crate::{OptimizerRule, RuleApplication, RuleId, RuleKind, RulePromise, StageTrace};
 use skein_core::Value;
-use skein_plan::{LogicalPlan, Predicate};
+use skein_plan::{ExactPropertySeekBranch, LogicalPlan, Predicate};
 use std::collections::BTreeMap;
 
 mod candidates;
 
 use candidates::{
-    composite_index_seek_candidate, equality_index_seek_candidate, index_seek_from_conjunction,
+    composite_index_seek_candidate, equality_index_seek_candidate,
+    exact_union_index_seek_candidate, index_seek_from_conjunction,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -47,6 +48,10 @@ struct NodeCompositeSeekRule<'a> {
     catalog: &'a OptimizerCatalog,
 }
 
+struct NodeUnionSeekRule<'a> {
+    catalog: &'a OptimizerCatalog,
+}
+
 struct NodeConjunctionSeekRule<'a> {
     catalog: &'a OptimizerCatalog,
 }
@@ -59,6 +64,9 @@ pub(super) fn index_seek_from_filter(
     stage_events: &mut Vec<StageTrace>,
 ) -> Option<PhysicalPlan> {
     match (predicate, input) {
+        (Predicate::Or(_), LogicalPlan::NodeScan { .. }) => {
+            union_index_seek_from_rule(predicate, input, catalog, decisions, stage_events)
+        }
         (
             Predicate::And(predicates),
             LogicalPlan::NodeScan {
@@ -261,6 +269,48 @@ pub(super) fn index_seek_from_filter(
             }
         }
         _ => None,
+    }
+}
+
+impl OptimizerRule<GraphRuleExpr> for NodeUnionSeekRule<'_> {
+    fn id(&self) -> RuleId {
+        RuleId::new("node_exact_index_union_seek", RuleKind::Implementation)
+    }
+
+    fn promise(&self, expression: &GraphRuleExpr) -> RulePromise {
+        let GraphRuleExpr::Filter { predicate, input } = expression else {
+            return RulePromise::NEVER;
+        };
+        let Predicate::Or(predicates) = predicate.as_ref() else {
+            return RulePromise::NEVER;
+        };
+        let LogicalPlan::NodeScan { variable, label } = input.as_ref() else {
+            return RulePromise::NEVER;
+        };
+        if exact_union_index_seek_candidate(predicates, predicate, variable, label, self.catalog)
+            .is_some()
+        {
+            RulePromise::new(110)
+        } else {
+            RulePromise::NEVER
+        }
+    }
+
+    fn apply(&self, expression: &GraphRuleExpr) -> Option<RuleApplication<GraphRuleExpr>> {
+        let GraphRuleExpr::Filter { predicate, input } = expression else {
+            return None;
+        };
+        let Predicate::Or(predicates) = predicate.as_ref() else {
+            return None;
+        };
+        let LogicalPlan::NodeScan { variable, label } = input.as_ref() else {
+            return None;
+        };
+        exact_union_index_seek_candidate(predicates, predicate, variable, label, self.catalog).map(
+            |(plan, decision)| {
+                RuleApplication::new(GraphRuleExpr::Physical(Box::new(plan)), decision)
+            },
+        )
     }
 }
 
@@ -716,6 +766,21 @@ fn text_index_seek_from_rule(
         input: Box::new(input.clone()),
     };
     let rule = NodeTextSeekRule { catalog };
+    physical_plan_from_rule_batch(&expression, &[&rule], decisions, stage_events)
+}
+
+fn union_index_seek_from_rule(
+    predicate: &Predicate,
+    input: &LogicalPlan,
+    catalog: &OptimizerCatalog,
+    decisions: &mut Vec<String>,
+    stage_events: &mut Vec<StageTrace>,
+) -> Option<PhysicalPlan> {
+    let expression = GraphRuleExpr::Filter {
+        predicate: Box::new(predicate.clone()),
+        input: Box::new(input.clone()),
+    };
+    let rule = NodeUnionSeekRule { catalog };
     physical_plan_from_rule_batch(&expression, &[&rule], decisions, stage_events)
 }
 

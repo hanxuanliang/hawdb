@@ -106,6 +106,35 @@ impl GraphExecutionRead for GraphStore {
         }
     }
 
+    fn visit_projected_nodes_by_property_owned(
+        &self,
+        label_id: LabelId,
+        property: &str,
+        values: &[skein_core::Value],
+        required_properties: &BTreeSet<String>,
+        consumer: &mut dyn FnMut(ProjectedNodeRecord) -> Result<ScanControl>,
+    ) -> Result<ScanControl> {
+        let mut consumer_error = None;
+        let control = GraphStore::visit_projected_nodes_by_property_owned(
+            self,
+            label_id,
+            property,
+            values,
+            required_properties,
+            |node| match consumer(node) {
+                Ok(control) => to_store_control(control),
+                Err(error) => {
+                    consumer_error = Some(error);
+                    GraphScanControl::Stop
+                }
+            },
+        )?;
+        match consumer_error {
+            Some(error) => Err(error),
+            None => Ok(to_execution_control(control)),
+        }
+    }
+
     fn visit_nodes_by_property_owned(
         &self,
         label_id: LabelId,

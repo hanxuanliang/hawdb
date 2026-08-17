@@ -76,6 +76,7 @@ impl PhysicalPlan {
             PhysicalPlan::NodeColumnLookupExec { .. } => PhysicalPlanKind::NodeColumnLookupExec,
             PhysicalPlan::IndexNodeSeek { .. } => PhysicalPlanKind::IndexNodeSeek,
             PhysicalPlan::IndexNodeMultiSeek { .. } => PhysicalPlanKind::IndexNodeMultiSeek,
+            PhysicalPlan::IndexNodeUnionSeek { .. } => PhysicalPlanKind::IndexNodeUnionSeek,
             PhysicalPlan::IndexNodeCompositeSeek { .. } => PhysicalPlanKind::IndexNodeCompositeSeek,
             PhysicalPlan::IndexNodeRangeSeek { .. } => PhysicalPlanKind::IndexNodeRangeSeek,
             PhysicalPlan::IndexNodeTextSeek { .. } => PhysicalPlanKind::IndexNodeTextSeek,
@@ -157,6 +158,7 @@ impl PhysicalPlan {
             | PhysicalPlan::SourceSegmentScan { .. }
             | PhysicalPlan::IndexNodeSeek { .. }
             | PhysicalPlan::IndexNodeMultiSeek { .. }
+            | PhysicalPlan::IndexNodeUnionSeek { .. }
             | PhysicalPlan::IndexNodeCompositeSeek { .. }
             | PhysicalPlan::IndexNodeRangeSeek { .. }
             | PhysicalPlan::IndexNodeTextSeek { .. }

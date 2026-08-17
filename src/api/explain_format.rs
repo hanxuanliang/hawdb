@@ -246,6 +246,16 @@ fn access_object(plan: &PhysicalPlan) -> String {
         | PhysicalPlan::IndexNodeTextSeek {
             label, property, ..
         } => format!("label:{label}, index:{property}"),
+        PhysicalPlan::IndexNodeUnionSeek {
+            label, branches, ..
+        } => format!(
+            "label:{label}, indexes:{}",
+            branches
+                .iter()
+                .map(|branch| branch.property.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
         PhysicalPlan::IndexNodeCompositeSeek {
             label, predicates, ..
         } => format!(

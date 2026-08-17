@@ -867,6 +867,7 @@ fn explain_chosen_indexes_value(optimized: &OptimizedQueryPlan) -> Value {
     let index_operators = [
         ("IndexNodeSeek", "node_seek"),
         ("IndexNodeMultiSeek", "node_multi_seek"),
+        ("IndexNodeUnionSeek", "node_union_seek"),
         ("IndexNodeCompositeSeek", "node_composite_seek"),
         ("IndexNodeRangeSeek", "node_range_seek"),
         ("IndexNodeTextSeek", "node_text_seek"),

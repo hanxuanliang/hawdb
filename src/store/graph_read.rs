@@ -127,6 +127,10 @@ impl GraphStore {
                     required_properties,
                     consumer,
                 ),
+            skein_plan::NodeProjectionAccess::PropertyUnion { .. } => Err(SkeinError::Execution(
+                "property-union projection access requires executor-owned deduplication admission"
+                    .to_string(),
+            )),
             skein_plan::NodeProjectionAccess::CompositeEquality { predicates } => self
                 .visit_projected_nodes_by_composite_property_owned(
                     label_id,
@@ -1043,7 +1047,7 @@ impl GraphStore {
         Ok(GraphScanControl::Continue)
     }
 
-    fn visit_projected_nodes_by_property_owned(
+    pub(crate) fn visit_projected_nodes_by_property_owned(
         &self,
         label_id: LabelId,
         property: &str,

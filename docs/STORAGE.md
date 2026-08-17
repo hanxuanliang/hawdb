@@ -646,7 +646,9 @@ catalog stores persistent equality, composite equality, range, and full-text
 index descriptors, while the execution indexes remain rebuildable from
 canonical records after checkpoint load or WAL replay. The optimizer can choose
 `IndexNodeSeek` for simple label plus property equality predicates when an
-equality index descriptor exists, `IndexNodeCompositeSeek` for conjunctions
+equality index descriptor exists, `IndexNodeUnionSeek` for bounded exact `OR`
+predicates only when every property branch has an equality descriptor,
+`IndexNodeCompositeSeek` for conjunctions
 that bind every property in a composite equality descriptor, `IndexNodeTextSeek`
 for `CONTAINS` predicates backed by a full-text descriptor, and
 `IndexNodeRangeSeek` for single-bound and conjunctive bounded range predicates

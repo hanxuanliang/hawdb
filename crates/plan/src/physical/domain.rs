@@ -116,6 +116,7 @@ impl PhysicalPlan {
             | PhysicalPlan::NodeColumnLookupExec { .. }
             | PhysicalPlan::IndexNodeSeek { .. }
             | PhysicalPlan::IndexNodeMultiSeek { .. }
+            | PhysicalPlan::IndexNodeUnionSeek { .. }
             | PhysicalPlan::IndexNodeCompositeSeek { .. }
             | PhysicalPlan::IndexNodeRangeSeek { .. }
             | PhysicalPlan::IndexNodeTextSeek { .. } => {

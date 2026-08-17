@@ -798,6 +798,32 @@ impl PhysicalPlan {
                 }
                 output.push_str("])");
             }
+            PhysicalPlan::IndexNodeUnionSeek {
+                variable,
+                label,
+                branches,
+            } => {
+                output.push_str("IndexNodeUnionSeek(");
+                write_identifier(output, variable);
+                output.push(':');
+                write_identifier(output, label);
+                output.push('(');
+                for (branch_index, branch) in branches.iter().enumerate() {
+                    if branch_index > 0 {
+                        output.push('|');
+                    }
+                    write_identifier(output, &branch.property);
+                    output.push_str(" IN [");
+                    for (value_index, value) in branch.values.iter().enumerate() {
+                        if value_index > 0 {
+                            output.push(',');
+                        }
+                        write_value(output, value);
+                    }
+                    output.push(']');
+                }
+                output.push_str("))");
+            }
             PhysicalPlan::IndexNodeCompositeSeek {
                 variable,
                 label,
@@ -1146,6 +1172,23 @@ fn write_node_projection_access(output: &mut String, access: &NodeProjectionAcce
                     output.push(',');
                 }
                 write_value(output, value);
+            }
+            output.push(')');
+        }
+        NodeProjectionAccess::PropertyUnion { branches } => {
+            output.push_str("property_union(");
+            for (branch_index, branch) in branches.iter().enumerate() {
+                if branch_index > 0 {
+                    output.push('|');
+                }
+                write_identifier(output, &branch.property);
+                output.push('=');
+                for (value_index, value) in branch.values.iter().enumerate() {
+                    if value_index > 0 {
+                        output.push(',');
+                    }
+                    write_value(output, value);
+                }
             }
             output.push(')');
         }

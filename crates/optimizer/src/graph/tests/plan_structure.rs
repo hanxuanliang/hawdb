@@ -219,6 +219,75 @@ fn exact_or_lookup_lowers_to_one_index_multiseek() {
 }
 
 #[test]
+fn different_exact_properties_lower_to_one_bounded_union_seek() {
+    let predicate = Predicate::Or(vec![
+        Predicate::PropertyEq {
+            variable: "m".to_string(),
+            property: "id".to_string(),
+            value: Value::String("memory:1".to_string()),
+        },
+        Predicate::PropertyEq {
+            variable: "m".to_string(),
+            property: "external_id".to_string(),
+            value: Value::String("memory:1".to_string()),
+        },
+    ]);
+    let logical = LogicalPlan::Filter {
+        predicate: predicate.clone(),
+        input: Box::new(LogicalPlan::NodeScan {
+            variable: "m".to_string(),
+            label: "Memory".to_string(),
+        }),
+    };
+    let catalog = OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new(
+            [
+                ("Memory".to_string(), "id".to_string()),
+                ("Memory".to_string(), "external_id".to_string()),
+            ],
+            [],
+            [],
+            [],
+        ),
+        OptimizerCatalogStatistics::new(
+            [("Memory".to_string(), 10_000)],
+            [],
+            [],
+            [],
+            [],
+            [
+                (("Memory".to_string(), "id".to_string()), 10_000),
+                (("Memory".to_string(), "external_id".to_string()), 10_000),
+            ],
+            [],
+        ),
+    );
+
+    let (plan, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+        .optimize_with_catalog(&logical, &catalog);
+
+    assert!(matches!(
+        plan,
+        PhysicalPlan::FilterExec {
+            predicate: residual,
+            input,
+        } if residual == predicate
+            && matches!(
+                input.as_ref(),
+                PhysicalPlan::IndexNodeUnionSeek { branches, .. }
+                    if branches.len() == 2
+                        && branches[0].property == "id"
+                        && branches[1].property == "external_id"
+            )
+    ));
+    assert_eq!(trace.selected_plan_cost.estimated_rows, 2);
+    assert!(trace
+        .rule_events
+        .iter()
+        .any(|event| event.rule() == "implementation:node_exact_index_union_seek"));
+}
+
+#[test]
 fn unfiltered_node_count_uses_exact_count_store() {
     let logical = LogicalPlan::Aggregate {
         group_keys: Vec::new(),

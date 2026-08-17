@@ -240,6 +240,12 @@ fn estimate_node_property_filter_rows(
             matched.then_some(rows)
         }
         Predicate::Or(predicates) => {
+            if predicates
+                .iter()
+                .all(|predicate| exact_property_predicate_is_covered(predicate, input))
+            {
+                return Some(input_rows);
+            }
             let mut rows = 0_u64;
             for predicate in predicates {
                 let estimated =
@@ -329,6 +335,18 @@ fn estimate_node_property_filter_rows(
     }
 }
 
+fn exact_property_predicate_is_covered(predicate: &Predicate, input: &PhysicalPlan) -> bool {
+    match predicate {
+        Predicate::PropertyEq {
+            variable, property, ..
+        }
+        | Predicate::PropertyIn {
+            variable, property, ..
+        } => physical_plan_access_path_covers_property(input, variable, property),
+        _ => false,
+    }
+}
+
 fn physical_plan_access_path_covers_property(
     plan: &PhysicalPlan,
     variable: &str,
@@ -365,6 +383,11 @@ fn physical_plan_access_path_covers_property(
                     .iter()
                     .any(|(plan_property, _)| plan_property == property)
         }
+        PhysicalPlan::IndexNodeUnionSeek {
+            variable: plan_variable,
+            branches,
+            ..
+        } => plan_variable == variable && branches.iter().any(|branch| branch.property == property),
         PhysicalPlan::NodeCartesianProductExec { left, right } => {
             physical_plan_access_path_covers_property(left, variable, property)
                 || physical_plan_access_path_covers_property(right, variable, property)
@@ -397,6 +420,11 @@ fn physical_plan_node_label<'a>(plan: &'a PhysicalPlan, variable: &str) -> Optio
             ..
         }
         | PhysicalPlan::IndexNodeMultiSeek {
+            variable: plan_variable,
+            label,
+            ..
+        }
+        | PhysicalPlan::IndexNodeUnionSeek {
             variable: plan_variable,
             label,
             ..

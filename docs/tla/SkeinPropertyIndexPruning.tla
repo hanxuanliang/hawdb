@@ -100,6 +100,16 @@ Prunes(prop) == prop \in declared
 Pruned(prop, value) ==
     IF Prunes(prop) THEN index[prop][value] ELSE Matching(prop, value)
 
+(* An exact two-branch OR is admitted only when both equality indexes are   *)
+(* declared. Set union gives the executor's candidate-identity dedup rule.  *)
+UnionMatching(prop1, value1, prop2, value2) ==
+    Matching(prop1, value1) \cup Matching(prop2, value2)
+UnionPrunes(prop1, prop2) == prop1 \in declared /\ prop2 \in declared
+UnionPruned(prop1, value1, prop2, value2) ==
+    IF UnionPrunes(prop1, prop2)
+      THEN index[prop1][value1] \cup index[prop2][value2]
+      ELSE UnionMatching(prop1, value1, prop2, value2)
+
 TypeOK ==
     /\ present \in [Nodes -> BOOLEAN]
     /\ property \in [Nodes -> [Properties -> Slots]]
@@ -112,6 +122,11 @@ TypeOK ==
 PruningPreservesResults ==
     \A prop \in Properties, value \in Values :
         Pruned(prop, value) = Matching(prop, value)
+
+UnionPruningPreservesResults ==
+    \A prop1, prop2 \in Properties, value1, value2 \in Values :
+        UnionPruned(prop1, value1, prop2, value2) =
+            UnionMatching(prop1, value1, prop2, value2)
 
 \* A declared index is complete: it holds every live node carrying the
 \* value, so trusting it as exact is justified.

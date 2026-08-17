@@ -1225,6 +1225,17 @@ fn node_projection_access(plan: &PhysicalPlan) -> Option<(&String, &String, Node
                 values: values.clone(),
             },
         )),
+        PhysicalPlan::IndexNodeUnionSeek {
+            variable,
+            label,
+            branches,
+        } => Some((
+            variable,
+            label,
+            NodeProjectionAccess::PropertyUnion {
+                branches: branches.clone(),
+            },
+        )),
         PhysicalPlan::IndexNodeCompositeSeek {
             variable,
             label,
@@ -1278,6 +1289,9 @@ fn collect_access_properties(access: &NodeProjectionAccess, required: &mut BTree
         }
         NodeProjectionAccess::CompositeEquality { predicates } => {
             required.extend(predicates.iter().map(|(property, _)| property.clone()));
+        }
+        NodeProjectionAccess::PropertyUnion { branches } => {
+            required.extend(branches.iter().map(|branch| branch.property.clone()));
         }
     }
 }

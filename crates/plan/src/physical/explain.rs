@@ -361,6 +361,15 @@ impl PhysicalPlan {
                     "{pad}IndexNodeMultiSeek variable={variable} label={label} property={property} values={values:?}"
                 )
             }
+            PhysicalPlan::IndexNodeUnionSeek {
+                variable,
+                label,
+                branches,
+            } => {
+                format!(
+                    "{pad}IndexNodeUnionSeek variable={variable} label={label} branches={branches:?}"
+                )
+            }
             PhysicalPlan::IndexNodeCompositeSeek {
                 variable,
                 label,

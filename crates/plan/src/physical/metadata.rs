@@ -48,6 +48,7 @@ pub enum PhysicalPlanKind {
     NodeColumnLookupExec,
     IndexNodeSeek,
     IndexNodeMultiSeek,
+    IndexNodeUnionSeek,
     IndexNodeCompositeSeek,
     IndexNodeRangeSeek,
     IndexNodeTextSeek,
@@ -141,6 +142,7 @@ impl PhysicalPlanKind {
             PhysicalPlanKind::NodeColumnLookupExec,
             PhysicalPlanKind::IndexNodeSeek,
             PhysicalPlanKind::IndexNodeMultiSeek,
+            PhysicalPlanKind::IndexNodeUnionSeek,
             PhysicalPlanKind::IndexNodeCompositeSeek,
             PhysicalPlanKind::IndexNodeRangeSeek,
             PhysicalPlanKind::IndexNodeTextSeek,
@@ -218,6 +220,7 @@ impl PhysicalPlanKind {
             PhysicalPlanKind::NodeColumnLookupExec => "NodeColumnLookupExec",
             PhysicalPlanKind::IndexNodeSeek => "IndexNodeSeek",
             PhysicalPlanKind::IndexNodeMultiSeek => "IndexNodeMultiSeek",
+            PhysicalPlanKind::IndexNodeUnionSeek => "IndexNodeUnionSeek",
             PhysicalPlanKind::IndexNodeCompositeSeek => "IndexNodeCompositeSeek",
             PhysicalPlanKind::IndexNodeRangeSeek => "IndexNodeRangeSeek",
             PhysicalPlanKind::IndexNodeTextSeek => "IndexNodeTextSeek",
@@ -281,6 +284,7 @@ impl PhysicalPlanKind {
             | PhysicalPlanKind::NodeColumnLookupExec
             | PhysicalPlanKind::IndexNodeSeek
             | PhysicalPlanKind::IndexNodeMultiSeek
+            | PhysicalPlanKind::IndexNodeUnionSeek
             | PhysicalPlanKind::IndexNodeCompositeSeek
             | PhysicalPlanKind::IndexNodeRangeSeek
             | PhysicalPlanKind::IndexNodeTextSeek => PhysicalPlanClass::Access,

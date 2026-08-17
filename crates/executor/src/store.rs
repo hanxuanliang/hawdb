@@ -89,6 +89,25 @@ pub trait GraphExecutionRead {
         consumer: &mut dyn FnMut(ProjectedNodeRecord) -> Result<ScanControl>,
     ) -> Result<ScanControl>;
 
+    fn visit_projected_nodes_by_property_owned(
+        &self,
+        label_id: LabelId,
+        property: &str,
+        values: &[skein_core::Value],
+        required_properties: &BTreeSet<String>,
+        consumer: &mut dyn FnMut(ProjectedNodeRecord) -> Result<ScanControl>,
+    ) -> Result<ScanControl> {
+        self.visit_projected_nodes_by_access_owned(
+            label_id,
+            &NodeProjectionAccess::PropertyValues {
+                property: property.to_string(),
+                values: values.to_vec(),
+            },
+            required_properties,
+            consumer,
+        )
+    }
+
     fn visit_nodes_by_property_owned(
         &self,
         label_id: LabelId,

@@ -563,6 +563,11 @@ fn bind_physical_plan(plan: &mut PhysicalPlan, parameters: &BTreeMap<String, Val
         PhysicalPlan::IndexNodeMultiSeek { values, .. } => {
             bind_values(values, parameters)?;
         }
+        PhysicalPlan::IndexNodeUnionSeek { branches, .. } => {
+            for branch in branches {
+                bind_values(&mut branch.values, parameters)?;
+            }
+        }
         PhysicalPlan::IndexNodeCompositeSeek { predicates, .. } => {
             for (_, value) in predicates {
                 bind_value(value, parameters)?;
@@ -649,6 +654,12 @@ fn bind_node_projection_access(
         skein_plan::NodeProjectionAccess::LabelScan => Ok(()),
         skein_plan::NodeProjectionAccess::PropertyValues { values, .. } => {
             bind_values(values, parameters)
+        }
+        skein_plan::NodeProjectionAccess::PropertyUnion { branches } => {
+            for branch in branches {
+                bind_values(&mut branch.values, parameters)?;
+            }
+            Ok(())
         }
         skein_plan::NodeProjectionAccess::CompositeEquality { predicates } => {
             for (_, value) in predicates {
@@ -945,7 +956,9 @@ mod tests {
     use skein_core::Value;
     use skein_cypher as cypher;
     use skein_optimizer::{CascadesOptimizer, OptimizerCatalog};
-    use skein_plan::{LogicalPlanRoot, NodeProjectionAccess, PhysicalPlan};
+    use skein_plan::{
+        ExactPropertySeekBranch, LogicalPlanRoot, NodeProjectionAccess, PhysicalPlan,
+    };
     use std::collections::BTreeMap;
 
     #[test]
@@ -1008,6 +1021,48 @@ mod tests {
                 ..
             } if values == vec![Value::String("second".to_string())]
         ));
+    }
+
+    #[test]
+    fn projected_union_access_rebinds_every_branch() {
+        let marker = || parameter_marker("id", &Value::String("first".to_string()), &[]);
+        let template = PhysicalPlan::NodeProjectionScanExec {
+            variable: "m".to_string(),
+            label: "Memory".to_string(),
+            access: NodeProjectionAccess::PropertyUnion {
+                branches: vec![
+                    ExactPropertySeekBranch {
+                        property: "id".to_string(),
+                        values: vec![marker()],
+                    },
+                    ExactPropertySeekBranch {
+                        property: "external_id".to_string(),
+                        values: vec![marker()],
+                    },
+                ],
+            },
+            required_properties: vec!["id".to_string(), "external_id".to_string()],
+            predicate: None,
+            items: Vec::new(),
+        };
+
+        let rebound = bind_physical_plan_parameters(
+            &template,
+            &BTreeMap::from([("id".to_string(), Value::String("second".to_string()))]),
+            true,
+        )
+        .unwrap();
+
+        let PhysicalPlan::NodeProjectionScanExec {
+            access: NodeProjectionAccess::PropertyUnion { branches },
+            ..
+        } = rebound
+        else {
+            panic!("expected projected union access");
+        };
+        assert!(branches
+            .iter()
+            .all(|branch| { branch.values == vec![Value::String("second".to_string())] }));
     }
 
     #[test]

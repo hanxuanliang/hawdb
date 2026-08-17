@@ -5,7 +5,7 @@ use super::cardinality::{
 use super::{OptimizerCatalog, PhysicalPlan, PlanCost, PlanCostBreakdown};
 use skein_core::Value;
 use skein_cypher::RelationshipDirection;
-use skein_plan::{NodeProjectionAccess, RelationshipCountLeg};
+use skein_plan::{ExactPropertySeekBranch, NodeProjectionAccess, RelationshipCountLeg};
 use std::collections::BTreeMap;
 
 pub(super) const NODE_INDEX_EQ_STARTUP_COST: u64 = 1;
@@ -64,6 +64,9 @@ fn projected_access_cost(
                 estimate_node_index_seek_cost(rows, values.len().max(1) as u64),
             )
         }
+        NodeProjectionAccess::PropertyUnion { branches } => {
+            exact_property_union_cost(branches, label, catalog)
+        }
         NodeProjectionAccess::CompositeEquality { predicates } => {
             let properties = predicates
                 .iter()
@@ -98,6 +101,28 @@ fn projected_access_cost(
             )
         }
     }
+}
+
+fn exact_property_union_cost(
+    branches: &[ExactPropertySeekBranch],
+    label: &str,
+    catalog: &OptimizerCatalog,
+) -> (u64, u64) {
+    let mut rows = 0u64;
+    let mut cost = 0u64;
+    for branch in branches {
+        let branch_rows = catalog.estimate_property_index_in_rows(
+            label,
+            &branch.property,
+            branch.values.len() as u64,
+        );
+        rows = rows.saturating_add(branch_rows);
+        cost = cost.saturating_add(estimate_node_index_seek_cost(
+            branch_rows,
+            branch.values.len().max(1) as u64,
+        ));
+    }
+    (rows.min(catalog.label_count(label)).max(1), cost.max(1))
 }
 
 pub(super) fn node_index_seek_is_cheaper(label_count: u64, seek_cost: u64) -> bool {
@@ -198,6 +223,15 @@ pub(super) fn estimate_physical_plan_cost(
             PlanCost {
                 estimated_rows: rows,
                 cost: estimate_node_index_seek_cost(rows, values.len() as u64),
+            }
+        }
+        PhysicalPlan::IndexNodeUnionSeek {
+            label, branches, ..
+        } => {
+            let (rows, cost) = exact_property_union_cost(branches, label, catalog);
+            PlanCost {
+                estimated_rows: rows,
+                cost,
             }
         }
         PhysicalPlan::IndexNodeCompositeSeek {
@@ -516,6 +550,12 @@ pub(super) fn estimate_physical_plan_cost_breakdown(
                 0,
                 0,
             )
+        }
+        PhysicalPlan::IndexNodeUnionSeek {
+            label, branches, ..
+        } => {
+            let (rows, cost) = exact_property_union_cost(branches, label, catalog);
+            PlanCostBreakdown::new(rows, 0, cost, 0, 0)
         }
         PhysicalPlan::IndexNodeCompositeSeek {
             label, predicates, ..

@@ -487,6 +487,18 @@ fn execute_binding_batches_inner(
             execution_limit,
             emit,
         ),
+        PhysicalPlan::IndexNodeUnionSeek {
+            variable,
+            label,
+            branches,
+        } => stream_index_node_union_seek_batches(
+            variable,
+            label,
+            branches,
+            context,
+            execution_limit,
+            emit,
+        ),
         PhysicalPlan::IndexNodeCompositeSeek {
             variable,
             label,

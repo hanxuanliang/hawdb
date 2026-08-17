@@ -21,13 +21,17 @@ use skein_core::{
     Catalog, LabelId, RelTypeId, RelationshipDirection, Result, RuntimeTaskContext, SkeinError,
     Value,
 };
-use skein_plan::{ComparisonOp, NodeProjectionAccess, Predicate, Projection};
+use skein_plan::{
+    ComparisonOp, ExactPropertySeekBranch, NodeProjectionAccess, Predicate, Projection,
+};
 use skein_storage::{
     NodeId, NodeRecord, ProjectedNodeRecord, PropertyFilter, RangeBound, ScanPredicate,
     ScanPruningReport, ScanPruningStrategy, ScanPruningTargetKind,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
+
+const UNION_DEDUP_ENTRY_BYTES: usize = 64;
 
 #[derive(Clone, Copy)]
 pub struct NodeScanSpec<'a> {
@@ -467,6 +471,30 @@ pub fn stream_node_projection_scan_batches(
             &required_properties,
             &mut visit,
         )?,
+        (Some(label_id), NodeProjectionAccess::PropertyUnion { branches }) => {
+            let mut seen = BTreeSet::new();
+            let mut dedup_memory = context.memory_tracker();
+            let mut control = ScanControl::Continue;
+            for branch in branches {
+                control = context.store.visit_projected_nodes_by_property_owned(
+                    label_id,
+                    &branch.property,
+                    &branch.values,
+                    &required_properties,
+                    &mut |node| {
+                        if !seen.insert(node.id) {
+                            return Ok(ScanControl::Continue);
+                        }
+                        dedup_memory.try_charge(UNION_DEDUP_ENTRY_BYTES)?;
+                        visit(node)
+                    },
+                )?;
+                if control == ScanControl::Stop {
+                    break;
+                }
+            }
+            control
+        }
         (Some(label_id), access) => context.store.visit_projected_nodes_by_access_owned(
             label_id,
             access,
@@ -511,6 +539,7 @@ fn node_projection_access_strategy(access: &NodeProjectionAccess) -> ScanPruning
         NodeProjectionAccess::PropertyValues { property, .. } => ScanPruningStrategy::PropertyIn {
             property: property.clone(),
         },
+        NodeProjectionAccess::PropertyUnion { .. } => ScanPruningStrategy::OrUnion,
         NodeProjectionAccess::CompositeEquality { predicates } => {
             ScanPruningStrategy::CompositePropertyEq {
                 properties: predicates
@@ -675,6 +704,74 @@ pub fn stream_index_node_seek_batches(
         BatchControl::Stop
     } else {
         BatchControl::Continue
+    })
+}
+
+pub fn stream_index_node_union_seek_batches(
+    variable: &str,
+    label: &str,
+    branches: &[ExactPropertySeekBranch],
+    context: NodeScanContext<'_>,
+    observer: &dyn ExecutionObserver,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let Some(label_id) = context.catalog.label_id(label) else {
+        return Ok(BatchControl::Continue);
+    };
+    let mut batch = context.output_batch("IndexNodeUnionSeekExec");
+    let mut seen = BTreeSet::new();
+    let mut dedup_memory = context.memory_tracker();
+    let mut emitted = 0usize;
+    let mut control = ScanControl::Continue;
+    for branch in branches {
+        control = context.store.visit_nodes_by_property_owned(
+            label_id,
+            &branch.property,
+            &branch.values,
+            &mut |node| {
+                if !seen.insert(node.id) {
+                    return Ok(ScanControl::Continue);
+                }
+                dedup_memory.try_charge(UNION_DEDUP_ENTRY_BYTES)?;
+                if batch.push(node_binding(variable, node), emit)? == BatchControl::Stop {
+                    return Ok(ScanControl::Stop);
+                }
+                emitted = emitted.saturating_add(1);
+                if batch.is_full() && batch.emit(emit)? == BatchControl::Stop {
+                    return Ok(ScanControl::Stop);
+                }
+                Ok(if context.execution_limit.is_reached(emitted) {
+                    ScanControl::Stop
+                } else {
+                    ScanControl::Continue
+                })
+            },
+        )?;
+        if control == ScanControl::Stop {
+            break;
+        }
+    }
+    let final_emit_control = batch.emit(emit)?;
+    let candidate_count_before_pruning = context.store.node_count_for_label(Some(label_id));
+    observer.record_scan_pruning_report(ScanPruningReport {
+        target_kind: ScanPruningTargetKind::Node,
+        label_id: Some(label_id),
+        rel_type_id: None,
+        strategy: ScanPruningStrategy::OrUnion,
+        pruned: true,
+        exact_empty: seen.is_empty(),
+        candidate_count_before_pruning,
+        pruned_candidate_count: candidate_count_before_pruning.saturating_sub(seen.len()),
+        candidate_count_before_filter: seen.len(),
+        output_count: emitted,
+        filtered_out_count: 0,
+    });
+    if final_emit_control == BatchControl::Stop {
+        return Ok(BatchControl::Stop);
+    }
+    Ok(match control {
+        ScanControl::Continue => BatchControl::Continue,
+        ScanControl::Stop => BatchControl::Stop,
     })
 }
 

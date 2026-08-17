@@ -27,6 +27,13 @@ pub struct GraphExpansionBudget {
     pub payload_byte_limit: usize,
 }
 
+/// One equality-index branch in a bounded exact-property union seek.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExactPropertySeekBranch {
+    pub property: String,
+    pub values: Vec<Value>,
+}
+
 /// Candidate source used by a fused scalar node projection.
 ///
 /// Keeping the access path beside the required-property set lets storage
@@ -38,6 +45,9 @@ pub enum NodeProjectionAccess {
     PropertyValues {
         property: String,
         values: Vec<Value>,
+    },
+    PropertyUnion {
+        branches: Vec<ExactPropertySeekBranch>,
     },
     CompositeEquality {
         predicates: Vec<(String, Value)>,
@@ -62,6 +72,7 @@ impl NodeProjectionAccess {
         match self {
             Self::LabelScan => "label_scan",
             Self::PropertyValues { .. } => "property_values",
+            Self::PropertyUnion { .. } => "property_union",
             Self::CompositeEquality { .. } => "composite_equality",
             Self::PropertyRange { .. } => "property_range",
             Self::FullText { .. } => "full_text",
@@ -74,6 +85,7 @@ impl NodeProjectionAccess {
             Self::LabelScan => "SeqNodeScan",
             Self::PropertyValues { values, .. } if values.len() == 1 => "IndexNodeSeek",
             Self::PropertyValues { .. } => "IndexNodeMultiSeek",
+            Self::PropertyUnion { .. } => "IndexNodeUnionSeek",
             Self::CompositeEquality { .. } => "IndexNodeCompositeSeek",
             Self::PropertyRange { .. } => "IndexNodeRangeSeek",
             Self::FullText { .. } => "IndexNodeTextSeek",
@@ -371,6 +383,11 @@ pub enum PhysicalPlan {
         label: String,
         property: String,
         values: Vec<Value>,
+    },
+    IndexNodeUnionSeek {
+        variable: String,
+        label: String,
+        branches: Vec<ExactPropertySeekBranch>,
     },
     IndexNodeCompositeSeek {
         variable: String,
