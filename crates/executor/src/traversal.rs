@@ -7,14 +7,16 @@ use crate::kernel::{
 };
 use crate::memory::DEFAULT_BLOCKING_OPERATOR_MEMORY_BYTES;
 use crate::observer::ExecutionObserver;
-use crate::pipeline::runtime_checkpoint;
+use crate::pipeline::{runtime_checkpoint, AccountedBindingSet};
 use crate::predicate::{
     combine_property_filters, label_ids_for_pattern, node_matches_label_pattern,
     node_matches_property_filter, property_filter_from_properties, property_filter_matches_values,
     relationship_properties_match,
 };
 use crate::store::{AdjacencyReadMemory, GraphExecutionRead, ScanControl};
-use crate::{ExecutionLimit, ExecutionMemoryConfig};
+use crate::{
+    ExecutionLimit, ExecutionMemoryConfig, QueryMemoryAccount, QueryMemoryClass, QueryMemoryLedger,
+};
 use skein_core::{
     Catalog, LabelId, RelTypeId, RelationshipDirection, Result, RuntimeTaskContext, SkeinError,
     Value,
@@ -42,25 +44,37 @@ pub struct ShortestPathExecInput<'a> {
     pub returns: &'a [ShortestPathProjection],
 }
 
+#[derive(Clone, Copy)]
+pub struct TraversalExecutionContext<'a> {
+    pub memory: &'a ExecutionMemoryConfig,
+    pub memory_ledger: &'a QueryMemoryLedger,
+    pub task_context: Option<&'a RuntimeTaskContext>,
+    pub observer: &'a dyn ExecutionObserver,
+}
+
 pub fn execute_shortest_path(
     catalog: &Catalog,
     store: &dyn GraphExecutionRead,
     input: ShortestPathExecInput<'_>,
-    memory: &ExecutionMemoryConfig,
     execution_limit: ExecutionLimit,
-    task_context: Option<&RuntimeTaskContext>,
-    observer: &dyn ExecutionObserver,
-) -> Result<Vec<Binding>> {
+    context: TraversalExecutionContext<'_>,
+) -> Result<AccountedBindingSet> {
+    let TraversalExecutionContext {
+        memory,
+        memory_ledger,
+        task_context,
+        observer,
+    } = context;
     runtime_checkpoint(task_context)?;
     let Some(source) =
         find_node_by_id_property(catalog, store, input.source_label, input.source_id)?
     else {
-        return Ok(Vec::new());
+        return Ok(empty_accounted_binding_set(memory, memory_ledger));
     };
     let Some(target) =
         find_node_by_id_property(catalog, store, input.target_label, input.target_id)?
     else {
-        return Ok(Vec::new());
+        return Ok(empty_accounted_binding_set(memory, memory_ledger));
     };
     if input
         .source_visibility_filter
@@ -71,17 +85,26 @@ pub fn execute_shortest_path(
             .map(|filter| !node_matches_property_filter(&target, filter))
             .unwrap_or(false)
     {
-        return Ok(Vec::new());
+        return Ok(empty_accounted_binding_set(memory, memory_ledger));
     }
     let rel_type_id = if input.rel_type.is_empty() {
         None
     } else {
         let Some(rel_type_id) = catalog.rel_type_id(input.rel_type) else {
-            return Ok(Vec::new());
+            return Ok(empty_accounted_binding_set(memory, memory_ledger));
         };
         Some(rel_type_id)
     };
-    let (paths, search_peak_bytes, visited_paths) = all_shortest_paths(
+    let blocking_account = memory_ledger.account(
+        QueryMemoryClass::BlockingState,
+        "ShortestPathExec",
+        memory.blocking_operator_bytes,
+    );
+    let ShortestPathSearchResult {
+        paths,
+        tracker: mut search_tracker,
+        visited_paths,
+    } = search_shortest_paths(
         store,
         ShortestPathSearch {
             source: source.id,
@@ -94,11 +117,13 @@ pub fn execute_shortest_path(
         },
         memory.blocking_operator_bytes,
         execution_limit.output_rows.unwrap_or(usize::MAX),
+        Some(blocking_account.clone()),
         task_context,
         observer,
     )?;
     let mut output = Vec::with_capacity(paths.len());
-    let mut output_tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
+    let mut output_tracker =
+        OperatorMemoryTracker::with_account(memory.blocking_operator_bytes, blocking_account);
     for path in paths {
         runtime_checkpoint(task_context)?;
         let binding = shortest_path_binding(store, &path, input.returns)?;
@@ -111,16 +136,34 @@ pub fn execute_shortest_path(
             )));
         }
         output_tracker.try_charge(bytes)?;
+        search_tracker.release(path_memory_bytes(&path));
         output.push(binding);
     }
     observer.record_blocking_memory_report(in_memory_report(
         "ShortestPathExec",
         &output_tracker,
-        search_peak_bytes.max(output_tracker.peak_bytes),
+        search_tracker.peak_bytes.max(output_tracker.peak_bytes),
         visited_paths,
         memory,
     ));
-    Ok(output)
+    Ok(AccountedBindingSet::new(output, output_tracker))
+}
+
+fn empty_accounted_binding_set(
+    memory: &ExecutionMemoryConfig,
+    memory_ledger: &QueryMemoryLedger,
+) -> AccountedBindingSet {
+    AccountedBindingSet::new(
+        Vec::new(),
+        OperatorMemoryTracker::with_account(
+            memory.blocking_operator_bytes,
+            memory_ledger.account(
+                QueryMemoryClass::BlockingState,
+                "ShortestPathExec",
+                memory.blocking_operator_bytes,
+            ),
+        ),
+    )
 }
 
 fn find_node_by_id_property(
@@ -168,8 +211,43 @@ pub fn all_shortest_paths(
     task_context: Option<&RuntimeTaskContext>,
     observer: &dyn ExecutionObserver,
 ) -> Result<(Vec<Vec<NodeId>>, usize, usize)> {
+    let result = search_shortest_paths(
+        store,
+        search,
+        memory_budget,
+        result_limit,
+        None,
+        task_context,
+        observer,
+    )?;
+    Ok((
+        result.paths,
+        result.tracker.peak_bytes,
+        result.visited_paths,
+    ))
+}
+
+struct ShortestPathSearchResult {
+    paths: Vec<Vec<NodeId>>,
+    tracker: OperatorMemoryTracker,
+    visited_paths: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn search_shortest_paths(
+    store: &dyn GraphExecutionRead,
+    search: ShortestPathSearch<'_>,
+    memory_budget: NonZeroUsize,
+    result_limit: usize,
+    memory_account: Option<QueryMemoryAccount>,
+    task_context: Option<&RuntimeTaskContext>,
+    observer: &dyn ExecutionObserver,
+) -> Result<ShortestPathSearchResult> {
     let initial_path = vec![search.source];
-    let mut tracker = OperatorMemoryTracker::new(memory_budget);
+    let mut tracker = match memory_account.as_ref() {
+        Some(account) => OperatorMemoryTracker::with_account(memory_budget, account.clone()),
+        None => OperatorMemoryTracker::new(memory_budget),
+    };
     tracker.try_charge(path_memory_bytes(&initial_path))?;
     let mut queue = VecDeque::from([initial_path]);
     let mut results = Vec::new();
@@ -185,58 +263,79 @@ pub fn all_shortest_paths(
             continue;
         }
         let current = *path.last().expect("path is never empty");
-        for (_, next) in one_hop_relationships_with_budget(
+        let adjacency_memory = AdjacencyReadMemory {
+            budget_bytes: memory_budget.get(),
+            account: memory_account.as_ref(),
+        };
+        visit_one_hop_relationships_with_budget(
             store,
-            current,
-            search.rel_type_id,
-            None,
-            &BTreeMap::new(),
-            None,
-            search.direction,
-            memory_budget.get(),
+            OneHopRelationshipSpec {
+                source: current,
+                rel_type_id: search.rel_type_id,
+                target_label_ids: None,
+                rel_properties: &BTreeMap::new(),
+                relationship_scan_filter: None,
+                direction: search.direction,
+            },
+            adjacency_memory,
             observer,
-        )? {
-            runtime_checkpoint(task_context)?;
-            if search
-                .path_node_visibility_filter
-                .map(|filter| !node_matches_property_filter(&next, filter))
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            if path.contains(&next.id) {
-                continue;
-            }
-            let next_depth = depth + 1;
-            let mut next_path = path.clone();
-            next_path.push(next.id);
-            let next_path_bytes = path_memory_bytes(&next_path);
-            ensure_operator_item_fits("ShortestPathExec", next_path_bytes, &tracker)?;
-            if tracker.would_exceed(next_path_bytes) {
-                return Err(SkeinError::Execution(format!(
-                    "ShortestPathExec frontier exceeds blocking_operator_bytes {}",
-                    tracker.budget_bytes
-                )));
-            }
-            tracker.try_charge(next_path_bytes)?;
-            if next.id == search.target && next_depth >= search.min_hops {
-                found_depth = Some(next_depth);
-                results.push(next_path);
-                if results.len() >= result_limit {
-                    break;
+            &mut |_, next| {
+                runtime_checkpoint(task_context)?;
+                if search
+                    .path_node_visibility_filter
+                    .map(|filter| !node_matches_property_filter(&next, filter))
+                    .unwrap_or(false)
+                {
+                    return Ok(ScanControl::Continue);
                 }
-            } else if found_depth.is_none() && next_depth < search.max_hops {
-                queue.push_back(next_path);
-            } else {
-                tracker.release(next_path_bytes);
-            }
-        }
+                if path.contains(&next.id) {
+                    return Ok(ScanControl::Continue);
+                }
+                let next_depth = depth + 1;
+                let mut next_path = path.clone();
+                next_path.push(next.id);
+                let next_path_bytes = path_memory_bytes(&next_path);
+                ensure_operator_item_fits("ShortestPathExec", next_path_bytes, &tracker)?;
+                if tracker.would_exceed(next_path_bytes) {
+                    return Err(SkeinError::Execution(format!(
+                        "ShortestPathExec frontier exceeds blocking_operator_bytes {}",
+                        tracker.budget_bytes
+                    )));
+                }
+                tracker.try_charge(next_path_bytes)?;
+                if next.id == search.target && next_depth >= search.min_hops {
+                    found_depth = Some(next_depth);
+                    results.push(next_path);
+                    if results.len() >= result_limit {
+                        return Ok(ScanControl::Stop);
+                    }
+                } else if found_depth.is_none() && next_depth < search.max_hops {
+                    queue.push_back(next_path);
+                } else {
+                    tracker.release(next_path_bytes);
+                }
+                Ok(ScanControl::Continue)
+            },
+        )?;
         tracker.release(path_bytes);
         if results.len() >= result_limit {
             break;
         }
     }
-    Ok((results, tracker.peak_bytes, visited_paths))
+    for path in queue {
+        tracker.release(path_memory_bytes(&path));
+    }
+    debug_assert_eq!(
+        tracker.used_bytes,
+        results.iter().fold(0usize, |bytes, path| {
+            bytes.saturating_add(path_memory_bytes(path))
+        })
+    );
+    Ok(ShortestPathSearchResult {
+        paths: results,
+        tracker,
+        visited_paths,
+    })
 }
 
 fn path_memory_bytes(path: &[NodeId]) -> usize {
@@ -628,6 +727,7 @@ pub fn relationship_count_sum_leg(
     store: &dyn GraphExecutionRead,
     source: NodeId,
     leg: &RelationshipCountLeg,
+    memory: AdjacencyReadMemory<'_>,
     observer: &dyn ExecutionObserver,
 ) -> Result<usize> {
     let rel_type_id = if leg.rel_type.is_empty() {
@@ -638,21 +738,43 @@ pub fn relationship_count_sum_leg(
     if !leg.rel_type.is_empty() && rel_type_id.is_none() {
         return Ok(0);
     }
-    Ok(one_hop_relationships(
+    count_one_hop_relationships(
         store,
-        source,
-        rel_type_id,
-        None,
-        &BTreeMap::new(),
-        None,
-        leg.direction,
+        OneHopRelationshipSpec {
+            source,
+            rel_type_id,
+            target_label_ids: None,
+            rel_properties: &BTreeMap::new(),
+            relationship_scan_filter: None,
+            direction: leg.direction,
+        },
+        memory,
         observer,
-    )?
-    .into_iter()
-    .filter(|(relationship, _)| {
-        relationship_count_filter_matches(relationship, leg.filter.as_ref())
-    })
-    .count())
+        leg.filter.as_ref(),
+    )
+}
+
+fn count_one_hop_relationships(
+    store: &dyn GraphExecutionRead,
+    spec: OneHopRelationshipSpec<'_>,
+    memory: AdjacencyReadMemory<'_>,
+    observer: &dyn ExecutionObserver,
+    count_filter: Option<&RelationshipCountFilter>,
+) -> Result<usize> {
+    let mut count = 0usize;
+    visit_one_hop_relationships_with_budget(
+        store,
+        spec,
+        memory,
+        observer,
+        &mut |relationship, _| {
+            if relationship_count_filter_matches(&relationship, count_filter) {
+                count = count.saturating_add(1);
+            }
+            Ok(ScanControl::Continue)
+        },
+    )?;
+    Ok(count)
 }
 
 fn relationship_count_filter_matches(
@@ -684,8 +806,9 @@ pub fn thread_repair_stats_rows(
     memory_rel_type: &str,
     memory_label: &str,
     memory_budget: NonZeroUsize,
+    memory_ledger: &QueryMemoryLedger,
     observer: &dyn ExecutionObserver,
-) -> Result<Vec<Binding>> {
+) -> Result<AccountedBindingSet> {
     let thread_label_ids = label_ids_for_pattern(catalog, label);
     let identity_label_ids = label_ids_for_pattern(catalog, identity_label);
     let message_label_ids = label_ids_for_pattern(catalog, message_label);
@@ -694,7 +817,13 @@ pub fn thread_repair_stats_rows(
     let memory_rel_type_id = catalog.rel_type_id(memory_rel_type);
     let mut identities = Vec::new();
     let mut threads = Vec::new();
-    let mut tracker = OperatorMemoryTracker::new(memory_budget);
+    let blocking_account = memory_ledger.account(
+        QueryMemoryClass::BlockingState,
+        "ThreadRepairStatsExec",
+        memory_budget,
+    );
+    let mut tracker = OperatorMemoryTracker::with_account(memory_budget, blocking_account.clone());
+    let mut identity_bytes = 0usize;
     let mut callback_error = None;
     let mut visit = |node: NodeRecord| {
         if node_matches_label_pattern(&node, identity_label_ids.as_deref()) {
@@ -707,6 +836,7 @@ pub fn thread_repair_stats_rows(
                 return Ok(ScanControl::Stop);
             }
             tracker.try_charge(bytes)?;
+            identity_bytes = identity_bytes.saturating_add(bytes);
             identities.push(node.clone());
         }
         if node_matches_label_pattern(&node, thread_label_ids.as_deref()) {
@@ -735,6 +865,7 @@ pub fn thread_repair_stats_rows(
     });
     let mut rows = Vec::with_capacity(threads.len());
     for thread in threads {
+        let thread_bytes = node_memory_bytes(&thread);
         let thread_id = thread
             .properties
             .get(thread_id_property)
@@ -745,33 +876,43 @@ pub fn thread_repair_stats_rows(
             .filter(|identity| identity.properties.get(identity_ref_property) == Some(&thread_id))
             .count();
         let legacy_messages = match message_rel_type_id {
-            Some(rel_type_id) => one_hop_relationships_with_budget(
+            Some(rel_type_id) => count_one_hop_relationships(
                 store,
-                thread.id,
-                Some(rel_type_id),
-                message_label_ids.as_deref(),
-                &BTreeMap::new(),
-                None,
-                RelationshipDirection::Outgoing,
-                memory_budget.get(),
+                OneHopRelationshipSpec {
+                    source: thread.id,
+                    rel_type_id: Some(rel_type_id),
+                    target_label_ids: message_label_ids.as_deref(),
+                    rel_properties: &BTreeMap::new(),
+                    relationship_scan_filter: None,
+                    direction: RelationshipDirection::Outgoing,
+                },
+                AdjacencyReadMemory {
+                    budget_bytes: memory_budget.get(),
+                    account: Some(&blocking_account),
+                },
                 observer,
-            )?
-            .len(),
+                None,
+            )?,
             None => 0,
         };
         let compacted_memories = match memory_rel_type_id {
-            Some(rel_type_id) => one_hop_relationships_with_budget(
+            Some(rel_type_id) => count_one_hop_relationships(
                 store,
-                thread.id,
-                Some(rel_type_id),
-                memory_label_ids.as_deref(),
-                &BTreeMap::new(),
-                None,
-                RelationshipDirection::Outgoing,
-                memory_budget.get(),
+                OneHopRelationshipSpec {
+                    source: thread.id,
+                    rel_type_id: Some(rel_type_id),
+                    target_label_ids: memory_label_ids.as_deref(),
+                    rel_properties: &BTreeMap::new(),
+                    relationship_scan_filter: None,
+                    direction: RelationshipDirection::Outgoing,
+                },
+                AdjacencyReadMemory {
+                    budget_bytes: memory_budget.get(),
+                    account: Some(&blocking_account),
+                },
                 observer,
-            )?
-            .len(),
+                None,
+            )?,
             None => 0,
         };
         let space_id = match thread.properties.get("space_id") {
@@ -813,6 +954,14 @@ pub fn thread_repair_stats_rows(
             relationships: BTreeMap::new(),
         };
         push_bounded_operator_binding("ThreadRepairStatsExec", &mut rows, binding, &mut tracker)?;
+        tracker.release(thread_bytes);
     }
-    Ok(rows)
+    tracker.release(identity_bytes);
+    debug_assert_eq!(
+        tracker.used_bytes,
+        rows.iter().fold(0usize, |bytes, binding| {
+            bytes.saturating_add(binding_memory_bytes(binding))
+        })
+    );
+    Ok(AccountedBindingSet::new(rows, tracker))
 }

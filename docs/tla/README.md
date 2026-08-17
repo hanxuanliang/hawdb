@@ -193,6 +193,14 @@ their visibility follows `SkeinConcurrentSnapshots.tla`; durable canonical
 adjacency ordering and publication continue to follow
 `SkeinGraphDescriptorPaging.tla`.
 
+Traversal materialization refines the same synchronous-transfer rule.
+`ShortestPathExec` retains frontier and completed paths in one rooted blocking
+account, consumes adjacency through the bounded visitor, and moves hydrated
+results into `AccountedBindingSet`. `ThreadRepairStatsExec` retains only its
+admitted identity/thread state and output rows while relationship counts remain
+streaming. `AccountedBindingSet::emit_batches` releases each owned batch only
+as the enclosing pipeline accepts it; early stop drops the remaining lease.
+
 ## Bounded Morsel Merge
 
 `SkeinBoundedMorselMerge.tla` models the production shared-pool result path for

@@ -535,12 +535,15 @@ fn execute_binding_batches_inner(
                     max_hops: *max_hops,
                     returns,
                 },
-                context.memory,
                 execution_limit,
-                context.task_context,
-                context.observer,
+                TraversalExecutionContext {
+                    memory: context.memory,
+                    memory_ledger: context.memory_ledger,
+                    task_context: context.task_context,
+                    observer: context.observer,
+                },
             )?;
-            emit_owned_binding_batches(bindings, memory.batch_rows.get(), emit)
+            bindings.emit_batches(memory.batch_rows.get(), emit)
         }
         PhysicalPlan::ThreadRepairStatsExec {
             label,
@@ -564,9 +567,10 @@ fn execute_binding_batches_inner(
                 memory_rel_type,
                 memory_label,
                 memory.blocking_operator_bytes,
+                context.memory_ledger,
                 context.observer,
             )?;
-            emit_owned_binding_batches(bindings, memory.batch_rows.get(), emit)
+            bindings.emit_batches(memory.batch_rows.get(), emit)
         }
         PhysicalPlan::GraphAlgorithm {
             algorithm,
@@ -830,6 +834,11 @@ fn execute_binding_batches_inner(
             ..
         } => {
             let label_ids = label_ids_for_pattern(catalog, label);
+            let count_account = context.memory_ledger.account(
+                QueryMemoryClass::BlockingState,
+                "OptionalRelationshipCountSumExec",
+                context.memory.blocking_operator_bytes,
+            );
             let mut total = 0usize;
             let mut callback_error = None;
             store.visit_nodes_owned(None, |node| {
@@ -839,8 +848,17 @@ fn execute_binding_batches_inner(
                     return GraphScanControl::Continue;
                 }
                 for leg in legs {
-                    match relationship_count_sum_leg(catalog, store, node.id, leg, context.observer)
-                    {
+                    match relationship_count_sum_leg(
+                        catalog,
+                        store,
+                        node.id,
+                        leg,
+                        skein_executor::store::AdjacencyReadMemory {
+                            budget_bytes: context.memory.blocking_operator_bytes.get(),
+                            account: Some(&count_account),
+                        },
+                        context.observer,
+                    ) {
                         Ok(count) => total = total.saturating_add(count),
                         Err(error) => {
                             callback_error = Some(error);

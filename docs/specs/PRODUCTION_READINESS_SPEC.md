@@ -435,6 +435,11 @@ conservative algorithm scratch and result estimate before PageRank or Louvain
 allocates that state. It fails with a stable resource error rather than spilling,
 checks cancellation within node and edge loops, and reports its combined
 projection, scratch, and materialized-result peak as blocking-operator memory.
+`ShortestPathExec` charges frontier and retained paths to one query-rooted
+blocking account, streams adjacency without a degree-sized vector, and carries
+result ownership through an accounted batch handoff. `ThreadRepairStatsExec`
+uses the same handoff and counts typed adjacency visits without collecting each
+thread's relationship and target records.
 All of these paths MUST report tracked peak memory, input rows, spill bytes,
 spill runs, and spilled rows, and MUST remove query-scoped runs on success,
 error, cancellation, and consumer stop.

@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::planner::{
-    AggregateFunction, AggregateTarget, ProjectionExpression, SortDirection, SortKey,
+    AggregateFunction, AggregateTarget, ProjectionExpression, ShortestPathProjection,
+    ShortestPathProjectionExpression, SortDirection, SortKey,
 };
 use crate::store::{DurabilityPolicy, ScanPruningStrategy, StorageResidencyMode, WalReplayConfig};
 
@@ -736,6 +737,86 @@ fn shortest_path_rejects_an_oversized_frontier() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("blocking_operator_bytes"));
+}
+
+#[test]
+fn shortest_path_stream_transfers_accounted_results_to_the_pipeline() {
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::in_memory();
+    let source = store
+        .create_node(
+            &mut catalog,
+            "Node",
+            properties([("id", Value::String("source".to_string()))]),
+        )
+        .unwrap();
+    let middle = store
+        .create_node(
+            &mut catalog,
+            "Node",
+            properties([("id", Value::String("middle".to_string()))]),
+        )
+        .unwrap();
+    let target = store
+        .create_node(
+            &mut catalog,
+            "Node",
+            properties([("id", Value::String("target".to_string()))]),
+        )
+        .unwrap();
+    store
+        .create_relationship(&mut catalog, source, middle, "LINK", BTreeMap::new())
+        .unwrap();
+    store
+        .create_relationship(&mut catalog, middle, target, "LINK", BTreeMap::new())
+        .unwrap();
+    let plan = PhysicalPlan::ShortestPathExec {
+        source_variable: "source".to_string(),
+        source_label: "Node".to_string(),
+        source_id: Value::String("source".to_string()),
+        source_visibility_predicate: None,
+        rel_type: "LINK".to_string(),
+        direction: RelationshipDirection::Outgoing,
+        target_variable: "target".to_string(),
+        target_label: "Node".to_string(),
+        target_id: Value::String("target".to_string()),
+        target_visibility_predicate: None,
+        min_hops: 1,
+        max_hops: 2,
+        returns: vec![ShortestPathProjection {
+            expression: ShortestPathProjectionExpression::Length,
+            name: "length".to_string(),
+        }],
+    };
+    let memory = ExecutionMemoryConfig::default();
+    let mut external = NoExternalReadOperator;
+    let mut rows = Vec::new();
+
+    let output = execute_with_row_consumer_profile_and_external_and_memory(
+        &plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        None,
+        &mut |row| {
+            rows.push(row);
+            Ok(())
+        },
+        &memory,
+    )
+    .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["length"], Value::Int(2));
+    assert_eq!(
+        output
+            .profile
+            .pipeline_memory_report
+            .query_memory_completion_bytes,
+        0
+    );
 }
 
 #[test]

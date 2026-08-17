@@ -102,6 +102,9 @@ unwinding. A streaming row consumer holds only the current transfer lease and
 MUST complete with zero query-owned bytes. A materialized result remains
 charged at the execution completion boundary because ownership is handed to
 the caller; the charge is released when the query result leaves that boundary.
+An operator that first produces an admitted result set MUST retain its blocking
+ownership until each batch is synchronously accepted by the enclosing pipeline;
+returning a bare row vector MUST NOT release the account before that handoff.
 Execution profiles MUST expose the root budget, peak aggregate charge,
 completion charge, and account count. Root-budget rejection MUST be
 fail-closed and identify `query_memory_bytes`.

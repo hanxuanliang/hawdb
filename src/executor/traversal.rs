@@ -3,28 +3,18 @@
 use super::*;
 use skein_executor::traversal as executor_traversal;
 
-pub(super) use executor_traversal::ShortestPathExecInput;
 #[cfg(test)]
 pub(super) use executor_traversal::ShortestPathSearch;
+pub(super) use executor_traversal::{ShortestPathExecInput, TraversalExecutionContext};
 
 pub(super) fn execute_shortest_path(
     catalog: &Catalog,
     store: &GraphStore,
     input: ShortestPathExecInput<'_>,
-    memory: &ExecutionMemoryConfig,
     execution_limit: ExecutionLimit,
-    task_context: Option<&RuntimeTaskContext>,
-    observer: &dyn skein_executor::observer::ExecutionObserver,
-) -> Result<Vec<Binding>> {
-    executor_traversal::execute_shortest_path(
-        catalog,
-        store,
-        input,
-        memory,
-        execution_limit,
-        task_context,
-        observer,
-    )
+    context: TraversalExecutionContext<'_>,
+) -> Result<skein_executor::pipeline::AccountedBindingSet> {
+    executor_traversal::execute_shortest_path(catalog, store, input, execution_limit, context)
 }
 
 #[cfg(test)]
@@ -75,9 +65,10 @@ pub(super) fn relationship_count_sum_leg(
     store: &GraphStore,
     source: NodeId,
     leg: &RelationshipCountLeg,
+    memory: skein_executor::store::AdjacencyReadMemory<'_>,
     observer: &dyn skein_executor::observer::ExecutionObserver,
 ) -> Result<usize> {
-    executor_traversal::relationship_count_sum_leg(catalog, store, source, leg, observer)
+    executor_traversal::relationship_count_sum_leg(catalog, store, source, leg, memory, observer)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -93,8 +84,9 @@ pub(super) fn thread_repair_stats_rows(
     memory_rel_type: &str,
     memory_label: &str,
     memory_budget: NonZeroUsize,
+    memory_ledger: &QueryMemoryLedger,
     observer: &dyn skein_executor::observer::ExecutionObserver,
-) -> Result<Vec<Binding>> {
+) -> Result<skein_executor::pipeline::AccountedBindingSet> {
     executor_traversal::thread_repair_stats_rows(
         catalog,
         store,
@@ -107,6 +99,7 @@ pub(super) fn thread_repair_stats_rows(
         memory_rel_type,
         memory_label,
         memory_budget,
+        memory_ledger,
         observer,
     )
 }
