@@ -693,7 +693,10 @@ mod tests {
             .runtime_admission_plan("CREATE (:Probe {value: 1})", &BTreeMap::new())
             .unwrap();
 
-        assert!((2 * 1024..64 * 1024).contains(&read.estimated_memory_bytes));
+        assert_eq!(
+            read.estimated_memory_bytes, 1024,
+            "the fused projection scan owns one admitted pipeline batch"
+        );
         assert_eq!(
             mutation.estimated_memory_bytes,
             2 * 1024 + 2 * 64 + 3 * 16 + 4 * 64 + 5

@@ -392,7 +392,14 @@ fn cypher_access_control_filters_node_scans_before_payload_projection() {
         output.output.rows[0].get("id"),
         Some(&Value::String("allowed".to_string()))
     );
-    assert!(output.physical_plan.explain(0).contains("FilterExec"));
+    let plan = output.physical_plan.explain(0);
+    assert!(plan.contains("NodeProjectionScanExec"), "plan: {plan}");
+    assert!(
+        plan.contains("properties=[\"id\", \"space_id\"]"),
+        "plan: {plan}"
+    );
+    assert!(plan.contains("predicate=Some(PropertyEq"), "plan: {plan}");
+    assert!(!plan.contains("FilterExec"), "plan: {plan}");
     assert!(output
         .trace
         .decisions
@@ -403,7 +410,7 @@ fn cypher_access_control_filters_node_scans_before_payload_projection() {
         .scan_pruning_reports
         .iter()
         .any(|report| report.strategy
-            == crate::store::ScanPruningStrategy::PropertyIn {
+            == crate::store::ScanPruningStrategy::PropertyEq {
                 property: "space_id".to_string()
             }));
 }
