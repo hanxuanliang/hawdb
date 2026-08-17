@@ -560,6 +560,45 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub warnings: Vec<String>,
     pub empty_reason_codes: Vec<KnowledgeRetrievalEmptyReasonCode>,
     pub empty_reasons: Vec<String>,
+    pub pipeline: KnowledgeRetrievalPipelineReport,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeRetrievalStage {
+    SearchCandidate,
+    MetadataFilter,
+    AuthorizedGraphExpand,
+    Rerank,
+    TopK,
+    CanonicalHydration,
+}
+
+impl KnowledgeRetrievalStage {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SearchCandidate => "search_candidate",
+            Self::MetadataFilter => "metadata_filter",
+            Self::AuthorizedGraphExpand => "authorized_graph_expand",
+            Self::Rerank => "rerank",
+            Self::TopK => "top_k",
+            Self::CanonicalHydration => "canonical_hydration",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRetrievalPipelineReport {
+    pub stages: Vec<KnowledgeRetrievalStage>,
+    pub graph_snapshot_commit_epoch: u64,
+    pub query_memory_budget_bytes: usize,
+    pub peak_tracked_memory_bytes: usize,
+    pub result_payload_budget_bytes: usize,
+    pub result_payload_bytes: usize,
+    pub canonical_identity_filtered_out_count: usize,
+    pub canonical_output_hydrated_node_count: usize,
+    pub canonical_output_hydrated_candidate_count: usize,
+    pub canonical_output_hydration_after_top_k: bool,
+    pub metadata_filter_authorized_graph_expansion: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

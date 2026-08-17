@@ -24,6 +24,7 @@ STORAGE_MODELS = [
     "SkeinIndexPublication",
     "SkeinIndexRecovery",
     "SkeinIndexStatistics",
+    "SkeinKnowledgeRetrievalPipeline",
     "SkeinMemoryTierRelease",
     "SkeinOverflowExactCompaction",
     "SkeinOverflowPublication",

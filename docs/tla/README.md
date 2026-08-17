@@ -143,6 +143,16 @@ fail-closed. Stale or unacknowledged plans are rejected without changing the WAL
 
 ## Query-Owned Runtime Memory
 
+`SkeinKnowledgeRetrievalPipeline.tla` models the application-facing retrieval
+stage machine over one pinned canonical graph snapshot. Search identities are
+metadata-filtered before authorized graph expansion; compact candidates are
+reranked and truncated by TopK before canonical output hydration. Query-memory
+or result-payload rejection terminates without returning partial hydrated
+output. TLC checks snapshot equality, stage completion, authorization before
+expansion, TopK-before-hydration, and both resource bounds. The implementation
+refinement is documented in
+`docs/specs/KNOWLEDGE_RETRIEVAL_PIPELINE_SPEC.md`.
+
 `SkeinQueryMemoryLedger.tla` models the runtime refinement implemented by
 `QueryMemoryLedger`, `QueryMemoryAccount`, and RAII `QueryMemoryLease` values.
 Every reservation is admitted atomically against its operator-local budget and

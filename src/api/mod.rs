@@ -77,6 +77,7 @@ mod observability;
 mod plan_cache;
 mod query_runtime;
 mod resource_profile;
+mod retrieval_pipeline;
 mod schema_guidance;
 mod search_projection_catch_up;
 mod source_candidates;
@@ -3269,6 +3270,11 @@ impl Database {
             store: &self.store,
             compressed_vector_search_mode: self.config.compressed_vector_search_mode,
             adaptive_vector_backend_policy: self.config.adaptive_vector_backend_policy,
+            query_memory_budget: self.config.execution_memory.query_memory_bytes,
+            result_payload_budget: self
+                .config
+                .max_read_result_payload_bytes
+                .unwrap_or(DEFAULT_MAX_READ_RESULT_PAYLOAD_BYTES),
         }
         .retrieve_knowledge(search_index, request)
     }
@@ -3283,6 +3289,11 @@ impl Database {
             store: &self.store,
             compressed_vector_search_mode: self.config.compressed_vector_search_mode,
             adaptive_vector_backend_policy: self.config.adaptive_vector_backend_policy,
+            query_memory_budget: self.config.execution_memory.query_memory_bytes,
+            result_payload_budget: self
+                .config
+                .max_read_result_payload_bytes
+                .unwrap_or(DEFAULT_MAX_READ_RESULT_PAYLOAD_BYTES),
         }
         .try_retrieve_knowledge(search_index, request)
     }
@@ -3298,6 +3309,11 @@ impl Database {
             store: &self.store,
             compressed_vector_search_mode: self.config.compressed_vector_search_mode,
             adaptive_vector_backend_policy: self.config.adaptive_vector_backend_policy,
+            query_memory_budget: self.config.execution_memory.query_memory_bytes,
+            result_payload_budget: self
+                .config
+                .max_read_result_payload_bytes
+                .unwrap_or(DEFAULT_MAX_READ_RESULT_PAYLOAD_BYTES),
         }
         .retrieve_knowledge_from_search(search, projection_freshness, request)
     }
@@ -3853,6 +3869,8 @@ struct KnowledgeRetrievalGraphContext<'a> {
     store: &'a GraphStore,
     compressed_vector_search_mode: CompressedVectorSearchMode,
     adaptive_vector_backend_policy: skein_optimizer::AdaptiveVectorBackendPolicy,
+    query_memory_budget: NonZeroUsize,
+    result_payload_budget: usize,
 }
 
 impl KnowledgeRetrievalGraphContext<'_> {
@@ -3911,23 +3929,80 @@ impl KnowledgeRetrievalGraphContext<'_> {
 
     fn retrieve_knowledge_from_search(
         &self,
-        search: SearchResultSet,
+        mut search: SearchResultSet,
         projection_freshness: SearchProjectionFreshness,
         request: &KnowledgeRetrievalRequest,
     ) -> Result<KnowledgeRetrievalOutput> {
+        let graph_commit_epoch = self.store.commit_epoch();
+        let mut pipeline = retrieval_pipeline::KnowledgeRetrievalPipelineBudget::new(
+            self.query_memory_budget,
+            self.result_payload_budget,
+        )?;
+        pipeline.enter(KnowledgeRetrievalStage::SearchCandidate)?;
+        pipeline.enter(KnowledgeRetrievalStage::MetadataFilter)?;
+        let canonical_search_nodes =
+            self.canonical_search_nodes(&search, &request.metadata_filters)?;
+        let search_hit_count = search.hits.len();
+        search
+            .hits
+            .retain(|hit| canonical_search_nodes.contains_key(&hit.id));
+        let canonical_identity_filtered_out_count =
+            search_hit_count.saturating_sub(search.hits.len());
         let graph_seed_search = self.search_knowledge_graph_seeds(
             &request.query_text,
             request.graph_seed_limit,
             &request.metadata_filters,
         )?;
-        let graph_context_search = self.expand_knowledge_context(
-            &search,
+        pipeline.retain_working(knowledge_search_node_map_memory_bytes(
+            &canonical_search_nodes,
+        ))?;
+        pipeline.retain_working(knowledge_graph_seed_candidates_memory_bytes(
             &graph_seed_search.seeds,
+        ))?;
+        pipeline.enter(KnowledgeRetrievalStage::AuthorizedGraphExpand)?;
+        let graph_context_search = self.expand_knowledge_context(
+            &canonical_search_nodes,
+            &graph_seed_search.seeds,
+            &request.metadata_filters,
             request.graph_context_limit,
             request.graph_context_max_hops,
         )?;
-        let evidence = self.knowledge_evidence_for_search(&search, &graph_context_search.paths)?;
-        let graph_commit_epoch = self.store.commit_epoch();
+        pipeline.retain_working(knowledge_graph_context_candidates_memory_bytes(
+            &graph_context_search.paths,
+        ))?;
+        let evidence = self.knowledge_evidence_for_search(
+            &search,
+            &canonical_search_nodes,
+            &graph_context_search.paths,
+        );
+        pipeline.enter(KnowledgeRetrievalStage::Rerank)?;
+        let mut candidates = self.knowledge_candidates(
+            &search,
+            &evidence,
+            &graph_seed_search.seeds,
+            &graph_context_search.paths,
+            request.candidate_scoring,
+        );
+        pipeline.retain_working(knowledge_candidates_memory_bytes(&candidates))?;
+        let candidate_total_count = candidates.len();
+        pipeline.enter(KnowledgeRetrievalStage::TopK)?;
+        let mut candidate_fanout_details = Vec::new();
+        if let Some(limit) = request.candidate_limit {
+            candidates.truncate(limit);
+            if candidate_total_count > limit {
+                candidate_fanout_details.push(KnowledgeFanoutReasonDetail::candidate_limit(
+                    limit,
+                    candidate_total_count,
+                ));
+            }
+        }
+        pipeline.enter(KnowledgeRetrievalStage::CanonicalHydration)?;
+        let (graph_seeds, graph_context_paths, canonical_hydrated_node_count) = self
+            .hydrate_knowledge_output(
+                &mut candidates,
+                &graph_seed_search.seeds,
+                &graph_context_search.paths,
+            )?;
         let required_projection_commit_epoch = self
             .store
             .search_projection_changefeed_status()
@@ -3935,8 +4010,8 @@ impl KnowledgeRetrievalGraphContext<'_> {
         let retrievers = knowledge_retriever_reports(
             &search,
             &evidence,
-            &graph_seed_search.seeds,
-            &graph_context_search.paths,
+            &graph_seeds,
+            &graph_context_paths,
             &projection_freshness,
             KnowledgeGraphSeedRetrieverInput {
                 limit: request.graph_seed_limit,
@@ -3947,20 +4022,33 @@ impl KnowledgeRetrievalGraphContext<'_> {
                 graph_commit_epoch,
             },
         );
-        let (candidates, candidate_total_count, candidate_fanout_details) = self
-            .knowledge_candidates(
-                &search,
-                &evidence,
-                &graph_seed_search.seeds,
-                &graph_context_search.paths,
-                request.candidate_limit,
-                request.candidate_scoring,
-            )?;
         let mut fanout_reason_details = graph_context_search.fanout_reason_details.clone();
         fanout_reason_details.extend(graph_seed_search.fanout_reason_details.clone());
         fanout_reason_details.extend(candidate_fanout_details);
         let fanout_reason_codes = knowledge_fanout_reason_codes(&fanout_reason_details);
         let fanout_reasons = knowledge_fanout_reason_messages(&fanout_reason_details);
+        let (result_memory_bytes, result_payload_bytes) =
+            knowledge_retrieval_result_resource_bytes(KnowledgeRetrievalResultResources {
+                search: &search,
+                retrievers: &retrievers,
+                candidates: &candidates,
+                evidence: &evidence,
+                graph_seeds: &graph_seeds,
+                graph_context_paths: &graph_context_paths,
+                fanout_reason_details: &fanout_reason_details,
+                fanout_reasons: &fanout_reasons,
+            });
+        pipeline.retain_result(result_memory_bytes, result_payload_bytes)?;
+        let pipeline_report = pipeline.finish(
+            graph_commit_epoch,
+            canonical_identity_filtered_out_count,
+            canonical_hydrated_node_count,
+            candidates
+                .iter()
+                .filter(|candidate| candidate.entity.is_some())
+                .count(),
+            true,
+        )?;
         let diagnostics = knowledge_retrieval_diagnostics(
             &search,
             request,
@@ -3979,7 +4067,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
                     graph_commit_epoch,
                 ),
                 graph_seed_candidate_count: graph_seed_search.candidate_count,
-                graph_seed_returned_count: graph_seed_search.seeds.len(),
+                graph_seed_returned_count: graph_seeds.len(),
                 graph_context_input_candidate_set:
                     knowledge_graph_context_input_candidate_set_report(
                         graph_context_search.input_seed_count,
@@ -3989,15 +4077,14 @@ impl KnowledgeRetrievalGraphContext<'_> {
                     graph_context_search.expanded_relationship_count,
                     graph_commit_epoch,
                 ),
-                graph_context_path_count: graph_context_search.paths.len(),
-                graph_context_node_count: knowledge_context_path_node_count(
-                    &graph_context_search.paths,
-                ),
-                graph_context_relationship_count: graph_context_search.paths.len(),
+                graph_context_path_count: graph_context_paths.len(),
+                graph_context_node_count: knowledge_context_path_node_count(&graph_context_paths),
+                graph_context_relationship_count: graph_context_paths.len(),
                 graph_context_truncation_reasons: graph_context_search.truncation_reasons.clone(),
                 fanout_reason_details: fanout_reason_details.clone(),
                 candidate_count: candidates.len(),
                 candidate_total_count,
+                pipeline: pipeline_report,
             },
         );
         Ok(KnowledgeRetrievalOutput {
@@ -4008,8 +4095,8 @@ impl KnowledgeRetrievalGraphContext<'_> {
             diagnostics,
             candidates,
             evidence,
-            graph_seeds: graph_seed_search.seeds,
-            graph_context_paths: graph_context_search.paths,
+            graph_seeds,
+            graph_context_paths,
             fanout_reason_codes,
             fanout_reason_details,
             fanout_reasons,
@@ -4018,8 +4105,9 @@ impl KnowledgeRetrievalGraphContext<'_> {
 
     fn expand_knowledge_context(
         &self,
-        search: &SearchResultSet,
-        graph_seeds: &[KnowledgeGraphSeed],
+        search_nodes: &BTreeMap<String, NodeId>,
+        graph_seeds: &[KnowledgeGraphSeedCandidate],
+        metadata_filters: &BTreeMap<String, String>,
         graph_context_limit: usize,
         graph_context_max_hops: usize,
     ) -> Result<KnowledgeGraphContextSearchOutput> {
@@ -4031,19 +4119,14 @@ impl KnowledgeRetrievalGraphContext<'_> {
         let mut reported_dense_groups = BTreeSet::new();
         let mut frontier = VecDeque::new();
 
-        for hit in &search.hits {
-            let Some(seed) =
-                self.seed_node_for_hit(hit.kind.as_deref(), hit.external_id.as_deref())?
-            else {
-                continue;
-            };
-            if seen_frontier_nodes.insert((hit.id.clone(), seed.id.0)) {
-                frontier.push_back((hit.id.clone(), seed.id, 0usize));
+        for (hit_id, seed_node) in search_nodes {
+            if seen_frontier_nodes.insert((hit_id.clone(), seed_node.0)) {
+                frontier.push_back((hit_id.clone(), *seed_node, 0usize));
             }
         }
         for seed in graph_seeds {
-            let seed_id = graph_seed_candidate_id(seed);
-            let seed_node = NodeId(seed.entity.node_id);
+            let seed_id = graph_seed_candidate_id_internal(seed);
+            let seed_node = seed.node_id;
             if seen_frontier_nodes.insert((seed_id.clone(), seed_node.0)) {
                 frontier.push_back((seed_id, seed_node, 0usize));
             }
@@ -4071,7 +4154,13 @@ impl KnowledgeRetrievalGraphContext<'_> {
                 current_node,
                 None,
                 KnowledgeNeighborDirection::Both,
+                graph_context_limit
+                    .saturating_sub(paths.len())
+                    .saturating_add(1),
             )? {
+                if !self.graph_expansion_node_is_authorized(edge.next_node, metadata_filters)? {
+                    continue;
+                }
                 if !seen_relationships.insert((seed_hit_id.clone(), edge.relationship.id.0)) {
                     continue;
                 }
@@ -4091,16 +4180,14 @@ impl KnowledgeRetrievalGraphContext<'_> {
                         truncation_reasons,
                     });
                 }
-                let Some(path) = self.context_path_for_relationship(
-                    &seed_hit_id,
-                    depth + 1,
-                    edge.direction,
-                    &edge.relationship,
-                )?
-                else {
-                    continue;
-                };
-                paths.push(path);
+                paths.push(KnowledgeGraphContextCandidate {
+                    seed_hit_id: seed_hit_id.clone(),
+                    hop: depth + 1,
+                    direction: edge.direction,
+                    relationship_id: edge.relationship.id,
+                    source_node_id: edge.relationship.source,
+                    target_node_id: edge.relationship.target,
+                });
                 if seen_frontier_nodes.insert((seed_hit_id.clone(), edge.next_node.0)) {
                     frontier.push_back((seed_hit_id.clone(), edge.next_node, depth + 1));
                 }
@@ -4117,10 +4204,26 @@ impl KnowledgeRetrievalGraphContext<'_> {
         })
     }
 
+    fn graph_expansion_node_is_authorized(
+        &self,
+        node_id: NodeId,
+        metadata_filters: &BTreeMap<String, String>,
+    ) -> Result<bool> {
+        let scope_filters = knowledge_graph_expansion_scope_filters(metadata_filters);
+        if scope_filters.is_empty() {
+            return Ok(true);
+        }
+        let Some(node) = self.store.node_owned(node_id)? else {
+            return Ok(false);
+        };
+        try_knowledge_graph_seed_matches_filters(self.catalog, self.store, &node, &scope_filters)
+    }
+
     fn seed_node_for_hit(
         &self,
         kind: Option<&str>,
         external_id: Option<&str>,
+        metadata_filters: &BTreeMap<String, String>,
     ) -> Result<Option<NodeRecord>> {
         let Some(external_id) = external_id else {
             return Ok(None);
@@ -4128,24 +4231,39 @@ impl KnowledgeRetrievalGraphContext<'_> {
         let Some(label) = kind.and_then(search_kind_to_label) else {
             return Ok(None);
         };
-        try_seed_node_by_label_and_external_id(self.catalog, self.store, label, external_id)
-    }
-
-    fn context_path_for_relationship(
-        &self,
-        seed_hit_id: &str,
-        hop: usize,
-        direction: KnowledgeGraphPathDirection,
-        relationship: &RelRecord,
-    ) -> Result<Option<KnowledgeGraphContextPath>> {
-        context_path_for_relationship(
+        let Some(node) =
+            try_seed_node_by_label_and_external_id(self.catalog, self.store, label, external_id)?
+        else {
+            return Ok(None);
+        };
+        if !try_knowledge_graph_seed_matches_filters(
             self.catalog,
             self.store,
-            seed_hit_id,
-            hop,
-            direction,
-            relationship,
-        )
+            &node,
+            metadata_filters,
+        )? {
+            return Ok(None);
+        }
+        Ok(Some(node))
+    }
+
+    fn canonical_search_nodes(
+        &self,
+        search: &SearchResultSet,
+        metadata_filters: &BTreeMap<String, String>,
+    ) -> Result<BTreeMap<String, NodeId>> {
+        let scope_filters = knowledge_graph_expansion_scope_filters(metadata_filters);
+        let mut nodes = BTreeMap::new();
+        for hit in &search.hits {
+            if let Some(node) = self.seed_node_for_hit(
+                hit.kind.as_deref(),
+                hit.external_id.as_deref(),
+                &scope_filters,
+            )? {
+                nodes.insert(hit.id.clone(), node.id);
+            }
+        }
+        Ok(nodes)
     }
 
     fn knowledge_entity_from_node(&self, node: &NodeRecord) -> KnowledgeEntity {
@@ -4155,13 +4273,12 @@ impl KnowledgeRetrievalGraphContext<'_> {
     fn knowledge_evidence_for_search(
         &self,
         search: &SearchResultSet,
-        graph_context_paths: &[KnowledgeGraphContextPath],
-    ) -> Result<Vec<KnowledgeEvidence>> {
+        canonical_search_nodes: &BTreeMap<String, NodeId>,
+        graph_context_paths: &[KnowledgeGraphContextCandidate],
+    ) -> Vec<KnowledgeEvidence> {
         let mut evidence = Vec::with_capacity(search.hits.len());
         for hit in &search.hits {
-            let canonical_node_id = self
-                .seed_node_for_hit(hit.kind.as_deref(), hit.external_id.as_deref())?
-                .map(|node| node.id.0);
+            let canonical_node_id = canonical_search_nodes.get(&hit.id).map(|node_id| node_id.0);
             let graph_context_path_count = graph_context_paths
                 .iter()
                 .filter(|path| path.seed_hit_id == hit.id)
@@ -4185,22 +4302,17 @@ impl KnowledgeRetrievalGraphContext<'_> {
                 text_rank: hit.text_rank,
             });
         }
-        Ok(evidence)
+        evidence
     }
 
     fn knowledge_candidates(
         &self,
         search: &SearchResultSet,
         evidence: &[KnowledgeEvidence],
-        graph_seeds: &[KnowledgeGraphSeed],
-        graph_context_paths: &[KnowledgeGraphContextPath],
-        candidate_limit: Option<usize>,
+        graph_seeds: &[KnowledgeGraphSeedCandidate],
+        graph_context_paths: &[KnowledgeGraphContextCandidate],
         scoring: KnowledgeCandidateScoringPolicy,
-    ) -> Result<(
-        Vec<KnowledgeCandidate>,
-        usize,
-        Vec<KnowledgeFanoutReasonDetail>,
-    )> {
+    ) -> Vec<KnowledgeCandidate> {
         let mut candidates = Vec::with_capacity(search.hits.len());
         for (index, (hit, evidence)) in search.hits.iter().zip(evidence.iter()).enumerate() {
             let score_breakdown =
@@ -4213,10 +4325,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
                 merged_sources: vec![KnowledgeCandidateSource::SearchHit],
                 score: score_breakdown.combined_score,
                 score_breakdown,
-                entity: self
-                    .seed_node_for_hit(hit.kind.as_deref(), hit.external_id.as_deref())?
-                    .as_ref()
-                    .map(|node| self.knowledge_entity_from_node(node)),
+                entity: None,
                 evidence: Some(evidence.clone()),
                 matched_properties: Vec::new(),
                 graph_context_path_count: evidence.graph_context_path_count,
@@ -4224,17 +4333,15 @@ impl KnowledgeRetrievalGraphContext<'_> {
         }
 
         for (index, seed) in graph_seeds.iter().enumerate() {
-            let seed_candidate_id = graph_seed_candidate_id(seed);
+            let seed_candidate_id = graph_seed_candidate_id_internal(seed);
             let seed_graph_context_path_count = graph_context_paths
                 .iter()
                 .filter(|path| path.seed_hit_id == seed_candidate_id)
                 .count();
-            if let Some(candidate) = candidates.iter_mut().find(|candidate| {
-                candidate
-                    .entity
-                    .as_ref()
-                    .is_some_and(|entity| entity.node_id == seed.entity.node_id)
-            }) {
+            if let Some(candidate) = candidates
+                .iter_mut()
+                .find(|candidate| candidate.canonical_node_id == Some(seed.node_id.0))
+            {
                 candidate.score_breakdown = knowledge_candidate_score_breakdown(
                     candidate.score_breakdown.search_score,
                     Some(seed.score),
@@ -4261,13 +4368,13 @@ impl KnowledgeRetrievalGraphContext<'_> {
                 knowledge_candidate_score_breakdown(None, Some(seed.score), scoring);
             candidates.push(KnowledgeCandidate {
                 id: seed_candidate_id,
-                canonical_node_id: Some(seed.entity.node_id),
+                canonical_node_id: Some(seed.node_id.0),
                 source: KnowledgeCandidateSource::GraphSeed,
                 source_rank: index + 1,
                 merged_sources: vec![KnowledgeCandidateSource::GraphSeed],
                 score: score_breakdown.combined_score,
                 score_breakdown,
-                entity: Some(seed.entity.clone()),
+                entity: None,
                 evidence: None,
                 matched_properties: seed.matched_properties.clone(),
                 graph_context_path_count: seed_graph_context_path_count,
@@ -4282,15 +4389,120 @@ impl KnowledgeRetrievalGraphContext<'_> {
                 .then_with(|| left.source_rank.cmp(&right.source_rank))
                 .then_with(|| left.id.cmp(&right.id))
         });
-        let total = candidates.len();
-        let mut fanout_reasons = Vec::new();
-        if let Some(limit) = candidate_limit {
-            candidates.truncate(limit);
-            if total > limit {
-                fanout_reasons.push(KnowledgeFanoutReasonDetail::candidate_limit(limit, total));
-            }
+        candidates
+    }
+
+    fn hydrate_knowledge_output(
+        &self,
+        candidates: &mut [KnowledgeCandidate],
+        graph_seeds: &[KnowledgeGraphSeedCandidate],
+        graph_context_paths: &[KnowledgeGraphContextCandidate],
+    ) -> Result<(
+        Vec<KnowledgeGraphSeed>,
+        Vec<KnowledgeGraphContextPath>,
+        usize,
+    )> {
+        let node_ids = candidates
+            .iter()
+            .filter_map(|candidate| candidate.canonical_node_id.map(NodeId))
+            .chain(graph_seeds.iter().map(|seed| seed.node_id))
+            .chain(
+                graph_context_paths
+                    .iter()
+                    .flat_map(|path| [path.source_node_id, path.target_node_id]),
+            )
+            .collect::<BTreeSet<_>>();
+        let entities = self.hydrate_knowledge_entities(&node_ids)?;
+
+        for candidate in candidates {
+            candidate.entity = candidate
+                .canonical_node_id
+                .and_then(|node_id| entities.get(&NodeId(node_id)).cloned());
         }
-        Ok((candidates, total, fanout_reasons))
+        let hydrated_seeds = graph_seeds
+            .iter()
+            .map(|seed| {
+                let entity = entities.get(&seed.node_id).cloned().ok_or_else(|| {
+                    SkeinError::StorageIntegrity(format!(
+                        "knowledge retrieval graph seed references missing canonical node {}",
+                        seed.node_id.0
+                    ))
+                })?;
+                Ok(KnowledgeGraphSeed {
+                    entity,
+                    score: seed.score,
+                    matched_properties: seed.matched_properties.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let hydrated_paths = graph_context_paths
+            .iter()
+            .map(|path| self.hydrate_graph_context_path(path, &entities))
+            .collect::<Result<Vec<_>>>()?;
+        Ok((hydrated_seeds, hydrated_paths, entities.len()))
+    }
+
+    fn hydrate_knowledge_entities(
+        &self,
+        node_ids: &BTreeSet<NodeId>,
+    ) -> Result<BTreeMap<NodeId, KnowledgeEntity>> {
+        let mut entities = BTreeMap::new();
+        for node_id in node_ids {
+            let Some(node) = self.store.node_owned(*node_id)? else {
+                return Err(SkeinError::StorageIntegrity(format!(
+                    "knowledge retrieval canonical hydration references missing node {}",
+                    node_id.0
+                )));
+            };
+            entities.insert(*node_id, self.knowledge_entity_from_node(&node));
+        }
+        Ok(entities)
+    }
+
+    fn hydrate_graph_context_path(
+        &self,
+        path: &KnowledgeGraphContextCandidate,
+        entities: &BTreeMap<NodeId, KnowledgeEntity>,
+    ) -> Result<KnowledgeGraphContextPath> {
+        let relationship = self
+            .store
+            .relationship_owned(path.relationship_id)?
+            .ok_or_else(|| {
+                SkeinError::StorageIntegrity(format!(
+                    "knowledge retrieval graph context references missing relationship {}",
+                    path.relationship_id.0
+                ))
+            })?;
+        let source = entities.get(&path.source_node_id).ok_or_else(|| {
+            SkeinError::StorageIntegrity(format!(
+                "knowledge retrieval graph context references missing source node {}",
+                path.source_node_id.0
+            ))
+        })?;
+        let target = entities.get(&path.target_node_id).ok_or_else(|| {
+            SkeinError::StorageIntegrity(format!(
+                "knowledge retrieval graph context references missing target node {}",
+                path.target_node_id.0
+            ))
+        })?;
+        Ok(KnowledgeGraphContextPath {
+            seed_hit_id: path.seed_hit_id.clone(),
+            hop: path.hop,
+            direction: path.direction,
+            relationship_id: path.relationship_id.0,
+            relationship_type: self
+                .catalog
+                .rel_type_name(relationship.rel_type)
+                .unwrap_or("<unknown>")
+                .to_string(),
+            relationship_properties: relationship.properties,
+            source_node_id: path.source_node_id.0,
+            source_labels: source.labels.clone(),
+            source_external_id: source.external_id.clone(),
+            target_node_id: path.target_node_id.0,
+            target_labels: target.labels.clone(),
+            target_external_id: target.external_id.clone(),
+        })
     }
 
     fn search_knowledge_graph_seeds(
@@ -4309,6 +4521,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
         let normalized_query = query_text.trim().to_ascii_lowercase();
         let mut input_candidate_count = 0usize;
         let mut input_filtered_out_count = 0usize;
+        let mut candidate_count = 0usize;
         let mut scored = Vec::new();
         let mut scan_error = None;
         self.store.visit_nodes_owned(None, |node| {
@@ -4332,13 +4545,23 @@ impl KnowledgeRetrievalGraphContext<'_> {
             if let Some(seed) = {
                 let (score, matched_properties) =
                     graph_seed_score(&node, &query_terms, &normalized_query);
-                (score > 0.0).then(|| KnowledgeGraphSeed {
-                    entity: self.knowledge_entity_from_node(&node),
+                (score > 0.0).then(|| KnowledgeGraphSeedCandidate {
+                    id: graph_seed_candidate_id_from_node(self.catalog, &node),
+                    node_id: node.id,
                     score,
                     matched_properties,
                 })
             } {
+                candidate_count = candidate_count.saturating_add(1);
                 scored.push(seed);
+                scored.sort_by(|left, right| {
+                    right
+                        .score
+                        .partial_cmp(&left.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| left.node_id.cmp(&right.node_id))
+                });
+                scored.truncate(limit);
             }
             crate::store::GraphScanControl::Continue
         })?;
@@ -4346,17 +4569,11 @@ impl KnowledgeRetrievalGraphContext<'_> {
             return Err(error);
         }
 
-        scored.sort_by(|left, right| {
-            right
-                .score
-                .partial_cmp(&left.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| left.entity.node_id.cmp(&right.entity.node_id))
-        });
-        let total = scored.len();
-        scored.truncate(limit);
-        let fanout_reasons = if total > limit {
-            vec![KnowledgeFanoutReasonDetail::graph_seed_limit(limit, total)]
+        let fanout_reasons = if candidate_count > limit {
+            vec![KnowledgeFanoutReasonDetail::graph_seed_limit(
+                limit,
+                candidate_count,
+            )]
         } else {
             Vec::new()
         };
@@ -4364,7 +4581,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
             seeds: scored,
             input_candidate_count,
             input_filtered_out_count,
-            candidate_count: total,
+            candidate_count,
             fanout_reason_details: fanout_reasons,
         })
     }
@@ -4372,7 +4589,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
 
 #[derive(Debug, Clone, Default)]
 struct KnowledgeGraphContextSearchOutput {
-    paths: Vec<KnowledgeGraphContextPath>,
+    paths: Vec<KnowledgeGraphContextCandidate>,
     input_seed_count: usize,
     expanded_relationship_count: usize,
     fanout_reason_details: Vec<KnowledgeFanoutReasonDetail>,
@@ -4381,11 +4598,290 @@ struct KnowledgeGraphContextSearchOutput {
 
 #[derive(Debug, Clone, Default)]
 struct KnowledgeGraphSeedSearchOutput {
-    seeds: Vec<KnowledgeGraphSeed>,
+    seeds: Vec<KnowledgeGraphSeedCandidate>,
     input_candidate_count: usize,
     input_filtered_out_count: usize,
     candidate_count: usize,
     fanout_reason_details: Vec<KnowledgeFanoutReasonDetail>,
+}
+
+#[derive(Debug, Clone)]
+struct KnowledgeGraphSeedCandidate {
+    id: String,
+    node_id: NodeId,
+    score: f64,
+    matched_properties: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct KnowledgeGraphContextCandidate {
+    seed_hit_id: String,
+    hop: usize,
+    direction: KnowledgeGraphPathDirection,
+    relationship_id: RelId,
+    source_node_id: NodeId,
+    target_node_id: NodeId,
+}
+
+fn knowledge_search_node_map_memory_bytes(nodes: &BTreeMap<String, NodeId>) -> usize {
+    std::mem::size_of::<BTreeMap<String, NodeId>>().saturating_add(nodes.iter().fold(
+        0usize,
+        |bytes, (hit_id, _)| {
+            bytes
+                .saturating_add(std::mem::size_of::<(String, NodeId)>() * 3)
+                .saturating_add(hit_id.len())
+        },
+    ))
+}
+
+fn knowledge_graph_seed_candidates_memory_bytes(seeds: &[KnowledgeGraphSeedCandidate]) -> usize {
+    std::mem::size_of_val(seeds).saturating_add(seeds.iter().fold(0usize, |bytes, seed| {
+        bytes
+            .saturating_add(std::mem::size_of::<KnowledgeGraphSeedCandidate>())
+            .saturating_add(seed.id.len())
+            .saturating_add(string_slice_bytes(&seed.matched_properties))
+    }))
+}
+
+fn knowledge_graph_context_candidates_memory_bytes(
+    paths: &[KnowledgeGraphContextCandidate],
+) -> usize {
+    std::mem::size_of_val(paths).saturating_add(paths.iter().fold(0usize, |bytes, path| {
+        bytes
+            .saturating_add(std::mem::size_of::<KnowledgeGraphContextCandidate>())
+            .saturating_add(path.seed_hit_id.len())
+    }))
+}
+
+fn knowledge_candidates_memory_bytes(candidates: &[KnowledgeCandidate]) -> usize {
+    std::mem::size_of_val(candidates).saturating_add(
+        candidates
+            .iter()
+            .map(knowledge_candidate_resource_bytes)
+            .fold(0usize, usize::saturating_add),
+    )
+}
+
+struct KnowledgeRetrievalResultResources<'a> {
+    search: &'a SearchResultSet,
+    retrievers: &'a [KnowledgeRetrieverReport],
+    candidates: &'a [KnowledgeCandidate],
+    evidence: &'a [KnowledgeEvidence],
+    graph_seeds: &'a [KnowledgeGraphSeed],
+    graph_context_paths: &'a [KnowledgeGraphContextPath],
+    fanout_reason_details: &'a [KnowledgeFanoutReasonDetail],
+    fanout_reasons: &'a [String],
+}
+
+fn knowledge_retrieval_result_resource_bytes(
+    resources: KnowledgeRetrievalResultResources<'_>,
+) -> (usize, usize) {
+    let payload_bytes = resources
+        .search
+        .hits
+        .iter()
+        .map(search_hit_payload_bytes)
+        .chain(
+            resources
+                .retrievers
+                .iter()
+                .map(knowledge_retriever_payload_bytes),
+        )
+        .chain(
+            resources
+                .candidates
+                .iter()
+                .map(knowledge_candidate_payload_bytes),
+        )
+        .chain(
+            resources
+                .evidence
+                .iter()
+                .map(knowledge_evidence_payload_bytes),
+        )
+        .chain(
+            resources
+                .graph_seeds
+                .iter()
+                .map(knowledge_graph_seed_payload_bytes),
+        )
+        .chain(
+            resources
+                .graph_context_paths
+                .iter()
+                .map(knowledge_graph_context_path_payload_bytes),
+        )
+        .chain(
+            resources
+                .fanout_reason_details
+                .iter()
+                .map(knowledge_fanout_detail_payload_bytes),
+        )
+        .fold(
+            string_slice_bytes(resources.fanout_reasons),
+            usize::saturating_add,
+        );
+    let item_count = resources
+        .search
+        .hits
+        .len()
+        .saturating_add(resources.retrievers.len())
+        .saturating_add(resources.candidates.len())
+        .saturating_add(resources.evidence.len())
+        .saturating_add(resources.graph_seeds.len())
+        .saturating_add(resources.graph_context_paths.len())
+        .saturating_add(resources.fanout_reason_details.len())
+        .saturating_add(resources.fanout_reasons.len());
+    let memory_bytes = payload_bytes
+        .saturating_add(std::mem::size_of::<KnowledgeRetrievalOutput>())
+        .saturating_add(item_count.saturating_mul(std::mem::size_of::<usize>() * 4));
+    (memory_bytes, payload_bytes)
+}
+
+fn string_slice_bytes(values: &[String]) -> usize {
+    values.iter().fold(0usize, |bytes, value| {
+        bytes
+            .saturating_add(std::mem::size_of::<String>())
+            .saturating_add(value.len())
+    })
+}
+
+fn option_string_bytes(value: &Option<String>) -> usize {
+    value.as_ref().map_or(0, |value| value.len())
+}
+
+fn matched_span_payload_bytes(span: &SearchMatchedSpan) -> usize {
+    span.field
+        .len()
+        .saturating_add(span.text.len())
+        .saturating_add(span.term.len())
+}
+
+fn search_hit_payload_bytes(hit: &crate::search::SearchHit) -> usize {
+    hit.id
+        .len()
+        .saturating_add(option_string_bytes(&hit.kind))
+        .saturating_add(option_string_bytes(&hit.external_id))
+        .saturating_add(option_string_bytes(&hit.source_id))
+        .saturating_add(string_slice_bytes(&hit.matched_terms))
+        .saturating_add(
+            hit.matched_spans
+                .iter()
+                .map(matched_span_payload_bytes)
+                .fold(0usize, usize::saturating_add),
+        )
+        .saturating_add(string_slice_bytes(&hit.fallback_reasons))
+}
+
+fn knowledge_entity_payload_bytes(entity: &KnowledgeEntity) -> usize {
+    string_slice_bytes(&entity.labels)
+        .saturating_add(option_string_bytes(&entity.external_id))
+        .saturating_add(skein_executor::binding::map_payload_bytes(
+            &entity.properties,
+        ))
+}
+
+fn knowledge_evidence_payload_bytes(evidence: &KnowledgeEvidence) -> usize {
+    evidence
+        .hit_id
+        .len()
+        .saturating_add(option_string_bytes(&evidence.kind))
+        .saturating_add(option_string_bytes(&evidence.external_id))
+        .saturating_add(option_string_bytes(&evidence.source_id))
+        .saturating_add(string_slice_bytes(&evidence.matched_terms))
+        .saturating_add(
+            evidence
+                .matched_spans
+                .iter()
+                .map(matched_span_payload_bytes)
+                .fold(0usize, usize::saturating_add),
+        )
+}
+
+fn knowledge_candidate_payload_bytes(candidate: &KnowledgeCandidate) -> usize {
+    candidate
+        .id
+        .len()
+        .saturating_add(string_slice_bytes(&candidate.matched_properties))
+        .saturating_add(
+            candidate
+                .entity
+                .as_ref()
+                .map_or(0, knowledge_entity_payload_bytes),
+        )
+        .saturating_add(
+            candidate
+                .evidence
+                .as_ref()
+                .map_or(0, knowledge_evidence_payload_bytes),
+        )
+}
+
+fn knowledge_candidate_resource_bytes(candidate: &KnowledgeCandidate) -> usize {
+    std::mem::size_of::<KnowledgeCandidate>()
+        .saturating_add(knowledge_candidate_payload_bytes(candidate))
+        .saturating_add(
+            candidate
+                .merged_sources
+                .len()
+                .saturating_mul(std::mem::size_of::<KnowledgeCandidateSource>()),
+        )
+}
+
+fn knowledge_graph_seed_payload_bytes(seed: &KnowledgeGraphSeed) -> usize {
+    knowledge_entity_payload_bytes(&seed.entity)
+        .saturating_add(string_slice_bytes(&seed.matched_properties))
+}
+
+fn knowledge_graph_context_path_payload_bytes(path: &KnowledgeGraphContextPath) -> usize {
+    path.seed_hit_id
+        .len()
+        .saturating_add(path.relationship_type.len())
+        .saturating_add(skein_executor::binding::map_payload_bytes(
+            &path.relationship_properties,
+        ))
+        .saturating_add(string_slice_bytes(&path.source_labels))
+        .saturating_add(option_string_bytes(&path.source_external_id))
+        .saturating_add(string_slice_bytes(&path.target_labels))
+        .saturating_add(option_string_bytes(&path.target_external_id))
+}
+
+fn knowledge_retriever_payload_bytes(report: &KnowledgeRetrieverReport) -> usize {
+    report
+        .name
+        .len()
+        .saturating_add(report.backend.len())
+        .saturating_add(string_slice_bytes(&report.fallback_reasons))
+        .saturating_add(string_slice_bytes(&report.truncation_reasons))
+        .saturating_add(
+            report
+                .top_candidates
+                .iter()
+                .fold(0usize, |bytes, candidate| {
+                    bytes
+                        .saturating_add(candidate.id.len())
+                        .saturating_add(option_string_bytes(&candidate.kind))
+                        .saturating_add(option_string_bytes(&candidate.external_id))
+                        .saturating_add(option_string_bytes(&candidate.source_id))
+                        .saturating_add(
+                            candidate
+                                .matched_spans
+                                .iter()
+                                .map(matched_span_payload_bytes)
+                                .fold(0usize, usize::saturating_add),
+                        )
+                }),
+        )
+}
+
+fn knowledge_fanout_detail_payload_bytes(detail: &KnowledgeFanoutReasonDetail) -> usize {
+    detail
+        .message
+        .len()
+        .saturating_add(option_string_bytes(&detail.operation))
+        .saturating_add(option_string_bytes(&detail.seed_hit_id))
+        .saturating_add(option_string_bytes(&detail.relationship_type))
+        .saturating_add(option_string_bytes(&detail.direction))
 }
 
 fn knowledge_retriever_reports(
@@ -4743,6 +5239,7 @@ struct KnowledgeRetrievalDiagnosticsInput {
     fanout_reason_details: Vec<KnowledgeFanoutReasonDetail>,
     candidate_count: usize,
     candidate_total_count: usize,
+    pipeline: KnowledgeRetrievalPipelineReport,
 }
 
 fn knowledge_retrieval_diagnostics(
@@ -4864,6 +5361,7 @@ fn knowledge_retrieval_diagnostics(
         ),
         empty_reason_codes,
         empty_reasons,
+        pipeline: input.pipeline,
     }
 }
 
@@ -4991,6 +5489,35 @@ fn graph_seed_candidate_id(seed: &KnowledgeGraphSeed) -> String {
         Some(external_id) if !external_id.is_empty() => format!("{label}:{external_id}"),
         _ => format!("node:{}", seed.entity.node_id),
     }
+}
+
+fn graph_seed_candidate_id_internal(seed: &KnowledgeGraphSeedCandidate) -> String {
+    seed.id.clone()
+}
+
+fn graph_seed_candidate_id_from_node(catalog: &Catalog, node: &NodeRecord) -> String {
+    let label = node
+        .labels
+        .iter()
+        .find_map(|label_id| catalog.label_name(*label_id))
+        .unwrap_or("node");
+    let external_id = projected_node_external_id(node);
+    if external_id.is_empty() {
+        format!("node:{}", node.id.0)
+    } else {
+        format!("{label}:{external_id}")
+    }
+}
+
+fn knowledge_graph_expansion_scope_filters(
+    metadata_filters: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    const SCOPE_FIELDS: &[&str] = &["space_id", "tenant_id", "workspace_id", "visibility"];
+    metadata_filters
+        .iter()
+        .filter(|(field, _)| SCOPE_FIELDS.contains(&field.as_str()))
+        .map(|(field, value)| (field.clone(), value.clone()))
+        .collect()
 }
 
 fn knowledge_candidate_score_breakdown(
@@ -17413,11 +17940,12 @@ fn knowledge_expansion_edges_for_node(
     node_id: NodeId,
     relationship_type: Option<crate::schema::RelTypeId>,
     requested_direction: KnowledgeNeighborDirection,
+    max_edges_per_direction: usize,
 ) -> Result<Vec<KnowledgeExpansionEdge>> {
     let mut edges = Vec::new();
     let mut seen_relationships = BTreeSet::new();
     for adjacency_direction in adjacency_directions_for_request(requested_direction) {
-        let mut direction_edges = Vec::new();
+        let mut direction_edges = BTreeMap::new();
         store.visit_adjacent_relationships_owned(
             node_id,
             relationship_type,
@@ -17427,18 +17955,26 @@ fn knowledge_expansion_edges_for_node(
                     AdjacencyDirection::Outgoing => relationship.target,
                     AdjacencyDirection::Incoming => relationship.source,
                 };
-                direction_edges.push(KnowledgeExpansionEdge {
-                    direction: knowledge_path_direction_for_adjacency(adjacency_direction),
-                    next_node,
-                    relationship,
-                });
+                let key = (next_node, relationship.id);
+                direction_edges.insert(
+                    key,
+                    KnowledgeExpansionEdge {
+                        direction: knowledge_path_direction_for_adjacency(adjacency_direction),
+                        next_node,
+                        relationship,
+                    },
+                );
+                if direction_edges.len() > max_edges_per_direction
+                    && let Some(last_key) = direction_edges.keys().next_back().copied()
+                {
+                    direction_edges.remove(&last_key);
+                }
                 crate::store::GraphScanControl::Continue
             },
         )?;
-        direction_edges.sort_by_key(|edge| (edge.next_node, edge.relationship.id));
         edges.extend(
             direction_edges
-                .into_iter()
+                .into_values()
                 .filter(|edge| seen_relationships.insert(edge.relationship.id.0)),
         );
     }
@@ -17534,14 +18070,27 @@ fn try_seed_node_by_label_and_external_id(
         return Ok(None);
     };
     let mut found = None;
-    store.visit_nodes_owned(Some(label_id), |node| {
-        if projected_node_external_id(&node) == external_id {
-            found = Some(node);
-            crate::store::GraphScanControl::Stop
-        } else {
-            crate::store::GraphScanControl::Continue
+    let mut values = vec![Value::String(external_id.to_string())];
+    if let Ok(value) = external_id.parse::<i64>() {
+        values.push(Value::Int(value));
+    }
+    store.visit_nodes_by_property_owned(label_id, "id", &values, |node| {
+        if projected_node_external_id(&node) != external_id {
+            return crate::store::GraphScanControl::Continue;
         }
+        found = Some(node);
+        crate::store::GraphScanControl::Stop
     })?;
+    if found.is_some() {
+        return Ok(found);
+    }
+    if let Ok(node_id) = external_id.parse::<u64>()
+        && let Some(node) = store.node_owned(NodeId(node_id))?
+        && node.labels.contains(&label_id)
+        && projected_node_external_id(&node) == external_id
+    {
+        return Ok(Some(node));
+    }
     Ok(found)
 }
 
@@ -17749,39 +18298,6 @@ fn knowledge_induced_edge_row_from_query_row(row: &Row) -> Result<KnowledgeInduc
             .cloned()
             .unwrap_or(Value::Float(0.5)),
     })
-}
-
-fn context_path_for_relationship(
-    catalog: &Catalog,
-    store: &GraphStore,
-    seed_hit_id: &str,
-    hop: usize,
-    direction: KnowledgeGraphPathDirection,
-    relationship: &RelRecord,
-) -> Result<Option<KnowledgeGraphContextPath>> {
-    let Some(source) = store.node_owned(relationship.source)? else {
-        return Ok(None);
-    };
-    let Some(target) = store.node_owned(relationship.target)? else {
-        return Ok(None);
-    };
-    Ok(Some(KnowledgeGraphContextPath {
-        seed_hit_id: seed_hit_id.to_string(),
-        hop,
-        direction,
-        relationship_id: relationship.id.0,
-        relationship_type: catalog
-            .rel_type_name(relationship.rel_type)
-            .unwrap_or("<unknown>")
-            .to_string(),
-        relationship_properties: relationship.properties.clone(),
-        source_node_id: relationship.source.0,
-        source_labels: node_label_names(catalog, &source),
-        source_external_id: Some(projected_node_external_id(&source)),
-        target_node_id: relationship.target.0,
-        target_labels: node_label_names(catalog, &target),
-        target_external_id: Some(projected_node_external_id(&target)),
-    }))
 }
 
 fn search_projection_graph_delta_for(
@@ -20157,6 +20673,11 @@ impl DatabaseReadTransaction {
             store: &self.store,
             compressed_vector_search_mode: self.config.compressed_vector_search_mode,
             adaptive_vector_backend_policy: self.config.adaptive_vector_backend_policy,
+            query_memory_budget: self.config.execution_memory.query_memory_bytes,
+            result_payload_budget: self
+                .config
+                .max_read_result_payload_bytes
+                .unwrap_or(DEFAULT_MAX_READ_RESULT_PAYLOAD_BYTES),
         }
         .retrieve_knowledge(search_index, request)
     }
@@ -20171,6 +20692,11 @@ impl DatabaseReadTransaction {
             store: &self.store,
             compressed_vector_search_mode: self.config.compressed_vector_search_mode,
             adaptive_vector_backend_policy: self.config.adaptive_vector_backend_policy,
+            query_memory_budget: self.config.execution_memory.query_memory_bytes,
+            result_payload_budget: self
+                .config
+                .max_read_result_payload_bytes
+                .unwrap_or(DEFAULT_MAX_READ_RESULT_PAYLOAD_BYTES),
         }
         .try_retrieve_knowledge(search_index, request)
     }

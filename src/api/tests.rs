@@ -42,10 +42,11 @@ use super::{
     KnowledgeRelationshipDeleteRequest, KnowledgeRelationshipUpdateBatchRequest,
     KnowledgeRelationshipUpdateRequest, KnowledgeRelationshipUpsertBatchRequest,
     KnowledgeRelationshipUpsertRequest, KnowledgeRelationshipsRequest,
-    KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest, KnowledgeSchemaMigrationApply,
-    KnowledgeSchemaMigrationApplyBatchRequest, KnowledgeScopedEntityBatchRequest,
-    KnowledgeScopedEntityDeleteBatchRequest, KnowledgeScopedEntityDeleteRequest,
-    KnowledgeScopedEntityRequest, KnowledgeScopedNeighborsRequest, KnowledgeScopedPathRequest,
+    KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest, KnowledgeRetrievalStage,
+    KnowledgeSchemaMigrationApply, KnowledgeSchemaMigrationApplyBatchRequest,
+    KnowledgeScopedEntityBatchRequest, KnowledgeScopedEntityDeleteBatchRequest,
+    KnowledgeScopedEntityDeleteRequest, KnowledgeScopedEntityRequest,
+    KnowledgeScopedNeighborsRequest, KnowledgeScopedPathRequest,
     KnowledgeScopedPropertyBatchRequest, KnowledgeScopedPropertyUpdateBatchRequest,
     KnowledgeScopedPropertyUpdateRequest, KnowledgeScopedRelationshipCreateBatchRequest,
     KnowledgeScopedRelationshipCreateRequest, KnowledgeScopedRelationshipDeleteBatchRequest,
@@ -154,6 +155,7 @@ mod knowledge_retrieval_fallbacks;
 mod knowledge_retrieval_filters;
 mod knowledge_retrieval_graph_context;
 mod knowledge_retrieval_identity;
+mod knowledge_retrieval_pipeline;
 mod knowledge_retrieval_ranking;
 mod merge_nodes;
 mod merge_relationships;

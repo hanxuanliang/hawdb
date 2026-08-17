@@ -975,6 +975,19 @@ future rerank policies a stable hook while preserving per-leg score provenance.
 budget after this merge and reports a fan-out reason when the budget truncates
 the merged candidate set. This gives the future retriever DAG a typed candidate
 boundary without making the search projection part of canonical graph state.
+The execution contract is an explicit
+`search_candidate -> metadata_filter -> authorized_graph_expand -> rerank ->
+top_k -> canonical_hydration` pipeline. Search identities and graph-seed
+candidates retain only compact canonical IDs through reranking. Canonical
+entity snapshots and graph-context payloads are constructed after TopK, under
+one query-rooted retained-memory ledger and one result-payload budget. Graph
+expansion rechecks canonical scope metadata and propagates `space_id`,
+`tenant_id`, `workspace_id`, and `visibility` boundaries to adjacent nodes.
+`KnowledgeRetrievalPipelineReport` makes the completed stage order, graph
+snapshot epoch, tracked peak, result bytes, and post-TopK hydration counts
+observable. The full contract and its formal refinement are specified in
+`docs/specs/KNOWLEDGE_RETRIEVAL_PIPELINE_SPEC.md` and
+`docs/tla/SkeinKnowledgeRetrievalPipeline.tla`.
 
 The same facade performs bounded multi-hop graph context
 expansion for returned search hits whose projection metadata maps back to a
