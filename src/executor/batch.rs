@@ -416,6 +416,37 @@ fn execute_binding_batches_inner(
         PhysicalPlan::SeqNodeScan { variable, label } => {
             stream_node_scan_batches(variable, label, None, context, execution_limit, emit)
         }
+        PhysicalPlan::NodeProjectionScanExec {
+            variable,
+            label,
+            required_properties,
+            predicate,
+            items,
+        } => {
+            if let Some(result) = try_stream_columnar_node_projection_batches(
+                variable,
+                label,
+                predicate.as_ref(),
+                items,
+                context,
+                execution_limit,
+                emit,
+            ) {
+                return result;
+            }
+            stream_node_projection_scan_batches(
+                NodeProjectionScanSpec {
+                    variable,
+                    label,
+                    required_properties,
+                    predicate: predicate.as_ref(),
+                    items,
+                },
+                context,
+                execution_limit,
+                emit,
+            )
+        }
         PhysicalPlan::SourceSegmentScan {
             variable,
             predicate,

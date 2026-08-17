@@ -18,8 +18,11 @@ use crate::{
     StageTrace,
 };
 use skein_core::Value;
-use skein_plan::{AggregateFunction, AggregateTarget, GraphExpansionBudget, LogicalPlan, SortItem};
-use std::collections::BTreeMap;
+use skein_plan::{
+    AggregateFunction, AggregateTarget, GraphExpansionBudget, LogicalPlan, Predicate, Projection,
+    ProjectionExpression, SortItem, SortKey,
+};
+use std::collections::{BTreeMap, BTreeSet};
 
 mod access;
 mod ddl;
@@ -146,6 +149,7 @@ impl CascadesOptimizer {
             let mut stage_events = Vec::new();
             let plan =
                 logical_to_physical_direct(logical, catalog, &mut decisions, &mut stage_events);
+            let plan = fuse_output_node_projection_scan(plan, &mut decisions, &mut stage_events);
             let mut report = if directive == OptimizerSearchDirective::DirectFallback {
                 OptimizationSearchReport::forced_direct_fallback(required_groups)
             } else {
@@ -172,6 +176,7 @@ impl CascadesOptimizer {
         let mut decisions = Vec::new();
         let mut stage_events = Vec::new();
         let plan = best_physical(&memo, root, catalog, &mut decisions, &mut stage_events);
+        let plan = fuse_output_node_projection_scan(plan, &mut decisions, &mut stage_events);
         let mut report = OptimizationSearchReport::memo(memo.group_count());
         record_logical_rewrite(&mut report, &rewrite);
         report
@@ -1066,6 +1071,300 @@ fn select_node_count_fast_path(
         label: label.clone(),
         output: item.name.clone(),
     })
+}
+
+fn fuse_output_node_projection_scan(
+    plan: PhysicalPlan,
+    decisions: &mut Vec<String>,
+    stage_events: &mut Vec<StageTrace>,
+) -> PhysicalPlan {
+    match plan {
+        PhysicalPlan::ProjectExec { items, input } => {
+            select_node_projection_scan(&items, &input, decisions, stage_events)
+                .unwrap_or(PhysicalPlan::ProjectExec { items, input })
+        }
+        PhysicalPlan::LimitExec {
+            offset,
+            limit,
+            input,
+        } => PhysicalPlan::LimitExec {
+            offset,
+            limit,
+            input: Box::new(fuse_output_node_projection_scan(
+                *input,
+                decisions,
+                stage_events,
+            )),
+        },
+        PhysicalPlan::DistinctExec { input } => PhysicalPlan::DistinctExec {
+            input: Box::new(fuse_output_node_projection_scan(
+                *input,
+                decisions,
+                stage_events,
+            )),
+        },
+        PhysicalPlan::SortExec { items, input }
+            if sort_items_use_only_projected_columns(&items) =>
+        {
+            PhysicalPlan::SortExec {
+                items,
+                input: Box::new(fuse_output_node_projection_scan(
+                    *input,
+                    decisions,
+                    stage_events,
+                )),
+            }
+        }
+        PhysicalPlan::TopNExec {
+            items,
+            offset,
+            limit,
+            input,
+        } if sort_items_use_only_projected_columns(&items) => PhysicalPlan::TopNExec {
+            items,
+            offset,
+            limit,
+            input: Box::new(fuse_output_node_projection_scan(
+                *input,
+                decisions,
+                stage_events,
+            )),
+        },
+        plan => plan,
+    }
+}
+
+fn sort_items_use_only_projected_columns(items: &[SortItem]) -> bool {
+    items
+        .iter()
+        .all(|item| matches!(item.key, SortKey::Column(_)))
+}
+
+fn select_node_projection_scan(
+    items: &[Projection],
+    input: &PhysicalPlan,
+    decisions: &mut Vec<String>,
+    stage_events: &mut Vec<StageTrace>,
+) -> Option<PhysicalPlan> {
+    let (variable, label, predicate) = match input {
+        PhysicalPlan::SeqNodeScan { variable, label } => (variable, label, None),
+        PhysicalPlan::FilterExec { predicate, input } => {
+            let PhysicalPlan::SeqNodeScan { variable, label } = input.as_ref() else {
+                return None;
+            };
+            (variable, label, Some(predicate))
+        }
+        _ => return None,
+    };
+    let mut required_properties = BTreeSet::new();
+    if !items.iter().all(|item| {
+        collect_projection_properties(&item.expression, variable, &mut required_properties)
+    }) || predicate.is_some_and(|predicate| {
+        !collect_predicate_properties(predicate, variable, &mut required_properties)
+    }) {
+        return None;
+    }
+
+    let required_properties = required_properties.into_iter().collect::<Vec<_>>();
+    decisions.push(format!(
+        "selected implementation:node_projection_scan: decode {} required properties for {variable}:{label}",
+        required_properties.len()
+    ));
+    stage_events
+        .push(ACCESS_PATH_SELECTION_STAGE.trace(StageStats::new(1, 1).with_rule_counts(1, 0)));
+    Some(PhysicalPlan::NodeProjectionScanExec {
+        variable: variable.clone(),
+        label: label.clone(),
+        required_properties,
+        predicate: predicate.cloned(),
+        items: items.to_vec(),
+    })
+}
+
+fn collect_predicate_properties(
+    predicate: &Predicate,
+    variable: &str,
+    required: &mut BTreeSet<String>,
+) -> bool {
+    match predicate {
+        Predicate::And(predicates) | Predicate::Or(predicates) => predicates
+            .iter()
+            .all(|predicate| collect_predicate_properties(predicate, variable, required)),
+        Predicate::Not(predicate) => collect_predicate_properties(predicate, variable, required),
+        Predicate::ConstantBool(_) => true,
+        Predicate::IdEq {
+            variable: current, ..
+        }
+        | Predicate::IdNotEq {
+            variable: current, ..
+        }
+        | Predicate::IdCompare {
+            variable: current, ..
+        }
+        | Predicate::IdIn {
+            variable: current, ..
+        } => current == variable,
+        Predicate::PropertyEq {
+            variable: current,
+            property,
+            ..
+        }
+        | Predicate::PropertyNotEq {
+            variable: current,
+            property,
+            ..
+        }
+        | Predicate::PropertyCompare {
+            variable: current,
+            property,
+            ..
+        }
+        | Predicate::PropertyListContains {
+            variable: current,
+            property,
+            ..
+        }
+        | Predicate::PropertyListContainsLower {
+            variable: current,
+            property,
+            ..
+        }
+        | Predicate::PropertyContains {
+            variable: current,
+            property,
+            ..
+        }
+        | Predicate::PropertyStartsWith {
+            variable: current,
+            property,
+            ..
+        }
+        | Predicate::PropertyEndsWith {
+            variable: current,
+            property,
+            ..
+        }
+        | Predicate::PropertyRegexMatch {
+            variable: current,
+            property,
+            ..
+        }
+        | Predicate::PropertyIsNull {
+            variable: current,
+            property,
+        }
+        | Predicate::PropertyIsNotNull {
+            variable: current,
+            property,
+        }
+        | Predicate::PropertyIn {
+            variable: current,
+            property,
+            ..
+        } => {
+            if current != variable {
+                return false;
+            }
+            required.insert(property.clone());
+            true
+        }
+        Predicate::ExpressionEq { expression, value }
+        | Predicate::ExpressionNotEq { expression, value }
+        | Predicate::ExpressionContains { expression, value } => {
+            collect_projection_properties(expression, variable, required)
+                && collect_projection_properties(value, variable, required)
+        }
+        Predicate::ExpressionCompare {
+            expression, value, ..
+        } => {
+            collect_projection_properties(expression, variable, required)
+                && collect_projection_properties(value, variable, required)
+        }
+        Predicate::RelationshipExists { .. } | Predicate::BoundRelationshipExists { .. } => false,
+    }
+}
+
+fn collect_projection_properties(
+    expression: &ProjectionExpression,
+    variable: &str,
+    required: &mut BTreeSet<String>,
+) -> bool {
+    match expression {
+        ProjectionExpression::Variable { .. }
+        | ProjectionExpression::RelationshipType { .. }
+        | ProjectionExpression::Column(_)
+        | ProjectionExpression::ColumnProperty { .. }
+        | ProjectionExpression::ColumnDefaultIfNullOrEq { .. }
+        | ProjectionExpression::ColumnValueDefaultIfNull { .. }
+        | ProjectionExpression::ColumnValueCasePropertyNotNullOrEq { .. }
+        | ProjectionExpression::CaseColumnSearchRank(_) => false,
+        ProjectionExpression::Id { variable: current } => current == variable,
+        ProjectionExpression::Literal(_) => true,
+        ProjectionExpression::Property {
+            variable: current,
+            property,
+        }
+        | ProjectionExpression::DatePart {
+            variable: current,
+            property,
+            ..
+        }
+        | ProjectionExpression::DefaultIfNullOrEq {
+            variable: current,
+            property,
+            ..
+        }
+        | ProjectionExpression::DefaultIfNull {
+            variable: current,
+            property,
+            ..
+        }
+        | ProjectionExpression::CasePropertyNotNullOrEq {
+            variable: current,
+            property,
+            ..
+        }
+        | ProjectionExpression::CasePropertyEqualsRank {
+            variable: current,
+            property,
+            ..
+        }
+        | ProjectionExpression::CaseLowerPropertyDefault {
+            variable: current,
+            property,
+            ..
+        } => {
+            if current != variable {
+                return false;
+            }
+            required.insert(property.clone());
+            true
+        }
+        ProjectionExpression::Coalesce(expressions) => expressions
+            .iter()
+            .all(|expression| collect_projection_properties(expression, variable, required)),
+        ProjectionExpression::Left { expression, .. } | ProjectionExpression::Lower(expression) => {
+            collect_projection_properties(expression, variable, required)
+        }
+        ProjectionExpression::CaseCoalesceDifferenceFloorZero {
+            variable: current,
+            terms,
+        } => {
+            if current != variable {
+                return false;
+            }
+            required.extend(terms.iter().map(|term| term.property.clone()));
+            true
+        }
+        ProjectionExpression::CaseEntitySearchRank(rank) => {
+            if rank.variable != variable {
+                return false;
+            }
+            required.insert(rank.name_property.clone());
+            required.insert(rank.aliases_property.clone());
+            true
+        }
+    }
 }
 
 struct ExpandEstimateRequest<'a> {

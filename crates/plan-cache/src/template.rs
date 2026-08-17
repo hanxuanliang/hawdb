@@ -542,6 +542,12 @@ fn bind_physical_plan(plan: &mut PhysicalPlan, parameters: &BTreeMap<String, Val
         | PhysicalPlan::FilterExec { predicate, .. } => {
             bind_predicate(predicate, parameters)?;
         }
+        PhysicalPlan::NodeProjectionScanExec {
+            predicate, items, ..
+        } => {
+            bind_optional_predicate(predicate, parameters)?;
+            bind_projections(items, parameters)?;
+        }
         PhysicalPlan::NodeCartesianProductExec { left, right } => {
             bind_physical_plan(left, parameters)?;
             bind_physical_plan(right, parameters)?;

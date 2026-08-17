@@ -58,6 +58,40 @@ pub(super) fn stream_node_scan_batches(
     )
 }
 
+pub(super) fn stream_node_projection_scan_batches(
+    spec: NodeProjectionScanSpec<'_>,
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let memory_account = context.memory_ledger.account(
+        QueryMemoryClass::BlockingState,
+        "NodeProjectionScanExec",
+        context.memory.blocking_operator_bytes,
+    );
+    let batch_memory_account = context.memory_ledger.account(
+        QueryMemoryClass::PipelineBatch,
+        "NodeProjectionScanExec output",
+        context.memory.batch_payload_bytes,
+    );
+    skein_executor::scan::stream_node_projection_scan_batches(
+        spec,
+        NodeScanContext {
+            catalog: context.catalog,
+            store: context.store,
+            execution_limit,
+            memory_budget: context.memory.blocking_operator_bytes,
+            memory_account: &memory_account,
+            batch_memory_budget: context.memory.batch_payload_bytes,
+            batch_memory_account: &batch_memory_account,
+            batch_rows: context.memory.batch_rows.get(),
+            task_context: context.task_context,
+        },
+        context.observer,
+        emit,
+    )
+}
+
 pub(super) fn stream_index_node_seek_batches(
     variable: &str,
     label: &str,

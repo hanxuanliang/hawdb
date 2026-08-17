@@ -267,6 +267,50 @@ fn unfiltered_node_count_uses_exact_count_store() {
 }
 
 #[test]
+fn scalar_node_projection_decodes_only_required_properties() {
+    let logical = LogicalPlan::Project {
+        items: vec![Projection {
+            expression: ProjectionExpression::Property {
+                variable: "m".to_string(),
+                property: "title".to_string(),
+            },
+            name: "title".to_string(),
+        }],
+        input: Box::new(LogicalPlan::Filter {
+            predicate: Predicate::PropertyCompare {
+                variable: "m".to_string(),
+                property: "rank".to_string(),
+                op: skein_plan::ComparisonOp::Gte,
+                value: Value::Int(10),
+            },
+            input: Box::new(LogicalPlan::NodeScan {
+                variable: "m".to_string(),
+                label: "Memory".to_string(),
+            }),
+        }),
+    };
+
+    let (plan, trace) =
+        CascadesOptimizer::new(OptimizerConfig { max_groups: 16 }).optimize_with_trace(&logical);
+
+    assert!(matches!(
+        plan,
+        PhysicalPlan::NodeProjectionScanExec {
+            ref required_properties,
+            ..
+        } if required_properties == &["rank".to_string(), "title".to_string()]
+    ));
+    assert!(trace.selected_plan_cost.estimated_rows >= 1);
+    assert!(!trace
+        .selected_plan_operator_counts
+        .contains_key("SeqNodeScan"));
+    assert!(trace
+        .rule_events
+        .iter()
+        .any(|event| event.rule() == "implementation:node_projection_scan"));
+}
+
+#[test]
 fn optimizer_trace_reports_physical_plan_operator_and_class_counts() {
     let logical = LogicalPlan::Project {
         items: vec![Projection {

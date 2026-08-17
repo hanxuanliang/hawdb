@@ -88,6 +88,69 @@ fn node_count_exec_uses_label_count_without_scanning() {
 }
 
 #[test]
+fn node_projection_scan_omits_unrequested_large_properties() {
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::in_memory();
+    for rank in 0..2 {
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                properties([
+                    ("rank", Value::Int(rank)),
+                    ("title", Value::String(format!("memory-{rank}"))),
+                    ("content", Value::String("x".repeat(128 * 1024))),
+                ]),
+            )
+            .unwrap();
+    }
+    let plan = PhysicalPlan::NodeProjectionScanExec {
+        variable: "m".to_string(),
+        label: "Memory".to_string(),
+        required_properties: vec!["rank".to_string(), "title".to_string()],
+        predicate: Some(Predicate::PropertyCompare {
+            variable: "m".to_string(),
+            property: "rank".to_string(),
+            op: crate::planner::ComparisonOp::Gte,
+            value: Value::Int(1),
+        }),
+        items: vec![Projection {
+            expression: ProjectionExpression::Property {
+                variable: "m".to_string(),
+                property: "title".to_string(),
+            },
+            name: "title".to_string(),
+        }],
+    };
+    let memory = ExecutionMemoryConfig {
+        batch_payload_bytes: NonZeroUsize::new(4 * 1024).unwrap(),
+        blocking_operator_bytes: NonZeroUsize::new(4 * 1024).unwrap(),
+        ..ExecutionMemoryConfig::default()
+    };
+    let mut external = NoExternalReadOperator;
+
+    let output = execute_with_row_limit_profile_and_external_and_memory(
+        &plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &memory,
+    )
+    .unwrap();
+
+    assert_eq!(
+        output.rows,
+        vec![BTreeMap::from([(
+            "title".to_string(),
+            Value::String("memory-1".to_string()),
+        )])]
+    );
+    assert_eq!(output.profile.pipeline_memory_report.output_rows, 1);
+}
+
+#[test]
 fn sort_pipeline_spills_runs_under_a_tight_memory_budget() {
     let mut catalog = Catalog::default();
     let mut store = GraphStore::in_memory();

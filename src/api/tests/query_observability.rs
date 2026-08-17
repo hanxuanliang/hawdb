@@ -55,7 +55,10 @@ fn explain_query_reports_effective_resource_hints() {
         output.work_request,
         WorkRequest::background(WorkClass::Analytics, 64)
     );
-    assert!(output.trace.selected_plan.contains("ProjectExec"));
+    assert!(output
+        .trace
+        .selected_plan
+        .contains("NodeProjectionScanExec"));
 }
 
 #[test]
@@ -72,7 +75,10 @@ fn explain_analyze_reports_storage_scan_pruning_profile() {
         .unwrap();
 
     assert_eq!(output.output.rows.len(), 2);
-    assert!(output.physical_plan.explain(0).contains("ProjectExec"));
+    assert!(output
+        .physical_plan
+        .explain(0)
+        .contains("NodeProjectionScanExec"));
     assert_eq!(output.execution_profile.scan_pruning_reports.len(), 1);
     let scan = &output.execution_profile.scan_pruning_reports[0];
     assert!(scan.pruned);
@@ -1550,7 +1556,10 @@ fn plan_cache_misses_after_index_descriptor_changes() {
     assert_eq!(before_index.plan_cache_lookup, PlanCacheLookup::Miss);
     assert_eq!(cached_before_index.plan_cache_lookup, PlanCacheLookup::Hit);
     assert_eq!(after_index.plan_cache_lookup, PlanCacheLookup::Miss);
-    assert!(before_index.trace.selected_plan.contains("SeqNodeScan"));
+    assert!(before_index
+        .trace
+        .selected_plan
+        .contains("NodeProjectionScanExec"));
     assert!(!before_index.trace.selected_plan.contains("IndexNodeSeek"));
     assert!(cached_before_index
         .trace
@@ -1694,8 +1703,11 @@ fn explain_uses_scan_without_index_descriptor() {
         .explain_query("MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title")
         .unwrap();
 
-    assert!(output.trace.selected_plan.contains("FilterExec"));
-    assert!(output.trace.selected_plan.contains("SeqNodeScan"));
+    assert!(output
+        .trace
+        .selected_plan
+        .contains("NodeProjectionScanExec"));
+    assert!(!output.trace.selected_plan.contains("FilterExec"));
     assert!(!output.trace.selected_plan.contains("IndexNodeSeek"));
     assert!(output
         .trace
@@ -1716,8 +1728,11 @@ fn explain_uses_statistics_to_keep_low_selectivity_filter() {
         .explain_query("MATCH (m:Memory) WHERE m.kind = 'note' RETURN m.id AS id")
         .unwrap();
 
-    assert!(output.trace.selected_plan.contains("FilterExec"));
-    assert!(output.trace.selected_plan.contains("SeqNodeScan"));
+    assert!(output
+        .trace
+        .selected_plan
+        .contains("NodeProjectionScanExec"));
+    assert!(!output.trace.selected_plan.contains("FilterExec"));
     assert!(!output.trace.selected_plan.contains("IndexNodeSeek"));
     assert!(output
         .trace
@@ -1737,8 +1752,11 @@ fn explain_keeps_full_scan_for_small_indexed_label() {
         .explain_query("MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title")
         .unwrap();
 
-    assert!(output.trace.selected_plan.contains("FilterExec"));
-    assert!(output.trace.selected_plan.contains("SeqNodeScan"));
+    assert!(output
+        .trace
+        .selected_plan
+        .contains("NodeProjectionScanExec"));
+    assert!(!output.trace.selected_plan.contains("FilterExec"));
     assert!(!output.trace.selected_plan.contains("IndexNodeSeek"));
     assert!(output
         .trace
@@ -1767,7 +1785,7 @@ fn plan_fingerprint_is_deterministic_and_changes_with_plan_shape() {
     assert!(before
         .trace
         .selected_plan_fingerprint
-        .contains("SeqNodeScan"));
+        .contains("NodeProjectionScanExec"));
 
     db.query("CREATE RANGE INDEX ON :Memory(created_at)")
         .unwrap();

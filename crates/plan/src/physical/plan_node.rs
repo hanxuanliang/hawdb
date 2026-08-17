@@ -68,6 +68,7 @@ impl PhysicalPlan {
             PhysicalPlan::CreateRelationship { .. } => PhysicalPlanKind::CreateRelationship,
             PhysicalPlan::EmptyExec => PhysicalPlanKind::EmptyExec,
             PhysicalPlan::SeqNodeScan { .. } => PhysicalPlanKind::SeqNodeScan,
+            PhysicalPlan::NodeProjectionScanExec { .. } => PhysicalPlanKind::NodeProjectionScanExec,
             PhysicalPlan::SourceSegmentScan { .. } => PhysicalPlanKind::SourceSegmentScan,
             PhysicalPlan::NodeCartesianProductExec { .. } => {
                 PhysicalPlanKind::NodeCartesianProductExec
@@ -152,6 +153,7 @@ impl PhysicalPlan {
             | PhysicalPlan::CreateRelationship { .. }
             | PhysicalPlan::EmptyExec
             | PhysicalPlan::SeqNodeScan { .. }
+            | PhysicalPlan::NodeProjectionScanExec { .. }
             | PhysicalPlan::SourceSegmentScan { .. }
             | PhysicalPlan::IndexNodeSeek { .. }
             | PhysicalPlan::IndexNodeMultiSeek { .. }

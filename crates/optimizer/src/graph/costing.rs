@@ -69,6 +69,25 @@ pub(super) fn estimate_physical_plan_cost(
                 cost: estimate_node_full_scan_cost(rows),
             }
         }
+        PhysicalPlan::NodeProjectionScanExec {
+            variable,
+            label,
+            predicate,
+            ..
+        } => {
+            let scan = PhysicalPlan::SeqNodeScan {
+                variable: variable.clone(),
+                label: label.clone(),
+            };
+            let input_rows = catalog.label_count(label).max(1);
+            let rows = predicate.as_ref().map_or(input_rows, |predicate| {
+                estimate_filter_rows(predicate, &scan, input_rows, catalog).max(1)
+            });
+            PlanCost {
+                estimated_rows: rows,
+                cost: estimate_node_full_scan_cost(input_rows).saturating_add(rows),
+            }
+        }
         PhysicalPlan::SourceSegmentScan { .. } => {
             let rows = catalog.label_count("Source");
             PlanCost {
@@ -362,6 +381,22 @@ pub(super) fn estimate_physical_plan_cost_breakdown(
         PhysicalPlan::SeqNodeScan { label, .. } => {
             let rows = catalog.label_count(label);
             PlanCostBreakdown::new(rows, 0, 0, estimate_node_full_scan_cost(rows), 0)
+        }
+        PhysicalPlan::NodeProjectionScanExec {
+            variable,
+            label,
+            predicate,
+            ..
+        } => {
+            let scan = PhysicalPlan::SeqNodeScan {
+                variable: variable.clone(),
+                label: label.clone(),
+            };
+            let input_rows = catalog.label_count(label).max(1);
+            let rows = predicate.as_ref().map_or(input_rows, |predicate| {
+                estimate_filter_rows(predicate, &scan, input_rows, catalog).max(1)
+            });
+            PlanCostBreakdown::new(rows, rows, 0, estimate_node_full_scan_cost(input_rows), 0)
         }
         PhysicalPlan::SourceSegmentScan { .. } => {
             let rows = catalog.label_count("Source");

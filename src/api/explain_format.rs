@@ -225,7 +225,8 @@ fn tree_identifier(
 
 fn access_object(plan: &PhysicalPlan) -> String {
     match plan {
-        PhysicalPlan::SeqNodeScan { label, .. } => format!("label:{label}"),
+        PhysicalPlan::SeqNodeScan { label, .. }
+        | PhysicalPlan::NodeProjectionScanExec { label, .. } => format!("label:{label}"),
         PhysicalPlan::SourceSegmentScan { .. } => "source-segments".to_string(),
         PhysicalPlan::NodeColumnLookupExec {
             label,
@@ -428,9 +429,9 @@ mod tests {
 
         assert!(rendered.contains("| id"));
         assert!(rendered.contains("| estRows"));
-        assert!(rendered.contains("ProjectExec"));
-        assert!(rendered.contains("└─FilterExec"));
-        assert!(rendered.contains("  └─SeqNodeScan"));
+        assert!(rendered.contains("NodeProjectionScanExec"));
+        assert!(!rendered.contains("ProjectExec"));
+        assert!(!rendered.contains("FilterExec"));
         assert!(rendered.contains("label:Memory"));
         assert!(rendered.contains("optimizer: mode=memo"));
         assert!(rendered.contains("query digest:"));

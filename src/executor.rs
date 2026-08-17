@@ -76,7 +76,7 @@ use skein_executor::predicate::{
 use skein_executor::scan::{
     single_node_binding, source_scan_pruning_strategy, source_storage_scan_predicate,
     stream_expand_binding, AdjacencyExpandFilters, AdjacencyExpandSpec, NodeColumnLookupSpec,
-    NodeScanContext, NodeScanSpec,
+    NodeProjectionScanSpec, NodeScanContext, NodeScanSpec,
 };
 pub use skein_executor::{ExecutionMemoryConfig, SpillPoolSnapshot};
 pub use skein_executor::{

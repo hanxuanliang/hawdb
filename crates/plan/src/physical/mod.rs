@@ -275,6 +275,18 @@ pub enum PhysicalPlan {
         variable: String,
         label: String,
     },
+    /// Fused node scan, local predicate, and scalar projection.
+    ///
+    /// The operator never exposes a partially hydrated node binding. Storage
+    /// may therefore decode only `required_properties` and the executor emits
+    /// scalar values directly.
+    NodeProjectionScanExec {
+        variable: String,
+        label: String,
+        required_properties: Vec<String>,
+        predicate: Option<Predicate>,
+        items: Vec<Projection>,
+    },
     /// A checkpoint-published Source sidecar candidate scan. The enclosing
     /// FilterExec retains the original predicate as the semantic authority.
     SourceSegmentScan {

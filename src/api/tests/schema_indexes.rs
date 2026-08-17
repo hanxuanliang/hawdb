@@ -1461,7 +1461,10 @@ fn full_text_index_ddl_enables_text_seek_plans() {
     let scan = db
         .explain_query("MATCH (m:Memory) WHERE m.title CONTAINS 'raph' RETURN m.id AS id")
         .unwrap();
-    assert!(scan.physical_plan.explain(0).contains("SeqNodeScan"));
+    assert!(scan
+        .physical_plan
+        .explain(0)
+        .contains("NodeProjectionScanExec"));
     assert!(!scan.physical_plan.explain(0).contains("IndexNodeTextSeek"));
 
     db.query("CREATE FULLTEXT INDEX ON :Memory(title)").unwrap();
@@ -1751,7 +1754,10 @@ fn range_predicates_filter_and_use_range_index() {
     let scan = db
         .explain_query("MATCH (m:Memory) WHERE m.created_at >= 20 RETURN m.id AS id")
         .unwrap();
-    assert!(scan.physical_plan.explain(0).contains("SeqNodeScan"));
+    assert!(scan
+        .physical_plan
+        .explain(0)
+        .contains("NodeProjectionScanExec"));
     assert!(!scan.physical_plan.explain(0).contains("IndexNodeRangeSeek"));
 
     db.query("CREATE RANGE INDEX ON :Memory(created_at)")

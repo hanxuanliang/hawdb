@@ -388,8 +388,8 @@ fn filters_with_or_predicates() {
         )
         .unwrap();
     let physical_plan = explain.physical_plan.explain(0);
-    assert!(physical_plan.contains("FilterExec"));
-    assert!(physical_plan.contains("SeqNodeScan"));
+    assert!(physical_plan.contains("NodeProjectionScanExec"));
+    assert!(!physical_plan.contains("FilterExec"));
     assert!(!physical_plan.contains("IndexNodeSeek"));
     assert!(!physical_plan.contains("IndexNodeRangeSeek"));
 }

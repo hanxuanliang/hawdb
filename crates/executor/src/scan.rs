@@ -1,6 +1,10 @@
 //! Storage-implementation-neutral node scan and lookup operators.
 
 use crate::binding::{binding_memory_bytes, Binding};
+use crate::expression::{
+    evaluate_predicate_with_memory, insert_projected_value, project_value,
+    property_filter_from_predicate,
+};
 use crate::kernel::{push_bounded_operator_binding, OperatorMemoryTracker};
 use crate::observer::ExecutionObserver;
 use crate::pipeline::{runtime_checkpoint, AccountedBindingBatch, BatchControl, BindingBatch};
@@ -17,10 +21,10 @@ use skein_core::{
     Catalog, LabelId, RelTypeId, RelationshipDirection, Result, RuntimeTaskContext, SkeinError,
     Value,
 };
-use skein_plan::{ComparisonOp, Predicate};
+use skein_plan::{ComparisonOp, Predicate, Projection};
 use skein_storage::{
-    NodeId, NodeRecord, PropertyFilter, RangeBound, ScanPredicate, ScanPruningReport,
-    ScanPruningStrategy, ScanPruningTargetKind,
+    NodeId, NodeRecord, ProjectedNodeRecord, PropertyFilter, RangeBound, ScanPredicate,
+    ScanPruningReport, ScanPruningStrategy, ScanPruningTargetKind,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
@@ -30,6 +34,15 @@ pub struct NodeScanSpec<'a> {
     pub variable: &'a str,
     pub label: &'a str,
     pub property_filter: Option<&'a PropertyFilter>,
+}
+
+#[derive(Clone, Copy)]
+pub struct NodeProjectionScanSpec<'a> {
+    pub variable: &'a str,
+    pub label: &'a str,
+    pub required_properties: &'a [String],
+    pub predicate: Option<&'a Predicate>,
+    pub items: &'a [Projection],
 }
 
 #[derive(Clone, Copy)]
@@ -326,6 +339,144 @@ pub fn stream_node_scan_batches(
     });
     let final_emit_control = batch.emit(emit)?;
     if final_emit_control == BatchControl::Stop {
+        return Ok(BatchControl::Stop);
+    }
+    Ok(if control == ScanControl::Stop {
+        BatchControl::Stop
+    } else {
+        BatchControl::Continue
+    })
+}
+
+pub fn stream_node_projection_scan_batches(
+    spec: NodeProjectionScanSpec<'_>,
+    context: NodeScanContext<'_>,
+    observer: &dyn ExecutionObserver,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let exact_label = exact_scan_label_id(context.catalog, spec.label);
+    let exact_label_id = exact_label.flatten();
+    let label_ids = label_ids_for_pattern(context.catalog, spec.label);
+    let required_properties = spec
+        .required_properties
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut batch = context.output_batch("NodeProjectionScanExec");
+    let mut emitted = 0usize;
+    let mut visit = |node: ProjectedNodeRecord| {
+        runtime_checkpoint(context.task_context)?;
+        let node = NodeRecord {
+            id: node.id,
+            labels: node.labels,
+            properties: node.properties,
+        };
+        if exact_label.is_none() && !node_matches_label_pattern(&node, label_ids.as_deref()) {
+            return Ok(ScanControl::Continue);
+        }
+        let binding = node_binding(spec.variable, node);
+        if let Some(predicate) = spec.predicate
+            && !evaluate_predicate_with_memory(
+                predicate,
+                context.catalog,
+                context.store,
+                &binding,
+                observer,
+                AdjacencyReadMemory {
+                    budget_bytes: context.memory_budget.get(),
+                    account: Some(context.memory_account),
+                },
+            )?
+        {
+            return Ok(ScanControl::Continue);
+        }
+        let mut values = BTreeMap::new();
+        for item in spec.items {
+            insert_projected_value(
+                &mut values,
+                &item.name,
+                project_value(item, context.catalog, &binding)?,
+            );
+        }
+        if batch.push(Binding::values(values), emit)? == BatchControl::Stop {
+            return Ok(ScanControl::Stop);
+        }
+        emitted = emitted.saturating_add(1);
+        if batch.is_full() && batch.emit(emit)? == BatchControl::Stop {
+            return Ok(ScanControl::Stop);
+        }
+        Ok(if context.execution_limit.is_reached(emitted) {
+            ScanControl::Stop
+        } else {
+            ScanControl::Continue
+        })
+    };
+    let property_filter = spec
+        .predicate
+        .and_then(|predicate| property_filter_from_predicate(predicate).ok());
+    if !context.store.is_out_of_core()
+        && let Some(label_id) = exact_label
+        && context
+            .store
+            .node_count_for_label(label_id)
+            .saturating_mul(std::mem::size_of::<&NodeRecord>())
+            <= context.memory_budget.get()
+    {
+        let scan = context.store.scan_nodes_with_filter_pruning(
+            context.catalog,
+            label_id,
+            property_filter.as_ref(),
+        )?;
+        observer.record_scan_pruning_report(scan.report.clone());
+        let mut control = ScanControl::Continue;
+        for node in scan.nodes {
+            let properties = required_properties
+                .iter()
+                .filter_map(|property| {
+                    node.properties
+                        .get(property)
+                        .cloned()
+                        .map(|value| (property.clone(), value))
+                })
+                .collect();
+            control = visit(ProjectedNodeRecord {
+                id: node.id,
+                labels: node.labels,
+                properties,
+            })?;
+            if control == ScanControl::Stop {
+                break;
+            }
+        }
+        if batch.emit(emit)? == BatchControl::Stop {
+            return Ok(BatchControl::Stop);
+        }
+        return Ok(if control == ScanControl::Stop {
+            BatchControl::Stop
+        } else {
+            BatchControl::Continue
+        });
+    }
+    let control = context.store.visit_projected_nodes_owned(
+        exact_label_id,
+        &required_properties,
+        &mut visit,
+    )?;
+    let candidate_count = context.store.node_count_for_label(exact_label_id);
+    observer.record_scan_pruning_report(ScanPruningReport {
+        target_kind: ScanPruningTargetKind::Node,
+        label_id: exact_label_id,
+        rel_type_id: None,
+        strategy: ScanPruningStrategy::FullLabelScan,
+        pruned: false,
+        exact_empty: candidate_count == 0,
+        candidate_count_before_pruning: candidate_count,
+        pruned_candidate_count: 0,
+        candidate_count_before_filter: candidate_count,
+        output_count: emitted,
+        filtered_out_count: candidate_count.saturating_sub(emitted),
+    });
+    if batch.emit(emit)? == BatchControl::Stop {
         return Ok(BatchControl::Stop);
     }
     Ok(if control == ScanControl::Stop {

@@ -111,6 +111,7 @@ impl PhysicalPlan {
                 PhysicalPlanDomainRef::Mutation(MutationPhysicalPlanRef::new(self))
             }
             PhysicalPlan::SeqNodeScan { .. }
+            | PhysicalPlan::NodeProjectionScanExec { .. }
             | PhysicalPlan::SourceSegmentScan { .. }
             | PhysicalPlan::NodeColumnLookupExec { .. }
             | PhysicalPlan::IndexNodeSeek { .. }

@@ -49,8 +49,11 @@ fn nowledge_graph_adapter_runs_parameterized_query_explain_and_transaction() {
             parameters: BTreeMap::from([("id".to_string(), Value::Int(1))]),
         })
         .unwrap();
-    assert!(explain.plan.contains("ProjectExec"));
-    assert!(explain.trace.selected_plan.contains("ProjectExec"));
+    assert!(explain.plan.contains("NodeProjectionScanExec"));
+    assert!(explain
+        .trace
+        .selected_plan
+        .contains("NodeProjectionScanExec"));
     assert_eq!(
         explain.work_request,
         WorkRequest::foreground(WorkClass::Query, 1)

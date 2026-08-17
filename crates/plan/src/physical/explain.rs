@@ -300,6 +300,22 @@ impl PhysicalPlan {
             PhysicalPlan::SeqNodeScan { variable, label } => {
                 format!("{pad}SeqNodeScan variable={variable} label={label}")
             }
+            PhysicalPlan::NodeProjectionScanExec {
+                variable,
+                label,
+                required_properties,
+                predicate,
+                items,
+            } => {
+                let columns = items
+                    .iter()
+                    .map(|item| item.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "{pad}NodeProjectionScanExec variable={variable} label={label} properties={required_properties:?} predicate={predicate:?} columns=[{columns}]"
+                )
+            }
             PhysicalPlan::SourceSegmentScan { variable, predicate } => {
                 format!("{pad}SourceSegmentScan variable={variable} predicate={predicate:?}")
             }

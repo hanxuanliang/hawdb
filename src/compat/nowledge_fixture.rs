@@ -41,7 +41,7 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                         Value::String("Graph foundations".to_string()),
                     )])]),
                 )
-                .with_plan_contains(vec!["SeqNodeScan".to_string()]),
+                .with_plan_contains(vec!["NodeProjectionScanExec".to_string()]),
             ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "graph totals memory count read",

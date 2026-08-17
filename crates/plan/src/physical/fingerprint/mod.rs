@@ -692,6 +692,28 @@ impl PhysicalPlan {
                 write_identifier(output, label);
                 output.push(')');
             }
+            PhysicalPlan::NodeProjectionScanExec {
+                variable,
+                label,
+                required_properties,
+                predicate,
+                items,
+            } => {
+                output.push_str("NodeProjectionScanExec(");
+                write_identifier(output, variable);
+                output.push(':');
+                write_identifier(output, label);
+                output.push_str(",properties=");
+                for property in required_properties {
+                    write_identifier(output, property);
+                    output.push(',');
+                }
+                output.push_str("predicate=");
+                write_optional_predicate(output, predicate.as_ref());
+                output.push_str(",columns=");
+                write_projection_list(output, items);
+                output.push(')');
+            }
             PhysicalPlan::SourceSegmentScan {
                 variable,
                 predicate,

@@ -58,6 +58,14 @@ pub(super) fn supports_parallel_morsel_execution(plan: &PhysicalPlan, catalog: &
             NumericFragment::try_prepare(items, input, catalog)
                 .is_some_and(|fragment| fragment.supports_lending_projection(items))
         }
+        PhysicalPlan::NodeProjectionScanExec {
+            variable,
+            label,
+            predicate: Some(predicate),
+            items,
+            ..
+        } => NumericFragment::try_prepare_parts(items, variable, label, predicate, catalog)
+            .is_some_and(|fragment| fragment.supports_lending_projection(items)),
         _ => match plan.children() {
             PlanChildren::None => false,
             PlanChildren::Unary(input) => supports_parallel_morsel_execution(input, catalog),
@@ -85,6 +93,17 @@ pub(super) fn default_morsel_parallelism(
             }
             default_morsel_parallelism(input, catalog, store, memory)
         }
+        PhysicalPlan::NodeProjectionScanExec {
+            variable,
+            label,
+            predicate: Some(predicate),
+            items,
+            ..
+        } => NumericFragment::try_prepare_parts(items, variable, label, predicate, catalog)
+            .filter(|fragment| fragment.supports_lending_projection(items))
+            .map_or(1, |fragment| {
+                fragment.default_parallelism(items, catalog, store, memory)
+            }),
         _ => match plan.children() {
             PlanChildren::None => 1,
             PlanChildren::Unary(input) => default_morsel_parallelism(input, catalog, store, memory),
@@ -107,6 +126,23 @@ pub(super) fn try_stream_columnar_projection_batches(
     Some(fragment.stream(items, context, execution_limit, emit))
 }
 
+pub(super) fn try_stream_columnar_node_projection_batches(
+    variable: &str,
+    label: &str,
+    predicate: Option<&Predicate>,
+    items: &[Projection],
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Option<Result<BatchControl>> {
+    if context.store.is_out_of_core() {
+        return None;
+    }
+    let fragment =
+        NumericFragment::try_prepare_parts(items, variable, label, predicate?, context.catalog)?;
+    Some(fragment.stream(items, context, execution_limit, emit))
+}
+
 impl<'a> NumericFragment<'a> {
     fn try_prepare(
         items: &[Projection],
@@ -116,19 +152,29 @@ impl<'a> NumericFragment<'a> {
         let PhysicalPlan::FilterExec { predicate, input } = input else {
             return None;
         };
+        let PhysicalPlan::SeqNodeScan {
+            variable: scan_variable,
+            label,
+        } = input.as_ref()
+        else {
+            return None;
+        };
+        Self::try_prepare_parts(items, scan_variable, label, predicate, catalog)
+    }
+
+    fn try_prepare_parts(
+        items: &[Projection],
+        scan_variable: &str,
+        label: &'a str,
+        predicate: &'a Predicate,
+        catalog: &Catalog,
+    ) -> Option<Self> {
         let Predicate::PropertyCompare {
             variable,
             property,
             op,
             value,
         } = predicate
-        else {
-            return None;
-        };
-        let PhysicalPlan::SeqNodeScan {
-            variable: scan_variable,
-            label,
-        } = input.as_ref()
         else {
             return None;
         };

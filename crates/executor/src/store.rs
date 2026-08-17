@@ -2,8 +2,10 @@
 
 use skein_core::{Catalog, LabelId, RelTypeId, Result};
 use skein_storage::{
-    AdjacencyDirection, NodeId, NodeRecord, PropertyFilter, RelRecord, ScanPruningReport,
+    AdjacencyDirection, NodeId, NodeRecord, ProjectedNodeRecord, PropertyFilter, RelRecord,
+    ScanPruningReport,
 };
+use std::collections::BTreeSet;
 
 use crate::QueryMemoryAccount;
 
@@ -53,6 +55,30 @@ pub trait GraphExecutionRead {
         label_id: Option<LabelId>,
         consumer: &mut dyn FnMut(NodeRecord) -> Result<ScanControl>,
     ) -> Result<ScanControl>;
+
+    fn visit_projected_nodes_owned(
+        &self,
+        label_id: Option<LabelId>,
+        required_properties: &BTreeSet<String>,
+        consumer: &mut dyn FnMut(ProjectedNodeRecord) -> Result<ScanControl>,
+    ) -> Result<ScanControl> {
+        self.visit_nodes_owned(label_id, &mut |node| {
+            let properties = required_properties
+                .iter()
+                .filter_map(|property| {
+                    node.properties
+                        .get(property)
+                        .cloned()
+                        .map(|value| (property.clone(), value))
+                })
+                .collect();
+            consumer(ProjectedNodeRecord {
+                id: node.id,
+                labels: node.labels,
+                properties,
+            })
+        })
+    }
 
     fn visit_nodes_by_property_owned(
         &self,

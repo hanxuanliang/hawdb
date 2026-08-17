@@ -875,6 +875,7 @@ pub(super) fn execute_bindings_with_limit(
         PhysicalPlan::EmptyExec
         | PhysicalPlan::NodeCountExec { .. }
         | PhysicalPlan::SeqNodeScan { .. }
+        | PhysicalPlan::NodeProjectionScanExec { .. }
         | PhysicalPlan::SourceSegmentScan { .. }
         | PhysicalPlan::NodeColumnLookupExec { .. }
         | PhysicalPlan::IndexNodeSeek { .. }
