@@ -12,7 +12,7 @@ use crate::traversal::{
     visit_bounded_expand_targets, visit_one_hop_relationships_with_budget, BoundedExpandSpec,
     OneHopRelationshipSpec,
 };
-use crate::ExecutionLimit;
+use crate::{ExecutionLimit, QueryMemoryAccount};
 use skein_core::{
     Catalog, LabelId, RelTypeId, RelationshipDirection, Result, RuntimeTaskContext, SkeinError,
     Value,
@@ -38,8 +38,18 @@ pub struct NodeScanContext<'a> {
     pub store: &'a dyn GraphExecutionRead,
     pub execution_limit: ExecutionLimit,
     pub memory_budget: NonZeroUsize,
+    pub memory_account: Option<&'a QueryMemoryAccount>,
     pub batch_rows: usize,
     pub task_context: Option<&'a RuntimeTaskContext>,
+}
+
+impl NodeScanContext<'_> {
+    fn memory_tracker(self) -> OperatorMemoryTracker {
+        self.memory_account.map_or_else(
+            || OperatorMemoryTracker::new(self.memory_budget),
+            |account| OperatorMemoryTracker::with_account(self.memory_budget, account.clone()),
+        )
+    }
 }
 
 #[derive(Default)]
@@ -350,7 +360,7 @@ pub fn execute_node_scan(
         )?;
         observer.record_scan_pruning_report(scan.report.clone());
         let mut output = Vec::new();
-        let mut tracker = OperatorMemoryTracker::new(context.memory_budget);
+        let mut tracker = context.memory_tracker();
         for node in scan.nodes {
             let binding = node_binding(spec.variable, node);
             if !predicate(&binding)? {
@@ -366,7 +376,7 @@ pub fn execute_node_scan(
 
     let label_ids = label_ids_for_pattern(context.catalog, spec.label);
     let mut output = Vec::new();
-    let mut tracker = OperatorMemoryTracker::new(context.memory_budget);
+    let mut tracker = context.memory_tracker();
     let mut visit = |node: NodeRecord| {
         if exact_label.is_none() && !node_matches_label_pattern(&node, label_ids.as_deref()) {
             return Ok(ScanControl::Continue);
@@ -503,7 +513,7 @@ pub fn execute_node_column_lookup(
 
     let label_ids = label_ids_for_pattern(context.catalog, spec.label);
     let mut output = Vec::new();
-    let mut tracker = OperatorMemoryTracker::new(context.memory_budget);
+    let mut tracker = context.memory_tracker();
     for binding in input {
         let expected = binding.values.get(spec.column).ok_or_else(|| {
             SkeinError::Execution(format!(
@@ -568,7 +578,7 @@ fn execute_indexed_node_column_lookup(
 
     let mut unique_candidate_ids = BTreeSet::new();
     let mut output = Vec::new();
-    let mut tracker = OperatorMemoryTracker::new(context.memory_budget);
+    let mut tracker = context.memory_tracker();
     for binding in input {
         let expected = binding
             .values

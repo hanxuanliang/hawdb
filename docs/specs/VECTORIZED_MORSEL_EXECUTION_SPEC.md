@@ -63,6 +63,34 @@ validity bitmap and selected-row buffers MUST be reused across batches. A
 completed projection MUST NOT retain hidden node bindings that are outside the
 projected result scope.
 
+## Query Memory Ledger
+
+Every read query MUST own one hierarchical runtime memory ledger. The root
+budget is `ExecutionMemoryConfig::query_memory_bytes`; operator-local limits
+remain subordinate budgets and MUST NOT be treated as independent capacity.
+The initial account classes are pipeline batches, blocking state, spill
+staging, morsel output, and result materialization.
+
+A reservation MUST atomically satisfy both its local account budget and the
+remaining root budget before the associated allocation is constructed. The
+implementation MAY use conservative resident-memory estimates, but MUST NOT
+omit an executor-owned buffer merely because another operator already has a
+local limit. Spill serialization MUST reserve staging memory before allocating
+its encoded record buffer, independently from the persistent spill-byte quota.
+
+Leases MUST release through normal completion, cancellation, error, and panic
+unwinding. A streaming row consumer holds only the current transfer lease and
+MUST complete with zero query-owned bytes. A materialized result remains
+charged at the execution completion boundary because ownership is handed to
+the caller; the charge is released when the query result leaves that boundary.
+Execution profiles MUST expose the root budget, peak aggregate charge,
+completion charge, and account count. Root-budget rejection MUST be
+fail-closed and identify `query_memory_bytes`.
+
+[`../tla/SkeinQueryMemoryLedger.tla`](../tla/SkeinQueryMemoryLedger.tla)
+models atomic hierarchical reservation, result handoff, and cleanup on
+failure or cancellation.
+
 ## Morsel Contract
 
 A morsel is a scheduling unit containing a bounded row range. It is distinct

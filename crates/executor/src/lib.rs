@@ -13,6 +13,7 @@ pub mod graph;
 pub mod kernel;
 pub mod limit;
 pub mod memory;
+pub mod memory_ledger;
 pub mod morsel;
 #[doc(hidden)]
 pub mod observer;
@@ -45,6 +46,10 @@ pub use external::{
 pub use graph::{GraphExpansionExecutionReport, GraphExpansionTruncationReason};
 pub use limit::ExecutionLimit;
 pub use memory::ExecutionMemoryConfig;
+pub use memory_ledger::{
+    QueryMemoryAccount, QueryMemoryClass, QueryMemoryClassSnapshot, QueryMemoryLease,
+    QueryMemoryLedger, QueryMemoryLedgerSnapshot,
+};
 pub use morsel::{
     admit_morsels, execute_morsels_ordered, Morsel, MorselAdmission, MorselAdmissionRequest,
     MorselIter, MorselOrdinal, PipelineId, SequentialMorselScheduler, SharedPoolMorselScheduler,

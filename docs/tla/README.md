@@ -141,6 +141,22 @@ audit record, and the pending record is removed last. Crashes preserve these
 durable phases so an interrupted repair either resumes or keeps ordinary open
 fail-closed. Stale or unacknowledged plans are rejected without changing the WAL.
 
+## Query-Owned Runtime Memory
+
+`SkeinQueryMemoryLedger.tla` models the runtime refinement implemented by
+`QueryMemoryLedger`, `QueryMemoryAccount`, and RAII `QueryMemoryLease` values.
+Every reservation is admitted atomically against its operator-local budget and
+the query root before the corresponding executor allocation. Pipeline batches,
+blocking state, spill encoding buffers, morsel output, and result
+materialization are separate accounts under that root.
+
+The model distinguishes a streaming completion, which owns no query memory,
+from a materialized-result handoff, which may retain an admitted result lease
+until the caller-owned result is dropped. Failure and cancellation release all
+accounts. TLC checks the root and local bounds plus the no-leak terminal-state
+invariant. The implementation records root budget, peak charge, completion
+charge, and account count in `PipelineMemoryReport`.
+
 ## Generation Reclamation
 
 `SkeinGenerationReclamation.tla` models immutable checkpoint generations and the

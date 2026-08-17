@@ -5105,6 +5105,10 @@ fn read_execution_profile_json(
             "spilled_rows": report.spilled_rows,
         })).collect::<Vec<_>>(),
         "pipeline_memory_report": {
+            "query_memory_budget_bytes": profile.pipeline_memory_report.query_memory_budget_bytes,
+            "query_memory_peak_bytes": profile.pipeline_memory_report.query_memory_peak_bytes,
+            "query_memory_completion_bytes": profile.pipeline_memory_report.query_memory_completion_bytes,
+            "query_memory_account_count": profile.pipeline_memory_report.query_memory_account_count,
             "intermediate_rows": profile.pipeline_memory_report.intermediate_rows,
             "intermediate_payload_bytes": profile.pipeline_memory_report.intermediate_payload_bytes,
             "peak_batch_rows": profile.pipeline_memory_report.peak_batch_rows,

@@ -22,7 +22,9 @@ use skein_executor::blocking::{
 use skein_executor::kernel::{ensure_operator_item_fits, OperatorMemoryTracker};
 use skein_executor::observer::ExecutionObserver;
 use skein_executor::pipeline::{BatchControl, BindingBatch};
-use skein_executor::{BlockingOperatorMemoryReport, ExecutionLimit};
+use skein_executor::{
+    BlockingOperatorMemoryReport, ExecutionLimit, QueryMemoryClass, QueryMemoryLedger,
+};
 use skein_optimizer::{
     select_relational_access_path, RelationalAccessPathDescriptor, RelationalAccessPathKind,
 };
@@ -1803,6 +1805,7 @@ struct DistinctBatchSource<'a> {
     input_plan: &'a PhysicalPlan,
     catalog: &'a Catalog,
     memory: &'a skein_executor::ExecutionMemoryConfig,
+    memory_ledger: &'a QueryMemoryLedger,
     task_context: Option<&'a skein_core::RuntimeTaskContext>,
     observer: &'a dyn ExecutionObserver,
 }
@@ -1820,6 +1823,7 @@ impl BindingBatchSource for DistinctBatchSource<'_> {
             BlockingExecutionContext {
                 catalog: self.catalog,
                 memory: self.memory,
+                memory_ledger: self.memory_ledger,
                 task_context: self.task_context,
                 observer: self.observer,
             },
@@ -1890,6 +1894,7 @@ fn execute_blocking_projection<'a>(
     let input_plan = relational_input_plan();
     let catalog = Catalog::default();
     let observer = RelationalBlockingObserver::default();
+    let memory_ledger = QueryMemoryLedger::new(memory.query_memory_bytes);
     let task_context = pipeline.task_context;
     let mut output = Vec::with_capacity(detection_limit.min(limits.max_output_rows));
     let mut payload_bytes = 0usize;
@@ -1913,6 +1918,7 @@ fn execute_blocking_projection<'a>(
             input_plan: &input_plan,
             catalog: &catalog,
             memory,
+            memory_ledger: &memory_ledger,
             task_context,
             observer: &observer,
         };
@@ -1924,6 +1930,7 @@ fn execute_blocking_projection<'a>(
                 BlockingExecutionContext {
                     catalog: &catalog,
                     memory,
+                    memory_ledger: &memory_ledger,
                     task_context,
                     observer: &observer,
                 },
@@ -1965,6 +1972,7 @@ fn execute_blocking_projection<'a>(
                 detection_limit,
                 &catalog,
                 memory,
+                &memory_ledger,
                 task_context,
                 &observer,
                 &mut |batch| {
@@ -2000,6 +2008,7 @@ fn execute_blocking_projection<'a>(
             detection_limit,
             &catalog,
             memory,
+            &memory_ledger,
             task_context,
             &observer,
             &mut |batch| {
@@ -2106,6 +2115,7 @@ fn execute_relational_order(
     limit: usize,
     catalog: &Catalog,
     memory: &skein_executor::ExecutionMemoryConfig,
+    memory_ledger: &QueryMemoryLedger,
     task_context: Option<&skein_core::RuntimeTaskContext>,
     observer: &dyn ExecutionObserver,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
@@ -2134,6 +2144,7 @@ fn execute_relational_order(
         BlockingExecutionContext {
             catalog,
             memory,
+            memory_ledger,
             task_context,
             observer,
         },
@@ -2687,7 +2698,15 @@ fn execute_aggregate_select<'a>(
         .map(|projection| AggregateProjectionState::new(projection, parameters))
         .collect::<Result<Vec<_>>>()?;
     let mut groups = BTreeMap::<Vec<RelationalValue>, Vec<AggregateProjectionState>>::new();
-    let mut memory_tracker = OperatorMemoryTracker::new(limits.blocking_operator_bytes);
+    let memory_ledger = QueryMemoryLedger::new(execution_memory.query_memory_bytes);
+    let mut memory_tracker = OperatorMemoryTracker::with_account(
+        limits.blocking_operator_bytes,
+        memory_ledger.account(
+            QueryMemoryClass::BlockingState,
+            "RelationalAggregate",
+            limits.blocking_operator_bytes,
+        ),
+    );
     let mut aggregate_input_rows = 0usize;
     if select.group_by.is_empty() {
         charge_aggregate_memory(
@@ -2840,6 +2859,7 @@ fn execute_single_count_distinct<'a>(
     let input_plan = relational_input_plan();
     let catalog = Catalog::default();
     let observer = RelationalBlockingObserver::default();
+    let memory_ledger = QueryMemoryLedger::new(execution_memory.query_memory_bytes);
     let task_context = pipeline.task_context;
     let mut source = DistinctAggregateValueBatchSource {
         select,
@@ -2862,6 +2882,7 @@ fn execute_single_count_distinct<'a>(
         BlockingExecutionContext {
             catalog: &catalog,
             memory: execution_memory,
+            memory_ledger: &memory_ledger,
             task_context,
             observer: &observer,
         },
@@ -2948,6 +2969,7 @@ fn execute_grouped_aggregate<'a>(
         .collect::<Vec<_>>();
     let catalog = Catalog::default();
     let observer = RelationalBlockingObserver::default();
+    let memory_ledger = QueryMemoryLedger::new(execution_memory.query_memory_bytes);
     let task_context = pipeline.task_context;
     let mut source = GroupLocatorBatchSource {
         select,
@@ -2964,7 +2986,14 @@ fn execute_grouped_aggregate<'a>(
     };
     let mut current_key = None::<Vec<RelationalValue>>;
     let mut current_group = None::<Vec<AggregateProjectionState>>;
-    let mut tracker = OperatorMemoryTracker::new(limits.blocking_operator_bytes);
+    let mut tracker = OperatorMemoryTracker::with_account(
+        limits.blocking_operator_bytes,
+        memory_ledger.account(
+            QueryMemoryClass::BlockingState,
+            "RelationalGroupedAggregate",
+            limits.blocking_operator_bytes,
+        ),
+    );
     let mut input_rows = 0usize;
     let mut output = Vec::new();
     let mut payload_bytes = 0usize;
@@ -2976,6 +3005,7 @@ fn execute_grouped_aggregate<'a>(
         BlockingExecutionContext {
             catalog: &catalog,
             memory: execution_memory,
+            memory_ledger: &memory_ledger,
             task_context,
             observer: &observer,
         },
@@ -3435,7 +3465,7 @@ fn charge_aggregate_memory(bytes: usize, tracker: &mut OperatorMemoryTracker) ->
             tracker.budget_bytes
         )));
     }
-    tracker.charge(bytes);
+    tracker.try_charge(bytes)?;
     Ok(())
 }
 

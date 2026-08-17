@@ -12,6 +12,7 @@ fn spill_test_config(name: &str) -> ExecutionMemoryConfig {
         .unwrap()
         .as_nanos();
     ExecutionMemoryConfig {
+        query_memory_bytes: NonZeroUsize::new(256 * 1024 * 1024).unwrap(),
         batch_rows: NonZeroUsize::new(2).unwrap(),
         batch_payload_bytes: NonZeroUsize::new(1024 * 1024).unwrap(),
         blocking_operator_bytes: NonZeroUsize::new(1024).unwrap(),
@@ -99,6 +100,14 @@ fn sort_pipeline_spills_runs_under_a_tight_memory_budget() {
     assert_eq!(pipeline.peak_batch_rows, 2);
     assert_eq!(pipeline.output_rows, 12);
     assert!(pipeline.output_payload_bytes > 0);
+    assert_eq!(
+        pipeline.query_memory_budget_bytes,
+        memory.query_memory_bytes.get()
+    );
+    assert!(pipeline.query_memory_peak_bytes > 0);
+    assert!(pipeline.query_memory_peak_bytes <= pipeline.query_memory_budget_bytes);
+    assert!(pipeline.query_memory_completion_bytes > 0);
+    assert!(pipeline.query_memory_account_count >= 4);
     assert!(pipeline.start_resident_bytes.is_some());
     assert!(pipeline.steady_resident_bytes.is_some());
     assert!(pipeline.peak_resident_bytes.is_some());
@@ -110,6 +119,58 @@ fn sort_pipeline_spills_runs_under_a_tight_memory_budget() {
         .next()
         .is_none());
     std::fs::remove_dir(memory.spill_directory).unwrap();
+}
+
+#[test]
+fn streaming_consumer_releases_query_memory_before_completion() {
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::in_memory();
+    for rank in 0..3 {
+        store
+            .create_node(
+                &mut catalog,
+                "Item",
+                properties([("rank", Value::Int(rank))]),
+            )
+            .unwrap();
+    }
+    let plan = PhysicalPlan::ProjectExec {
+        items: vec![Projection {
+            expression: ProjectionExpression::Property {
+                variable: "n".to_string(),
+                property: "rank".to_string(),
+            },
+            name: "rank".to_string(),
+        }],
+        input: Box::new(PhysicalPlan::SeqNodeScan {
+            variable: "n".to_string(),
+            label: "Item".to_string(),
+        }),
+    };
+    let memory = ExecutionMemoryConfig::default();
+    let mut external = NoExternalReadOperator;
+    let mut rows = 0usize;
+
+    let output = execute_with_row_consumer_profile_and_external_and_memory(
+        &plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        None,
+        &mut |_| {
+            rows += 1;
+            Ok(())
+        },
+        &memory,
+    )
+    .unwrap();
+
+    assert_eq!(rows, 3);
+    let pipeline = &output.profile.pipeline_memory_report;
+    assert!(pipeline.query_memory_peak_bytes > 0);
+    assert_eq!(pipeline.query_memory_completion_bytes, 0);
 }
 
 #[test]
@@ -1448,11 +1509,13 @@ fn source_segment_scan_uses_checkpoint_sidecar_and_keeps_filter_semantics() {
     let parameters = BTreeMap::new();
     let mut external = NoExternalReadOperator;
     let memory = ExecutionMemoryConfig::default();
+    let memory_ledger = QueryMemoryLedger::new(memory.query_memory_bytes);
     let observer = QueryExecutionObserver::default();
     let mut context = ExecutionContext {
         parameters: &parameters,
         external: &mut external,
         memory: &memory,
+        memory_ledger: &memory_ledger,
         task_context: None,
         observer: &observer,
     };

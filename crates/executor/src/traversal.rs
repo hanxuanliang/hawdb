@@ -110,7 +110,7 @@ pub fn execute_shortest_path(
                 output_tracker.budget_bytes
             )));
         }
-        output_tracker.charge(bytes);
+        output_tracker.try_charge(bytes)?;
         output.push(binding);
     }
     observer.record_blocking_memory_report(in_memory_report(
@@ -170,7 +170,7 @@ pub fn all_shortest_paths(
 ) -> Result<(Vec<Vec<NodeId>>, usize, usize)> {
     let initial_path = vec![search.source];
     let mut tracker = OperatorMemoryTracker::new(memory_budget);
-    tracker.charge(path_memory_bytes(&initial_path));
+    tracker.try_charge(path_memory_bytes(&initial_path))?;
     let mut queue = VecDeque::from([initial_path]);
     let mut results = Vec::new();
     let mut found_depth = None;
@@ -218,7 +218,7 @@ pub fn all_shortest_paths(
                     tracker.budget_bytes
                 )));
             }
-            tracker.charge(next_path_bytes);
+            tracker.try_charge(next_path_bytes)?;
             if next.id == search.target && next_depth >= search.min_hops {
                 found_depth = Some(next_depth);
                 results.push(next_path);
@@ -553,7 +553,7 @@ pub fn bounded_expand_targets(
             .expect("execution memory budget is represented by NonZeroUsize"),
     );
     let stack_entry_bytes = std::mem::size_of::<(NodeId, usize)>();
-    tracker.charge(stack_entry_bytes);
+    tracker.try_charge(stack_entry_bytes)?;
     let mut stack = vec![(source, 0usize)];
     while let Some((current, depth)) = stack.pop() {
         tracker.release(stack_entry_bytes);
@@ -569,7 +569,7 @@ pub fn bounded_expand_targets(
                     tracker.budget_bytes
                 )));
             }
-            tracker.charge(bytes);
+            tracker.try_charge(bytes)?;
             targets.push((node, depth));
         }
         if depth == max_hops {
@@ -583,7 +583,7 @@ pub fn bounded_expand_targets(
                     tracker.budget_bytes
                 )));
             }
-            tracker.charge(stack_entry_bytes);
+            tracker.try_charge(stack_entry_bytes)?;
             neighbors.push((relationship.target, relationship.id));
             Ok(ScanControl::Continue)
         };
@@ -708,7 +708,7 @@ pub fn thread_repair_stats_rows(
                 )));
                 return Ok(ScanControl::Stop);
             }
-            tracker.charge(bytes);
+            tracker.try_charge(bytes)?;
             identities.push(node.clone());
         }
         if node_matches_label_pattern(&node, thread_label_ids.as_deref()) {
@@ -720,7 +720,7 @@ pub fn thread_repair_stats_rows(
                 )));
                 return Ok(ScanControl::Stop);
             }
-            tracker.charge(bytes);
+            tracker.try_charge(bytes)?;
             threads.push(node);
         }
         Ok(ScanControl::Continue)

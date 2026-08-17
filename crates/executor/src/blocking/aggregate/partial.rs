@@ -103,8 +103,16 @@ pub(super) fn stream_partial_aggregate_batches(
     observer: &dyn ExecutionObserver,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
-    let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
-    let mut spill_budget = SpillBudgetTracker::new("AggregateExec", memory);
+    let mut tracker = OperatorMemoryTracker::with_account(
+        memory.blocking_operator_bytes,
+        context.memory_ledger.account(
+            QueryMemoryClass::BlockingState,
+            "AggregateExec partial state",
+            memory.blocking_operator_bytes,
+        ),
+    );
+    let mut spill_budget =
+        SpillBudgetTracker::with_ledger("AggregateExec", memory, context.memory_ledger);
     let mut groups = BTreeMap::<Vec<Value>, PartialGroup>::new();
     let mut runs = Vec::<spill::SpillRun>::new();
     let mut ordinal = 0u64;
@@ -149,7 +157,7 @@ pub(super) fn stream_partial_aggregate_batches(
                     )?;
                 } else {
                     tracker.release(delta.released_bytes);
-                    tracker.charge(delta.added_bytes);
+                    tracker.try_charge(delta.added_bytes)?;
                     groups.get_mut(&key).expect("partial group exists").states = states;
                 }
             } else {
@@ -195,6 +203,7 @@ pub(super) fn stream_partial_aggregate_batches(
             &mut spill_budget,
             context.task_context,
         )?);
+        tracker.reset();
     }
     runs = compact_partial_runs(runs, items, memory, &mut spill_budget, context.task_context)?;
     observer.record_blocking_memory_report(spill_backed_report(
@@ -232,7 +241,7 @@ fn insert_partial_group(
             tracker.budget_bytes
         )));
     }
-    tracker.charge(bytes);
+    tracker.try_charge(bytes)?;
     groups.insert(key, PartialGroup { ordinal, states });
     Ok(())
 }

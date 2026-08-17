@@ -1,4 +1,4 @@
-use crate::binding::{binding_payload_bytes, Binding};
+use crate::binding::{binding_memory_bytes, binding_payload_bytes, Binding};
 use crate::kernel::SpillBudgetTracker;
 use pool::{process_marker, RunLease, SPILL_FILE_PREFIX, SPILL_FILE_SUFFIX};
 use skein_core::{LabelId, RelTypeId, Result, SkeinError, Value};
@@ -95,6 +95,8 @@ impl SpillWriter {
         binding: &Binding,
         spill_budget: &mut SpillBudgetTracker,
     ) -> Result<u64> {
+        let _staging_lease =
+            spill_budget.reserve_staging(binding_memory_bytes(binding).saturating_add(8))?;
         let mut payload = Vec::with_capacity(binding_payload_bytes(binding));
         write_u64(&mut payload, ordinal)?;
         write_binding(&mut payload, binding)?;
@@ -409,7 +411,8 @@ fn read_i64(input: &mut Cursor<&[u8]>) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ExecutionMemoryConfig;
+    use crate::kernel::OperatorMemoryTracker;
+    use crate::{ExecutionMemoryConfig, QueryMemoryClass, QueryMemoryLedger};
     use std::num::{NonZeroU64, NonZeroUsize};
     use std::time::Duration;
 
@@ -428,6 +431,43 @@ mod tests {
             )),
             ..ExecutionMemoryConfig::default()
         }
+    }
+
+    #[test]
+    fn spill_staging_shares_the_query_root_with_operator_state() {
+        let mut memory = test_memory("query-ledger");
+        memory.query_memory_bytes = NonZeroUsize::new(256).unwrap();
+        memory.blocking_operator_bytes = NonZeroUsize::new(256).unwrap();
+        let ledger = QueryMemoryLedger::new(memory.query_memory_bytes);
+        let mut tracker = OperatorMemoryTracker::with_account(
+            memory.blocking_operator_bytes,
+            ledger.account(
+                QueryMemoryClass::BlockingState,
+                "test state",
+                memory.blocking_operator_bytes,
+            ),
+        );
+        tracker.try_charge(100).unwrap();
+        let mut spill_budget = SpillBudgetTracker::with_ledger("Test", &memory, &ledger);
+        let (run, mut writer) = spill_budget.create_run("query-ledger").unwrap();
+        let binding = Binding {
+            values: BTreeMap::from([("payload".to_string(), Value::String("x".repeat(64)))]),
+            nodes: BTreeMap::new(),
+            relationships: BTreeMap::new(),
+        };
+
+        let error = writer.write(0, &binding, &mut spill_budget).unwrap_err();
+
+        assert!(
+            error.to_string().contains("query_memory_bytes 256"),
+            "{error}"
+        );
+        assert_eq!(ledger.snapshot().used_bytes, 100);
+        drop(writer);
+        drop(run);
+        drop(tracker);
+        assert_eq!(ledger.snapshot().used_bytes, 0);
+        std::fs::remove_dir_all(&memory.spill_directory).unwrap();
     }
 
     fn empty_binding() -> Binding {

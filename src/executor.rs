@@ -52,15 +52,14 @@ use mutation::{
 use observer::*;
 use read::*;
 use scan::*;
-#[cfg(feature = "tokio-runtime")]
 pub(crate) use skein_executor::binding::map_memory_bytes;
 pub(crate) use skein_executor::binding::map_payload_bytes;
 use skein_executor::binding::{binding_memory_bytes, Binding};
 pub(crate) use skein_executor::external::NoExternalReadOperator;
 use skein_executor::graph::GraphExpansionExecutionState;
 use skein_executor::kernel::{
-    collect_bounded_operator_bindings, ensure_operator_item_fits, push_bounded_operator_binding,
-    OperatorMemoryTracker, SpillBudgetTracker,
+    collect_bounded_operator_bindings_with_account, ensure_operator_item_fits,
+    push_bounded_operator_binding, OperatorMemoryTracker, SpillBudgetTracker,
 };
 pub(crate) use skein_executor::memory::{
     estimated_execution_memory, estimated_mutation_memory_bytes,
@@ -83,6 +82,7 @@ pub use skein_executor::{
     ExternalReadOperator, VectorSeedExecutionOutput, VectorSeedExecutionRequest,
     VectorSeedExecutionRow,
 };
+use skein_executor::{QueryMemoryClass, QueryMemoryLedger};
 use traversal::*;
 use vector::*;
 
@@ -122,6 +122,7 @@ struct ExecutionContext<'a> {
     parameters: &'a BTreeMap<String, Value>,
     external: &'a mut dyn ExternalReadOperator,
     memory: &'a ExecutionMemoryConfig,
+    memory_ledger: &'a QueryMemoryLedger,
     task_context: Option<&'a RuntimeTaskContext>,
     observer: &'a QueryExecutionObserver,
 }
@@ -130,6 +131,7 @@ struct ExecutionContext<'a> {
 struct ExecutionRuntimeControl<'a> {
     memory: &'a ExecutionMemoryConfig,
     task_context: Option<&'a RuntimeTaskContext>,
+    materialize_output: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -191,6 +193,7 @@ fn execute_with_row_limit_internal(
         ExecutionRuntimeControl {
             memory: &memory,
             task_context,
+            materialize_output: true,
         },
     )?;
     Ok(rows)
@@ -277,6 +280,7 @@ pub fn execute_with_output_limits_profile_and_external_and_memory(
         ExecutionRuntimeControl {
             memory,
             task_context: None,
+            materialize_output: true,
         },
     )
 }
@@ -303,6 +307,7 @@ pub fn execute_with_row_limit_profile_and_external_and_memory(
         ExecutionRuntimeControl {
             memory,
             task_context: None,
+            materialize_output: true,
         },
     )
 }
@@ -330,6 +335,7 @@ pub fn execute_with_row_limit_profile_and_external_and_context(
         ExecutionRuntimeControl {
             memory: &memory,
             task_context: Some(task_context),
+            materialize_output: true,
         },
     )
 }
@@ -383,6 +389,7 @@ pub fn execute_with_output_limits_profile_and_external_and_context_and_memory(
         ExecutionRuntimeControl {
             memory,
             task_context: Some(task_context),
+            materialize_output: true,
         },
     )
 }
@@ -461,6 +468,7 @@ pub fn execute_with_row_consumer_profile_and_external_and_memory(
         ExecutionRuntimeControl {
             memory,
             task_context: None,
+            materialize_output: false,
         },
     )
 }
@@ -516,6 +524,7 @@ pub fn execute_with_row_consumer_profile_and_external_and_context_and_memory(
         ExecutionRuntimeControl {
             memory,
             task_context: Some(task_context),
+            materialize_output: false,
         },
     )
 }
@@ -536,7 +545,15 @@ fn execute_with_row_consumer_profile_internal(
     let ExecutionRuntimeControl {
         memory,
         task_context,
+        materialize_output,
     } = runtime;
+    let memory_ledger = QueryMemoryLedger::new(memory.query_memory_bytes);
+    let result_account = memory_ledger.account(
+        QueryMemoryClass::ResultMaterialization,
+        "query result",
+        memory.query_memory_bytes,
+    );
+    let mut materialized_result_lease = result_account.reserve(0)?;
     let process_memory_start = skein_qos::ProcessMemorySnapshot::capture().ok();
     let execution_limit = ExecutionLimit::from_user_max_rows(max_rows)?;
     let mut profile = read_execution_profile(plan, max_rows)?;
@@ -553,6 +570,13 @@ fn execute_with_row_consumer_profile_internal(
             )));
         }
         let row = binding.values;
+        let row_memory_bytes = map_memory_bytes(&row);
+        let transient_result_lease = if materialize_output {
+            materialized_result_lease.grow(row_memory_bytes)?;
+            None
+        } else {
+            Some(result_account.reserve(row_memory_bytes)?)
+        };
         let row_payload_bytes = map_payload_bytes(&row);
         let next_payload_bytes = output_payload_bytes.saturating_add(row_payload_bytes);
         if max_payload_bytes.is_some_and(|limit| next_payload_bytes > limit) {
@@ -564,6 +588,7 @@ fn execute_with_row_consumer_profile_internal(
             )));
         }
         consumer(row)?;
+        drop(transient_result_lease);
         output_rows = output_rows.saturating_add(1);
         output_payload_bytes = next_payload_bytes;
         Ok(())
@@ -573,6 +598,7 @@ fn execute_with_row_consumer_profile_internal(
         parameters,
         external,
         memory,
+        memory_ledger: &memory_ledger,
         task_context,
         observer: &observer,
     };
@@ -584,6 +610,7 @@ fn execute_with_row_consumer_profile_internal(
             parameters: context.parameters,
             external: &external,
             memory,
+            memory_ledger: &memory_ledger,
             task_context,
             observer: context.observer,
         };
@@ -619,6 +646,11 @@ fn execute_with_row_consumer_profile_internal(
     let pipeline_memory_report = &mut pipeline_memory;
     pipeline_memory_report.output_rows = output_rows;
     pipeline_memory_report.output_payload_bytes = output_payload_bytes;
+    let query_memory = memory_ledger.snapshot();
+    pipeline_memory_report.query_memory_budget_bytes = query_memory.budget_bytes;
+    pipeline_memory_report.query_memory_peak_bytes = query_memory.peak_bytes;
+    pipeline_memory_report.query_memory_completion_bytes = query_memory.used_bytes;
+    pipeline_memory_report.query_memory_account_count = query_memory.account_count;
     if let Ok(process_memory_end) = skein_qos::ProcessMemorySnapshot::capture() {
         pipeline_memory_report.steady_resident_bytes = Some(process_memory_end.resident_bytes);
         pipeline_memory_report.peak_resident_bytes = Some(process_memory_end.peak_resident_bytes);

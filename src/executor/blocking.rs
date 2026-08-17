@@ -16,6 +16,7 @@ impl<'a> BatchReadContext<'a> {
         BlockingExecutionContext {
             catalog: self.catalog,
             memory: self.memory,
+            memory_ledger: self.memory_ledger,
             task_context: self.task_context,
             observer: self.observer,
         }
@@ -117,8 +118,19 @@ pub(super) fn stream_cartesian_product_batches(
     execution_limit: ExecutionLimit,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
-    let mut tracker = OperatorMemoryTracker::new(context.memory.blocking_operator_bytes);
-    let mut spill_budget = SpillBudgetTracker::new("NodeCartesianProductExec", context.memory);
+    let mut tracker = OperatorMemoryTracker::with_account(
+        context.memory.blocking_operator_bytes,
+        context.memory_ledger.account(
+            QueryMemoryClass::BlockingState,
+            "NodeCartesianProductExec",
+            context.memory.blocking_operator_bytes,
+        ),
+    );
+    let mut spill_budget = SpillBudgetTracker::with_ledger(
+        "NodeCartesianProductExec",
+        context.memory,
+        context.memory_ledger,
+    );
     let mut right_bindings = Vec::new();
     let mut runs = Vec::new();
     let mut right_ordinal = 0u64;
@@ -135,7 +147,7 @@ pub(super) fn stream_cartesian_product_batches(
                 )?);
                 tracker.reset();
             }
-            tracker.charge(bytes);
+            tracker.try_charge(bytes)?;
             right_bindings.push(binding);
             right_ordinal = right_ordinal.saturating_add(1);
         }

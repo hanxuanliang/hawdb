@@ -18,6 +18,14 @@ pub struct BlockingOperatorMemoryReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PipelineMemoryReport {
+    /// Query-owned runtime ledger budget across pipeline and blocking state.
+    pub query_memory_budget_bytes: usize,
+    /// Highest aggregate tracked resident bytes charged to the query ledger.
+    pub query_memory_peak_bytes: usize,
+    /// Tracked bytes still owned at the execution completion boundary.
+    pub query_memory_completion_bytes: usize,
+    /// Number of operator or transfer accounts created by the query.
+    pub query_memory_account_count: usize,
     /// Sum of rows emitted at every physical operator boundary.
     pub intermediate_rows: usize,
     /// Sum of retained payload estimates emitted at every physical operator boundary.

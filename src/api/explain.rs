@@ -204,6 +204,22 @@ fn blocking_operator_memory_report_value(
 fn pipeline_memory_report_value(report: &skein_executor::PipelineMemoryReport) -> Value {
     Value::Map(BTreeMap::from([
         (
+            "query_memory_budget_bytes".to_string(),
+            usize_value(report.query_memory_budget_bytes),
+        ),
+        (
+            "query_memory_peak_bytes".to_string(),
+            usize_value(report.query_memory_peak_bytes),
+        ),
+        (
+            "query_memory_completion_bytes".to_string(),
+            usize_value(report.query_memory_completion_bytes),
+        ),
+        (
+            "query_memory_account_count".to_string(),
+            usize_value(report.query_memory_account_count),
+        ),
+        (
             "intermediate_rows".to_string(),
             usize_value(report.intermediate_rows),
         ),

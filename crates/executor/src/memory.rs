@@ -9,6 +9,7 @@ use std::time::Duration;
 #[doc(hidden)]
 pub const DEFAULT_EXECUTION_BATCH_ROWS: usize = 256;
 const DEFAULT_EXECUTION_BATCH_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_QUERY_MEMORY_BYTES: usize = 256 * 1024 * 1024;
 #[doc(hidden)]
 pub const DEFAULT_BLOCKING_OPERATOR_MEMORY_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_EXECUTION_MAX_SPILL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -25,6 +26,8 @@ pub const SOURCE_SEGMENT_SCAN_MAX_WAVE_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionMemoryConfig {
+    /// Maximum tracked resident bytes owned by one query across all operators.
+    pub query_memory_bytes: NonZeroUsize,
     /// Maximum row count in an executor-owned transfer batch.
     pub batch_rows: NonZeroUsize,
     /// Maximum estimated resident bytes in an executor-owned transfer batch.
@@ -50,6 +53,8 @@ pub struct ExecutionMemoryConfig {
 impl Default for ExecutionMemoryConfig {
     fn default() -> Self {
         Self {
+            query_memory_bytes: NonZeroUsize::new(DEFAULT_QUERY_MEMORY_BYTES)
+                .expect("default query memory budget is non-zero"),
             batch_rows: NonZeroUsize::new(DEFAULT_EXECUTION_BATCH_ROWS)
                 .expect("default execution batch size is non-zero"),
             batch_payload_bytes: NonZeroUsize::new(DEFAULT_EXECUTION_BATCH_PAYLOAD_BYTES)
@@ -223,6 +228,7 @@ mod tests {
 
     fn admission_test_config() -> ExecutionMemoryConfig {
         ExecutionMemoryConfig {
+            query_memory_bytes: NonZeroUsize::new(16 * 1024).unwrap(),
             batch_rows: NonZeroUsize::new(8).unwrap(),
             batch_payload_bytes: NonZeroUsize::new(1024).unwrap(),
             blocking_operator_bytes: NonZeroUsize::new(4096).unwrap(),

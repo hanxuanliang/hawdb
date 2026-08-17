@@ -80,11 +80,11 @@ impl Display for ExplainAnalyzeOutput {
                     })
                     .or_else(|| {
                         is_root.then(|| {
-                            format_bytes(
-                                self.execution_profile
-                                    .pipeline_memory_report
-                                    .peak_batch_payload_bytes
-                                    as u64,
+                            let pipeline = &self.execution_profile.pipeline_memory_report;
+                            format!(
+                                "peak={}/budget={}",
+                                format_bytes(pipeline.query_memory_peak_bytes as u64),
+                                format_bytes(pipeline.query_memory_budget_bytes as u64),
                             )
                         })
                     }),
@@ -281,6 +281,12 @@ fn root_execution_info(profile: &ReadExecutionProfile) -> String {
         format!("output_rows={}", pipeline.output_rows),
         format!("output_bytes={}", pipeline.output_payload_bytes),
         format!("intermediate_rows={}", pipeline.intermediate_rows),
+        format!(
+            "query_memory={}/{}, completion={}",
+            format_bytes(pipeline.query_memory_peak_bytes as u64),
+            format_bytes(pipeline.query_memory_budget_bytes as u64),
+            format_bytes(pipeline.query_memory_completion_bytes as u64),
+        ),
     ];
     if pipeline.columnar_batches > 0 {
         fields.push(format!(
@@ -447,6 +453,7 @@ mod tests {
         assert!(rendered.contains("SortExec"));
         assert!(rendered.contains("peak="));
         assert!(rendered.contains("/budget="));
+        assert!(rendered.contains("query_memory="));
     }
 
     #[test]

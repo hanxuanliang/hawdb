@@ -104,7 +104,7 @@ impl StorageResourceProfileReport {
             .graph_index_reads
             .delta_since(self.before.graph_index_reads);
         let graph_index_reads_json = graph_index_reads_json(graph_index_reads);
-        serde_json::json!({
+        let mut json = serde_json::json!({
             "protocol": STORAGE_RESOURCE_PROFILE_PROTOCOL,
             "protocol_version": 2,
             "present": true,
@@ -204,7 +204,28 @@ impl StorageResourceProfileReport {
                 "blocking_operator_kinds": self.query.execution_profile.blocking_operator_kinds,
                 "blocking_operator_memory_reports": blocking_operator_memory_reports,
             },
-        })
+        });
+        let execution = json
+            .get_mut("execution")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("resource profile execution is an object");
+        execution.insert(
+            "query_memory_budget_bytes".to_string(),
+            pipeline.query_memory_budget_bytes.into(),
+        );
+        execution.insert(
+            "query_memory_peak_bytes".to_string(),
+            pipeline.query_memory_peak_bytes.into(),
+        );
+        execution.insert(
+            "query_memory_completion_bytes".to_string(),
+            pipeline.query_memory_completion_bytes.into(),
+        );
+        execution.insert(
+            "query_memory_account_count".to_string(),
+            pipeline.query_memory_account_count.into(),
+        );
+        json
     }
 
     pub fn production_ready(&self) -> bool {

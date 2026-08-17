@@ -15,7 +15,7 @@ fn charge_graph_algorithm_memory(
             tracker.budget_bytes,
         )));
     }
-    tracker.charge(bytes);
+    tracker.try_charge(bytes)?;
     Ok(())
 }
 
@@ -67,13 +67,10 @@ fn stream_node_column_lookup_batches(
             let bindings = execute_node_column_lookup(
                 spec,
                 batch,
-                context.catalog,
-                context.store,
+                context,
                 ExecutionLimit {
                     output_rows: Some(remaining),
                 },
-                context.memory.blocking_operator_bytes,
-                context.observer,
             )?;
             for binding in bindings {
                 output.push(binding);
@@ -191,6 +188,7 @@ pub(super) struct BatchReadContext<'a> {
     pub(super) parameters: &'a BTreeMap<String, Value>,
     pub(super) external: &'a dyn BatchExternalRead,
     pub(super) memory: &'a ExecutionMemoryConfig,
+    pub(super) memory_ledger: &'a QueryMemoryLedger,
     pub(super) task_context: Option<&'a RuntimeTaskContext>,
     pub(super) observer: &'a QueryExecutionObserver,
 }
@@ -243,7 +241,14 @@ pub(super) fn collect_batch_pipeline(
     let memory = execution_context.memory;
     let task_context = execution_context.task_context;
     let mut output = Vec::new();
-    let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
+    let mut tracker = OperatorMemoryTracker::with_account(
+        memory.blocking_operator_bytes,
+        execution_context.memory_ledger.account(
+            QueryMemoryClass::BlockingState,
+            "materialized batch pipeline",
+            memory.blocking_operator_bytes,
+        ),
+    );
     let external = BatchExternalReadAdapter::new(&mut *execution_context.external);
     let context = BatchReadContext {
         catalog,
@@ -251,6 +256,7 @@ pub(super) fn collect_batch_pipeline(
         parameters: execution_context.parameters,
         external: &external,
         memory,
+        memory_ledger: execution_context.memory_ledger,
         task_context,
         observer: execution_context.observer,
     };
@@ -293,11 +299,17 @@ pub(super) fn execute_prepared_binding_batches(
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
     runtime_checkpoint(context.task_context)?;
+    let pipeline_account = context.memory_ledger.account(
+        QueryMemoryClass::PipelineBatch,
+        format!("{} pipeline", plan.plan().kind().as_str()),
+        context.memory.batch_payload_bytes,
+    );
     let mut measured_emit = |batch: BindingBatch| {
         runtime_checkpoint(context.task_context)?;
         let control = emit_byte_bounded_batches(
             batch,
             context.memory.batch_payload_bytes.get(),
+            &pipeline_account,
             context.observer,
             emit,
         )?;
@@ -310,6 +322,7 @@ pub(super) fn execute_prepared_binding_batches(
 fn emit_byte_bounded_batches(
     batch: BindingBatch,
     max_payload_bytes: usize,
+    memory_account: &skein_executor::QueryMemoryAccount,
     observer: &QueryExecutionObserver,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
@@ -327,6 +340,7 @@ fn emit_byte_bounded_batches(
     }
     if !requires_split {
         if !batch.is_empty() {
+            let _batch_lease = memory_account.reserve(batch_bytes)?;
             observer.record_pipeline_batch(&batch);
             return emit(batch);
         }
@@ -343,6 +357,7 @@ fn emit_byte_bounded_batches(
             )));
         }
         if !bounded.is_empty() && bounded_bytes.saturating_add(binding_bytes) > max_payload_bytes {
+            let _batch_lease = memory_account.reserve(bounded_bytes)?;
             observer.record_pipeline_batch(&bounded);
             if emit(std::mem::take(&mut bounded))? == BatchControl::Stop {
                 return Ok(BatchControl::Stop);
@@ -353,6 +368,7 @@ fn emit_byte_bounded_batches(
         bounded.push(binding);
     }
     if !bounded.is_empty() {
+        let _batch_lease = memory_account.reserve(bounded_bytes)?;
         observer.record_pipeline_batch(&bounded);
         if emit(bounded)? == BatchControl::Stop {
             return Ok(BatchControl::Stop);
@@ -595,7 +611,14 @@ fn execute_binding_batches_inner(
                 )
             }?;
             runtime_checkpoint(context.task_context)?;
-            let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
+            let mut tracker = OperatorMemoryTracker::with_account(
+                memory.blocking_operator_bytes,
+                context.memory_ledger.account(
+                    QueryMemoryClass::BlockingState,
+                    "GraphAlgorithm",
+                    memory.blocking_operator_bytes,
+                ),
+            );
             let projection_bytes = graph.memory_estimate().estimated_bytes;
             charge_graph_algorithm_memory(
                 match algorithm {
@@ -733,7 +756,7 @@ fn execute_binding_batches_inner(
                     vector_plan,
                 })?;
             context.observer.record_vector_execution(output.report);
-            let mut bindings = collect_bounded_operator_bindings(
+            let mut bindings = collect_bounded_operator_bindings_with_account(
                 "VectorSeedScan",
                 output.rows.into_iter().map(|row| {
                     let mut values = BTreeMap::from([
@@ -750,6 +773,11 @@ fn execute_binding_batches_inner(
                     }
                 }),
                 memory.blocking_operator_bytes,
+                context.memory_ledger.account(
+                    QueryMemoryClass::BlockingState,
+                    "VectorSeedScan",
+                    memory.blocking_operator_bytes,
+                ),
             )?;
             bindings.truncate(execution_limit.output_rows.unwrap_or(usize::MAX));
             emit_owned_binding_batches(bindings, memory.batch_rows.get(), emit)
@@ -1093,12 +1121,25 @@ mod byte_bounded_batch_tests {
         }];
         let allocation = batch.as_ptr();
         let observer = QueryExecutionObserver::default();
+        let memory = ExecutionMemoryConfig::default();
+        let memory_ledger = QueryMemoryLedger::new(memory.query_memory_bytes);
+        let memory_account = memory_ledger.account(
+            QueryMemoryClass::PipelineBatch,
+            "test batch",
+            memory.query_memory_bytes,
+        );
         let mut emitted_allocation = None;
 
-        let control = emit_byte_bounded_batches(batch, usize::MAX, &observer, &mut |emitted| {
-            emitted_allocation = Some(emitted.as_ptr());
-            Ok(BatchControl::Continue)
-        })
+        let control = emit_byte_bounded_batches(
+            batch,
+            usize::MAX,
+            &memory_account,
+            &observer,
+            &mut |emitted| {
+                emitted_allocation = Some(emitted.as_ptr());
+                Ok(BatchControl::Continue)
+            },
+        )
         .unwrap();
 
         assert_eq!(control, BatchControl::Continue);

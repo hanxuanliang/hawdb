@@ -9,7 +9,10 @@ use crate::kernel::{ensure_operator_item_fits, OperatorMemoryTracker, SpillBudge
 use crate::observer::ExecutionObserver;
 use crate::pipeline::{emit_binding_iterator, runtime_checkpoint, BatchControl, BindingBatch};
 use crate::spill;
-use crate::{BlockingOperatorMemoryReport, ExecutionLimit, ExecutionMemoryConfig};
+use crate::{
+    BlockingOperatorMemoryReport, ExecutionLimit, ExecutionMemoryConfig, QueryMemoryClass,
+    QueryMemoryLedger,
+};
 use skein_core::{Catalog, Result, RuntimeTaskContext, SkeinError, Value};
 use skein_plan::{
     AggregateFunction, AggregateTarget, Aggregation, PhysicalPlan, Projection, SortDirection,
@@ -28,11 +31,26 @@ pub trait BindingBatchSource {
     ) -> Result<BatchControl>;
 }
 
+#[derive(Clone, Copy)]
 pub struct BlockingExecutionContext<'a> {
     pub catalog: &'a Catalog,
     pub memory: &'a ExecutionMemoryConfig,
+    pub memory_ledger: &'a QueryMemoryLedger,
     pub task_context: Option<&'a RuntimeTaskContext>,
     pub observer: &'a dyn ExecutionObserver,
+}
+
+impl BlockingExecutionContext<'_> {
+    pub fn operator_tracker(&self, operator: &'static str) -> OperatorMemoryTracker {
+        OperatorMemoryTracker::with_account(
+            self.memory.blocking_operator_bytes,
+            self.memory_ledger.account(
+                QueryMemoryClass::BlockingState,
+                operator,
+                self.memory.blocking_operator_bytes,
+            ),
+        )
+    }
 }
 
 pub fn in_memory_report(
@@ -137,7 +155,7 @@ mod tests {
     fn report_factory_snapshots_tracker_and_spill_state() {
         let memory = ExecutionMemoryConfig::default();
         let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
-        tracker.charge(64);
+        tracker.try_charge(64).unwrap();
         let mut spill = SpillBudgetTracker::new("SortExec", &memory);
         spill.used_bytes = 128;
         spill.run_count = 1;
@@ -166,6 +184,7 @@ mod tests {
         };
         let catalog = Catalog::default();
         let memory = ExecutionMemoryConfig::default();
+        let memory_ledger = QueryMemoryLedger::new(memory.query_memory_bytes);
         let observer = NoopExecutionObserver;
         let mut output = Vec::new();
 
@@ -175,6 +194,7 @@ mod tests {
             BlockingExecutionContext {
                 catalog: &catalog,
                 memory: &memory,
+                memory_ledger: &memory_ledger,
                 task_context: None,
                 observer: &observer,
             },
@@ -206,6 +226,7 @@ mod tests {
         };
         let catalog = Catalog::default();
         let memory = ExecutionMemoryConfig::default();
+        let memory_ledger = QueryMemoryLedger::new(memory.query_memory_bytes);
         let observer = NoopExecutionObserver;
         let mut output = Vec::new();
 
@@ -221,6 +242,7 @@ mod tests {
             BlockingExecutionContext {
                 catalog: &catalog,
                 memory: &memory,
+                memory_ledger: &memory_ledger,
                 task_context: None,
                 observer: &observer,
             },

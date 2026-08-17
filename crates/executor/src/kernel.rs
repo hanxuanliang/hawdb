@@ -2,7 +2,10 @@
 
 use crate::binding::{binding_memory_bytes, Binding};
 use crate::spill::{SpillPool, SpillRun, SpillWriteReservation, SpillWriter};
-use crate::ExecutionMemoryConfig;
+use crate::{
+    ExecutionMemoryConfig, QueryMemoryAccount, QueryMemoryClass, QueryMemoryLease,
+    QueryMemoryLedger,
+};
 use skein_core::{Result, SkeinError};
 use std::num::NonZeroUsize;
 
@@ -10,6 +13,7 @@ pub struct OperatorMemoryTracker {
     pub budget_bytes: usize,
     pub used_bytes: usize,
     pub peak_bytes: usize,
+    lease: Option<QueryMemoryLease>,
 }
 
 impl OperatorMemoryTracker {
@@ -18,6 +22,20 @@ impl OperatorMemoryTracker {
             budget_bytes: budget_bytes.get(),
             used_bytes: 0,
             peak_bytes: 0,
+            lease: None,
+        }
+    }
+
+    pub fn with_account(budget_bytes: NonZeroUsize, account: QueryMemoryAccount) -> Self {
+        Self {
+            budget_bytes: budget_bytes.get(),
+            used_bytes: 0,
+            peak_bytes: 0,
+            lease: Some(
+                account
+                    .reserve(0)
+                    .expect("zero-byte query memory reservation cannot fail"),
+            ),
         }
     }
 
@@ -25,16 +43,34 @@ impl OperatorMemoryTracker {
         self.used_bytes.saturating_add(bytes) > self.budget_bytes
     }
 
-    pub fn charge(&mut self, bytes: usize) {
+    pub fn try_charge(&mut self, bytes: usize) -> Result<()> {
+        if self.would_exceed(bytes) {
+            return Err(SkeinError::Execution(format!(
+                "operator state would use {} bytes, exceeding its {}-byte budget",
+                self.used_bytes.saturating_add(bytes),
+                self.budget_bytes
+            )));
+        }
+        if let Some(lease) = self.lease.as_mut() {
+            lease.grow(bytes)?;
+        }
         self.used_bytes = self.used_bytes.saturating_add(bytes);
         self.peak_bytes = self.peak_bytes.max(self.used_bytes);
+        Ok(())
     }
 
     pub fn release(&mut self, bytes: usize) {
-        self.used_bytes = self.used_bytes.saturating_sub(bytes);
+        let released = bytes.min(self.used_bytes);
+        if let Some(lease) = self.lease.as_mut() {
+            lease.shrink(released);
+        }
+        self.used_bytes -= released;
     }
 
     pub fn reset(&mut self) {
+        if let Some(lease) = self.lease.as_mut() {
+            lease.reset();
+        }
         self.used_bytes = 0;
     }
 }
@@ -46,6 +82,7 @@ pub struct SpillBudgetTracker {
     pub max_runs: usize,
     pub used_bytes: u64,
     pub run_count: usize,
+    staging_account: Option<QueryMemoryAccount>,
 }
 
 impl SpillBudgetTracker {
@@ -57,7 +94,30 @@ impl SpillBudgetTracker {
             max_runs: memory.max_spill_runs.get(),
             used_bytes: 0,
             run_count: 0,
+            staging_account: None,
         }
+    }
+
+    pub fn with_ledger(
+        operator: &'static str,
+        memory: &ExecutionMemoryConfig,
+        memory_ledger: &QueryMemoryLedger,
+    ) -> Self {
+        Self {
+            staging_account: Some(memory_ledger.account(
+                QueryMemoryClass::SpillStaging,
+                format!("{operator} spill staging"),
+                memory.blocking_operator_bytes,
+            )),
+            ..Self::new(operator, memory)
+        }
+    }
+
+    pub(crate) fn reserve_staging(&self, bytes: usize) -> Result<Option<QueryMemoryLease>> {
+        self.staging_account
+            .as_ref()
+            .map(|account| account.reserve(bytes))
+            .transpose()
     }
 
     pub fn create_run(&mut self, file_operator: &str) -> Result<(SpillRun, SpillWriter)> {
@@ -124,7 +184,7 @@ pub fn push_bounded_operator_binding(
             tracker.budget_bytes
         )));
     }
-    tracker.charge(bytes);
+    tracker.try_charge(bytes)?;
     output.push(binding);
     Ok(())
 }
@@ -136,6 +196,20 @@ pub fn collect_bounded_operator_bindings(
 ) -> Result<Vec<Binding>> {
     let mut output = Vec::new();
     let mut tracker = OperatorMemoryTracker::new(memory_budget);
+    for binding in bindings {
+        push_bounded_operator_binding(operator, &mut output, binding, &mut tracker)?;
+    }
+    Ok(output)
+}
+
+pub fn collect_bounded_operator_bindings_with_account(
+    operator: &str,
+    bindings: impl IntoIterator<Item = Binding>,
+    memory_budget: NonZeroUsize,
+    account: QueryMemoryAccount,
+) -> Result<Vec<Binding>> {
+    let mut output = Vec::new();
+    let mut tracker = OperatorMemoryTracker::with_account(memory_budget, account);
     for binding in bindings {
         push_bounded_operator_binding(operator, &mut output, binding, &mut tracker)?;
     }

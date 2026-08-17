@@ -421,6 +421,7 @@ struct AggregateExecutionContext<'a> {
     catalog: &'a Catalog,
     batch_rows: usize,
     memory_budget: NonZeroUsize,
+    memory_ledger: &'a QueryMemoryLedger,
     execution_limit: ExecutionLimit,
     task_context: Option<&'a RuntimeTaskContext>,
 }
@@ -457,19 +458,26 @@ pub fn stream_aggregate_batches(
     execution_limit: ExecutionLimit,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
+    let primary_account = context.memory_ledger.account(
+        QueryMemoryClass::BlockingState,
+        "AggregateExec",
+        context.memory.blocking_operator_bytes,
+    );
     let BlockingExecutionContext {
         catalog,
         memory,
+        memory_ledger,
         task_context,
         observer,
     } = context;
     runtime_checkpoint(task_context)?;
     if group_keys.is_empty() {
         let mut accumulator = GroupAccumulator::new(Vec::new(), group_keys, items);
-        let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
+        let mut tracker =
+            OperatorMemoryTracker::with_account(memory.blocking_operator_bytes, primary_account);
         let base_bytes = accumulator.base_memory_bytes();
         ensure_operator_item_fits("AggregateExec", base_bytes, &tracker)?;
-        tracker.charge(base_bytes);
+        tracker.try_charge(base_bytes)?;
         let mut input_rows = 0usize;
         source.execute(input, ExecutionLimit::unlimited(), &mut |batch| {
             runtime_checkpoint(task_context)?;
@@ -501,6 +509,7 @@ pub fn stream_aggregate_batches(
                 catalog,
                 batch_rows: memory.batch_rows.get(),
                 memory_budget: memory.blocking_operator_bytes,
+                memory_ledger,
                 execution_limit,
                 task_context,
             },
@@ -510,8 +519,9 @@ pub fn stream_aggregate_batches(
         );
     }
 
-    let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
-    let mut spill_budget = SpillBudgetTracker::new("AggregateExec", memory);
+    let mut tracker =
+        OperatorMemoryTracker::with_account(memory.blocking_operator_bytes, primary_account);
+    let mut spill_budget = SpillBudgetTracker::with_ledger("AggregateExec", memory, memory_ledger);
     let mut rows = Vec::<GroupRunRow>::new();
     let mut runs = Vec::<spill::SpillRun>::new();
     let mut ordinal = 0u64;
@@ -537,7 +547,7 @@ pub fn stream_aggregate_batches(
                 runs.push(spill_group_run(&mut rows, &mut spill_budget, task_context)?);
                 tracker.reset();
             }
-            tracker.charge(bytes);
+            tracker.try_charge(bytes)?;
             rows.push(row);
             ordinal = ordinal.saturating_add(1);
         }
@@ -559,6 +569,7 @@ pub fn stream_aggregate_batches(
             catalog,
             batch_rows: memory.batch_rows.get(),
             memory_budget: memory.blocking_operator_bytes,
+            memory_ledger,
             execution_limit,
             task_context,
         };
@@ -566,6 +577,7 @@ pub fn stream_aggregate_batches(
     }
     if !rows.is_empty() {
         runs.push(spill_group_run(&mut rows, &mut spill_budget, task_context)?);
+        tracker.reset();
     }
     runs = compact_group_runs(runs, items.len(), memory, &mut spill_budget, task_context)?;
     observer.record_blocking_memory_report(spill_backed_report(
@@ -582,6 +594,7 @@ pub fn stream_aggregate_batches(
         catalog,
         batch_rows: memory.batch_rows.get(),
         memory_budget: memory.blocking_operator_bytes,
+        memory_ledger,
         execution_limit,
         task_context,
     };
@@ -661,7 +674,7 @@ fn merge_group_run_pair(
                     memory.blocking_operator_bytes
                 )));
             }
-            tracker.charge(bytes);
+            tracker.try_charge(bytes)?;
             heap.push(entry);
         }
     }
@@ -684,7 +697,7 @@ fn merge_group_run_pair(
                     memory.blocking_operator_bytes
                 )));
             }
-            tracker.charge(bytes);
+            tracker.try_charge(bytes)?;
             heap.push(next);
         }
     }
@@ -703,11 +716,19 @@ fn aggregate_sorted_group_rows(
         catalog: _,
         batch_rows,
         memory_budget,
+        memory_ledger,
         execution_limit,
         task_context,
     } = context;
     runtime_checkpoint(task_context)?;
-    let mut tracker = OperatorMemoryTracker::new(memory_budget);
+    let mut tracker = OperatorMemoryTracker::with_account(
+        memory_budget,
+        memory_ledger.account(
+            QueryMemoryClass::BlockingState,
+            "AggregateExec group state",
+            memory_budget,
+        ),
+    );
     let mut batch = Vec::with_capacity(batch_rows);
     let mut accumulator: Option<GroupAccumulator<'_>> = None;
     let mut emitted = 0usize;
@@ -730,7 +751,7 @@ fn aggregate_sorted_group_rows(
             let next = GroupAccumulator::new(row.key.clone(), group_keys, items);
             let base_bytes = next.base_memory_bytes();
             ensure_operator_item_fits("AggregateExec group state", base_bytes, &tracker)?;
-            tracker.charge(base_bytes);
+            tracker.try_charge(base_bytes)?;
             accumulator = Some(next);
         }
         update_group_accumulator_inputs(
@@ -760,17 +781,32 @@ fn merge_group_runs(
         catalog: _,
         batch_rows,
         memory_budget,
+        memory_ledger,
         execution_limit,
         task_context,
     } = context;
     runtime_checkpoint(task_context)?;
-    let mut accumulator_tracker = OperatorMemoryTracker::new(memory_budget);
+    let mut accumulator_tracker = OperatorMemoryTracker::with_account(
+        memory_budget,
+        memory_ledger.account(
+            QueryMemoryClass::BlockingState,
+            "AggregateExec accumulator",
+            memory_budget,
+        ),
+    );
     let mut readers = runs
         .iter()
         .map(spill::SpillRun::reader)
         .collect::<Result<Vec<_>>>()?;
     let mut heap = BinaryHeap::new();
-    let mut merge_tracker = OperatorMemoryTracker::new(memory_budget);
+    let mut merge_tracker = OperatorMemoryTracker::with_account(
+        memory_budget,
+        memory_ledger.account(
+            QueryMemoryClass::BlockingState,
+            "AggregateExec merge",
+            memory_budget,
+        ),
+    );
     for (run_index, reader) in readers.iter_mut().enumerate() {
         runtime_checkpoint(task_context)?;
         if let Some((ordinal, binding)) = reader.read(memory_budget.get())? {
@@ -784,7 +820,7 @@ fn merge_group_runs(
                     merge_tracker.budget_bytes
                 )));
             }
-            merge_tracker.charge(bytes);
+            merge_tracker.try_charge(bytes)?;
             heap.push(entry);
         }
     }
@@ -817,7 +853,7 @@ fn merge_group_runs(
                 base_bytes,
                 &accumulator_tracker,
             )?;
-            accumulator_tracker.charge(base_bytes);
+            accumulator_tracker.try_charge(base_bytes)?;
             accumulator = Some(next);
         }
         update_group_accumulator_inputs(
@@ -836,7 +872,7 @@ fn merge_group_runs(
                     merge_tracker.budget_bytes
                 )));
             }
-            merge_tracker.charge(bytes);
+            merge_tracker.try_charge(bytes)?;
             heap.push(next);
         }
     }
@@ -864,7 +900,7 @@ fn update_group_accumulator(
             tracker.budget_bytes
         )));
     }
-    tracker.charge(delta.added_bytes);
+    tracker.try_charge(delta.added_bytes)?;
     Ok(())
 }
 
@@ -881,7 +917,7 @@ fn update_group_accumulator_inputs(
             tracker.budget_bytes
         )));
     }
-    tracker.charge(delta.added_bytes);
+    tracker.try_charge(delta.added_bytes)?;
     Ok(())
 }
 

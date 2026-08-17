@@ -112,14 +112,19 @@ pub fn stream_sort_batches(
 
 impl<'plan, 'runtime> SortOperator<'plan, 'runtime> {
     fn new(items: &'plan [SortItem], context: BlockingExecutionContext<'runtime>) -> Self {
+        let tracker = context.operator_tracker("SortExec");
         Self {
             items,
             catalog: context.catalog,
             memory: context.memory,
             task_context: context.task_context,
             observer: context.observer,
-            tracker: OperatorMemoryTracker::new(context.memory.blocking_operator_bytes),
-            spill_budget: SpillBudgetTracker::new("SortExec", context.memory),
+            tracker,
+            spill_budget: SpillBudgetTracker::with_ledger(
+                "SortExec",
+                context.memory,
+                context.memory_ledger,
+            ),
             rows: Vec::new(),
             runs: Vec::new(),
             input_rows: 0,
@@ -138,7 +143,7 @@ impl<'plan, 'runtime> SortOperator<'plan, 'runtime> {
             )?);
             self.tracker.reset();
         }
-        self.tracker.charge(bytes);
+        self.tracker.try_charge(bytes)?;
         self.rows.push(row);
         self.input_rows = self.input_rows.saturating_add(1);
         Ok(())
@@ -168,6 +173,7 @@ impl<'plan, 'runtime> SortOperator<'plan, 'runtime> {
                 &mut self.spill_budget,
                 self.task_context,
             )?);
+            self.tracker.reset();
         }
         self.runs = compact_sort_runs(
             self.runs,
@@ -255,6 +261,7 @@ impl<'plan, 'runtime> TopNOperator<'plan, 'runtime> {
         limit: usize,
         context: BlockingExecutionContext<'runtime>,
     ) -> Self {
+        let tracker = context.operator_tracker("TopNExec");
         Self {
             items,
             offset,
@@ -264,8 +271,12 @@ impl<'plan, 'runtime> TopNOperator<'plan, 'runtime> {
             memory: context.memory,
             task_context: context.task_context,
             observer: context.observer,
-            tracker: OperatorMemoryTracker::new(context.memory.blocking_operator_bytes),
-            spill_budget: SpillBudgetTracker::new("TopNExec", context.memory),
+            tracker,
+            spill_budget: SpillBudgetTracker::with_ledger(
+                "TopNExec",
+                context.memory,
+                context.memory_ledger,
+            ),
             runs: Vec::new(),
             heap: BinaryHeap::new(),
             input_rows: 0,
@@ -296,7 +307,7 @@ impl<'plan, 'runtime> TopNOperator<'plan, 'runtime> {
             if self.tracker.would_exceed(bytes) {
                 self.spill_heap()?;
             }
-            self.tracker.charge(bytes);
+            self.tracker.try_charge(bytes)?;
             self.heap.push(candidate);
         } else if self.heap.peek().is_some_and(|worst| candidate < *worst) {
             let worst_bytes = self.heap.peek().map(TopNBinding::memory_bytes).unwrap_or(0);
@@ -312,7 +323,7 @@ impl<'plan, 'runtime> TopNOperator<'plan, 'runtime> {
                 self.heap.pop();
                 self.tracker.release(worst_bytes);
             }
-            self.tracker.charge(bytes);
+            self.tracker.try_charge(bytes)?;
             self.heap.push(candidate);
         }
         Ok(())
@@ -480,7 +491,7 @@ fn merge_sort_run_pair(
                     memory.blocking_operator_bytes
                 )));
             }
-            tracker.charge(bytes);
+            tracker.try_charge(bytes)?;
             heap.push(entry);
         }
     }
@@ -504,7 +515,7 @@ fn merge_sort_run_pair(
                     memory.blocking_operator_bytes
                 )));
             }
-            tracker.charge(bytes);
+            tracker.try_charge(bytes)?;
             heap.push(next);
         }
     }
@@ -546,7 +557,7 @@ pub fn merge_sort_runs(
                     tracker.budget_bytes
                 )));
             }
-            tracker.charge(bytes);
+            tracker.try_charge(bytes)?;
             heap.push(entry);
         }
     }
@@ -573,7 +584,7 @@ pub fn merge_sort_runs(
                     tracker.budget_bytes
                 )));
             }
-            tracker.charge(bytes);
+            tracker.try_charge(bytes)?;
             heap.push(next);
         }
         if skipped < skip_rows {

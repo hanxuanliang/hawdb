@@ -90,6 +90,7 @@ fn main() {
             .as_nanos()
     ));
     let memory = ExecutionMemoryConfig {
+        query_memory_bytes: NonZeroUsize::new(256 * 1024 * 1024).unwrap(),
         batch_rows: NonZeroUsize::new(1_024).unwrap(),
         batch_payload_bytes: NonZeroUsize::new(8 * 1024 * 1024).unwrap(),
         blocking_operator_bytes: NonZeroUsize::new(16 * 1024).unwrap(),

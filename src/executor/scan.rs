@@ -11,6 +11,11 @@ pub(super) fn stream_node_scan_batches(
     execution_limit: ExecutionLimit,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
+    let memory_account = context.memory_ledger.account(
+        QueryMemoryClass::BlockingState,
+        "NodeScanExec",
+        context.memory.blocking_operator_bytes,
+    );
     let mut predicate = |binding: &Binding| match filter {
         Some((predicate, _)) => evaluate_predicate_observed(
             predicate,
@@ -32,6 +37,7 @@ pub(super) fn stream_node_scan_batches(
             store: context.store,
             execution_limit,
             memory_budget: context.memory.blocking_operator_bytes,
+            memory_account: Some(&memory_account),
             batch_rows: context.memory.batch_rows.get(),
             task_context: context.task_context,
         },
@@ -50,6 +56,11 @@ pub(super) fn stream_index_node_seek_batches(
     execution_limit: ExecutionLimit,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
+    let memory_account = context.memory_ledger.account(
+        QueryMemoryClass::BlockingState,
+        "IndexNodeSeekExec",
+        context.memory.blocking_operator_bytes,
+    );
     skein_executor::scan::stream_index_node_seek_batches(
         variable,
         label,
@@ -60,6 +71,7 @@ pub(super) fn stream_index_node_seek_batches(
             store: context.store,
             execution_limit,
             memory_budget: context.memory.blocking_operator_bytes,
+            memory_account: Some(&memory_account),
             batch_rows: context.memory.batch_rows.get(),
             task_context: context.task_context,
         },
@@ -121,6 +133,11 @@ pub(super) fn execute_node_scan_with_optional_filter(
     context: BatchReadContext<'_>,
     execution_limit: ExecutionLimit,
 ) -> Result<Vec<Binding>> {
+    let memory_account = context.memory_ledger.account(
+        QueryMemoryClass::BlockingState,
+        "NodeScanExec",
+        context.memory.blocking_operator_bytes,
+    );
     let mut predicate = |binding: &Binding| match filter {
         Some((predicate, _)) => evaluate_predicate_observed(
             predicate,
@@ -142,6 +159,7 @@ pub(super) fn execute_node_scan_with_optional_filter(
             store: context.store,
             execution_limit,
             memory_budget: context.memory.blocking_operator_bytes,
+            memory_account: Some(&memory_account),
             batch_rows: 1,
             task_context: context.task_context,
         },
@@ -220,7 +238,14 @@ pub(super) fn execute_source_segment_scan(
     };
     let source_label_id = catalog.label_id("Source");
     let mut bindings = Vec::new();
-    let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
+    let mut tracker = OperatorMemoryTracker::with_account(
+        memory.blocking_operator_bytes,
+        context.memory_ledger.account(
+            QueryMemoryClass::BlockingState,
+            "SourceSegmentScan",
+            memory.blocking_operator_bytes,
+        ),
+    );
     for row in rows {
         let Some(node) = store.node_owned(NodeId(row.node_id))? else {
             return fallback();
@@ -246,24 +271,28 @@ pub(super) fn execute_source_segment_scan(
 pub(super) fn execute_node_column_lookup(
     spec: NodeColumnLookupSpec<'_>,
     input: Vec<Binding>,
-    catalog: &Catalog,
-    store: &GraphStore,
+    context: BatchReadContext<'_>,
     execution_limit: ExecutionLimit,
-    memory_budget: NonZeroUsize,
-    observer: &dyn skein_executor::observer::ExecutionObserver,
 ) -> Result<Vec<Binding>> {
+    let memory_budget = context.memory.blocking_operator_bytes;
+    let memory_account = context.memory_ledger.account(
+        QueryMemoryClass::BlockingState,
+        "NodeColumnLookupExec",
+        memory_budget,
+    );
     skein_executor::scan::execute_node_column_lookup(
         spec,
         input,
         NodeScanContext {
-            catalog,
-            store,
+            catalog: context.catalog,
+            store: context.store,
             execution_limit,
             memory_budget,
+            memory_account: Some(&memory_account),
             batch_rows: 1,
             task_context: None,
         },
-        observer,
+        context.observer,
     )
 }
 

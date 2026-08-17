@@ -30,12 +30,17 @@ pub fn stream_distinct_batches(
 
 impl<'a> DistinctOperator<'a> {
     fn new(context: BlockingExecutionContext<'a>) -> Self {
+        let tracker = context.operator_tracker("DistinctExec");
         Self {
             memory: context.memory,
             task_context: context.task_context,
             observer: context.observer,
-            tracker: OperatorMemoryTracker::new(context.memory.blocking_operator_bytes),
-            spill_budget: SpillBudgetTracker::new("DistinctExec", context.memory),
+            tracker,
+            spill_budget: SpillBudgetTracker::with_ledger(
+                "DistinctExec",
+                context.memory,
+                context.memory_ledger,
+            ),
             distinct: BTreeMap::new(),
             runs: Vec::new(),
             input_rows: 0,
@@ -56,7 +61,7 @@ impl<'a> DistinctOperator<'a> {
                 )?);
                 self.tracker.reset();
             }
-            self.tracker.charge(entry_bytes);
+            self.tracker.try_charge(entry_bytes)?;
             self.distinct.insert(key, (self.input_rows, binding));
         }
         self.input_rows = self.input_rows.saturating_add(1);
