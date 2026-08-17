@@ -114,6 +114,225 @@ pub fn spill_binding_run(
     Ok(run)
 }
 
+pub fn stream_cartesian_product_batches(
+    left: &PhysicalPlan,
+    right: &PhysicalPlan,
+    source: &mut dyn BindingBatchSource,
+    context: BlockingExecutionContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let blocking_account = context.operator_account("NodeCartesianProductExec");
+    let mut tracker = OperatorMemoryTracker::with_account(
+        context.memory.blocking_operator_bytes,
+        blocking_account.clone(),
+    );
+    let mut spill_budget = SpillBudgetTracker::with_ledger(
+        "NodeCartesianProductExec",
+        context.memory,
+        context.memory_ledger,
+    );
+    let mut right_bindings = Vec::new();
+    let mut runs = Vec::new();
+    let mut right_ordinal = 0u64;
+    source.execute(right, ExecutionLimit::unlimited(), &mut |batch| {
+        for binding in batch {
+            let bytes = binding_memory_bytes(&binding);
+            ensure_operator_item_fits("NodeCartesianProductExec", bytes, &tracker)?;
+            if tracker.would_exceed(bytes) {
+                runs.push(spill_binding_run(
+                    "cartesian",
+                    &mut right_bindings,
+                    &mut spill_budget,
+                    context.task_context,
+                )?);
+                tracker.reset();
+            }
+            tracker.try_charge(bytes)?;
+            right_bindings.push(binding);
+            right_ordinal = right_ordinal.saturating_add(1);
+        }
+        Ok(BatchControl::Continue)
+    })?;
+    if !runs.is_empty() && !right_bindings.is_empty() {
+        runs.push(spill_binding_run(
+            "cartesian",
+            &mut right_bindings,
+            &mut spill_budget,
+            context.task_context,
+        )?);
+        tracker.reset();
+    }
+    context
+        .observer
+        .record_blocking_memory_report(spill_backed_report(
+            "NodeCartesianProductExec",
+            &tracker,
+            tracker.peak_bytes,
+            right_ordinal as usize,
+            &spill_budget,
+            if runs.is_empty() {
+                0
+            } else {
+                right_ordinal as usize
+            },
+        ));
+    if right_bindings.is_empty() && runs.is_empty() {
+        return Ok(BatchControl::Continue);
+    }
+
+    let output_account = context.memory_ledger.account(
+        QueryMemoryClass::PipelineBatch,
+        "NodeCartesianProductExec output",
+        context.memory.batch_payload_bytes,
+    );
+    let mut output = CartesianOutput::new(
+        context.memory.batch_rows.get(),
+        context.memory.batch_payload_bytes,
+        output_account,
+        execution_limit,
+    );
+    let mut replay_tracker = OperatorMemoryTracker::with_account(
+        context.memory.blocking_operator_bytes,
+        blocking_account,
+    );
+    let control = source.execute(left, ExecutionLimit::unlimited(), &mut |batch| {
+        for left_binding in batch {
+            if runs.is_empty() {
+                for right_binding in &right_bindings {
+                    if output.push(&left_binding, right_binding, emit)? == BatchControl::Stop {
+                        return Ok(BatchControl::Stop);
+                    }
+                }
+            } else {
+                for run in &runs {
+                    runtime_checkpoint(context.task_context)?;
+                    let mut reader = run.reader()?;
+                    while let Some(record) = reader.read_binding_record(
+                        context.memory.blocking_operator_bytes.get(),
+                        &spill_budget,
+                    )? {
+                        runtime_checkpoint(context.task_context)?;
+                        let right_binding = record.try_map(
+                            "NodeCartesianProductExec replay",
+                            context.memory.blocking_operator_bytes.get(),
+                            &mut replay_tracker,
+                            |_, binding| Ok(binding),
+                            binding_memory_bytes,
+                        )?;
+                        let right_bytes = binding_memory_bytes(&right_binding);
+                        let control = output.push(&left_binding, &right_binding, emit);
+                        replay_tracker.release(right_bytes);
+                        if control? == BatchControl::Stop {
+                            return Ok(BatchControl::Stop);
+                        }
+                    }
+                }
+                if output.is_complete() {
+                    return Ok(BatchControl::Stop);
+                }
+            }
+        }
+        Ok(BatchControl::Continue)
+    })?;
+    if output.finish(emit)? == BatchControl::Stop {
+        return Ok(BatchControl::Stop);
+    }
+    Ok(control)
+}
+
+struct CartesianOutput {
+    batch_rows: usize,
+    execution_limit: ExecutionLimit,
+    batch: BindingBatch,
+    emitted: usize,
+    tracker: OperatorMemoryTracker,
+}
+
+impl CartesianOutput {
+    fn new(
+        batch_rows: usize,
+        memory_budget: NonZeroUsize,
+        account: QueryMemoryAccount,
+        execution_limit: ExecutionLimit,
+    ) -> Self {
+        Self {
+            batch_rows,
+            execution_limit,
+            batch: Vec::with_capacity(batch_rows),
+            emitted: 0,
+            tracker: OperatorMemoryTracker::with_account(memory_budget, account),
+        }
+    }
+
+    fn push(
+        &mut self,
+        left: &Binding,
+        right: &Binding,
+        emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+    ) -> Result<BatchControl> {
+        let reserved_bytes = binding_memory_bytes(left).saturating_add(binding_memory_bytes(right));
+        ensure_operator_item_fits(
+            "NodeCartesianProductExec output",
+            reserved_bytes,
+            &self.tracker,
+        )?;
+        self.tracker.try_charge(reserved_bytes)?;
+        let binding = merge_cartesian_bindings(left, right);
+        let actual_bytes = binding_memory_bytes(&binding);
+        self.tracker
+            .release(reserved_bytes.saturating_sub(actual_bytes));
+        self.batch.push(binding);
+        self.emitted = self.emitted.saturating_add(1);
+        if self.batch.len() == self.batch_rows && self.emit(emit)? == BatchControl::Stop {
+            return Ok(BatchControl::Stop);
+        }
+        Ok(if self.is_complete() {
+            BatchControl::Stop
+        } else {
+            BatchControl::Continue
+        })
+    }
+
+    fn finish(
+        &mut self,
+        emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+    ) -> Result<BatchControl> {
+        if self.batch.is_empty() {
+            Ok(BatchControl::Continue)
+        } else {
+            self.emit(emit)
+        }
+    }
+
+    fn emit(
+        &mut self,
+        emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+    ) -> Result<BatchControl> {
+        let outgoing = std::mem::replace(&mut self.batch, Vec::with_capacity(self.batch_rows));
+        self.tracker.reset();
+        emit(outgoing)
+    }
+
+    fn is_complete(&self) -> bool {
+        self.execution_limit.is_reached(self.emitted)
+    }
+}
+
+fn merge_cartesian_bindings(left: &Binding, right: &Binding) -> Binding {
+    let mut values = left.values.clone();
+    values.extend(right.values.clone());
+    let mut nodes = left.nodes.clone();
+    nodes.extend(right.nodes.clone());
+    let mut relationships = left.relationships.clone();
+    relationships.extend(right.relationships.clone());
+    Binding {
+        values,
+        nodes,
+        relationships,
+    }
+}
+
 mod aggregate;
 mod distinct;
 mod sort;
@@ -261,5 +480,43 @@ mod tests {
         .expect("top-n execution");
 
         assert_eq!(output, vec![value_binding(2), value_binding(3)]);
+    }
+
+    #[test]
+    fn cartesian_output_is_root_admitted_before_binding_clones() {
+        let root_budget = NonZeroUsize::new(300).unwrap();
+        let ledger = QueryMemoryLedger::new(root_budget);
+        let mut retained = OperatorMemoryTracker::with_account(
+            root_budget,
+            ledger.account(QueryMemoryClass::BlockingState, "retained", root_budget),
+        );
+        retained.try_charge(200).unwrap();
+        let mut output = CartesianOutput::new(
+            8,
+            root_budget,
+            ledger.account(
+                QueryMemoryClass::PipelineBatch,
+                "cartesian output",
+                root_budget,
+            ),
+            ExecutionLimit::unlimited(),
+        );
+        let mut emitted = false;
+
+        let error = output
+            .push(&value_binding(1), &value_binding(2), &mut |_| {
+                emitted = true;
+                Ok(BatchControl::Continue)
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("query_memory_bytes 300"));
+        assert!(!emitted);
+        assert!(output.batch.is_empty());
+        assert_eq!(output.tracker.used_bytes, 0);
+        assert_eq!(ledger.snapshot().used_bytes, 200);
+        drop(output);
+        drop(retained);
+        assert_eq!(ledger.snapshot().used_bytes, 0);
     }
 }

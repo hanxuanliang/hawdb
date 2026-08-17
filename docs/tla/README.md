@@ -174,6 +174,10 @@ operator item and admits that item to the query-rooted blocking tracker before
 releasing staging. Pair compaction, final fan-in, and emitted sort/distinct
 batches preserve a rooted owner across each synchronous ownership transfer;
 normal completion and every error path therefore return both accounts to zero.
+`NodeCartesianProductExec` uses that shared decoded-record handoff for build
+replay and reserves a conservative merged-binding bound before cloning either
+side. Its output account transfers to the enclosing pipeline synchronously, so
+consumer stop and replay failure cannot strand decoded or output ownership.
 
 Typed adjacency expansion refines the zero-transient-state branch of this
 model: `AdjacencyPostingList` keeps live entries ordered in snapshot-owned

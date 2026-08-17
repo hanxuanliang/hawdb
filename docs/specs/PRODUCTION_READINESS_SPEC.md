@@ -425,6 +425,11 @@ they MUST NOT retain or serialize unrelated variables or properties from the
 upstream binding. `DistinctExec` uses ordered spill runs followed by bounded
 merge deduplication. `NodeCartesianProductExec` partitions an oversized build
 side into bounded spill runs and replays those runs for each streamed probe row.
+Replay retains the encoded spill lease until the right binding is admitted to
+the blocking account. Before cloning either input, each output row reserves the
+sum of both input resident estimates in a query-rooted pipeline-batch account;
+the conservative reservation is reduced to the actual merged row size and is
+transferred synchronously when the batch is emitted.
 `GraphAlgorithm` admits the direction-specific projection together with a
 conservative algorithm scratch and result estimate before PageRank or Louvain
 allocates that state. It fails with a stable resource error rather than spilling,

@@ -58,8 +58,8 @@ use skein_executor::binding::{binding_memory_bytes, Binding};
 pub(crate) use skein_executor::external::NoExternalReadOperator;
 use skein_executor::graph::GraphExpansionExecutionState;
 use skein_executor::kernel::{
-    collect_bounded_operator_bindings_with_account, ensure_operator_item_fits,
-    push_bounded_operator_binding, OperatorMemoryTracker, SpillBudgetTracker,
+    collect_bounded_operator_bindings_with_account, push_bounded_operator_binding,
+    OperatorMemoryTracker,
 };
 pub(crate) use skein_executor::memory::{
     estimated_execution_memory, estimated_mutation_memory_bytes,
