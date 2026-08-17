@@ -506,6 +506,137 @@ fn authoritative_constraint_staging_derives_index_and_row_batches_once() {
 }
 
 #[test]
+fn relational_wal_round_trips_bounded_primary_key_changes_without_row_payloads() {
+    let base = RelationalState::default()
+        .stage_transaction(
+            create_upsert_table(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("create table");
+    let transaction = RelationalTransaction {
+        writes: vec![RelationalWrite::Insert {
+            table: "documents".to_string(),
+            rows: vec![upsert_row("id-1", "owner-1", &"x".repeat(32 * 1024))],
+            mode: RelationalInsertMode::Error,
+        }],
+    };
+    let staged = base
+        .stage_transaction_with_primary_key_changes(
+            transaction.clone(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            None,
+            None,
+            RelationalPrimaryKeyChangeCaptureLimits::default(),
+            None,
+        )
+        .expect("stage transaction with primary-key changes");
+    let RelationalPrimaryKeyChangeCapture::Captured {
+        tables,
+        encoded_bytes,
+    } = &staged.primary_key_changes
+    else {
+        panic!("small primary-key change set must remain incremental");
+    };
+    assert_eq!(tables.len(), 1);
+    assert_eq!(tables[0].table, "documents");
+    assert_eq!(tables[0].primary_keys.len(), 1);
+    assert!(*encoded_bytes < 128);
+
+    let encoded = encode_relational_wal_batch_with_captures(
+        2,
+        &transaction,
+        None,
+        &staged.primary_key_changes,
+    )
+    .expect("encode relational WAL captures");
+    assert_eq!(encoded.primary_key_changes, staged.primary_key_changes);
+    let decoded = decode_relational_wal_batch(&encoded.record, RelationalDecodeLimits::wal())
+        .expect("decode relational WAL captures");
+    assert_eq!(
+        decoded.primary_key_changes,
+        Some(staged.primary_key_changes)
+    );
+}
+
+#[test]
+fn primary_key_change_capture_reports_exact_net_identity_changes() {
+    let base = RelationalState::default()
+        .stage_transaction(
+            create_upsert_table(),
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("create primary-key change capture table")
+        .stage_transaction(
+            RelationalTransaction {
+                writes: vec![RelationalWrite::Insert {
+                    table: "documents".to_string(),
+                    rows: vec![upsert_row("id-1", "owner-1", "old")],
+                    mode: RelationalInsertMode::Error,
+                }],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+        )
+        .expect("seed primary-key change capture table");
+
+    let staged = base
+        .stage_transaction_with_primary_key_changes(
+            RelationalTransaction {
+                writes: vec![
+                    RelationalWrite::UpdateWhere {
+                        table: "documents".to_string(),
+                        assignments: vec![RelationalUpdateAssignment {
+                            column: "id".to_string(),
+                            value: RelationalUpdateValue::Value(RelationalValue::Text(
+                                "id-3".to_string(),
+                            )),
+                        }],
+                        predicate: RelationalPredicate::Compare {
+                            column: "id".to_string(),
+                            op: RelationalComparisonOp::Eq,
+                            value: RelationalValue::Text("id-1".to_string()),
+                        },
+                    },
+                    RelationalWrite::Insert {
+                        table: "documents".to_string(),
+                        rows: vec![upsert_row("id-2", "owner-2", "transient")],
+                        mode: RelationalInsertMode::Error,
+                    },
+                    RelationalWrite::DeleteByPrimaryKey {
+                        table: "documents".to_string(),
+                        keys: vec![RelationalKey(vec![RelationalValue::Text(
+                            "id-2".to_string(),
+                        )])],
+                    },
+                ],
+            },
+            RelationalMutationLimits::default(),
+            RelationalOverflowConfig::default(),
+            None,
+            None,
+            RelationalPrimaryKeyChangeCaptureLimits::default(),
+            None,
+        )
+        .expect("capture exact net primary-key changes");
+
+    assert!(matches!(
+        staged.primary_key_changes,
+        RelationalPrimaryKeyChangeCapture::Captured { tables, .. }
+            if tables
+                == vec![RelationalTablePrimaryKeyChanges {
+                    table: "documents".to_string(),
+                    primary_keys: vec![
+                        RelationalKey(vec![RelationalValue::Text("id-1".to_string())]),
+                        RelationalKey(vec![RelationalValue::Text("id-3".to_string())]),
+                    ],
+                }]
+    ));
+}
+
+#[test]
 fn sparse_authoritative_recovery_matches_materialized_predicate_replay() {
     let base = RelationalState::default()
         .stage_transaction(

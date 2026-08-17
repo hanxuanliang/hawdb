@@ -2,6 +2,22 @@
 
 use super::*;
 
+fn wal_ops_contain_relational_transaction(ops: &[WalOp]) -> bool {
+    ops.iter().any(|op| match op {
+        WalOp::Relational { .. } => true,
+        WalOp::Batch(ops) => wal_ops_contain_relational_transaction(ops),
+        _ => false,
+    })
+}
+
+fn wal_ops_contain_relational_snapshot(ops: &[WalOp]) -> bool {
+    ops.iter().any(|op| match op {
+        WalOp::RelationalSnapshot { .. } => true,
+        WalOp::Batch(ops) => wal_ops_contain_relational_snapshot(ops),
+        _ => false,
+    })
+}
+
 impl GraphStore {
     pub fn create_node(
         &mut self,
@@ -1311,6 +1327,16 @@ impl GraphStore {
         commit_epoch: u64,
         ops: &[WalOp],
     ) {
+        self.record_search_projection_changes_for_ops(catalog, commit_epoch, ops, None);
+    }
+
+    pub(super) fn record_search_projection_changes_for_ops(
+        &mut self,
+        catalog: &Catalog,
+        commit_epoch: u64,
+        ops: &[WalOp],
+        relational_primary_key_changes: Option<skein_storage::RelationalPrimaryKeyChangeCapture>,
+    ) {
         let mut upsert_node_ids = BTreeSet::new();
         let mut delete_document_ids = BTreeSet::new();
         self.collect_search_projection_graph_changes_for_ops(
@@ -1319,26 +1345,83 @@ impl GraphStore {
             &mut upsert_node_ids,
             &mut delete_document_ids,
         );
-        if upsert_node_ids.is_empty() && delete_document_ids.is_empty() {
+        let relational_primary_key_changes = relational_primary_key_changes.unwrap_or_else(|| {
+            let reason = if wal_ops_contain_relational_snapshot(ops) {
+                Some(skein_storage::RelationalPrimaryKeyChangeRebuildReason::SnapshotReplacement)
+            } else if wal_ops_contain_relational_transaction(ops) {
+                Some(skein_storage::RelationalPrimaryKeyChangeRebuildReason::MissingWalCapture)
+            } else {
+                None
+            };
+            match reason {
+                Some(reason) => {
+                    skein_storage::RelationalPrimaryKeyChangeCapture::RequiresRebuild { reason }
+                }
+                None => skein_storage::RelationalPrimaryKeyChangeCapture::Captured {
+                    tables: Vec::new(),
+                    encoded_bytes: 0,
+                },
+            }
+        });
+        let relational_primary_key_changes =
+            omit_internal_search_projection_relational_changes(relational_primary_key_changes);
+        if upsert_node_ids.is_empty()
+            && delete_document_ids.is_empty()
+            && relational_primary_key_changes.operation_count() == 0
+            && !relational_primary_key_changes.requires_rebuild()
+        {
             return;
         }
-        self.search_projection_graph_changes
-            .push(SearchProjectionGraphChange {
-                commit_epoch,
-                upsert_node_ids: upsert_node_ids.into_iter().map(|id| id.0).collect(),
-                delete_document_ids: delete_document_ids.into_iter().collect(),
-            });
+        let change = SearchProjectionGraphChange {
+            commit_epoch,
+            upsert_node_ids: upsert_node_ids.into_iter().map(|id| id.0).collect(),
+            delete_document_ids: delete_document_ids.into_iter().collect(),
+            relational_primary_key_changes,
+        };
+        self.search_projection_change_log_retained_bytes = self
+            .search_projection_change_log_retained_bytes
+            .saturating_add(change.estimated_retained_bytes());
+        self.search_projection_graph_changes.push(change);
         self.trim_search_projection_graph_change_log();
     }
 
-    pub(super) fn trim_search_projection_graph_change_log(&mut self) {
-        let Some(max_entries) = self.max_search_projection_change_log_entries else {
-            return;
-        };
-        if self.search_projection_graph_changes.len() <= max_entries {
-            return;
+    pub(super) fn relational_primary_key_changes_from_wal_ops(
+        &self,
+        ops: &[WalOp],
+    ) -> Result<Option<skein_storage::RelationalPrimaryKeyChangeCapture>> {
+        let mut captures = Vec::new();
+        collect_relational_primary_key_changes_from_wal_ops(ops, &mut captures)?;
+        if captures.len() > 1 {
+            return Ok(Some(
+                skein_storage::RelationalPrimaryKeyChangeCapture::RequiresRebuild {
+                    reason: skein_storage::RelationalPrimaryKeyChangeRebuildReason::MultipleRelationalTransactions,
+                },
+            ));
         }
-        let remove_count = self.search_projection_graph_changes.len() - max_entries;
+        Ok(captures.pop())
+    }
+
+    pub(super) fn trim_search_projection_graph_change_log(&mut self) {
+        let mut retained_bytes = self.search_projection_change_log_retained_bytes;
+        let mut remove_count = 0usize;
+        while remove_count < self.search_projection_graph_changes.len()
+            && (self
+                .max_search_projection_change_log_entries
+                .is_some_and(|limit| {
+                    self.search_projection_graph_changes
+                        .len()
+                        .saturating_sub(remove_count)
+                        > limit
+                })
+                || self
+                    .max_search_projection_change_log_bytes
+                    .is_some_and(|limit| retained_bytes > limit))
+        {
+            retained_bytes = retained_bytes.saturating_sub(
+                self.search_projection_graph_changes[remove_count].estimated_retained_bytes(),
+            );
+            remove_count = remove_count.saturating_add(1);
+        }
         if remove_count > 0 {
             if let Some(last_removed) = self
                 .search_projection_graph_changes
@@ -1350,6 +1433,7 @@ impl GraphStore {
             }
             self.search_projection_graph_changes.drain(0..remove_count);
         }
+        self.search_projection_change_log_retained_bytes = retained_bytes;
     }
 
     fn collect_search_projection_graph_changes_for_ops(
@@ -1773,4 +1857,59 @@ impl GraphStore {
         ops.extend(ids.iter().copied().map(|id| WalOp::DeleteNode { id }));
         Ok(ops)
     }
+}
+
+fn omit_internal_search_projection_relational_changes(
+    capture: skein_storage::RelationalPrimaryKeyChangeCapture,
+) -> skein_storage::RelationalPrimaryKeyChangeCapture {
+    let skein_storage::RelationalPrimaryKeyChangeCapture::Captured { mut tables, .. } = capture
+    else {
+        return capture;
+    };
+    tables.retain(|table| table.table != "skein_schema_migrations");
+    let encoded_bytes = tables.iter().fold(0usize, |total, table| {
+        let table_bytes = 4usize.saturating_add(table.table.len());
+        table.primary_keys.iter().fold(
+            total.saturating_add(table_bytes),
+            |table_total, primary_key| {
+                let key_bytes = skein_storage::encode_relational_primary_key(primary_key)
+                    .map_or(0, |encoded| encoded.len());
+                table_total.saturating_add(4).saturating_add(key_bytes)
+            },
+        )
+    });
+    skein_storage::RelationalPrimaryKeyChangeCapture::Captured {
+        tables,
+        encoded_bytes,
+    }
+}
+
+fn collect_relational_primary_key_changes_from_wal_ops(
+    ops: &[WalOp],
+    captures: &mut Vec<skein_storage::RelationalPrimaryKeyChangeCapture>,
+) -> Result<()> {
+    for op in ops {
+        match op {
+            WalOp::Relational { record } => {
+                let batch = decode_relational_wal_batch(record, RelationalDecodeLimits::wal())
+                    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                captures.push(batch.primary_key_changes.unwrap_or(
+                    skein_storage::RelationalPrimaryKeyChangeCapture::RequiresRebuild {
+                        reason: skein_storage::RelationalPrimaryKeyChangeRebuildReason::MissingWalCapture,
+                    },
+                ));
+            }
+            WalOp::RelationalSnapshot { .. } => captures.push(
+                skein_storage::RelationalPrimaryKeyChangeCapture::RequiresRebuild {
+                    reason:
+                        skein_storage::RelationalPrimaryKeyChangeRebuildReason::SnapshotReplacement,
+                },
+            ),
+            WalOp::Batch(ops) => {
+                collect_relational_primary_key_changes_from_wal_ops(ops, captures)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }

@@ -3,10 +3,12 @@ use super::{
     RelationalColumnSchema, RelationalComparisonOp, RelationalConflictAction, RelationalError,
     RelationalForeignKeySchema, RelationalIndexSchema, RelationalInsertMode, RelationalKey,
     RelationalOverflowRef, RelationalOverflowSegment, RelationalPredicate,
+    RelationalPrimaryKeyChangeCapture, RelationalPrimaryKeyChangeRebuildReason,
     RelationalReferentialAction, RelationalReplayAccess, RelationalReplayAccessSet, RelationalRow,
-    RelationalScalarType, RelationalState, RelationalTableSchema, RelationalTableSegment,
-    RelationalTransaction, RelationalUpdateAssignment, RelationalUpdateValue,
-    RelationalUpsertAssignment, RelationalUpsertValue, RelationalValue, RelationalWrite,
+    RelationalScalarType, RelationalState, RelationalTablePrimaryKeyChanges, RelationalTableSchema,
+    RelationalTableSegment, RelationalTransaction, RelationalUpdateAssignment,
+    RelationalUpdateValue, RelationalUpsertAssignment, RelationalUpsertValue, RelationalValue,
+    RelationalWrite,
 };
 use crate::{
     ContentDigest, FileSegmentRangeReader, SegmentReadRange, DEFAULT_MAX_CHECKPOINT_ENCODED_BYTES,
@@ -131,6 +133,13 @@ pub struct RelationalWalBatch {
     pub epoch: u64,
     pub transaction: RelationalTransaction,
     pub replay_access: Option<RelationalReplayAccessSet>,
+    pub primary_key_changes: Option<RelationalPrimaryKeyChangeCapture>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedRelationalWalBatch {
+    pub record: Vec<u8>,
+    pub primary_key_changes: RelationalPrimaryKeyChangeCapture,
 }
 
 #[derive(Debug, Clone)]
@@ -150,13 +159,64 @@ pub fn encode_relational_wal_batch(
     epoch: u64,
     transaction: &RelationalTransaction,
 ) -> Result<Vec<u8>, RelationalError> {
-    encode_relational_wal_batch_with_replay_access(epoch, transaction, None)
+    encode_relational_wal_batch_inner(epoch, transaction, None, None)
 }
 
 pub fn encode_relational_wal_batch_with_replay_access(
     epoch: u64,
     transaction: &RelationalTransaction,
     replay_access: Option<&RelationalReplayAccessSet>,
+) -> Result<Vec<u8>, RelationalError> {
+    encode_relational_wal_batch_inner(epoch, transaction, replay_access, None)
+}
+
+pub fn encode_relational_wal_batch_with_captures(
+    epoch: u64,
+    transaction: &RelationalTransaction,
+    replay_access: Option<&RelationalReplayAccessSet>,
+    primary_key_changes: &RelationalPrimaryKeyChangeCapture,
+) -> Result<EncodedRelationalWalBatch, RelationalError> {
+    match encode_relational_wal_batch_inner(
+        epoch,
+        transaction,
+        replay_access,
+        Some(primary_key_changes),
+    ) {
+        Ok(record) => Ok(EncodedRelationalWalBatch {
+            record,
+            primary_key_changes: primary_key_changes.clone(),
+        }),
+        Err(exact_error @ RelationalError::Admission(_))
+            if matches!(
+                primary_key_changes,
+                RelationalPrimaryKeyChangeCapture::Captured { .. }
+            ) =>
+        {
+            let fallback = RelationalPrimaryKeyChangeCapture::RequiresRebuild {
+                reason: RelationalPrimaryKeyChangeRebuildReason::WalEncodingLimitExceeded,
+            };
+            match encode_relational_wal_batch_inner(
+                epoch,
+                transaction,
+                replay_access,
+                Some(&fallback),
+            ) {
+                Ok(record) => Ok(EncodedRelationalWalBatch {
+                    record,
+                    primary_key_changes: fallback,
+                }),
+                Err(_) => Err(exact_error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn encode_relational_wal_batch_inner(
+    epoch: u64,
+    transaction: &RelationalTransaction,
+    replay_access: Option<&RelationalReplayAccessSet>,
+    primary_key_changes: Option<&RelationalPrimaryKeyChangeCapture>,
 ) -> Result<Vec<u8>, RelationalError> {
     let limits = RelationalDecodeLimits::wal();
     if transaction.writes.len() > limits.max_writes {
@@ -185,6 +245,7 @@ pub fn encode_relational_wal_batch_with_replay_access(
             payload.key(&entry.primary_key)?;
         }
     }
+    encode_primary_key_changes(&mut payload, primary_key_changes, limits)?;
     if payload.value_count > limits.max_values {
         return Err(RelationalError::Admission(format!(
             "WAL contains {} values, exceeding decoder limit {} before WAL append",
@@ -202,6 +263,90 @@ pub fn encode_relational_wal_batch_with_replay_access(
         )));
     }
     encode_envelope(WAL_MAGIC, epoch, payload)
+}
+
+fn encode_primary_key_changes(
+    payload: &mut Encoder,
+    capture: Option<&RelationalPrimaryKeyChangeCapture>,
+    limits: RelationalDecodeLimits,
+) -> Result<(), RelationalError> {
+    match capture {
+        None => payload.u8(0),
+        Some(RelationalPrimaryKeyChangeCapture::Captured { tables, .. }) => {
+            if !tables.windows(2).all(|pair| pair[0].table < pair[1].table) {
+                return Err(RelationalError::Corruption(
+                    "relational primary-key change tables must be strictly ordered".to_string(),
+                ));
+            }
+            if let Some(table) = tables.iter().find(|table| {
+                table.primary_keys.is_empty()
+                    || !table.primary_keys.windows(2).all(|pair| pair[0] < pair[1])
+            }) {
+                return Err(RelationalError::Corruption(format!(
+                    "relational primary-key changes for table {} must be non-empty and strictly ordered",
+                    table.table
+                )));
+            }
+            let entry_count = tables
+                .iter()
+                .map(|table| table.primary_keys.len())
+                .try_fold(0usize, usize::checked_add)
+                .ok_or_else(|| {
+                    RelationalError::Admission(
+                        "relational primary-key change count overflow".to_string(),
+                    )
+                })?;
+            if tables.len() > limits.max_tables || entry_count > limits.max_rows {
+                return Err(RelationalError::Admission(format!(
+                    "relational primary-key changes contain {} tables and {entry_count} keys, exceeding decoder limits {}/{}",
+                    tables.len(), limits.max_tables, limits.max_rows
+                )));
+            }
+            payload.u8(1);
+            payload.count(tables.len(), "relational primary-key change tables")?;
+            for table in tables {
+                payload.string(&table.table)?;
+                payload.count(table.primary_keys.len(), "relational primary-key changes")?;
+                for primary_key in &table.primary_keys {
+                    payload.key(primary_key)?;
+                }
+            }
+        }
+        Some(RelationalPrimaryKeyChangeCapture::RequiresRebuild { reason }) => {
+            payload.u8(2);
+            payload.u8(primary_key_rebuild_reason_tag(*reason));
+        }
+    }
+    Ok(())
+}
+
+const fn primary_key_rebuild_reason_tag(reason: RelationalPrimaryKeyChangeRebuildReason) -> u8 {
+    match reason {
+        RelationalPrimaryKeyChangeRebuildReason::SchemaRewrite => 0,
+        RelationalPrimaryKeyChangeRebuildReason::CaptureLimitExceeded => 1,
+        RelationalPrimaryKeyChangeRebuildReason::UnsupportedKeyEncoding => 2,
+        RelationalPrimaryKeyChangeRebuildReason::WalEncodingLimitExceeded => 3,
+        RelationalPrimaryKeyChangeRebuildReason::MissingWalCapture => 4,
+        RelationalPrimaryKeyChangeRebuildReason::SnapshotReplacement => 5,
+        RelationalPrimaryKeyChangeRebuildReason::MultipleRelationalTransactions => 6,
+    }
+}
+
+fn decode_primary_key_rebuild_reason(
+    tag: u8,
+) -> Result<RelationalPrimaryKeyChangeRebuildReason, RelationalError> {
+    match tag {
+        0 => Ok(RelationalPrimaryKeyChangeRebuildReason::SchemaRewrite),
+        1 => Ok(RelationalPrimaryKeyChangeRebuildReason::CaptureLimitExceeded),
+        2 => Ok(RelationalPrimaryKeyChangeRebuildReason::UnsupportedKeyEncoding),
+        3 => Ok(RelationalPrimaryKeyChangeRebuildReason::WalEncodingLimitExceeded),
+        4 => Ok(RelationalPrimaryKeyChangeRebuildReason::MissingWalCapture),
+        5 => Ok(RelationalPrimaryKeyChangeRebuildReason::SnapshotReplacement),
+        6 => Ok(RelationalPrimaryKeyChangeRebuildReason::MultipleRelationalTransactions),
+        _ => Err(RelationalError::Corruption(format!(
+            "unknown relational primary-key rebuild reason tag {tag}"
+        ))),
+    }
 }
 
 pub fn decode_relational_wal_batch(
@@ -228,11 +373,91 @@ pub fn decode_relational_wal_batch(
     } else {
         None
     };
+    let primary_key_changes = match decoder.u8()? {
+        0 => None,
+        1 => {
+            const TABLE_FIXED_BYTES: usize = 4;
+            const KEY_FIXED_BYTES: usize = 4;
+            let table_count =
+                decoder.count(limits.max_tables, "relational primary-key change tables")?;
+            let mut tables = Vec::with_capacity(table_count);
+            let mut encoded_bytes = 0usize;
+            let mut entry_count = 0usize;
+            for _ in 0..table_count {
+                let table = decoder.string()?;
+                let key_count = decoder.count(
+                    limits.max_rows.saturating_sub(entry_count),
+                    "relational primary-key changes",
+                )?;
+                if key_count == 0 {
+                    return Err(RelationalError::Corruption(format!(
+                        "relational primary-key change table {table} contains no keys"
+                    )));
+                }
+                entry_count = entry_count.checked_add(key_count).ok_or_else(|| {
+                    RelationalError::Corruption(
+                        "relational primary-key change count overflow".to_string(),
+                    )
+                })?;
+                encoded_bytes = encoded_bytes
+                    .checked_add(TABLE_FIXED_BYTES)
+                    .and_then(|bytes| bytes.checked_add(table.len()))
+                    .ok_or_else(|| {
+                        RelationalError::Corruption(
+                            "relational primary-key change byte count overflow".to_string(),
+                        )
+                    })?;
+                let mut primary_keys = Vec::with_capacity(key_count);
+                for _ in 0..key_count {
+                    let primary_key = decoder.key()?;
+                    let key_bytes = super::ordered_key::encode_ordered_relational_key(&primary_key)
+                        .map_err(|error| RelationalError::Corruption(error.to_string()))?
+                        .len();
+                    encoded_bytes = encoded_bytes
+                        .checked_add(KEY_FIXED_BYTES)
+                        .and_then(|bytes| bytes.checked_add(key_bytes))
+                        .ok_or_else(|| {
+                            RelationalError::Corruption(
+                                "relational primary-key change byte count overflow".to_string(),
+                            )
+                        })?;
+                    primary_keys.push(primary_key);
+                }
+                if !primary_keys.windows(2).all(|pair| pair[0] < pair[1]) {
+                    return Err(RelationalError::Corruption(format!(
+                        "relational primary-key changes for table {table} are unordered or duplicated"
+                    )));
+                }
+                tables.push(RelationalTablePrimaryKeyChanges {
+                    table,
+                    primary_keys,
+                });
+            }
+            if !tables.windows(2).all(|pair| pair[0].table < pair[1].table) {
+                return Err(RelationalError::Corruption(
+                    "relational primary-key change tables are unordered or duplicated".to_string(),
+                ));
+            }
+            Some(RelationalPrimaryKeyChangeCapture::Captured {
+                tables,
+                encoded_bytes,
+            })
+        }
+        2 => Some(RelationalPrimaryKeyChangeCapture::RequiresRebuild {
+            reason: decode_primary_key_rebuild_reason(decoder.u8()?)?,
+        }),
+        tag => {
+            return Err(RelationalError::Corruption(format!(
+                "unknown relational primary-key change capture tag {tag}"
+            )))
+        }
+    };
     decoder.finish()?;
     Ok(RelationalWalBatch {
         epoch,
         transaction: RelationalTransaction { writes },
         replay_access,
+        primary_key_changes,
     })
 }
 

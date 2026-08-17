@@ -153,6 +153,26 @@ Reader actions map to `Database::begin_read_transaction` and `ReaderPin::drop`.
 Publication and reclamation map to `DurableStore::publish_checkpoint_manifest`
 and `DurableStore::reclaim_old_generations`.
 
+## External Search Projection Changefeed
+
+`SkeinProjectionChangefeed.tla` models the unified graph and relational
+identity feed. A canonical epoch becomes visible only after its WAL mutation is
+durable, and every WAL epoch carries either an exact bounded identity set or a
+fixed rebuild barrier. Incremental resume starts at or above the retained
+floor, copies whole exact commits, processes every selected commit, and only
+then publishes the external projection watermark. Prefix GC advances the
+floor by whole commits; an expired cursor or barrier requires a canonical full
+rebuild. The model intentionally has no search-document, embedding, ranking,
+or SearchIndex-manifest variable because those values remain outside canonical
+WAL state.
+
+The runtime refinement is `RelationalPrimaryKeyChangeCapture`, relational WAL
+capture encoding, `SearchProjectionChange`,
+`Database::build_search_projection_change_batch_after`, and
+`Database::apply_search_projection_change_batch`. Checkpoint recovery restores
+the same identities and rebuild barriers; entry and byte retention limits
+implement the modeled prefix-GC floor.
+
 ## Canonical COW Row-Page Publication
 
 `SkeinCowPagePublication.tla` specifies the publication protocol required by

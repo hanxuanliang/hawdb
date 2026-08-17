@@ -27,6 +27,7 @@ STORAGE_MODELS = [
     "SkeinOverflowExactCompaction",
     "SkeinOverflowPublication",
     "SkeinPageCacheAdmission",
+    "SkeinProjectionChangefeed",
     "SkeinProjectionDurability",
     "SkeinPropertyIndexPruning",
     "SkeinRelationalIndexDemandRead",

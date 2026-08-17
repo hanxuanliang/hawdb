@@ -8,7 +8,8 @@ use super::{
     decode_projected_graph_artifacts, derived_repair, doctor, elapsed_micros,
     encode_binary_wal_header, encode_binary_wal_record, encode_bool, encode_durable_text,
     encode_index_kind, encode_nullable, encode_optional_sha256, encode_optional_u64,
-    encode_property_type, encode_schema_object_state, encode_string, encode_string_vec,
+    encode_property_type, encode_schema_object_state,
+    encode_search_projection_relational_primary_key_changes, encode_string, encode_string_vec,
     encode_table_kind, encode_u64_vec, encode_value_vec, file_checksum, frame_binary_wal_record,
     has_storage_artifacts, parse_optional_sha256, parse_optional_u64,
     parse_relational_overflow_extent_generation_file,
@@ -2146,11 +2147,17 @@ impl DurableStore {
             ));
         }
         for change in image.search_projection_graph_changes {
+            let (relational_kind, relational_changes) =
+                encode_search_projection_relational_primary_key_changes(
+                    &change.relational_primary_key_changes,
+                )?;
             body.push_str(&format!(
-                "search_projection_change\t{}\t{}\t{}\n",
+                "search_projection_change\t{}\t{}\t{}\t{}\t{}\n",
                 change.commit_epoch,
                 encode_u64_vec(change.upsert_node_ids.iter().copied()),
-                encode_string_vec(&change.delete_document_ids)
+                encode_string_vec(&change.delete_document_ids),
+                relational_kind,
+                relational_changes,
             ));
         }
         for label in image.catalog.labels() {

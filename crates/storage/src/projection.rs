@@ -1,4 +1,4 @@
-use crate::{NodeId, RelId};
+use crate::{NodeId, RelId, RelationalPrimaryKeyChangeCapture};
 use skein_core::{SchemaObjectState, Value};
 use std::collections::BTreeMap;
 
@@ -121,17 +121,51 @@ pub struct PropertyIndexProjectionRebuildAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SearchProjectionGraphChange {
+pub struct SearchProjectionChange {
     pub commit_epoch: u64,
     pub upsert_node_ids: Vec<u64>,
     pub delete_document_ids: Vec<String>,
+    pub relational_primary_key_changes: RelationalPrimaryKeyChangeCapture,
 }
 
-impl SearchProjectionGraphChange {
+impl SearchProjectionChange {
     pub const fn mutation_id(&self) -> SearchProjectionMutationId {
         SearchProjectionMutationId(self.commit_epoch)
     }
+
+    pub fn operation_count(&self) -> usize {
+        self.upsert_node_ids
+            .len()
+            .saturating_add(self.delete_document_ids.len())
+            .saturating_add(self.relational_primary_key_changes.operation_count())
+    }
+
+    pub fn estimated_retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            .saturating_add(
+                self.upsert_node_ids
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<u64>()),
+            )
+            .saturating_add(
+                self.delete_document_ids
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<String>()),
+            )
+            .saturating_add(
+                self.delete_document_ids
+                    .iter()
+                    .map(String::capacity)
+                    .sum::<usize>(),
+            )
+            .saturating_add(
+                self.relational_primary_key_changes
+                    .estimated_retained_bytes(),
+            )
+    }
 }
+
+pub type SearchProjectionGraphChange = SearchProjectionChange;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SearchProjectionMutationId(pub u64);
@@ -148,7 +182,10 @@ pub struct SearchProjectionChangefeedStatus {
     pub resume_floor_commit_epoch: u64,
     pub oldest_retained_mutation_id: Option<SearchProjectionMutationId>,
     pub newest_retained_mutation_id: Option<SearchProjectionMutationId>,
+    pub first_rebuild_required_mutation_id: Option<SearchProjectionMutationId>,
     pub retained_mutation_count: usize,
+    pub retained_bytes: usize,
+    pub max_retained_bytes: Option<usize>,
     pub restart_recoverable: bool,
 }
 
@@ -203,6 +240,12 @@ impl SearchProjectionChangefeedStatus {
         let mut blocker_codes = Vec::new();
         if self.requires_rebuild_after(resume_epoch) {
             blocker_codes.push("search_projection_changefeed_resume_floor_expired".to_string());
+        }
+        if self
+            .first_rebuild_required_mutation_id
+            .is_some_and(|mutation_id| mutation_id.commit_epoch() > resume_epoch)
+        {
+            blocker_codes.push("search_projection_changefeed_rebuild_barrier".to_string());
         }
         if resume_epoch > self.graph_commit_epoch {
             blocker_codes.push("search_projection_source_graph_epoch_ahead".to_string());

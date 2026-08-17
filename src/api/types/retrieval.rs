@@ -111,6 +111,48 @@ impl SearchProjectionGraphDeltaRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchProjectionChangeBatch {
+    pub(in crate::api) graph_delta: SearchProjectionGraphDeltaRequest,
+    pub(in crate::api) relational_primary_key_changes:
+        Vec<skein_storage::RelationalTablePrimaryKeyChanges>,
+}
+
+impl SearchProjectionChangeBatch {
+    pub fn operation_count(&self) -> usize {
+        self.graph_delta.operation_count().saturating_add(
+            self.relational_primary_key_changes
+                .iter()
+                .map(|table| table.primary_keys.len())
+                .fold(0usize, usize::saturating_add),
+        )
+    }
+
+    pub const fn complete_through_commit_epoch(&self) -> Option<u64> {
+        self.graph_delta.complete_through_graph_commit_epoch
+    }
+
+    pub fn graph_delta(&self) -> &SearchProjectionGraphDeltaRequest {
+        &self.graph_delta
+    }
+
+    pub fn relational_primary_key_changes(
+        &self,
+    ) -> &[skein_storage::RelationalTablePrimaryKeyChanges] {
+        &self.relational_primary_key_changes
+    }
+
+    pub fn has_relational_changes(&self) -> bool {
+        !self.relational_primary_key_changes.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SearchProjectionRelationalDelta {
+    pub delta: SearchProjectionDelta,
+    pub processed_primary_key_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackgroundMaintenanceOptions {
     pub hint: BackgroundWorkHint,
     pub include_storage_checkpoint: bool,

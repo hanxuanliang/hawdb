@@ -18354,7 +18354,7 @@ mod tests {
 
         let error = store.catch_up_search_projection(1, 1).unwrap_err();
         assert!(error.to_string().contains(
-            "search projection graph change at commit epoch 1 requires 2 operations, exceeding configured per-batch limit 1"
+            "search projection change at commit epoch 1 requires 2 operations, exceeding configured per-batch limit 1"
         ));
         let projection = store.search_projection().unwrap();
         assert_eq!(

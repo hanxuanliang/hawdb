@@ -121,9 +121,8 @@ pub(crate) use relational_row_pages::RelationalTransactionRowView;
 use skein_storage::{
     available_storage_space, decode_relational_checkpoint_file_with_index_load,
     decode_relational_checkpoint_with_index_load, decode_relational_wal_batch,
-    encode_relational_checkpoint, encode_relational_wal_batch,
-    encode_relational_wal_batch_with_replay_access, persistent_composite_property_identity,
-    sync_parent_directory, AdjacencyPostingList, CanonicalEndpointDirection, CanonicalNodeIterator,
+    encode_relational_checkpoint, persistent_composite_property_identity, sync_parent_directory,
+    AdjacencyPostingList, CanonicalEndpointDirection, CanonicalNodeIterator,
     CanonicalRelationshipIterator, CanonicalSegmentError,
     PersistentPropertyProjectionDefinitionAdmission, PersistentPropertyProjectionRecord,
     RelationalCheckpointIndexLoad, RelationalDecodeLimits, RelationalMutationLimits,
@@ -921,7 +920,11 @@ pub struct GraphStore {
     initial_import_source_fingerprint: Option<String>,
     search_projection_change_log_start_epoch: u64,
     search_projection_graph_changes: CowSegment<Vec<SearchProjectionGraphChange>>,
+    search_projection_change_log_retained_bytes: usize,
     max_search_projection_change_log_entries: Option<usize>,
+    max_search_projection_change_log_bytes: Option<usize>,
+    search_projection_primary_key_capture_limits:
+        skein_storage::RelationalPrimaryKeyChangeCaptureLimits,
     source_scan_manifest: CowSegment<Option<ScanSegmentManifest>>,
     storage_recovery_report: StorageRecoveryReport,
     canonical_base: Option<CanonicalSegmentReader>,
@@ -1933,7 +1936,10 @@ impl GraphStore {
             initial_import_source_fingerprint: None,
             search_projection_change_log_start_epoch: 0,
             search_projection_graph_changes: CowSegment::default(),
+            search_projection_change_log_retained_bytes: 0,
             max_search_projection_change_log_entries: None,
+            max_search_projection_change_log_bytes: None,
+            search_projection_primary_key_capture_limits: Default::default(),
             source_scan_manifest: CowSegment::default(),
             storage_recovery_report: StorageRecoveryReport::default(),
             canonical_base: None,
@@ -2115,6 +2121,13 @@ impl GraphStore {
             .collect()
     }
 
+    pub fn search_projection_changes_after(
+        &self,
+        commit_epoch: u64,
+    ) -> Vec<skein_storage::SearchProjectionChange> {
+        self.search_projection_graph_changes_after(commit_epoch)
+    }
+
     pub fn search_projection_changefeed_status(&self) -> SearchProjectionChangefeedStatus {
         SearchProjectionChangefeedStatus {
             graph_commit_epoch: self.commit_epoch,
@@ -2127,13 +2140,46 @@ impl GraphStore {
                 .search_projection_graph_changes
                 .last()
                 .map(SearchProjectionGraphChange::mutation_id),
+            first_rebuild_required_mutation_id: self
+                .search_projection_graph_changes
+                .iter()
+                .find(|change| change.relational_primary_key_changes.requires_rebuild())
+                .map(SearchProjectionGraphChange::mutation_id),
             retained_mutation_count: self.search_projection_graph_changes.len(),
+            retained_bytes: self.search_projection_change_log_retained_bytes,
+            max_retained_bytes: self.max_search_projection_change_log_bytes,
             restart_recoverable: self.durable.is_some(),
         }
     }
 
     pub fn set_max_search_projection_change_log_entries(&mut self, max_entries: Option<usize>) {
         self.max_search_projection_change_log_entries = max_entries;
+        self.trim_search_projection_graph_change_log();
+    }
+
+    pub fn set_max_search_projection_change_log_bytes(&mut self, max_bytes: Option<usize>) {
+        self.max_search_projection_change_log_bytes = max_bytes;
+        self.trim_search_projection_graph_change_log();
+    }
+
+    pub fn set_search_projection_primary_key_capture_limits(
+        &mut self,
+        limits: skein_storage::RelationalPrimaryKeyChangeCaptureLimits,
+    ) {
+        self.search_projection_primary_key_capture_limits = limits;
+        for change in self.search_projection_graph_changes.iter_mut() {
+            if change.relational_primary_key_changes.exceeds_limits(limits) {
+                change.relational_primary_key_changes =
+                    skein_storage::RelationalPrimaryKeyChangeCapture::RequiresRebuild {
+                        reason: skein_storage::RelationalPrimaryKeyChangeRebuildReason::CaptureLimitExceeded,
+                    };
+            }
+        }
+        self.search_projection_change_log_retained_bytes = self
+            .search_projection_graph_changes
+            .iter()
+            .map(SearchProjectionGraphChange::estimated_retained_bytes)
+            .fold(0usize, usize::saturating_add);
         self.trim_search_projection_graph_change_log();
     }
 
@@ -2251,7 +2297,12 @@ impl GraphStore {
             initial_import_source_fingerprint: self.initial_import_source_fingerprint.clone(),
             search_projection_change_log_start_epoch: self.search_projection_change_log_start_epoch,
             search_projection_graph_changes: self.search_projection_graph_changes.clone(),
+            search_projection_change_log_retained_bytes: self
+                .search_projection_change_log_retained_bytes,
             max_search_projection_change_log_entries: self.max_search_projection_change_log_entries,
+            max_search_projection_change_log_bytes: self.max_search_projection_change_log_bytes,
+            search_projection_primary_key_capture_limits: self
+                .search_projection_primary_key_capture_limits,
             source_scan_manifest: self.source_scan_manifest.clone(),
             storage_recovery_report: self.storage_recovery_report.clone(),
             canonical_base: self.canonical_base.clone(),
@@ -5166,6 +5217,157 @@ fn decode_string_vec(input: &str) -> Result<Vec<String>> {
     input.split(':').map(decode_string).collect()
 }
 
+fn encode_search_projection_relational_primary_key_changes(
+    capture: &skein_storage::RelationalPrimaryKeyChangeCapture,
+) -> Result<(String, String)> {
+    match capture {
+        skein_storage::RelationalPrimaryKeyChangeCapture::Captured { tables, .. } => {
+            let mut encoded_tables = Vec::with_capacity(tables.len());
+            for table in tables {
+                let encoded_keys = table
+                    .primary_keys
+                    .iter()
+                    .map(|key| {
+                        skein_storage::encode_relational_primary_key(key)
+                            .map(|encoded| encode_bytes(&encoded))
+                            .map_err(|error| SkeinError::Storage(error.to_string()))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                encoded_tables.push(format!(
+                    "{}={}",
+                    encode_string(&table.table),
+                    encoded_keys.join(":")
+                ));
+            }
+            Ok(("exact".to_string(), encoded_tables.join(";")))
+        }
+        skein_storage::RelationalPrimaryKeyChangeCapture::RequiresRebuild { reason } => Ok((
+            match reason {
+                skein_storage::RelationalPrimaryKeyChangeRebuildReason::SchemaRewrite => {
+                    "rebuild_schema_rewrite"
+                }
+                skein_storage::RelationalPrimaryKeyChangeRebuildReason::CaptureLimitExceeded => {
+                    "rebuild_capture_limit"
+                }
+                skein_storage::RelationalPrimaryKeyChangeRebuildReason::UnsupportedKeyEncoding => {
+                    "rebuild_key_encoding"
+                }
+                skein_storage::RelationalPrimaryKeyChangeRebuildReason::WalEncodingLimitExceeded => {
+                    "rebuild_wal_encoding_limit"
+                }
+                skein_storage::RelationalPrimaryKeyChangeRebuildReason::MissingWalCapture => {
+                    "rebuild_missing_wal_capture"
+                }
+                skein_storage::RelationalPrimaryKeyChangeRebuildReason::SnapshotReplacement => {
+                    "rebuild_snapshot_replacement"
+                }
+                skein_storage::RelationalPrimaryKeyChangeRebuildReason::MultipleRelationalTransactions => {
+                    "rebuild_multiple_relational_transactions"
+                }
+            }
+            .to_string(),
+            String::new(),
+        )),
+    }
+}
+
+fn decode_search_projection_relational_primary_key_changes(
+    raw_kind: &str,
+    raw_changes: &str,
+) -> Result<skein_storage::RelationalPrimaryKeyChangeCapture> {
+    use skein_storage::{
+        RelationalPrimaryKeyChangeCapture, RelationalPrimaryKeyChangeRebuildReason,
+        RelationalTablePrimaryKeyChanges,
+    };
+
+    let rebuild_reason = match raw_kind {
+        "exact" => None,
+        "rebuild_schema_rewrite" => Some(RelationalPrimaryKeyChangeRebuildReason::SchemaRewrite),
+        "rebuild_capture_limit" => {
+            Some(RelationalPrimaryKeyChangeRebuildReason::CaptureLimitExceeded)
+        }
+        "rebuild_key_encoding" => {
+            Some(RelationalPrimaryKeyChangeRebuildReason::UnsupportedKeyEncoding)
+        }
+        "rebuild_wal_encoding_limit" => {
+            Some(RelationalPrimaryKeyChangeRebuildReason::WalEncodingLimitExceeded)
+        }
+        "rebuild_missing_wal_capture" => {
+            Some(RelationalPrimaryKeyChangeRebuildReason::MissingWalCapture)
+        }
+        "rebuild_snapshot_replacement" => {
+            Some(RelationalPrimaryKeyChangeRebuildReason::SnapshotReplacement)
+        }
+        "rebuild_multiple_relational_transactions" => {
+            Some(RelationalPrimaryKeyChangeRebuildReason::MultipleRelationalTransactions)
+        }
+        _ => {
+            return Err(SkeinError::Storage(format!(
+                "invalid search projection relational change kind: {raw_kind}"
+            )))
+        }
+    };
+    if let Some(reason) = rebuild_reason {
+        if !raw_changes.is_empty() {
+            return Err(SkeinError::Storage(format!(
+                "search projection rebuild marker {raw_kind} contains unexpected key payload"
+            )));
+        }
+        return Ok(RelationalPrimaryKeyChangeCapture::RequiresRebuild { reason });
+    }
+
+    const TABLE_FIXED_BYTES: usize = 4;
+    const KEY_FIXED_BYTES: usize = 4;
+    let mut tables = Vec::new();
+    let mut encoded_bytes = 0usize;
+    if !raw_changes.is_empty() {
+        for raw_table in raw_changes.split(';') {
+            let Some((raw_name, raw_keys)) = raw_table.split_once('=') else {
+                return Err(SkeinError::Storage(format!(
+                    "invalid search projection relational table change: {raw_table}"
+                )));
+            };
+            let table = decode_string(raw_name)?;
+            if raw_keys.is_empty() {
+                return Err(SkeinError::Storage(format!(
+                    "search projection relational table {table} contains no primary keys"
+                )));
+            }
+            encoded_bytes = encoded_bytes
+                .checked_add(TABLE_FIXED_BYTES)
+                .and_then(|bytes| bytes.checked_add(table.len()))
+                .ok_or_else(|| {
+                    SkeinError::Storage(
+                        "search projection relational change byte count overflow".to_string(),
+                    )
+                })?;
+            let mut primary_keys = Vec::new();
+            for raw_key in raw_keys.split(':') {
+                let key_bytes = decode_bytes(raw_key)?;
+                let key = skein_storage::decode_relational_primary_key(&key_bytes)
+                    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                encoded_bytes = encoded_bytes
+                    .checked_add(KEY_FIXED_BYTES)
+                    .and_then(|bytes| bytes.checked_add(key_bytes.len()))
+                    .ok_or_else(|| {
+                        SkeinError::Storage(
+                            "search projection relational change byte count overflow".to_string(),
+                        )
+                    })?;
+                primary_keys.push(key);
+            }
+            tables.push(RelationalTablePrimaryKeyChanges {
+                table,
+                primary_keys,
+            });
+        }
+    }
+    Ok(RelationalPrimaryKeyChangeCapture::Captured {
+        tables,
+        encoded_bytes,
+    })
+}
+
 fn encode_value_vec(values: &[Value]) -> String {
     values
         .iter()
@@ -5245,6 +5447,26 @@ fn validate_search_projection_checkpoint_changes(
                 "search projection change at commit epoch {} has unordered or duplicate delete document ids",
                 change.commit_epoch
             )));
+        }
+        if let skein_storage::RelationalPrimaryKeyChangeCapture::Captured { tables, .. } =
+            &change.relational_primary_key_changes
+        {
+            if !tables.windows(2).all(|pair| pair[0].table < pair[1].table) {
+                return Err(SkeinError::Storage(format!(
+                    "search projection change at commit epoch {} has unordered or duplicate relational tables",
+                    change.commit_epoch
+                )));
+            }
+            for table in tables {
+                if table.primary_keys.is_empty()
+                    || !table.primary_keys.windows(2).all(|pair| pair[0] < pair[1])
+                {
+                    return Err(SkeinError::Storage(format!(
+                        "search projection change at commit epoch {} has empty, unordered, or duplicate primary keys for table {}",
+                        change.commit_epoch, table.table
+                    )));
+                }
+            }
         }
         previous_epoch = change.commit_epoch;
     }
@@ -5502,14 +5724,19 @@ fn decode_schema_object_state(input: &str) -> Result<SchemaObjectState> {
 }
 
 pub(crate) fn encode_string(input: &str) -> String {
-    input
-        .as_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    encode_bytes(input.as_bytes())
+}
+
+fn encode_bytes(input: &[u8]) -> String {
+    input.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub(crate) fn decode_string(input: &str) -> Result<String> {
+    let bytes = decode_bytes(input)?;
+    String::from_utf8(bytes).map_err(|error| SkeinError::Storage(error.to_string()))
+}
+
+fn decode_bytes(input: &str) -> Result<Vec<u8>> {
     if !input.len().is_multiple_of(2) {
         return Err(SkeinError::Storage(format!(
             "invalid hex string length: {}",
@@ -5522,7 +5749,7 @@ pub(crate) fn decode_string(input: &str) -> Result<String> {
             .map_err(|_| SkeinError::Storage(format!("invalid hex string: {input}")))?;
         bytes.push(byte);
     }
-    String::from_utf8(bytes).map_err(|error| SkeinError::Storage(error.to_string()))
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -8885,11 +9112,21 @@ mod tests {
                     commit_epoch: 1,
                     upsert_node_ids: vec![0],
                     delete_document_ids: Vec::new(),
+                    relational_primary_key_changes:
+                        skein_storage::RelationalPrimaryKeyChangeCapture::Captured {
+                            tables: Vec::new(),
+                            encoded_bytes: 0,
+                        },
                 },
                 SearchProjectionGraphChange {
                     commit_epoch: 2,
                     upsert_node_ids: Vec::new(),
                     delete_document_ids: vec!["memory:deleted-memory".to_string()],
+                    relational_primary_key_changes:
+                        skein_storage::RelationalPrimaryKeyChangeCapture::Captured {
+                            tables: Vec::new(),
+                            encoded_bytes: 0,
+                        },
                 },
             ]
         );

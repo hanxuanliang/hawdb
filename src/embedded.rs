@@ -502,6 +502,12 @@ fn default_database_config(profile: EmbeddedDeploymentProfile) -> DatabaseConfig
             max_checkpoint_decoded_bytes: Some(256 * 1024 * 1024 * 1024),
             segment_cache_capacity_bytes: 32 * 1024 * 1024,
             max_search_projection_change_log_entries: Some(512),
+            max_search_projection_change_log_bytes: Some(8 * 1024 * 1024),
+            search_projection_relational_change_limits:
+                skein_storage::RelationalPrimaryKeyChangeCaptureLimits {
+                    max_entries: std::num::NonZeroUsize::new(512).unwrap(),
+                    max_bytes: std::num::NonZeroUsize::new(16 * 1024).unwrap(),
+                },
             max_plan_cache_entries: Some(32),
             slow_query_log_capacity: 128,
             statement_summary_capacity: 128,
@@ -637,6 +643,10 @@ mod tests {
         assert_eq!(
             options.config.max_search_projection_change_log_entries,
             Some(512)
+        );
+        assert_eq!(
+            options.config.max_search_projection_change_log_bytes,
+            Some(8 * 1024 * 1024)
         );
         assert!(options.config.runtime_capabilities.full_text_search);
         assert!(options.config.runtime_capabilities.vector_search);

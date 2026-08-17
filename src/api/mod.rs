@@ -90,6 +90,7 @@ pub(crate) use query_runtime::PreparedRuntimeQuery;
 pub use types::*;
 
 const DEFAULT_SEARCH_PROJECTION_CHANGE_LOG_MAX_ENTRIES: usize = 4096;
+const DEFAULT_SEARCH_PROJECTION_CHANGE_LOG_MAX_BYTES: usize = 64 * 1024 * 1024;
 pub const SLOW_QUERY_LOG_EVENT_PROTOCOL: &str = "skein-slow-query-log-event-v1";
 
 pub use access_control::AccessControlPolicyReadiness;
@@ -273,6 +274,9 @@ pub struct DatabaseConfig {
     /// Persistent relational-index publication and read activation mode.
     pub relational_index_mode: skein_storage::RelationalIndexMode,
     pub max_search_projection_change_log_entries: Option<usize>,
+    pub max_search_projection_change_log_bytes: Option<usize>,
+    pub search_projection_relational_change_limits:
+        skein_storage::RelationalPrimaryKeyChangeCaptureLimits,
     pub max_plan_cache_entries: Option<usize>,
     pub slow_query_log_capacity: usize,
     pub slow_query_log_threshold_micros: u128,
@@ -415,6 +419,10 @@ impl Default for DatabaseConfig {
             max_search_projection_change_log_entries: Some(
                 DEFAULT_SEARCH_PROJECTION_CHANGE_LOG_MAX_ENTRIES,
             ),
+            max_search_projection_change_log_bytes: Some(
+                DEFAULT_SEARCH_PROJECTION_CHANGE_LOG_MAX_BYTES,
+            ),
+            search_projection_relational_change_limits: Default::default(),
             max_plan_cache_entries: Some(DEFAULT_PLAN_CACHE_MAX_ENTRIES),
             slow_query_log_capacity: system_sql::DEFAULT_SLOW_QUERY_LOG_CAPACITY,
             slow_query_log_threshold_micros: system_sql::DEFAULT_SLOW_QUERY_LOG_THRESHOLD_MICROS,
@@ -661,13 +669,21 @@ struct ReaderPin {
     pins: Arc<Mutex<ReaderPins>>,
 }
 
+fn configure_search_projection_changefeed(store: &mut GraphStore, config: &DatabaseConfig) {
+    store.set_search_projection_primary_key_capture_limits(
+        config.search_projection_relational_change_limits,
+    );
+    store.set_max_search_projection_change_log_entries(
+        config.max_search_projection_change_log_entries,
+    );
+    store.set_max_search_projection_change_log_bytes(config.max_search_projection_change_log_bytes);
+}
+
 impl Default for Database {
     fn default() -> Self {
         let config = effective_database_config(DatabaseConfig::default());
         let mut store = GraphStore::default();
-        store.set_max_search_projection_change_log_entries(
-            config.max_search_projection_change_log_entries,
-        );
+        configure_search_projection_changefeed(&mut store, &config);
         Self {
             catalog: Catalog::default(),
             store,
@@ -702,9 +718,7 @@ impl Database {
     pub fn new_with_config(config: DatabaseConfig) -> Self {
         let config = effective_database_config(config);
         let mut store = GraphStore::default();
-        store.set_max_search_projection_change_log_entries(
-            config.max_search_projection_change_log_entries,
-        );
+        configure_search_projection_changefeed(&mut store, &config);
         let optimizer = CascadesOptimizer::new(optimizer_config_from_database_config(&config));
         Self {
             catalog: Catalog::default(),
@@ -823,9 +837,7 @@ impl Database {
                 replay_config,
             )?
         };
-        store.set_max_search_projection_change_log_entries(
-            config.max_search_projection_change_log_entries,
-        );
+        configure_search_projection_changefeed(&mut store, &config);
         let mut database = Self {
             catalog,
             store,
@@ -2758,25 +2770,57 @@ impl Database {
         source_graph_commit_epoch: u64,
         max_operations: Option<usize>,
     ) -> Result<Option<SearchProjectionGraphDeltaRequest>> {
+        let Some(batch) = self.build_search_projection_change_batch_after(
+            source_graph_commit_epoch,
+            max_operations,
+        )?
+        else {
+            return Ok(None);
+        };
+        if batch.has_relational_changes() {
+            return Err(SkeinError::Storage(format!(
+                "search projection commits through epoch {} contain relational primary-key changes; use the unified search projection changefeed and publish one combined projection delta",
+                batch.complete_through_commit_epoch().unwrap_or(source_graph_commit_epoch)
+            )));
+        }
+        Ok(Some(batch.graph_delta))
+    }
+
+    pub fn build_search_projection_change_batch_after(
+        &self,
+        source_commit_epoch: u64,
+        max_operations: Option<usize>,
+    ) -> Result<Option<SearchProjectionChangeBatch>> {
         let current_epoch = self.store.commit_epoch();
-        if source_graph_commit_epoch >= current_epoch {
+        if source_commit_epoch >= current_epoch {
             return Ok(None);
         }
         let change_log_start_epoch = self.store.search_projection_change_log_start_epoch();
-        if source_graph_commit_epoch < change_log_start_epoch {
+        if source_commit_epoch < change_log_start_epoch {
             return Err(SkeinError::Storage(format!(
-                "search projection change log starts at commit epoch {change_log_start_epoch}; requested source graph commit epoch {source_graph_commit_epoch}; full search projection rebuild required"
+                "search projection change log starts at commit epoch {change_log_start_epoch}; requested source commit epoch {source_commit_epoch}; full search projection rebuild required"
             )));
         }
 
         let mut upsert_node_ids = BTreeSet::new();
         let mut delete_document_ids = BTreeSet::new();
-        let mut complete_through_graph_commit_epoch = source_graph_commit_epoch;
+        let mut relational_primary_keys =
+            BTreeMap::<String, BTreeSet<skein_storage::RelationalKey>>::new();
+        let mut complete_through_commit_epoch = source_commit_epoch;
         let mut truncated_by_budget = false;
         for change in self
             .store
-            .search_projection_graph_changes_after(source_graph_commit_epoch)
+            .search_projection_changes_after(source_commit_epoch)
         {
+            let tables = match &change.relational_primary_key_changes {
+                skein_storage::RelationalPrimaryKeyChangeCapture::Captured { tables, .. } => tables,
+                skein_storage::RelationalPrimaryKeyChangeCapture::RequiresRebuild { reason } => {
+                    return Err(SkeinError::Storage(format!(
+                        "search projection relational change at commit epoch {} requires a full rebuild: {reason:?}",
+                        change.commit_epoch
+                    )));
+                }
+            };
             let additional_operation_count = change
                 .upsert_node_ids
                 .iter()
@@ -2788,17 +2832,36 @@ impl Database {
                         .iter()
                         .filter(|document_id| !delete_document_ids.contains(*document_id))
                         .count(),
+                )
+                .saturating_add(
+                    tables
+                        .iter()
+                        .map(|table| {
+                            let existing = relational_primary_keys.get(&table.table);
+                            table
+                                .primary_keys
+                                .iter()
+                                .filter(|key| existing.is_none_or(|keys| !keys.contains(*key)))
+                                .count()
+                        })
+                        .sum::<usize>(),
                 );
             let next_operation_count = upsert_node_ids
                 .len()
                 .saturating_add(delete_document_ids.len())
+                .saturating_add(
+                    relational_primary_keys
+                        .values()
+                        .map(BTreeSet::len)
+                        .sum::<usize>(),
+                )
                 .saturating_add(additional_operation_count);
             if let Some(limit) = max_operations
                 && next_operation_count > limit
             {
-                if complete_through_graph_commit_epoch == source_graph_commit_epoch {
+                if complete_through_commit_epoch == source_commit_epoch {
                     return Err(SkeinError::Storage(format!(
-                        "search projection graph change at commit epoch {} requires {next_operation_count} operations, exceeding configured per-batch limit {limit}",
+                        "search projection change at commit epoch {} requires {next_operation_count} operations, exceeding configured per-batch limit {limit}",
                         change.commit_epoch
                     )));
                 }
@@ -2807,17 +2870,34 @@ impl Database {
             }
             upsert_node_ids.extend(change.upsert_node_ids);
             delete_document_ids.extend(change.delete_document_ids);
-            complete_through_graph_commit_epoch = change.commit_epoch;
+            for table in tables {
+                relational_primary_keys
+                    .entry(table.table.clone())
+                    .or_default()
+                    .extend(table.primary_keys.iter().cloned());
+            }
+            complete_through_commit_epoch = change.commit_epoch;
         }
         if !truncated_by_budget {
-            complete_through_graph_commit_epoch = current_epoch;
+            complete_through_commit_epoch = current_epoch;
         }
 
-        Ok(Some(SearchProjectionGraphDeltaRequest {
-            upsert_node_ids: upsert_node_ids.into_iter().collect(),
-            delete_document_ids: delete_document_ids.into_iter().collect(),
-            max_operations,
-            complete_through_graph_commit_epoch: Some(complete_through_graph_commit_epoch),
+        Ok(Some(SearchProjectionChangeBatch {
+            graph_delta: SearchProjectionGraphDeltaRequest {
+                upsert_node_ids: upsert_node_ids.into_iter().collect(),
+                delete_document_ids: delete_document_ids.into_iter().collect(),
+                max_operations,
+                complete_through_graph_commit_epoch: Some(complete_through_commit_epoch),
+            },
+            relational_primary_key_changes: relational_primary_keys
+                .into_iter()
+                .map(
+                    |(table, primary_keys)| skein_storage::RelationalTablePrimaryKeyChanges {
+                        table,
+                        primary_keys: primary_keys.into_iter().collect(),
+                    },
+                )
+                .collect(),
         }))
     }
 
@@ -2827,6 +2907,20 @@ impl Database {
         max_operations: Option<usize>,
     ) -> Result<Option<SearchProjectionGraphDeltaRequest>> {
         self.build_search_projection_graph_delta_request_after(
+            search_index
+                .projection_freshness()
+                .source_graph_commit_epoch
+                .unwrap_or(0),
+            max_operations,
+        )
+    }
+
+    pub fn build_search_projection_change_batch_from_freshness(
+        &self,
+        search_index: &SearchIndex,
+        max_operations: Option<usize>,
+    ) -> Result<Option<SearchProjectionChangeBatch>> {
+        self.build_search_projection_change_batch_after(
             search_index
                 .projection_freshness()
                 .source_graph_commit_epoch
@@ -3056,6 +3150,45 @@ impl Database {
     ) -> Result<SearchProjectionDeltaReport> {
         let delta = self.build_search_projection_graph_delta(&request)?;
         search_index.apply_projection_delta(delta)
+    }
+
+    pub fn apply_search_projection_change_batch(
+        &self,
+        search_index: &mut SearchIndex,
+        batch: SearchProjectionChangeBatch,
+        relational: SearchProjectionRelationalDelta,
+    ) -> Result<SearchProjectionDeltaReport> {
+        let expected_primary_key_count = batch
+            .relational_primary_key_changes
+            .iter()
+            .map(|table| table.primary_keys.len())
+            .fold(0usize, usize::saturating_add);
+        if relational.processed_primary_key_count != expected_primary_key_count {
+            return Err(SkeinError::Storage(format!(
+                "search projection relational delta processed {} primary keys, expected {expected_primary_key_count}; projection watermark was not published",
+                relational.processed_primary_key_count
+            )));
+        }
+        if relational.delta.source_graph_commit_epoch.is_some() {
+            return Err(SkeinError::Storage(
+                "search projection relational delta must not publish its own source epoch"
+                    .to_string(),
+            ));
+        }
+        let complete_through_commit_epoch = batch.complete_through_commit_epoch();
+        let max_operations = batch.graph_delta.max_operations;
+        let mut graph = self.build_search_projection_graph_delta(&batch.graph_delta)?;
+        let SearchProjectionDelta {
+            upserts,
+            deletes,
+            max_operations: _,
+            source_graph_commit_epoch: _,
+        } = relational.delta;
+        graph.upserts.extend(upserts);
+        graph.deletes.extend(deletes);
+        graph.max_operations = max_operations;
+        graph.source_graph_commit_epoch = complete_through_commit_epoch;
+        search_index.apply_projection_delta(graph)
     }
 
     pub fn apply_background_search_projection_delta(

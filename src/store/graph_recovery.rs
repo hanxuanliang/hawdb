@@ -379,20 +379,34 @@ impl GraphStore {
                     }
                     self.initial_import_source_fingerprint = Some(decode_string(raw)?);
                 }
-                ["search_projection_change", raw_commit_epoch, raw_upsert_node_ids, raw_delete_document_ids] =>
+                ["search_projection_change", raw_commit_epoch, raw_upsert_node_ids, raw_delete_document_ids, raw_relational_kind, raw_relational_changes] =>
                 {
-                    self.search_projection_graph_changes
-                        .push(SearchProjectionGraphChange {
-                            commit_epoch: parse_u64(
-                                raw_commit_epoch,
-                                "search projection change commit epoch",
+                    let change = SearchProjectionGraphChange {
+                        commit_epoch: parse_u64(
+                            raw_commit_epoch,
+                            "search projection change commit epoch",
+                        )?,
+                        upsert_node_ids: decode_u64_vec(
+                            raw_upsert_node_ids,
+                            "search projection change upsert node id",
+                        )?,
+                        delete_document_ids: decode_string_vec(raw_delete_document_ids)?,
+                        relational_primary_key_changes:
+                            decode_search_projection_relational_primary_key_changes(
+                                raw_relational_kind,
+                                raw_relational_changes,
                             )?,
-                            upsert_node_ids: decode_u64_vec(
-                                raw_upsert_node_ids,
-                                "search projection change upsert node id",
-                            )?,
-                            delete_document_ids: decode_string_vec(raw_delete_document_ids)?,
-                        });
+                    };
+                    self.search_projection_change_log_retained_bytes = self
+                        .search_projection_change_log_retained_bytes
+                        .checked_add(change.estimated_retained_bytes())
+                        .ok_or_else(|| {
+                            SkeinError::Storage(
+                                "search projection change log retained byte count overflow"
+                                    .to_string(),
+                            )
+                        })?;
+                    self.search_projection_graph_changes.push(change);
                 }
                 ["label", raw_id, raw_name] => {
                     let id = LabelId(parse_u32(raw_id, "label id")?);
@@ -1057,10 +1071,13 @@ impl GraphStore {
                 WalOp::Batch(ops) => {
                     self.ensure_out_of_core_delta_replay_admission(&ops)?;
                     let commit_epoch = self.commit_epoch + 1;
-                    self.record_search_projection_graph_changes_for_ops(
+                    let relational_primary_key_changes =
+                        self.relational_primary_key_changes_from_wal_ops(&ops)?;
+                    self.record_search_projection_changes_for_ops(
                         catalog,
                         commit_epoch,
                         &ops,
+                        relational_primary_key_changes,
                     );
                     for op in ops {
                         self.apply_wal_op(catalog, op)?;
@@ -1071,10 +1088,13 @@ impl GraphStore {
                 op => {
                     self.ensure_out_of_core_delta_replay_admission(std::slice::from_ref(&op))?;
                     let commit_epoch = self.commit_epoch + 1;
-                    self.record_search_projection_graph_changes_for_ops(
+                    let relational_primary_key_changes = self
+                        .relational_primary_key_changes_from_wal_ops(std::slice::from_ref(&op))?;
+                    self.record_search_projection_changes_for_ops(
                         catalog,
                         commit_epoch,
                         std::slice::from_ref(&op),
+                        relational_primary_key_changes,
                     );
                     self.apply_wal_op(catalog, op)?;
                     self.commit_epoch += 1;

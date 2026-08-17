@@ -138,6 +138,198 @@ fn database_facade_builds_search_projection_delta_request_from_changefeed() {
 }
 
 #[test]
+fn unified_search_projection_changefeed_captures_relational_primary_keys() {
+    let mut db = Database::new();
+    db.query_sql("CREATE TABLE public.thread_messages (id BIGINT PRIMARY KEY, body TEXT NOT NULL)")
+        .unwrap();
+    let source_epoch = db.store.commit_epoch();
+    db.query_sql("INSERT INTO public.thread_messages (id, body) VALUES (1, 'first')")
+        .unwrap();
+    db.query_sql("UPDATE public.thread_messages SET body = 'second' WHERE id = 1")
+        .unwrap();
+
+    let batch = db
+        .build_search_projection_change_batch_after(source_epoch, Some(4))
+        .unwrap()
+        .unwrap();
+    assert!(batch.graph_delta.upsert_node_ids.is_empty());
+    assert!(batch.graph_delta.delete_document_ids.is_empty());
+    assert_eq!(batch.relational_primary_key_changes.len(), 1);
+    assert_eq!(
+        batch.relational_primary_key_changes[0].table,
+        "thread_messages"
+    );
+    assert_eq!(
+        batch.relational_primary_key_changes[0].primary_keys,
+        vec![skein_storage::RelationalKey(vec![
+            skein_storage::RelationalValue::BigInt(1)
+        ])]
+    );
+    assert_eq!(batch.operation_count(), 1);
+    assert_eq!(
+        batch.complete_through_commit_epoch(),
+        Some(db.store.commit_epoch())
+    );
+
+    let graph_only_error = db
+        .build_search_projection_graph_delta_request_after(source_epoch, Some(4))
+        .unwrap_err();
+    assert!(graph_only_error
+        .to_string()
+        .contains("use the unified search projection changefeed"));
+
+    let mut search_index = SearchIndex::in_memory();
+    let incomplete = db
+        .apply_search_projection_change_batch(
+            &mut search_index,
+            batch.clone(),
+            SearchProjectionRelationalDelta::default(),
+        )
+        .unwrap_err();
+    assert!(incomplete.to_string().contains("processed 0 primary keys"));
+    assert_eq!(
+        search_index
+            .projection_freshness()
+            .source_graph_commit_epoch,
+        None
+    );
+
+    let report = db
+        .apply_search_projection_change_batch(
+            &mut search_index,
+            batch,
+            SearchProjectionRelationalDelta {
+                delta: SearchProjectionDelta {
+                    upserts: vec![search_projection_row(
+                        "thread-message-1",
+                        "Thread message",
+                        "second",
+                    )],
+                    ..SearchProjectionDelta::default()
+                },
+                processed_primary_key_count: 1,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        report.source_graph_commit_epoch_after,
+        Some(db.store.commit_epoch())
+    );
+    assert!(search_index.document("memory:thread-message-1").is_some());
+}
+
+#[test]
+fn relational_changefeed_overflow_requires_rebuild_without_rejecting_commit() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        search_projection_relational_change_limits:
+            skein_storage::RelationalPrimaryKeyChangeCaptureLimits {
+                max_entries: NonZeroUsize::new(1).unwrap(),
+                max_bytes: NonZeroUsize::new(1024).unwrap(),
+            },
+        ..DatabaseConfig::default()
+    });
+    db.query_sql("CREATE TABLE public.source_chunks (id BIGINT PRIMARY KEY, body TEXT NOT NULL)")
+        .unwrap();
+    let source_epoch = db.store.commit_epoch();
+    db.query_sql("INSERT INTO public.source_chunks (id, body) VALUES (1, 'a'), (2, 'b')")
+        .unwrap();
+
+    let error = db
+        .build_search_projection_change_batch_after(source_epoch, Some(8))
+        .unwrap_err();
+    assert!(error.to_string().contains("CaptureLimitExceeded"));
+    let readiness =
+        db.search_projection_changefeed_readiness(&SearchIndex::in_memory(), false, Some(8));
+    assert!(!readiness.ready);
+    assert!(readiness
+        .blocker_codes
+        .contains(&"search_projection_changefeed_rebuild_barrier".to_string()));
+    let rows = db
+        .query_sql("SELECT id FROM public.source_chunks ORDER BY id")
+        .unwrap();
+    assert_eq!(rows.rows.len(), 2);
+}
+
+#[test]
+fn relational_changefeed_resumes_from_wal_after_restart() {
+    let path = unique_test_dir("relational_search_projection_changefeed_wal_resume");
+    let mut db = Database::open(&path).unwrap();
+    db.query_sql("CREATE TABLE public.thread_messages (id BIGINT PRIMARY KEY, body TEXT NOT NULL)")
+        .unwrap();
+    db.checkpoint().unwrap();
+    let source_epoch = db.store.commit_epoch();
+    db.query_sql("INSERT INTO public.thread_messages (id, body) VALUES (7, 'durable')")
+        .unwrap();
+    let committed_epoch = db.store.commit_epoch();
+    drop(db);
+
+    let db = Database::open(&path).unwrap();
+    let batch = db
+        .build_search_projection_change_batch_after(source_epoch, Some(2))
+        .unwrap()
+        .unwrap();
+    assert_eq!(batch.complete_through_commit_epoch(), Some(committed_epoch));
+    assert_eq!(batch.relational_primary_key_changes.len(), 1);
+    assert_eq!(
+        batch.relational_primary_key_changes[0].primary_keys,
+        vec![skein_storage::RelationalKey(vec![
+            skein_storage::RelationalValue::BigInt(7)
+        ])]
+    );
+    assert!(db.search_projection_changefeed_status().restart_recoverable);
+
+    drop(db);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn relational_changefeed_resumes_from_checkpoint_after_restart() {
+    let path = unique_test_dir("relational_search_projection_changefeed_checkpoint_resume");
+    let mut db = Database::open(&path).unwrap();
+    db.query_sql("CREATE TABLE public.source_chunks (id BIGINT PRIMARY KEY, body TEXT NOT NULL)")
+        .unwrap();
+    let source_epoch = db.store.commit_epoch();
+    db.query_sql("INSERT INTO public.source_chunks (id, body) VALUES (11, 'checkpointed')")
+        .unwrap();
+    let committed_epoch = db.store.commit_epoch();
+    db.checkpoint().unwrap();
+    drop(db);
+
+    let db = Database::open(&path).unwrap();
+    let batch = db
+        .build_search_projection_change_batch_after(source_epoch, Some(2))
+        .unwrap()
+        .unwrap();
+    assert_eq!(batch.complete_through_commit_epoch(), Some(committed_epoch));
+    assert_eq!(batch.relational_primary_key_changes.len(), 1);
+    assert_eq!(
+        batch.relational_primary_key_changes[0].primary_keys,
+        vec![skein_storage::RelationalKey(vec![
+            skein_storage::RelationalValue::BigInt(11)
+        ])]
+    );
+
+    drop(db);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn search_projection_changefeed_byte_budget_advances_resume_floor() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_search_projection_change_log_bytes: Some(1),
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'm1', title: 'First'})")
+        .unwrap();
+
+    let status = db.search_projection_changefeed_status();
+    assert_eq!(status.resume_floor_commit_epoch, 1);
+    assert_eq!(status.retained_mutation_count, 0);
+    assert_eq!(status.retained_bytes, 0);
+    assert_eq!(status.max_retained_bytes, Some(1));
+}
+
+#[test]
 fn search_projection_changefeed_tracks_has_label_relationship_metadata() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'm1', title: 'Labelled', content: 'label delta retrieval'})")
