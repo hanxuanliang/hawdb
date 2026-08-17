@@ -1,7 +1,8 @@
 use super::stages::LOGICAL_REWRITE_STAGE;
 use crate::{RuleEvent, StageStats, StageTrace};
 use skein_core::Value;
-use skein_plan::{LogicalPlan, Predicate};
+use skein_plan::{LogicalPlan, Predicate, Projection, ProjectionExpression};
+use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_FIXED_POINT_PASSES: usize = 16;
 
@@ -171,8 +172,13 @@ fn rewrite_bottom_up(plan: LogicalPlan, events: &mut Vec<RuleEvent>) -> LogicalP
 }
 
 fn rewrite_local(plan: LogicalPlan, events: &mut Vec<RuleEvent>) -> LogicalPlan {
+    if let Some(empty) = propagate_empty_input(&plan) {
+        record(events, "propagate_empty_input");
+        return empty;
+    }
     match plan {
         LogicalPlan::Filter { predicate, input } => rewrite_filter(predicate, *input, events),
+        LogicalPlan::Project { items, input } => rewrite_project(items, *input, events),
         LogicalPlan::Distinct { input } => match *input {
             LogicalPlan::Distinct { input } => {
                 record(events, "remove_redundant_distinct");
@@ -201,6 +207,224 @@ fn rewrite_local(plan: LogicalPlan, events: &mut Vec<RuleEvent>) -> LogicalPlan 
             input,
         } => rewrite_limit(offset, limit, *input, events),
         plan => plan,
+    }
+}
+
+fn propagate_empty_input(plan: &LogicalPlan) -> Option<LogicalPlan> {
+    let empty = match plan {
+        LogicalPlan::NodeCartesianProduct { left, right } => [left.as_ref(), right.as_ref()]
+            .into_iter()
+            .find(|plan| is_empty_limit(plan))?,
+        LogicalPlan::NodeColumnLookup { input, .. }
+        | LogicalPlan::Expand { input, .. }
+        | LogicalPlan::OptionalDegree { input, .. }
+        | LogicalPlan::Filter { input, .. }
+        | LogicalPlan::Project { input, .. }
+        | LogicalPlan::Distinct { input }
+        | LogicalPlan::Sort { input, .. }
+            if is_empty_limit(input) =>
+        {
+            input
+        }
+        LogicalPlan::Aggregate {
+            group_keys, input, ..
+        } if !group_keys.is_empty() && is_empty_limit(input) => input,
+        _ => return None,
+    };
+    Some(empty.clone())
+}
+
+fn is_empty_limit(plan: &LogicalPlan) -> bool {
+    matches!(plan, LogicalPlan::Limit { limit: Some(0), .. })
+}
+
+fn rewrite_project(
+    items: Vec<Projection>,
+    input: LogicalPlan,
+    events: &mut Vec<RuleEvent>,
+) -> LogicalPlan {
+    match input {
+        LogicalPlan::Project {
+            items: inner_items,
+            input,
+        } => {
+            let Some(composed_items) = compose_projection_items(&items, &inner_items) else {
+                return LogicalPlan::Project {
+                    items,
+                    input: Box::new(LogicalPlan::Project {
+                        items: inner_items,
+                        input,
+                    }),
+                };
+            };
+            record(events, "collapse_adjacent_projects");
+            LogicalPlan::Project {
+                items: composed_items,
+                input,
+            }
+        }
+        LogicalPlan::Aggregate {
+            group_keys,
+            items: aggregate_items,
+            input,
+        } => {
+            let Some(required_columns) = projection_column_dependencies(&items) else {
+                return LogicalPlan::Project {
+                    items,
+                    input: Box::new(LogicalPlan::Aggregate {
+                        group_keys,
+                        items: aggregate_items,
+                        input,
+                    }),
+                };
+            };
+            let output_names = group_keys
+                .iter()
+                .map(|item| item.name.as_str())
+                .chain(aggregate_items.iter().map(|item| item.name.as_str()))
+                .collect::<Vec<_>>();
+            if output_names.iter().copied().collect::<BTreeSet<_>>().len() != output_names.len() {
+                return LogicalPlan::Project {
+                    items,
+                    input: Box::new(LogicalPlan::Aggregate {
+                        group_keys,
+                        items: aggregate_items,
+                        input,
+                    }),
+                };
+            }
+            let original_len = aggregate_items.len();
+            let aggregate_items = aggregate_items
+                .into_iter()
+                .filter(|item| required_columns.contains(&item.name))
+                .collect::<Vec<_>>();
+            if aggregate_items.len() != original_len {
+                record(events, "prune_unused_aggregates");
+            }
+            LogicalPlan::Project {
+                items,
+                input: Box::new(LogicalPlan::Aggregate {
+                    group_keys,
+                    items: aggregate_items,
+                    input,
+                }),
+            }
+        }
+        input => LogicalPlan::Project {
+            items,
+            input: Box::new(input),
+        },
+    }
+}
+
+fn compose_projection_items(
+    outer_items: &[Projection],
+    inner_items: &[Projection],
+) -> Option<Vec<Projection>> {
+    let mut inner_by_name = BTreeMap::new();
+    for item in inner_items {
+        if inner_by_name
+            .insert(item.name.as_str(), &item.expression)
+            .is_some()
+        {
+            return None;
+        }
+    }
+    outer_items
+        .iter()
+        .cloned()
+        .map(|mut item| {
+            item.expression = match item.expression {
+                ProjectionExpression::Column(column) => {
+                    inner_by_name.get(column.as_str()).copied()?.clone()
+                }
+                expression if !projection_expression_references_column(&expression) => expression,
+                _ => return None,
+            };
+            Some(item)
+        })
+        .collect()
+}
+
+fn projection_column_dependencies(items: &[Projection]) -> Option<BTreeSet<String>> {
+    let mut columns = BTreeSet::new();
+    for item in items {
+        if !collect_projection_columns(&item.expression, &mut columns) {
+            return None;
+        }
+    }
+    Some(columns)
+}
+
+fn collect_projection_columns(
+    expression: &ProjectionExpression,
+    columns: &mut BTreeSet<String>,
+) -> bool {
+    match expression {
+        ProjectionExpression::Column(column) => {
+            columns.insert(column.clone());
+            true
+        }
+        ProjectionExpression::Literal(_) => true,
+        ProjectionExpression::Coalesce(expressions) => expressions
+            .iter()
+            .all(|expression| collect_projection_columns(expression, columns)),
+        ProjectionExpression::Left { expression, .. } | ProjectionExpression::Lower(expression) => {
+            collect_projection_columns(expression, columns)
+        }
+        ProjectionExpression::ColumnDefaultIfNullOrEq { column, .. }
+        | ProjectionExpression::ColumnValueDefaultIfNull { column, .. }
+        | ProjectionExpression::ColumnValueCasePropertyNotNullOrEq { column, .. }
+        | ProjectionExpression::ColumnProperty { column, .. } => {
+            columns.insert(column.clone());
+            true
+        }
+        ProjectionExpression::CaseColumnSearchRank(rank) => {
+            columns.insert(rank.column.clone());
+            true
+        }
+        ProjectionExpression::Variable { .. }
+        | ProjectionExpression::Property { .. }
+        | ProjectionExpression::Id { .. }
+        | ProjectionExpression::RelationshipType { .. }
+        | ProjectionExpression::DatePart { .. }
+        | ProjectionExpression::DefaultIfNullOrEq { .. }
+        | ProjectionExpression::DefaultIfNull { .. }
+        | ProjectionExpression::CasePropertyNotNullOrEq { .. }
+        | ProjectionExpression::CasePropertyEqualsRank { .. }
+        | ProjectionExpression::CaseLowerPropertyDefault { .. }
+        | ProjectionExpression::CaseCoalesceDifferenceFloorZero { .. }
+        | ProjectionExpression::CaseEntitySearchRank(_) => false,
+    }
+}
+
+fn projection_expression_references_column(expression: &ProjectionExpression) -> bool {
+    match expression {
+        ProjectionExpression::Column(_)
+        | ProjectionExpression::ColumnDefaultIfNullOrEq { .. }
+        | ProjectionExpression::ColumnValueDefaultIfNull { .. }
+        | ProjectionExpression::ColumnValueCasePropertyNotNullOrEq { .. }
+        | ProjectionExpression::ColumnProperty { .. }
+        | ProjectionExpression::CaseColumnSearchRank(_) => true,
+        ProjectionExpression::Coalesce(expressions) => expressions
+            .iter()
+            .any(projection_expression_references_column),
+        ProjectionExpression::Left { expression, .. } | ProjectionExpression::Lower(expression) => {
+            projection_expression_references_column(expression)
+        }
+        ProjectionExpression::Variable { .. }
+        | ProjectionExpression::Property { .. }
+        | ProjectionExpression::Id { .. }
+        | ProjectionExpression::RelationshipType { .. }
+        | ProjectionExpression::Literal(_)
+        | ProjectionExpression::DatePart { .. }
+        | ProjectionExpression::DefaultIfNullOrEq { .. }
+        | ProjectionExpression::DefaultIfNull { .. }
+        | ProjectionExpression::CasePropertyNotNullOrEq { .. }
+        | ProjectionExpression::CasePropertyEqualsRank { .. }
+        | ProjectionExpression::CaseLowerPropertyDefault { .. }
+        | ProjectionExpression::CaseCoalesceDifferenceFloorZero { .. }
+        | ProjectionExpression::CaseEntitySearchRank(_) => false,
     }
 }
 
@@ -751,7 +975,9 @@ fn logical_node_count(plan: &LogicalPlan) -> usize {
 mod tests {
     use super::*;
     use skein_cypher::RelationshipDirection;
-    use skein_plan::{SortDirection, SortItem, SortKey};
+    use skein_plan::{
+        AggregateFunction, AggregateTarget, Aggregation, SortDirection, SortItem, SortKey,
+    };
 
     fn scan() -> LogicalPlan {
         LogicalPlan::NodeScan {
@@ -998,5 +1224,180 @@ mod tests {
             rewrite_logical_plan(&plan).plan(),
             LogicalPlan::Limit { limit: Some(0), .. }
         ));
+    }
+
+    #[test]
+    fn empty_input_propagates_through_row_preserving_operators() {
+        let plan = LogicalPlan::Project {
+            items: vec![Projection {
+                expression: ProjectionExpression::Property {
+                    variable: "m".to_string(),
+                    property: "title".to_string(),
+                },
+                name: "title".to_string(),
+            }],
+            input: Box::new(LogicalPlan::Distinct {
+                input: Box::new(LogicalPlan::Sort {
+                    items: vec![SortItem {
+                        key: SortKey::Id {
+                            variable: "m".to_string(),
+                        },
+                        direction: SortDirection::Asc,
+                    }],
+                    input: Box::new(LogicalPlan::Filter {
+                        predicate: Predicate::ConstantBool(false),
+                        input: Box::new(scan()),
+                    }),
+                }),
+            }),
+        };
+
+        let output = rewrite_logical_plan(&plan);
+
+        assert!(matches!(
+            output.plan(),
+            LogicalPlan::Limit {
+                offset: 0,
+                limit: Some(0),
+                ..
+            }
+        ));
+        assert!(output
+            .events()
+            .iter()
+            .any(|event| event.rule() == "transformation:propagate_empty_input"));
+    }
+
+    #[test]
+    fn empty_input_preserves_global_aggregate_but_eliminates_grouped_aggregate() {
+        let empty = LogicalPlan::Filter {
+            predicate: Predicate::ConstantBool(false),
+            input: Box::new(scan()),
+        };
+        let count = Aggregation {
+            function: AggregateFunction::Count,
+            target: AggregateTarget::All,
+            distinct: false,
+            name: "memory_count".to_string(),
+        };
+        let global = LogicalPlan::Aggregate {
+            group_keys: Vec::new(),
+            items: vec![count.clone()],
+            input: Box::new(empty.clone()),
+        };
+        let grouped = LogicalPlan::Aggregate {
+            group_keys: vec![Projection {
+                expression: ProjectionExpression::Property {
+                    variable: "m".to_string(),
+                    property: "kind".to_string(),
+                },
+                name: "kind".to_string(),
+            }],
+            items: vec![count],
+            input: Box::new(empty),
+        };
+
+        assert!(matches!(
+            rewrite_logical_plan(&global).plan(),
+            LogicalPlan::Aggregate { input, .. }
+                if matches!(input.as_ref(), LogicalPlan::Limit { limit: Some(0), .. })
+        ));
+        assert!(matches!(
+            rewrite_logical_plan(&grouped).plan(),
+            LogicalPlan::Limit { limit: Some(0), .. }
+        ));
+    }
+
+    #[test]
+    fn adjacent_projects_compose_direct_column_aliases() {
+        let plan = LogicalPlan::Project {
+            items: vec![Projection {
+                expression: ProjectionExpression::Column("projected_title".to_string()),
+                name: "title".to_string(),
+            }],
+            input: Box::new(LogicalPlan::Project {
+                items: vec![Projection {
+                    expression: ProjectionExpression::Property {
+                        variable: "m".to_string(),
+                        property: "title".to_string(),
+                    },
+                    name: "projected_title".to_string(),
+                }],
+                input: Box::new(scan()),
+            }),
+        };
+
+        let output = rewrite_logical_plan(&plan);
+
+        assert!(matches!(
+            output.plan(),
+            LogicalPlan::Project { items, input }
+                if items
+                    == &vec![Projection {
+                        expression: ProjectionExpression::Property {
+                            variable: "m".to_string(),
+                            property: "title".to_string(),
+                        },
+                        name: "title".to_string(),
+                    }]
+                    && matches!(input.as_ref(), LogicalPlan::NodeScan { .. })
+        ));
+        assert!(output
+            .events()
+            .iter()
+            .any(|event| { event.rule() == "transformation:collapse_adjacent_projects" }));
+    }
+
+    #[test]
+    fn outer_projection_prunes_unreferenced_aggregate_computation() {
+        let plan = LogicalPlan::Project {
+            items: vec![Projection {
+                expression: ProjectionExpression::Column("memory_count".to_string()),
+                name: "memory_count".to_string(),
+            }],
+            input: Box::new(LogicalPlan::Aggregate {
+                group_keys: vec![Projection {
+                    expression: ProjectionExpression::Property {
+                        variable: "m".to_string(),
+                        property: "kind".to_string(),
+                    },
+                    name: "kind".to_string(),
+                }],
+                items: vec![
+                    Aggregation {
+                        function: AggregateFunction::Count,
+                        target: AggregateTarget::All,
+                        distinct: false,
+                        name: "memory_count".to_string(),
+                    },
+                    Aggregation {
+                        function: AggregateFunction::Collect,
+                        target: AggregateTarget::Property {
+                            variable: "m".to_string(),
+                            property: "content".to_string(),
+                        },
+                        distinct: false,
+                        name: "unused_contents".to_string(),
+                    },
+                ],
+                input: Box::new(scan()),
+            }),
+        };
+
+        let output = rewrite_logical_plan(&plan);
+
+        assert!(matches!(
+            output.plan(),
+            LogicalPlan::Project { input, .. }
+                if matches!(
+                    input.as_ref(),
+                    LogicalPlan::Aggregate { items, .. }
+                        if items.len() == 1 && items[0].name == "memory_count"
+                )
+        ));
+        assert!(output
+            .events()
+            .iter()
+            .any(|event| event.rule() == "transformation:prune_unused_aggregates"));
     }
 }

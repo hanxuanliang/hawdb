@@ -568,8 +568,14 @@ Logical rewrite rules:
 - push predicates into node and relationship scans
 - convert property predicates to index seek candidates
 - reorder pattern expansions by estimated selectivity
-- merge adjacent projections
-- remove redundant filters and projections
+- compose adjacent projections only when column aliases can be substituted
+  exactly and no generated-name collision is possible
+- propagate proven-empty inputs through row-preserving operators and grouped
+  aggregates, while retaining global aggregates because `COUNT(*)` over an
+  empty input still returns one row
+- prune aggregate expressions that a direct downstream projection cannot read,
+  without removing group keys that define result cardinality
+- remove redundant filters, identical sorts, distinct operators, and limits
 - normalize commutative predicates
 - split conjunctive predicates
 - lower `MERGE` into match-or-create where legal
