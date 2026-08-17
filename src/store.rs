@@ -145,7 +145,7 @@ pub use skein_storage::{
     PersistentPropertyProjectionDefinition, PersistentPropertyProjectionError,
     PersistentPropertyProjectionKind, PersistentPropertyProjectionManifest,
     PersistentPropertyProjectionReader, PersistentPropertyProjectionWriter,
-    ProjectedGraphDefinition, ProjectedGraphStatus, PropertyFilter,
+    ProjectedGraphDefinition, ProjectedGraphStatus, ProjectedNodeRecord, PropertyFilter,
     PropertyIndexProjectionRebuildAction, PropertySpillConfig, PropertySpillManifest,
     PropertySpillReader, RecoveryMode, RelId, RelRecord, RelationalIndexMode,
     RelationalIndexReadLimits, RelationalIndexReadReport, RelationalIndexRecoveryReadReport,

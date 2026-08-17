@@ -90,10 +90,52 @@ impl GraphStore {
         label_id: Option<LabelId>,
         mut consumer: impl FnMut(NodeRecord) -> GraphScanControl,
     ) -> Result<GraphScanControl> {
+        self.visit_selected_nodes_owned(label_id, None, |node| {
+            consumer(NodeRecord {
+                id: node.id,
+                labels: node.labels,
+                properties: node.properties,
+            })
+        })
+    }
+
+    pub fn visit_projected_nodes_owned(
+        &self,
+        label_id: Option<LabelId>,
+        required_properties: &BTreeSet<String>,
+        consumer: impl FnMut(ProjectedNodeRecord) -> GraphScanControl,
+    ) -> Result<GraphScanControl> {
+        self.visit_selected_nodes_owned(label_id, Some(required_properties), consumer)
+    }
+
+    fn visit_selected_nodes_owned(
+        &self,
+        label_id: Option<LabelId>,
+        required_properties: Option<&BTreeSet<String>>,
+        mut consumer: impl FnMut(ProjectedNodeRecord) -> GraphScanControl,
+    ) -> Result<GraphScanControl> {
+        let project_delta = |node: &NodeRecord| ProjectedNodeRecord {
+            id: node.id,
+            labels: node.labels.clone(),
+            properties: required_properties.map_or_else(
+                || node.properties.clone(),
+                |required| {
+                    required
+                        .iter()
+                        .filter_map(|property| {
+                            node.properties
+                                .get(property)
+                                .cloned()
+                                .map(|value| (property.clone(), value))
+                        })
+                        .collect()
+                },
+            ),
+        };
         let Some(reader) = &self.canonical_base else {
             for node in self.nodes.values() {
                 if self.node_matches_label(node, label_id)
-                    && consumer(node.clone()) == GraphScanControl::Stop
+                    && consumer(project_delta(node)) == GraphScanControl::Stop
                 {
                     return Ok(GraphScanControl::Stop);
                 }
@@ -103,46 +145,57 @@ impl GraphStore {
 
         let mut delta = self.nodes.iter().peekable();
         let mut graph_control = GraphScanControl::Continue;
-        let (_, canonical_control) = reader
-            .scan_nodes_control(|base| {
-                while delta.peek().is_some_and(|(id, _)| **id < base.id) {
-                    let (id, node) = delta.next().expect("peeked delta node exists");
-                    if !self.node_tombstones.contains(id)
-                        && self.node_matches_label(node, label_id)
-                        && consumer(node.clone()) == GraphScanControl::Stop
-                    {
-                        graph_control = GraphScanControl::Stop;
-                        return Ok(CanonicalScanControl::Stop);
-                    }
-                }
-                if delta.peek().is_some_and(|(id, _)| **id == base.id) {
-                    let (id, node) = delta.next().expect("matching delta node exists");
-                    if !self.node_tombstones.contains(id)
-                        && self.node_matches_label(node, label_id)
-                        && consumer(node.clone()) == GraphScanControl::Stop
-                    {
-                        graph_control = GraphScanControl::Stop;
-                        return Ok(CanonicalScanControl::Stop);
-                    }
-                    return Ok(CanonicalScanControl::Continue);
-                }
-                if !self.node_tombstones.contains(&base.id)
-                    && self.node_matches_label(&base, label_id)
-                    && consumer(base) == GraphScanControl::Stop
+        let mut consume_base = |base: ProjectedNodeRecord| {
+            while delta.peek().is_some_and(|(id, _)| **id < base.id) {
+                let (id, node) = delta.next().expect("peeked delta node exists");
+                if !self.node_tombstones.contains(id)
+                    && self.node_matches_label(node, label_id)
+                    && consumer(project_delta(node)) == GraphScanControl::Stop
                 {
                     graph_control = GraphScanControl::Stop;
                     return Ok(CanonicalScanControl::Stop);
                 }
-                Ok(CanonicalScanControl::Continue)
-            })
-            .map_err(canonical_segment_error)?;
+            }
+            if delta.peek().is_some_and(|(id, _)| **id == base.id) {
+                let (id, node) = delta.next().expect("matching delta node exists");
+                if !self.node_tombstones.contains(id)
+                    && self.node_matches_label(node, label_id)
+                    && consumer(project_delta(node)) == GraphScanControl::Stop
+                {
+                    graph_control = GraphScanControl::Stop;
+                    return Ok(CanonicalScanControl::Stop);
+                }
+                return Ok(CanonicalScanControl::Continue);
+            }
+            if !self.node_tombstones.contains(&base.id)
+                && label_id.is_none_or(|label_id| base.labels.contains(&label_id))
+                && consumer(base) == GraphScanControl::Stop
+            {
+                graph_control = GraphScanControl::Stop;
+                return Ok(CanonicalScanControl::Stop);
+            }
+            Ok(CanonicalScanControl::Continue)
+        };
+        let (_, canonical_control) = match required_properties {
+            Some(required_properties) => {
+                reader.scan_projected_nodes_control(required_properties, &mut consume_base)
+            }
+            None => reader.scan_nodes_control(|node| {
+                consume_base(ProjectedNodeRecord {
+                    id: node.id,
+                    labels: node.labels,
+                    properties: node.properties,
+                })
+            }),
+        }
+        .map_err(canonical_segment_error)?;
         if canonical_control == CanonicalScanControl::Stop {
             return Ok(graph_control);
         }
         for (id, node) in delta {
             if !self.node_tombstones.contains(id)
                 && self.node_matches_label(node, label_id)
-                && consumer(node.clone()) == GraphScanControl::Stop
+                && consumer(project_delta(node)) == GraphScanControl::Stop
             {
                 return Ok(GraphScanControl::Stop);
             }

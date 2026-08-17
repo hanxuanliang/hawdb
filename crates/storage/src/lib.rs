@@ -96,7 +96,7 @@ pub use graph_descriptor_tree::{
     GraphDescriptorTreePaths, GraphDescriptorTreeRoot, GraphDescriptorTreeRootReader,
     GraphDescriptorTreeWriteOutput, PreparedGraphDescriptorTree,
 };
-pub use ids::{NodeId, NodeRecord, RelId, RelRecord};
+pub use ids::{NodeId, NodeRecord, ProjectedNodeRecord, RelId, RelRecord};
 pub use index_page::{
     ImmutableIndexPage, ImmutableIndexPageBody, ImmutableIndexPageError, ImmutableIndexPageLimits,
     IndexIdentity, IndexInteriorEntry, IndexInteriorPage, IndexLeafEntry, IndexLeafPage,

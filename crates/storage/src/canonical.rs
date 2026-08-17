@@ -8,9 +8,9 @@ use crate::{
     GraphDescriptorTreeBuildConfig, GraphDescriptorTreeBuilder, GraphDescriptorTreeError,
     GraphDescriptorTreeGenerationArtifacts, GraphDescriptorTreePaths,
     GraphDescriptorTreeRootReader, ManifestGeneration, NodeId, NodeRecord,
-    PreparedGraphDescriptorTree, PropertySpillError, PropertySpillManifest, PropertySpillReader,
-    PropertySpillWriteOptions, PropertySpillWriteOutput, PropertySpillWriter, RelId, RelRecord,
-    SegmentCache, SegmentRangeRead, SegmentReadError, SegmentReadRange, StoreId,
+    PreparedGraphDescriptorTree, ProjectedNodeRecord, PropertySpillError, PropertySpillManifest,
+    PropertySpillReader, PropertySpillWriteOptions, PropertySpillWriteOutput, PropertySpillWriter,
+    RelId, RelRecord, SegmentCache, SegmentRangeRead, SegmentReadError, SegmentReadRange, StoreId,
 };
 use skein_core::{LabelId, RelTypeId, Value};
 use skein_integrity::{IntegrityHasher, Sha256Digest};
@@ -1705,6 +1705,32 @@ impl CanonicalSegmentReader {
         result
     }
 
+    pub fn get_projected_node(
+        &self,
+        id: NodeId,
+        required_properties: &BTreeSet<String>,
+    ) -> Result<Option<ProjectedNodeRecord>, CanonicalSegmentError> {
+        self.ensure_healthy()?;
+        let result = (|| {
+            let (segment, _) = self.find_descriptor_for_id(CanonicalSegmentKind::Nodes, id.0)?;
+            let Some(segment) = segment else {
+                return Ok(None);
+            };
+            let read = self.read_segment_with_report(&segment)?;
+            decode_projected_node_by_id(
+                &read.payload,
+                self.manifest.generation,
+                &segment,
+                id.0,
+                self.property_spills.as_ref(),
+                Some(self.property_keys()),
+                required_properties,
+            )
+        })();
+        self.poison_on_physical_failure(&result);
+        result
+    }
+
     pub fn get_relationship(&self, id: RelId) -> Result<Option<RelRecord>, CanonicalSegmentError> {
         self.get_relationship_with_report(id)
             .map(|(relationship, _)| relationship)
@@ -1780,6 +1806,44 @@ impl CanonicalSegmentReader {
                         payload,
                         self.property_spills.as_ref(),
                         Some(self.property_keys()),
+                    )?)?;
+                    report.records_decoded = report.records_decoded.saturating_add(1);
+                    Ok(control)
+                },
+            )
+        });
+        let result = result.map(|(descriptor_report, control)| {
+            report.record_descriptor_read(descriptor_report);
+            (report, control)
+        });
+        self.poison_on_physical_failure(&result);
+        result
+    }
+
+    pub fn scan_projected_nodes_control(
+        &self,
+        required_properties: &BTreeSet<String>,
+        mut consumer: impl FnMut(
+            ProjectedNodeRecord,
+        ) -> Result<CanonicalScanControl, CanonicalSegmentError>,
+    ) -> Result<(CanonicalReadReport, CanonicalScanControl), CanonicalSegmentError> {
+        self.ensure_healthy()?;
+        let mut report = self.empty_read_report();
+        let result = self.scan_descriptor_kind(CanonicalSegmentKind::Nodes, |descriptor| {
+            report.segments_considered = report.segments_considered.saturating_add(1);
+            let read = self.read_segment_with_report(descriptor)?;
+            update_report_for_segment(&mut report, &read);
+            decode_segment_records_control(
+                &read.payload,
+                self.manifest.generation,
+                descriptor,
+                |id, payload| {
+                    let control = consumer(decode_projected_node_with_property_spills(
+                        id,
+                        payload,
+                        self.property_spills.as_ref(),
+                        Some(self.property_keys()),
+                        required_properties,
                     )?)?;
                     report.records_decoded = report.records_decoded.saturating_add(1);
                     Ok(control)
@@ -2699,6 +2763,34 @@ fn decode_node_by_id(
     Ok(found)
 }
 
+fn decode_projected_node_by_id(
+    bytes: &[u8],
+    generation: ManifestGeneration,
+    descriptor: &CanonicalSegmentDescriptor,
+    id: u64,
+    property_spills: Option<&PropertySpillReader>,
+    property_keys: Option<&[String]>,
+    required_properties: &BTreeSet<String>,
+) -> Result<Option<ProjectedNodeRecord>, CanonicalSegmentError> {
+    let mut found = None;
+    decode_segment_records_control(bytes, generation, descriptor, |record_id, payload| {
+        if record_id < id {
+            return Ok(CanonicalScanControl::Continue);
+        }
+        if record_id == id {
+            found = Some(decode_projected_node_with_property_spills(
+                record_id,
+                payload,
+                property_spills,
+                property_keys,
+                required_properties,
+            )?);
+        }
+        Ok(CanonicalScanControl::Stop)
+    })?;
+    Ok(found)
+}
+
 fn decode_relationship_by_id(
     bytes: &[u8],
     generation: ManifestGeneration,
@@ -2873,6 +2965,37 @@ fn decode_node_with_property_spills(
     })
 }
 
+fn decode_projected_node_with_property_spills(
+    id: u64,
+    payload: &[u8],
+    property_spills: Option<&PropertySpillReader>,
+    property_keys: Option<&[String]>,
+    required_properties: &BTreeSet<String>,
+) -> Result<ProjectedNodeRecord, CanonicalSegmentError> {
+    let mut cursor = SliceCursor::new(payload);
+    let label_count = cursor.read_u32()? as usize;
+    let mut labels = BTreeSet::new();
+    for _ in 0..label_count {
+        labels.insert(LabelId(cursor.read_u32()?));
+    }
+    let properties = decode_projected_record_properties(
+        &mut cursor,
+        property_spills,
+        property_keys,
+        required_properties,
+    )?;
+    if !cursor.is_empty() {
+        return Err(CanonicalSegmentError::Corrupt(
+            "projected node record has trailing bytes".to_string(),
+        ));
+    }
+    Ok(ProjectedNodeRecord {
+        id: NodeId(id),
+        labels,
+        properties,
+    })
+}
+
 pub(crate) fn encode_relationship(
     relationship: &RelRecord,
 ) -> Result<Vec<u8>, CanonicalSegmentError> {
@@ -3000,6 +3123,60 @@ fn decode_record_properties(
             return Err(CanonicalSegmentError::Corrupt(
                 "canonical property map has duplicate keys".to_string(),
             ));
+        }
+    }
+    Ok(properties)
+}
+
+fn decode_projected_record_properties(
+    cursor: &mut SliceCursor<'_>,
+    property_spills: Option<&PropertySpillReader>,
+    property_keys: Option<&[String]>,
+    required_properties: &BTreeSet<String>,
+) -> Result<BTreeMap<String, Value>, CanonicalSegmentError> {
+    let count = cursor.read_u32()? as usize;
+    let spill_count = property_spills.map(|reader| reader.manifest().value_count);
+    let mut properties = BTreeMap::new();
+    if let Some(keys) = property_keys {
+        let mut seen = BTreeSet::new();
+        for _ in 0..count {
+            let key_id = cursor.read_u32()?;
+            let key = keys.get(key_id as usize).ok_or_else(|| {
+                CanonicalSegmentError::Corrupt(format!(
+                    "canonical record references unknown property key id {key_id}"
+                ))
+            })?;
+            if !seen.insert(key_id) {
+                return Err(CanonicalSegmentError::Corrupt(format!(
+                    "canonical property map has duplicate key id {key_id}"
+                )));
+            }
+            if required_properties.contains(key) {
+                properties.insert(
+                    key.clone(),
+                    decode_value_with_property_spills(cursor, 1, property_spills)?,
+                );
+            } else {
+                validate_encoded_value(cursor, 1, spill_count)?;
+            }
+        }
+    } else {
+        let mut seen = BTreeSet::new();
+        for _ in 0..count {
+            let key = cursor.read_string()?;
+            if !seen.insert(key.clone()) {
+                return Err(CanonicalSegmentError::Corrupt(
+                    "canonical property map has duplicate keys".to_string(),
+                ));
+            }
+            if required_properties.contains(&key) {
+                properties.insert(
+                    key,
+                    decode_value_with_property_spills(cursor, 1, property_spills)?,
+                );
+            } else {
+                validate_encoded_value(cursor, 1, spill_count)?;
+            }
         }
     }
     Ok(properties)
@@ -3773,6 +3950,55 @@ mod tests {
         assert!(scrub_reader.is_poisoned());
 
         drop(scrub_reader);
+        remove_fixture(&path, manifest.generation);
+    }
+
+    #[test]
+    fn projected_node_read_returns_only_requested_properties() {
+        let path = unique_path("projected_node_read");
+        let node = NodeRecord {
+            id: NodeId(7),
+            labels: BTreeSet::from([LabelId(1)]),
+            properties: BTreeMap::from([
+                ("rank".to_string(), Value::Int(9)),
+                ("title".to_string(), Value::String("selected".to_string())),
+                ("content".to_string(), Value::String("x".repeat(128 * 1024))),
+            ]),
+        };
+        let manifest = CanonicalSegmentWriter::new(CanonicalSegmentConfig::default())
+            .write(
+                &path,
+                ManifestGeneration(71),
+                std::iter::once(node),
+                std::iter::empty::<RelRecord>(),
+            )
+            .unwrap();
+        let reader = CanonicalSegmentReader::open(
+            &path,
+            manifest.clone(),
+            Arc::new(SegmentCache::new(1024 * 1024)),
+            StoreId(71),
+            NonZeroU64::new(1024 * 1024).unwrap(),
+        )
+        .unwrap();
+
+        let projected = reader
+            .get_projected_node(
+                NodeId(7),
+                &BTreeSet::from(["rank".to_string(), "title".to_string()]),
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(projected.id, NodeId(7));
+        assert_eq!(projected.labels, BTreeSet::from([LabelId(1)]));
+        assert_eq!(
+            projected.properties,
+            BTreeMap::from([
+                ("rank".to_string(), Value::Int(9)),
+                ("title".to_string(), Value::String("selected".to_string())),
+            ])
+        );
         remove_fixture(&path, manifest.generation);
     }
 
