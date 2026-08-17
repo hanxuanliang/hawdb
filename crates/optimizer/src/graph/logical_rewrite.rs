@@ -219,6 +219,9 @@ fn rewrite_filter(
             record(events, "replace_false_filter_with_empty_limit");
             canonical_empty_limit(input)
         }
+        predicate if matches!(input, LogicalPlan::Expand { .. }) => {
+            rewrite_filter_into_expand(predicate, input, events)
+        }
         outer => match input {
             LogicalPlan::Filter {
                 predicate: inner,
@@ -232,6 +235,189 @@ fn rewrite_filter(
                 input: Box::new(input),
             },
         },
+    }
+}
+
+fn rewrite_filter_into_expand(
+    predicate: Predicate,
+    input: LogicalPlan,
+    events: &mut Vec<RuleEvent>,
+) -> LogicalPlan {
+    let LogicalPlan::Expand {
+        source_variable,
+        source_label,
+        rel_variable,
+        rel_type,
+        mut rel_properties,
+        direction,
+        target_variable,
+        target_label,
+        min_hops,
+        max_hops,
+        optional,
+        input,
+    } = input
+    else {
+        unreachable!("filter-into-expand requires an expand input")
+    };
+    let predicates = match predicate {
+        Predicate::And(predicates) => predicates,
+        predicate => vec![predicate],
+    };
+    let mut source_predicates = Vec::new();
+    let mut residual_predicates = Vec::new();
+    let mut embedded_relationship_predicate = false;
+
+    for predicate in predicates {
+        if !optional
+            && min_hops == 1
+            && max_hops == 1
+            && let Some(rel_variable) = &rel_variable
+            && let Predicate::PropertyEq {
+                variable,
+                property,
+                value,
+            } = &predicate
+            && variable == rel_variable
+        {
+            if rel_properties
+                .get(property)
+                .is_some_and(|existing| existing != value)
+            {
+                record(events, "detect_conflicting_relationship_filter");
+                return canonical_empty_limit(*input);
+            }
+            rel_properties
+                .entry(property.clone())
+                .or_insert_with(|| value.clone());
+            embedded_relationship_predicate = true;
+            continue;
+        }
+        if predicate_references_only_variable(&predicate, &source_variable) {
+            source_predicates.push(predicate);
+        } else {
+            residual_predicates.push(predicate);
+        }
+    }
+
+    if source_predicates.is_empty() && !embedded_relationship_predicate {
+        return LogicalPlan::Filter {
+            predicate: predicates_from_terms(residual_predicates),
+            input: Box::new(LogicalPlan::Expand {
+                source_variable,
+                source_label,
+                rel_variable,
+                rel_type,
+                rel_properties,
+                direction,
+                target_variable,
+                target_label,
+                min_hops,
+                max_hops,
+                optional,
+                input,
+            }),
+        };
+    }
+
+    let input = if source_predicates.is_empty() {
+        *input
+    } else {
+        record(events, "push_source_filter_below_expand");
+        rewrite_filter(predicates_from_terms(source_predicates), *input, events)
+    };
+    if embedded_relationship_predicate {
+        record(events, "embed_relationship_filter_into_expand");
+    }
+    let expand = LogicalPlan::Expand {
+        source_variable,
+        source_label,
+        rel_variable,
+        rel_type,
+        rel_properties,
+        direction,
+        target_variable,
+        target_label,
+        min_hops,
+        max_hops,
+        optional,
+        input: Box::new(input),
+    };
+    if residual_predicates.is_empty() {
+        expand
+    } else {
+        LogicalPlan::Filter {
+            predicate: predicates_from_terms(residual_predicates),
+            input: Box::new(expand),
+        }
+    }
+}
+
+fn predicates_from_terms(predicates: Vec<Predicate>) -> Predicate {
+    simplify_predicate(Predicate::And(predicates))
+}
+
+fn predicate_references_only_variable(predicate: &Predicate, variable: &str) -> bool {
+    match predicate {
+        Predicate::And(predicates) | Predicate::Or(predicates) => predicates
+            .iter()
+            .all(|predicate| predicate_references_only_variable(predicate, variable)),
+        Predicate::Not(predicate) => predicate_references_only_variable(predicate, variable),
+        Predicate::IdEq {
+            variable: current, ..
+        }
+        | Predicate::IdNotEq {
+            variable: current, ..
+        }
+        | Predicate::IdCompare {
+            variable: current, ..
+        }
+        | Predicate::IdIn {
+            variable: current, ..
+        }
+        | Predicate::PropertyEq {
+            variable: current, ..
+        }
+        | Predicate::PropertyNotEq {
+            variable: current, ..
+        }
+        | Predicate::PropertyCompare {
+            variable: current, ..
+        }
+        | Predicate::PropertyListContains {
+            variable: current, ..
+        }
+        | Predicate::PropertyListContainsLower {
+            variable: current, ..
+        }
+        | Predicate::PropertyContains {
+            variable: current, ..
+        }
+        | Predicate::PropertyStartsWith {
+            variable: current, ..
+        }
+        | Predicate::PropertyEndsWith {
+            variable: current, ..
+        }
+        | Predicate::PropertyRegexMatch {
+            variable: current, ..
+        }
+        | Predicate::PropertyIsNull {
+            variable: current, ..
+        }
+        | Predicate::PropertyIsNotNull {
+            variable: current, ..
+        }
+        | Predicate::PropertyIn {
+            variable: current, ..
+        } => current == variable,
+        Predicate::ConstantBool(_)
+        | Predicate::RelationshipExists { .. }
+        | Predicate::BoundRelationshipExists { .. }
+        | Predicate::ExpressionEq { .. }
+        | Predicate::ExpressionNotEq { .. }
+        | Predicate::ExpressionCompare { .. }
+        | Predicate::ExpressionContains { .. } => false,
     }
 }
 
@@ -424,6 +610,7 @@ fn logical_node_count(plan: &LogicalPlan) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use skein_cypher::RelationshipDirection;
     use skein_plan::{SortDirection, SortItem, SortKey};
 
     fn scan() -> LogicalPlan {
@@ -438,6 +625,23 @@ mod tests {
             variable: "m".to_string(),
             property: "kind".to_string(),
             value: Value::Int(value),
+        }
+    }
+
+    fn expand(optional: bool) -> LogicalPlan {
+        LogicalPlan::Expand {
+            source_variable: "m".to_string(),
+            source_label: "Memory".to_string(),
+            rel_variable: Some("r".to_string()),
+            rel_type: "MENTIONS".to_string(),
+            rel_properties: Default::default(),
+            direction: RelationshipDirection::Outgoing,
+            target_variable: "e".to_string(),
+            target_label: "Entity".to_string(),
+            min_hops: 1,
+            max_hops: 1,
+            optional,
+            input: Box::new(scan()),
         }
     }
 
@@ -541,5 +745,84 @@ mod tests {
                 }),
             }
         );
+    }
+
+    #[test]
+    fn source_filter_moves_before_expand_and_leaves_target_filter_pushable() {
+        let source = property_eq(1);
+        let target = Predicate::PropertyEq {
+            variable: "e".to_string(),
+            property: "kind".to_string(),
+            value: Value::String("person".to_string()),
+        };
+        let plan = LogicalPlan::Filter {
+            predicate: Predicate::And(vec![source.clone(), target.clone()]),
+            input: Box::new(expand(false)),
+        };
+
+        let output = rewrite_logical_plan(&plan);
+        assert!(matches!(
+            output.plan(),
+            LogicalPlan::Filter {
+                predicate,
+                input,
+            } if predicate == &target
+                && matches!(
+                    input.as_ref(),
+                    LogicalPlan::Expand { input, .. }
+                        if matches!(
+                            input.as_ref(),
+                            LogicalPlan::Filter { predicate, input }
+                                if predicate == &source
+                                    && matches!(input.as_ref(), LogicalPlan::NodeScan { .. })
+                        )
+                )
+        ));
+        assert!(output
+            .events()
+            .iter()
+            .any(|event| { event.rule() == "transformation:push_source_filter_below_expand" }));
+    }
+
+    #[test]
+    fn exact_relationship_filter_is_embedded_for_required_one_hop_expand() {
+        let plan = LogicalPlan::Filter {
+            predicate: Predicate::PropertyEq {
+                variable: "r".to_string(),
+                property: "role".to_string(),
+                value: Value::String("subject".to_string()),
+            },
+            input: Box::new(expand(false)),
+        };
+
+        assert!(matches!(
+            rewrite_logical_plan(&plan).plan(),
+            LogicalPlan::Expand { rel_properties, .. }
+                if rel_properties.get("role") == Some(&Value::String("subject".to_string()))
+        ));
+    }
+
+    #[test]
+    fn optional_expand_keeps_post_expand_relationship_filter() {
+        let predicate = Predicate::PropertyEq {
+            variable: "r".to_string(),
+            property: "role".to_string(),
+            value: Value::String("subject".to_string()),
+        };
+        let plan = LogicalPlan::Filter {
+            predicate: predicate.clone(),
+            input: Box::new(expand(true)),
+        };
+
+        assert!(matches!(
+            rewrite_logical_plan(&plan).plan(),
+            LogicalPlan::Filter { predicate: actual, input }
+                if actual == &predicate
+                    && matches!(
+                        input.as_ref(),
+                        LogicalPlan::Expand { rel_properties, optional: true, .. }
+                            if rel_properties.is_empty()
+                    )
+        ));
     }
 }

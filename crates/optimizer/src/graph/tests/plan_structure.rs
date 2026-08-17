@@ -89,6 +89,74 @@ fn physical_plan_metadata_describes_binary_children() {
 }
 
 #[test]
+fn source_predicate_is_indexed_before_graph_expansion() {
+    let source_predicate = Predicate::PropertyEq {
+        variable: "m".to_string(),
+        property: "space_id".to_string(),
+        value: Value::String("space:1".to_string()),
+    };
+    let target_predicate = Predicate::PropertyEq {
+        variable: "e".to_string(),
+        property: "kind".to_string(),
+        value: Value::String("person".to_string()),
+    };
+    let logical = LogicalPlan::Filter {
+        predicate: Predicate::And(vec![source_predicate, target_predicate.clone()]),
+        input: Box::new(LogicalPlan::Expand {
+            source_variable: "m".to_string(),
+            source_label: "Memory".to_string(),
+            rel_variable: Some("r".to_string()),
+            rel_type: "MENTIONS".to_string(),
+            rel_properties: Default::default(),
+            direction: skein_cypher::RelationshipDirection::Outgoing,
+            target_variable: "e".to_string(),
+            target_label: "Entity".to_string(),
+            min_hops: 1,
+            max_hops: 1,
+            optional: false,
+            input: Box::new(LogicalPlan::NodeScan {
+                variable: "m".to_string(),
+                label: "Memory".to_string(),
+            }),
+        }),
+    };
+    let catalog = OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([("Memory".to_string(), "space_id".to_string())], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [("Memory".to_string(), 10_000)],
+            [("MENTIONS".to_string(), 25_000)],
+            [],
+            [],
+            [],
+            [(("Memory".to_string(), "space_id".to_string()), 100)],
+            [],
+        ),
+    );
+
+    let (plan, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+        .optimize_with_catalog(&logical, &catalog);
+
+    assert!(matches!(
+        plan,
+        PhysicalPlan::FilterExec { predicate, input }
+            if predicate == target_predicate
+                && matches!(
+                    input.as_ref(),
+                    PhysicalPlan::AdjacencyExpandExec { input, .. }
+                        if matches!(
+                            input.as_ref(),
+                            PhysicalPlan::IndexNodeSeek { property, .. }
+                                if property == "space_id"
+                        )
+                )
+    ));
+    assert!(trace
+        .rule_events
+        .iter()
+        .any(|event| { event.rule() == "transformation:push_source_filter_below_expand" }));
+}
+
+#[test]
 fn optimizer_trace_reports_physical_plan_operator_and_class_counts() {
     let logical = LogicalPlan::Project {
         items: vec![Projection {
