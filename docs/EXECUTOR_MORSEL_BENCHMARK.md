@@ -35,6 +35,51 @@ requested worker count under the default four-morsels-per-worker admission
 rule. The fixture has a numeric predicate field and a 256-byte non-projected
 payload so the scan retains a production-shaped resident row width.
 
+The adjacency mode measures the Mem-shaped `LIMIT 50` one-hop expansion at
+degrees 1, 32, 1,024, and 100,000 without running the numeric or scheduler
+benchmarks:
+
+```bash
+SKEIN_EXECUTOR_BENCH_MODE=adjacency \
+  cargo bench --bench executor_vectorization
+```
+
+The plan is `LimitExec -> ProjectExec -> AdjacencyExpandExec -> IndexNodeSeek`,
+matching Mem's exact-identity start-node shape rather than charging an unrelated
+full seed scan to the degree measurement.
+The benchmark requires the expansion report to visit and return exactly
+`min(degree, 50)` nodes and edges, keeps transfer batches at 16 rows, rejects
+blocking operators, and requires the query memory ledger to return to zero.
+It reports P50/P95/P99 latency, tracked query memory, batch payload, RSS, and
+page faults for every degree. Debug builds stop at degree 1,024 so local test
+smokes remain bounded; the release benchmark is the performance evidence that
+includes degree 100,000.
+
+### Bounded adjacency spot check
+
+Measured on 2026-08-17 with an Apple M5 Max and the release profile. Each
+degree used three warmups followed by eleven samples of 64 executions.
+
+| Degree | Returned / expanded edges | P50 | P95 | Query-ledger peak | Batch peak |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1 | 3.102 us | 3.457 us | 1,020 B | 1 row |
+| 32 | 32 | 13.757 us | 14.503 us | 12,978 B | 16 rows |
+| 1,024 | 50 | 27.634 us | 27.996 us | 12,978 B | 16 rows |
+| 100,000 | 50 | 843.990 us | 858.343 us | 12,978 B | 16 rows |
+
+The executor and consumer boundary is bounded: output, expanded edges, batch
+rows, and ledger completion do not grow beyond the configured limits. The
+100,000-degree latency is nevertheless not constant. An in-memory live
+adjacency group currently materializes and sorts compact `(NodeId, RelId)`
+keys before its stable ordered cursor can emit the first row. That temporary
+vector is protected by `blocking_operator_bytes`, but is not represented in
+the query-ledger peak above. The benchmark therefore records the fixture's
+ordering-key upper bound explicitly and must not be read as proof that the
+complete storage-to-consumer path has constant memory or latency. A follow-up
+needs to move live ordering state under the query ledger and replace the
+whole-group sort with a bounded order-preserving cursor; canonical persisted
+adjacency already streams in stable order.
+
 ## Local Result
 
 Measured on 2026-08-06 with an Apple M5 Max, 18 logical CPUs, 36 GiB RAM,

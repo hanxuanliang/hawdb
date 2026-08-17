@@ -22,6 +22,8 @@ const MORSEL_MATRIX_SAMPLES: usize = 3;
 const LOCAL_MORSEL_BENCHMARK_PROTOCOL: &str = "skein-local-morsel-benchmark-v1";
 const EXECUTOR_BENCH_MODE_ENV: &str = "SKEIN_EXECUTOR_BENCH_MODE";
 
+#[path = "executor_vectorization/adjacency.rs"]
+mod adjacency;
 #[path = "executor_vectorization/morsel.rs"]
 mod morsel;
 
@@ -29,12 +31,12 @@ fn main() {
     let requested_workers = morsel::benchmark_workers();
     let mode = std::env::var(EXECUTOR_BENCH_MODE_ENV).unwrap_or_else(|_| "full".to_string());
     assert!(
-        matches!(mode.as_str(), "full" | "scheduler" | "morsel"),
-        "{EXECUTOR_BENCH_MODE_ENV} must be full, scheduler, or morsel"
+        matches!(mode.as_str(), "full" | "scheduler" | "morsel" | "adjacency"),
+        "{EXECUTOR_BENCH_MODE_ENV} must be full, scheduler, morsel, or adjacency"
     );
     let full = mode == "full";
     let micro = full.then(micro_benchmark);
-    let (end_to_end, production_morsel) = if mode == "scheduler" {
+    let (end_to_end, production_morsel) = if matches!(mode.as_str(), "scheduler" | "adjacency") {
         (None, None)
     } else {
         let (comparison, production) = end_to_end_benchmark(requested_workers, full);
@@ -42,6 +44,7 @@ fn main() {
     };
     let morsel = matches!(mode.as_str(), "full" | "scheduler")
         .then(|| morsel::scheduler_benchmark(requested_workers));
+    let adjacency_limit = matches!(mode.as_str(), "full" | "adjacency").then(adjacency::benchmark);
     if let Some(micro) = micro {
         assert_eq!(micro.row_checksum, micro.columnar_checksum);
     }
@@ -56,6 +59,7 @@ fn main() {
             "end_to_end": end_to_end.map(ComparisonReport::json),
             "morsel": morsel,
             "production_morsel": production_morsel,
+            "adjacency_limit": adjacency_limit,
             "end_to_end_payload_bytes_per_row": END_TO_END_PAYLOAD_BYTES,
             "mode": mode,
         })
