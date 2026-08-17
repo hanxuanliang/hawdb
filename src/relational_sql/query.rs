@@ -23,8 +23,9 @@ use skein_executor::kernel::{ensure_operator_item_fits, OperatorMemoryTracker};
 use skein_executor::observer::ExecutionObserver;
 use skein_executor::pipeline::{BatchControl, BindingBatch};
 use skein_executor::{
-    BlockingOperatorMemoryReport, ExecutionLimit, QueryMemoryClass, QueryMemoryLedger,
-    RelationalRowLocator,
+    BindingSchema, BlockingOperatorMemoryReport, ColumnVector, ColumnarBatch, ExecutionLimit,
+    LogicalType, QueryMemoryClass, QueryMemoryLease, QueryMemoryLedger, RelationalRowLocator,
+    SlotDescriptor, SlotId,
 };
 use skein_optimizer::{
     select_relational_access_path, RelationalAccessPathDescriptor, RelationalAccessPathKind,
@@ -37,6 +38,7 @@ use skein_storage::{
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 mod locator;
 
@@ -229,6 +231,101 @@ struct RelationalPipelineState<'a> {
     max_intermediate_rows: usize,
 }
 
+const RELATIONAL_ROW_LOCATOR_SLOT: SlotId = SlotId(0);
+
+struct AccountedRelationalLocatorBatch {
+    schema: Arc<BindingSchema>,
+    locators: Vec<RelationalRowLocator>,
+    row_limit: usize,
+    byte_limit: usize,
+    locator_bytes: usize,
+    lease: QueryMemoryLease,
+}
+
+impl AccountedRelationalLocatorBatch {
+    fn new(
+        row_limit: usize,
+        byte_limit: NonZeroUsize,
+        memory_ledger: &QueryMemoryLedger,
+    ) -> Result<Self> {
+        let schema = Arc::new(BindingSchema::try_new(vec![SlotDescriptor {
+            id: RELATIONAL_ROW_LOCATOR_SLOT,
+            name: "row_locator".to_string(),
+            logical_type: LogicalType::RelationalRowLocator,
+        }])?);
+        let schema_bytes = std::mem::size_of::<BindingSchema>()
+            .saturating_add(std::mem::size_of::<SlotDescriptor>())
+            .saturating_add("row_locator".len());
+        let account = memory_ledger.account(
+            QueryMemoryClass::PipelineBatch,
+            "RelationalOrderedIndexScan locator batch",
+            byte_limit,
+        );
+        let lease = account.reserve(schema_bytes)?;
+        Ok(Self {
+            schema,
+            locators: Vec::new(),
+            row_limit: row_limit.max(1),
+            byte_limit: byte_limit.get(),
+            locator_bytes: 0,
+            lease,
+        })
+    }
+
+    fn push(
+        &mut self,
+        locator: RelationalRowLocator,
+        emit: &mut dyn FnMut(ColumnarBatch) -> Result<BatchControl>,
+    ) -> Result<BatchControl> {
+        let bytes =
+            std::mem::size_of::<RelationalRowLocator>().saturating_add(locator.allocated_bytes());
+        if self
+            .lease
+            .bytes()
+            .saturating_sub(self.locator_bytes)
+            .saturating_add(bytes)
+            > self.byte_limit
+        {
+            return Err(SkeinError::Execution(format!(
+                "relational ordered locator uses {bytes} bytes, exceeding batch_payload_bytes {}",
+                self.byte_limit
+            )));
+        }
+        if !self.locators.is_empty()
+            && (self.locators.len() == self.row_limit
+                || self.lease.bytes().saturating_add(bytes) > self.byte_limit)
+            && self.emit(emit)? == BatchControl::Stop
+        {
+            return Ok(BatchControl::Stop);
+        }
+        self.lease.grow(bytes)?;
+        self.locator_bytes = self.locator_bytes.saturating_add(bytes);
+        self.locators.push(locator);
+        if self.locators.len() == self.row_limit {
+            return self.emit(emit);
+        }
+        Ok(BatchControl::Continue)
+    }
+
+    fn emit(
+        &mut self,
+        emit: &mut dyn FnMut(ColumnarBatch) -> Result<BatchControl>,
+    ) -> Result<BatchControl> {
+        if self.locators.is_empty() {
+            return Ok(BatchControl::Continue);
+        }
+        let locators = std::mem::take(&mut self.locators);
+        let batch = ColumnarBatch::try_new(
+            Arc::clone(&self.schema),
+            vec![Arc::new(ColumnVector::relational_row_locators(locators))],
+        )?;
+        let control = emit(batch);
+        self.lease.shrink(self.locator_bytes);
+        self.locator_bytes = 0;
+        control
+    }
+}
+
 impl<'a> RelationalPipelineState<'a> {
     fn new(
         task_context: Option<&'a skein_core::RuntimeTaskContext>,
@@ -387,6 +484,7 @@ fn execute_select<'state>(
             &index_runtime,
             &row_runtime,
             limits,
+            execution_memory,
         )?;
         pipeline.finish()?;
         return Ok(RelationalQueryOutput {
@@ -2208,6 +2306,7 @@ fn execute_ordered_index_projection<'a>(
     index_runtime: &RelationalIndexRuntime<'a>,
     row_runtime: &RelationalRowRuntime<'a>,
     limits: RelationalQueryLimits,
+    execution_memory: &skein_executor::ExecutionMemoryConfig,
 ) -> Result<StreamingProjectionOutput> {
     let RelationalBaseAccess::Index { name, prefix } = base_access else {
         return Err(SkeinError::Execution(
@@ -2225,6 +2324,65 @@ fn execute_ordered_index_projection<'a>(
         .unwrap_or(usize::MAX);
     let mut output = Vec::with_capacity(requested.min(limits.max_output_rows));
     let mut payload_bytes = 0usize;
+    let memory_ledger = QueryMemoryLedger::new(execution_memory.query_memory_bytes);
+    let mut locator_batch = AccountedRelationalLocatorBatch::new(
+        limits.batch_rows.get(),
+        execution_memory.batch_payload_bytes,
+        &memory_ledger,
+    )?;
+    let mut hydrate = |batch: ColumnarBatch| -> Result<BatchControl> {
+        let locators = batch.column(RELATIONAL_ROW_LOCATOR_SLOT).ok_or_else(|| {
+            SkeinError::Execution("ordered locator batch is missing its locator column".to_string())
+        })?;
+        for row_index in batch.selection().iter() {
+            if output.len() >= requested {
+                return Ok(BatchControl::Stop);
+            }
+            if output.len() >= limits.max_output_rows {
+                return Err(SkeinError::Execution(format!(
+                    "relational SQL output exceeds max_output_rows {}",
+                    limits.max_output_rows
+                )));
+            }
+            let locator = locators.relational_row_locator(row_index).ok_or_else(|| {
+                SkeinError::Execution(format!(
+                    "ordered locator batch row {row_index} is not a relational row locator"
+                ))
+            })?;
+            let row = row_runtime
+                .read_output_point(&select.from.name, locator.primary_key())?
+                .ok_or_else(|| {
+                    SkeinError::StorageIntegrity(format!(
+                        "relational index {name} on table {} points to missing row {:?}",
+                        select.from.name,
+                        locator.primary_key()
+                    ))
+                })?;
+            let bound = BoundRow {
+                bindings: vec![Binding {
+                    table: &select.from.name,
+                    qualifier: base_qualifier,
+                    schema: base_schema,
+                    row: Some(row),
+                }],
+            };
+            let projected = project_bound_row(&bound, &select.projection)?;
+            payload_bytes = payload_bytes.saturating_add(map_payload_bytes(&projected));
+            if payload_bytes > limits.max_output_payload_bytes {
+                return Err(SkeinError::Execution(format!(
+                    "relational SQL output exceeds max_output_payload_bytes {}",
+                    limits.max_output_payload_bytes
+                )));
+            }
+            output.push(projected);
+        }
+        Ok(if output.len() >= requested {
+            BatchControl::Stop
+        } else {
+            BatchControl::Continue
+        })
+    };
+    let mut selected_rows = 0usize;
     if requested != 0 {
         index_runtime.visit_prefix_entries(
             state,
@@ -2237,43 +2395,24 @@ fn execute_ordered_index_projection<'a>(
                     offset -= 1;
                     return Ok(true);
                 }
-                if output.len() >= requested {
+                if selected_rows >= requested {
                     return Ok(false);
                 }
-                if output.len() >= limits.max_output_rows {
-                    return Err(SkeinError::Execution(format!(
-                        "relational SQL output exceeds max_output_rows {}",
-                        limits.max_output_rows
-                    )));
+                let control = locator_batch.push(
+                    RelationalRowLocator::new(0, primary_key.clone()),
+                    &mut hydrate,
+                )?;
+                selected_rows = selected_rows.saturating_add(1);
+                if control == BatchControl::Stop {
+                    return Ok(false);
                 }
-                let row = row_runtime
-                    .read_output_point(&select.from.name, primary_key)?
-                    .ok_or_else(|| {
-                        SkeinError::StorageIntegrity(format!(
-                            "relational index {name} on table {} points to missing row {primary_key:?}",
-                            select.from.name
-                        ))
-                    })?;
-                let bound = BoundRow {
-                    bindings: vec![Binding {
-                        table: &select.from.name,
-                        qualifier: base_qualifier,
-                        schema: base_schema,
-                        row: Some(row),
-                    }],
-                };
-                let projected = project_bound_row(&bound, &select.projection)?;
-                payload_bytes = payload_bytes.saturating_add(map_payload_bytes(&projected));
-                if payload_bytes > limits.max_output_payload_bytes {
-                    return Err(SkeinError::Execution(format!(
-                        "relational SQL output exceeds max_output_payload_bytes {}",
-                        limits.max_output_payload_bytes
-                    )));
+                if selected_rows >= requested {
+                    return Ok(locator_batch.emit(&mut hydrate)? != BatchControl::Stop);
                 }
-                output.push(projected);
-                Ok(output.len() < requested)
+                Ok(true)
             },
         )?;
+        locator_batch.emit(&mut hydrate)?;
     }
     Ok(StreamingProjectionOutput {
         rows: output,

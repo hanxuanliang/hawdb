@@ -267,6 +267,15 @@ time; non-grouped aggregation retains one admitted incremental state. Large
 payload hydration remains after the blocking locator selection unless exact
 statement `DISTINCT` requires the projected value.
 
+An ordered index projection whose equality prefix and `ORDER BY` suffix are
+fully covered MUST stream compact row locators through an executor-owned typed
+`ColumnarBatch`. `OFFSET` and `LIMIT` apply while visiting the ordered cursor,
+before row hydration, and the visitor MUST stop after the requested locator is
+accepted. Each locator batch is bounded by both `batch_rows` and
+`batch_payload_bytes` under the query root ledger. TEXT, BYTEA, and other public
+payload values enter neither the locator column nor an intermediate `Binding`;
+only the selected locator batch may perform final projection hydration.
+
 Blocking relational rows MUST carry a typed `sort_keys + locator + stable
 ordinal` record and MUST NOT materialize an executor `Binding`, public `Value`,
 or `BTreeMap`. One immutable query-local locator layout owns the table,

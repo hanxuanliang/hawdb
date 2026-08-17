@@ -1837,6 +1837,26 @@ mod tests {
         assert_eq!(page.hydration.hydrated_rows, 1);
         assert!(page.hydration.decompressed_bytes > 8 * 1024);
 
+        let locator_constrained_memory = skein_executor::ExecutionMemoryConfig {
+            batch_payload_bytes: std::num::NonZeroUsize::new(128)
+                .expect("non-zero locator batch budget"),
+            ..skein_executor::ExecutionMemoryConfig::default()
+        };
+        let error = execute_relational_query_sql_with_runtime(
+            "SELECT id, body FROM messages WHERE stream_id = $1 ORDER BY order_index ASC, id ASC LIMIT $2 OFFSET $3",
+            &[text("stream-1"), Value::Int(1), Value::Int(1)],
+            snapshot.value(),
+            RelationalQueryReadModes::new(
+                RelationalIndexReadMode::Materialized,
+                RelationalRowReadMode::CanonicalMemory,
+            ),
+            query_limits(1, 64 * 1024),
+            &locator_constrained_memory,
+            None,
+        )
+        .expect_err("ordered locator batch must honor batch_payload_bytes");
+        assert!(error.to_string().contains("batch_payload_bytes 128"));
+
         let explained_page = execute_relational_query_sql_with_runtime(
             "EXPLAIN SELECT id, body FROM messages WHERE stream_id = $1 ORDER BY order_index ASC, id ASC LIMIT $2 OFFSET $3",
             &[text("stream-1"), Value::Int(1), Value::Int(1)],
