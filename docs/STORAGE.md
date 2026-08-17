@@ -921,13 +921,21 @@ contract.
 The current in-memory adjacency key is:
 
 ```text
-(node_id, relationship_type_id) -> relationship ids
+(node_id, relationship_type_id) -> ordered (neighbor_id, relationship_id) entries
 ```
 
 There are two indexes:
 
-- outgoing: `(source, type) -> rel_ids`
-- incoming: `(target, type) -> rel_ids`
+- outgoing: `(source, type) -> (target, rel_id)`
+- incoming: `(target, type) -> (source, rel_id)`
+
+Each posting list is ordered by `(neighbor_id, relationship_id)`. Snapshot
+sharing retains an immutable pivot and bounded ordered mutation deltas; reads
+merge those structures directly. Typed adjacency expansion therefore does not
+allocate or sort a degree-sized relationship-id vector, and its cursor can stop
+as soon as the executor reaches a row limit or observes cancellation. The
+untyped cross-relationship-type fallback remains a separately admitted
+blocking operation.
 
 Checkpoint storage also publishes two physical layouts:
 

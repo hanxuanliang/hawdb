@@ -176,10 +176,16 @@ impl GraphStore {
         }
         self.outgoing
             .entry_or_default((source, rel_type))
-            .insert(id);
+            .insert(OrderedAdjacencyEntry {
+                neighbor_id: target,
+                relationship_id: id,
+            });
         self.incoming
             .entry_or_default((target, rel_type))
-            .insert(id);
+            .insert(OrderedAdjacencyEntry {
+                neighbor_id: source,
+                relationship_id: id,
+            });
     }
 
     /// Plans physical adjacency consolidation without changing graph contents,
@@ -365,14 +371,20 @@ impl GraphStore {
     fn remove_relationship_from_adjacency(&mut self, relationship: &RelRecord) {
         let outgoing_key = (relationship.source, relationship.rel_type);
         if let Some(ids) = self.outgoing.get_mut(&outgoing_key) {
-            ids.remove(&relationship.id);
+            ids.remove(&OrderedAdjacencyEntry {
+                neighbor_id: relationship.target,
+                relationship_id: relationship.id,
+            });
             if ids.is_empty() {
                 self.outgoing.remove(&outgoing_key);
             }
         }
         let incoming_key = (relationship.target, relationship.rel_type);
         if let Some(ids) = self.incoming.get_mut(&incoming_key) {
-            ids.remove(&relationship.id);
+            ids.remove(&OrderedAdjacencyEntry {
+                neighbor_id: relationship.source,
+                relationship_id: relationship.id,
+            });
             if ids.is_empty() {
                 self.incoming.remove(&incoming_key);
             }

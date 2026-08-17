@@ -119,8 +119,8 @@ fn benchmark_degree(degree: usize) -> JsonValue {
         "peak_batch_payload_bytes": pipeline.peak_batch_payload_bytes,
         "query_memory_peak_bytes": pipeline.query_memory_peak_bytes,
         "query_memory_completion_bytes": pipeline.query_memory_completion_bytes,
-        "live_ordering_key_upper_bound_bytes": degree
-            .saturating_mul(std::mem::size_of::<(NodeId, RelId)>()),
+        "ordered_live_cursor": true,
+        "degree_sized_query_ordering_buffer": false,
         "blocking_operator_budget_bytes": memory.blocking_operator_bytes.get(),
         "steady_resident_bytes": pipeline.steady_resident_bytes,
         "peak_resident_bytes": pipeline.peak_resident_bytes,

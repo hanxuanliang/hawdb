@@ -1331,7 +1331,7 @@ impl GraphStore {
             .get(&(source, rel_type))
             .into_iter()
             .flat_map(AdjacencyPostingList::iter_copied)
-            .filter_map(|rel_id| self.relationships.get(&rel_id))
+            .filter_map(|entry| self.relationships.get(&entry.relationship_id))
     }
 
     #[inline]
@@ -1344,7 +1344,7 @@ impl GraphStore {
             .get(&(target, rel_type))
             .into_iter()
             .flat_map(AdjacencyPostingList::iter_copied)
-            .filter_map(|rel_id| self.relationships.get(&rel_id))
+            .filter_map(|entry| self.relationships.get(&entry.relationship_id))
     }
 
     pub fn visit_adjacent_relationships_owned(
@@ -1355,6 +1355,11 @@ impl GraphStore {
         mut consumer: impl FnMut(RelRecord) -> GraphScanControl,
     ) -> Result<GraphScanControl> {
         let Some(reader) = &self.canonical_base else {
+            if let Some(rel_type) = rel_type {
+                return self.visit_live_adjacent_relationships_owned(
+                    node_id, rel_type, direction, consumer,
+                );
+            }
             return self.visit_relationships_owned(rel_type, |relationship| {
                 let adjacent = match direction {
                     AdjacencyDirection::Outgoing => relationship.source == node_id,
@@ -1432,6 +1437,10 @@ impl GraphStore {
         if canonical_control == CanonicalScanControl::Stop {
             return Ok(graph_control);
         }
+        if let Some(rel_type) = rel_type {
+            return self
+                .visit_live_adjacent_relationships_owned(node_id, rel_type, direction, consumer);
+        }
         for relationship in self.relationships.values() {
             if rel_type.is_some_and(|rel_type| relationship.rel_type != rel_type) {
                 continue;
@@ -1447,6 +1456,30 @@ impl GraphStore {
         Ok(GraphScanControl::Continue)
     }
 
+    fn visit_live_adjacent_relationships_owned(
+        &self,
+        node_id: NodeId,
+        rel_type: RelTypeId,
+        direction: AdjacencyDirection,
+        mut consumer: impl FnMut(RelRecord) -> GraphScanControl,
+    ) -> Result<GraphScanControl> {
+        let Some(entries) = self.adjacency_relationship_ids(node_id, rel_type, direction) else {
+            return Ok(GraphScanControl::Continue);
+        };
+        for entry in entries.iter_copied() {
+            let Some(relationship) = self.relationships.get(&entry.relationship_id) else {
+                return Err(SkeinError::StorageIntegrity(format!(
+                    "live adjacency references missing relationship {}",
+                    entry.relationship_id.0
+                )));
+            };
+            if consumer(relationship.clone()) == GraphScanControl::Stop {
+                return Ok(GraphScanControl::Stop);
+            }
+        }
+        Ok(GraphScanControl::Continue)
+    }
+
     pub fn try_visit_ordered_adjacent_relationships_owned(
         &self,
         node_id: NodeId,
@@ -1455,35 +1488,27 @@ impl GraphStore {
         memory_budget_bytes: usize,
         mut consumer: impl FnMut(RelRecord) -> Result<GraphScanControl>,
     ) -> Result<GraphScanControl> {
-        let (Some(reader), Some(adjacency), Some(rel_type)) = (
-            self.canonical_base.as_ref(),
-            self.canonical_adjacency.as_ref(),
-            rel_type,
-        ) else {
+        let Some(rel_type) = rel_type else {
             return self.try_visit_compact_sorted_adjacency(
                 node_id,
-                rel_type,
+                None,
                 direction,
                 memory_budget_bytes,
                 consumer,
             );
         };
+        let mut live_entries = self
+            .adjacency_relationship_ids(node_id, rel_type, direction)
+            .into_iter()
+            .flat_map(AdjacencyPostingList::iter_copied)
+            .peekable();
+        let (Some(reader), Some(adjacency)) = (
+            self.canonical_base.as_ref(),
+            self.canonical_adjacency.as_ref(),
+        ) else {
+            return emit_live_adjacency_before(self, &mut live_entries, None, &mut consumer);
+        };
 
-        let mut delta_entries = Vec::new();
-        for relationship in self.relationships.values() {
-            if relationship.rel_type != rel_type
-                || !relationship_is_adjacent(relationship, node_id, direction)
-            {
-                continue;
-            }
-            push_compact_adjacency_key(
-                &mut delta_entries,
-                ordered_relationship_key(relationship, direction),
-                memory_budget_bytes,
-            )?;
-        }
-        delta_entries.sort_unstable();
-        let mut delta_index = 0usize;
         let mut graph_control = GraphScanControl::Continue;
         let mut consumer_error = None;
         let (report, canonical_control) = adjacency
@@ -1508,10 +1533,9 @@ impl GraphStore {
                     return Ok(CanonicalScanControl::Continue);
                 }
                 let canonical_key = ordered_relationship_key(&relationship, direction);
-                match emit_compact_adjacency_before(
+                match emit_live_adjacency_before(
                     self,
-                    &delta_entries,
-                    &mut delta_index,
+                    &mut live_entries,
                     Some(canonical_key),
                     &mut consumer,
                 ) {
@@ -1553,7 +1577,7 @@ impl GraphStore {
         if canonical_control == CanonicalScanControl::Stop {
             return Ok(graph_control);
         }
-        emit_compact_adjacency_before(self, &delta_entries, &mut delta_index, None, &mut consumer)
+        emit_live_adjacency_before(self, &mut live_entries, None, &mut consumer)
     }
 
     fn try_visit_compact_sorted_adjacency(
@@ -1814,23 +1838,10 @@ impl GraphStore {
         rel_type: RelTypeId,
         direction: AdjacencyDirection,
     ) -> Vec<OrderedAdjacencyEntry> {
-        let mut entries = self
-            .adjacency_relationship_ids(node_id, rel_type, direction)
+        self.adjacency_relationship_ids(node_id, rel_type, direction)
             .into_iter()
             .flat_map(AdjacencyPostingList::iter_copied)
-            .filter_map(|rel_id| {
-                let relationship = self.relationships.get(&rel_id)?;
-                Some(OrderedAdjacencyEntry {
-                    relationship_id: relationship.id,
-                    neighbor_id: match direction {
-                        AdjacencyDirection::Outgoing => relationship.target,
-                        AdjacencyDirection::Incoming => relationship.source,
-                    },
-                })
-            })
-            .collect::<Vec<_>>();
-        entries.sort_by_key(|entry| (entry.neighbor_id, entry.relationship_id));
-        entries
+            .collect()
     }
 
     pub fn ordered_adjacency_entries_for_node(
@@ -1846,16 +1857,6 @@ impl GraphStore {
             .iter()
             .filter(|((group_node, _), _)| *group_node == node_id)
             .flat_map(|(_, rel_ids)| rel_ids.iter_copied())
-            .filter_map(|rel_id| {
-                let relationship = self.relationships.get(&rel_id)?;
-                Some(OrderedAdjacencyEntry {
-                    relationship_id: relationship.id,
-                    neighbor_id: match direction {
-                        AdjacencyDirection::Outgoing => relationship.target,
-                        AdjacencyDirection::Incoming => relationship.source,
-                    },
-                })
-            })
             .collect::<Vec<_>>();
         entries.sort_by_key(|entry| (entry.neighbor_id, entry.relationship_id));
         entries
@@ -2571,37 +2572,29 @@ impl GraphStore {
     }
 }
 
-fn relationship_is_adjacent(
-    relationship: &RelRecord,
-    node_id: NodeId,
-    direction: AdjacencyDirection,
-) -> bool {
-    match direction {
-        AdjacencyDirection::Outgoing => relationship.source == node_id,
-        AdjacencyDirection::Incoming => relationship.target == node_id,
-    }
-}
-
 fn ordered_relationship_key(
     relationship: &RelRecord,
     direction: AdjacencyDirection,
-) -> (NodeId, RelId) {
+) -> OrderedAdjacencyEntry {
     let neighbor = match direction {
         AdjacencyDirection::Outgoing => relationship.target,
         AdjacencyDirection::Incoming => relationship.source,
     };
-    (neighbor, relationship.id)
+    OrderedAdjacencyEntry {
+        neighbor_id: neighbor,
+        relationship_id: relationship.id,
+    }
 }
 
 fn push_compact_adjacency_key(
-    entries: &mut Vec<(NodeId, RelId)>,
-    entry: (NodeId, RelId),
+    entries: &mut Vec<OrderedAdjacencyEntry>,
+    entry: OrderedAdjacencyEntry,
     memory_budget_bytes: usize,
 ) -> Result<()> {
     let required_bytes = entries
         .len()
         .saturating_add(1)
-        .saturating_mul(std::mem::size_of::<(NodeId, RelId)>());
+        .saturating_mul(std::mem::size_of::<OrderedAdjacencyEntry>());
     if required_bytes > memory_budget_bytes {
         return Err(SkeinError::Execution(format!(
             "ordered adjacency keys use {required_bytes} bytes, exceeding blocking_operator_bytes {memory_budget_bytes}"
@@ -2613,9 +2606,9 @@ fn push_compact_adjacency_key(
 
 fn emit_compact_adjacency_before(
     store: &GraphStore,
-    entries: &[(NodeId, RelId)],
+    entries: &[OrderedAdjacencyEntry],
     index: &mut usize,
-    before: Option<(NodeId, RelId)>,
+    before: Option<OrderedAdjacencyEntry>,
     consumer: &mut impl FnMut(RelRecord) -> Result<GraphScanControl>,
 ) -> Result<GraphScanControl> {
     while let Some(entry) = entries.get(*index).copied() {
@@ -2623,13 +2616,37 @@ fn emit_compact_adjacency_before(
             break;
         }
         *index = index.saturating_add(1);
-        let Some(relationship) = store.relationship_owned(entry.1)? else {
+        let Some(relationship) = store.relationship_owned(entry.relationship_id)? else {
             return Err(SkeinError::StorageIntegrity(format!(
                 "ordered adjacency references missing relationship {}",
-                entry.1 .0
+                entry.relationship_id.0
             )));
         };
         if consumer(relationship)? == GraphScanControl::Stop {
+            return Ok(GraphScanControl::Stop);
+        }
+    }
+    Ok(GraphScanControl::Continue)
+}
+
+fn emit_live_adjacency_before(
+    store: &GraphStore,
+    entries: &mut std::iter::Peekable<impl Iterator<Item = OrderedAdjacencyEntry>>,
+    before: Option<OrderedAdjacencyEntry>,
+    consumer: &mut impl FnMut(RelRecord) -> Result<GraphScanControl>,
+) -> Result<GraphScanControl> {
+    while let Some(entry) = entries.peek().copied() {
+        if before.is_some_and(|before| entry >= before) {
+            break;
+        }
+        entries.next();
+        let Some(relationship) = store.relationships.get(&entry.relationship_id) else {
+            return Err(SkeinError::StorageIntegrity(format!(
+                "live ordered adjacency references missing relationship {}",
+                entry.relationship_id.0
+            )));
+        };
+        if consumer(relationship.clone())? == GraphScanControl::Stop {
             return Ok(GraphScanControl::Stop);
         }
     }

@@ -1221,6 +1221,12 @@ reclamation remain separate activation contracts.
    degree threshold.
 5. Relationship create/delete MUST preserve endpoint and adjacency-index
    agreement in the same commit epoch.
+6. A live typed adjacency overlay MUST retain `(neighbor_id, relationship_id)`
+   order in its posting state. Its read cursor MUST merge immutable and live
+   entries without constructing a degree-sized query buffer, and MUST stop
+   before reading the next entry after downstream cancellation or `LIMIT`.
+7. Ordering across unspecified relationship types MAY use a blocking merge only
+   when its complete compact-key state is admitted by the query root ledger.
 
 ### Stable identity export mapping
 

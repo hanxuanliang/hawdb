@@ -238,9 +238,13 @@ Adjacency access also exposes a stable ordered view sorted by
 `(neighbor_id, relationship_id)` plus sparse/dense group classification. The
 executor consumes that ordered view for one-hop and bounded outgoing expansion,
 so query traversal order is independent of the current relationship-id index
-layout. The current implementation computes the view over in-memory adjacency
-indexes; the same API is the boundary for later sparse blocks and copy-on-write
-dense segments.
+layout. Typed live posting lists maintain that order incrementally and merge
+their immutable pivot with bounded mutation deltas without materializing a
+degree-sized query buffer. Canonical adjacency blocks expose the same cursor
+contract, so a typed expansion can merge the canonical and live streams and
+stop immediately at cancellation or `LIMIT`. An untyped relationship expansion
+may still use the explicitly admitted blocking fallback needed to order entries
+across relationship types.
 
 ## Cypher Pipeline
 

@@ -62,23 +62,27 @@ degree used three warmups followed by eleven samples of 64 executions.
 
 | Degree | Returned / expanded edges | P50 | P95 | Query-ledger peak | Batch peak |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 1 | 3.102 us | 3.457 us | 1,020 B | 1 row |
-| 32 | 32 | 13.757 us | 14.503 us | 12,978 B | 16 rows |
-| 1,024 | 50 | 27.634 us | 27.996 us | 12,978 B | 16 rows |
-| 100,000 | 50 | 843.990 us | 858.343 us | 12,978 B | 16 rows |
+| 1 | 1 | 3.386 us | 4.589 us | 1,020 B | 1 row |
+| 32 | 32 | 14.582 us | 19.564 us | 12,978 B | 16 rows |
+| 1,024 | 50 | 21.694 us | 24.638 us | 12,978 B | 16 rows |
+| 100,000 | 50 | 272.464 us | 312.365 us | 12,978 B | 16 rows |
 
 The executor and consumer boundary is bounded: output, expanded edges, batch
-rows, and ledger completion do not grow beyond the configured limits. The
-100,000-degree latency is nevertheless not constant. An in-memory live
-adjacency group currently materializes and sorts compact `(NodeId, RelId)`
-keys before its stable ordered cursor can emit the first row. That temporary
-vector is protected by `blocking_operator_bytes`, but is not represented in
-the query-ledger peak above. The benchmark therefore records the fixture's
-ordering-key upper bound explicitly and must not be read as proof that the
-complete storage-to-consumer path has constant memory or latency. A follow-up
-needs to move live ordering state under the query ledger and replace the
-whole-group sort with a bounded order-preserving cursor; canonical persisted
-adjacency already streams in stable order.
+rows, and ledger completion do not grow beyond the configured limits. Live
+typed adjacency now stores `(neighbor_id, relationship_id)` in posting order,
+so the query cursor emits the prefix directly and no longer constructs a
+degree-sized ordering vector. At degree 100,000 this reduced P50 from the prior
+843.990 us spot check to 272.464 us, a 3.10x improvement, while the expansion
+report still proves that only 50 relationships crossed the cursor boundary.
+
+The remaining degree-correlated latency and RSS are not query ordering state:
+the in-memory fixture itself retains all nodes, relationships, and both live
+adjacency indexes. This local result therefore proves early cursor termination
+and bounded executor memory, not constant whole-database residency. Canonical
+persisted adjacency remains the out-of-core production path. An expansion with
+no relationship type still uses a complete compact-key sort admitted by
+`blocking_operator_bytes`; the physical `AdjacencyExpandExec` path measured
+here has a concrete relationship type and uses the streaming cursor.
 
 ## Local Result
 

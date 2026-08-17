@@ -157,6 +157,18 @@ accounts. TLC checks the root and local bounds plus the no-leak terminal-state
 invariant. The implementation records root budget, peak charge, completion
 charge, and account count in `PipelineMemoryReport`.
 
+Typed adjacency expansion refines the zero-transient-state branch of this
+model: `AdjacencyPostingList` keeps live entries ordered in snapshot-owned
+storage, and `GraphStore::try_visit_ordered_adjacent_relationships_owned`
+merges the canonical and live cursors without reserving a degree-sized query
+buffer. This claim does not include the untyped cross-relationship-type
+fallback, which still constructs compact keys behind the static blocking
+operator limit and must be connected to the query root before it can satisfy
+the stronger requirement in the storage spec. Posting pivots and bounded
+deltas remain immutable for pinned snapshots, so their visibility follows
+`SkeinConcurrentSnapshots.tla`; durable canonical adjacency ordering and
+publication continue to follow `SkeinGraphDescriptorPaging.tla`.
+
 ## Bounded Morsel Merge
 
 `SkeinBoundedMorselMerge.tla` models the production shared-pool result path for

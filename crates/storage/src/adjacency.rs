@@ -9,6 +9,12 @@ pub const ADJACENCY_MINI_DELTA_MAX_ENTRIES: usize = 64;
 pub const ADJACENCY_DELTA_CONSOLIDATION_ENTRIES: usize = ADJACENCY_MINI_DELTA_MAX_ENTRIES * 2;
 pub const ADJACENCY_DELTA_HARD_MAX_ENTRIES: usize = ADJACENCY_MINI_DELTA_MAX_ENTRIES * 8;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct OrderedAdjacencyEntry {
+    pub neighbor_id: NodeId,
+    pub relationship_id: RelId,
+}
+
 /// A snapshot-friendly adjacency posting list with an immutable pivot and a
 /// bounded mini-delta for high-degree mutations.
 ///
@@ -26,13 +32,13 @@ pub struct AdjacencyPostingList {
 
 #[derive(Debug)]
 enum AdjacencyPostingState {
-    Pivot(BTreeSet<RelId>),
+    Pivot(BTreeSet<OrderedAdjacencyEntry>),
     Delta {
         pivot: Arc<AdjacencyPostingState>,
-        sealed: Vec<Arc<BTreeMap<RelId, bool>>>,
-        active: BTreeMap<RelId, bool>,
+        sealed: Vec<Arc<BTreeMap<OrderedAdjacencyEntry, bool>>>,
+        active: BTreeMap<OrderedAdjacencyEntry, bool>,
         len: usize,
-        read_view: OnceLock<Arc<BTreeSet<RelId>>>,
+        read_view: OnceLock<Arc<BTreeSet<OrderedAdjacencyEntry>>>,
     },
 }
 
@@ -65,8 +71,8 @@ impl Default for AdjacencyPostingList {
     }
 }
 
-impl From<BTreeSet<RelId>> for AdjacencyPostingList {
-    fn from(pivot: BTreeSet<RelId>) -> Self {
+impl From<BTreeSet<OrderedAdjacencyEntry>> for AdjacencyPostingList {
+    fn from(pivot: BTreeSet<OrderedAdjacencyEntry>) -> Self {
         Self {
             state: Arc::new(AdjacencyPostingState::Pivot(pivot)),
         }
@@ -96,21 +102,21 @@ impl AdjacencyPostingList {
     }
 
     #[inline]
-    pub fn contains(&self, id: &RelId) -> bool {
+    pub fn contains(&self, entry: &OrderedAdjacencyEntry) -> bool {
         match self.state.as_ref() {
-            AdjacencyPostingState::Pivot(pivot) => pivot.contains(id),
+            AdjacencyPostingState::Pivot(pivot) => pivot.contains(entry),
             AdjacencyPostingState::Delta {
                 pivot,
                 sealed,
                 active,
                 ..
-            } => override_presence(sealed, active, id)
-                .unwrap_or_else(|| pivot_set(pivot).contains(id)),
+            } => override_presence(sealed, active, entry)
+                .unwrap_or_else(|| pivot_set(pivot).contains(entry)),
         }
     }
 
-    pub fn insert(&mut self, id: RelId) -> bool {
-        if self.contains(&id) {
+    pub fn insert(&mut self, entry: OrderedAdjacencyEntry) -> bool {
+        if self.contains(&entry) {
             return false;
         }
         match self.state.as_ref() {
@@ -121,7 +127,7 @@ impl AdjacencyPostingList {
                 self.state = Arc::new(AdjacencyPostingState::Delta {
                     pivot: Arc::clone(&self.state),
                     sealed: Vec::new(),
-                    active: BTreeMap::from([(id, true)]),
+                    active: BTreeMap::from([(entry, true)]),
                     len: pivot.len().saturating_add(1),
                     read_view: OnceLock::new(),
                 });
@@ -130,7 +136,7 @@ impl AdjacencyPostingList {
                 let AdjacencyPostingState::Pivot(pivot) = Arc::make_mut(&mut self.state) else {
                     unreachable!("matched pivot state");
                 };
-                pivot.insert(id);
+                pivot.insert(entry);
             }
             AdjacencyPostingState::Delta { .. } => {
                 let AdjacencyPostingState::Delta {
@@ -144,10 +150,10 @@ impl AdjacencyPostingList {
                     unreachable!("matched delta state");
                 };
                 read_view.take();
-                if presence_before_active(pivot, sealed, &id) {
-                    active.remove(&id);
+                if presence_before_active(pivot, sealed, &entry) {
+                    active.remove(&entry);
                 } else {
-                    active.insert(id, true);
+                    active.insert(entry, true);
                 }
                 *len = len.saturating_add(1);
             }
@@ -156,8 +162,8 @@ impl AdjacencyPostingList {
         true
     }
 
-    pub fn remove(&mut self, id: &RelId) -> bool {
-        if !self.contains(id) {
+    pub fn remove(&mut self, entry: &OrderedAdjacencyEntry) -> bool {
+        if !self.contains(entry) {
             return false;
         }
         match self.state.as_ref() {
@@ -168,7 +174,7 @@ impl AdjacencyPostingList {
                 self.state = Arc::new(AdjacencyPostingState::Delta {
                     pivot: Arc::clone(&self.state),
                     sealed: Vec::new(),
-                    active: BTreeMap::from([(*id, false)]),
+                    active: BTreeMap::from([(*entry, false)]),
                     len: pivot.len().saturating_sub(1),
                     read_view: OnceLock::new(),
                 });
@@ -177,7 +183,7 @@ impl AdjacencyPostingList {
                 let AdjacencyPostingState::Pivot(pivot) = Arc::make_mut(&mut self.state) else {
                     unreachable!("matched pivot state");
                 };
-                pivot.remove(id);
+                pivot.remove(entry);
             }
             AdjacencyPostingState::Delta { .. } => {
                 let AdjacencyPostingState::Delta {
@@ -191,10 +197,10 @@ impl AdjacencyPostingList {
                     unreachable!("matched delta state");
                 };
                 read_view.take();
-                if presence_before_active(pivot, sealed, id) {
-                    active.insert(*id, false);
+                if presence_before_active(pivot, sealed, entry) {
+                    active.insert(*entry, false);
                 } else {
-                    active.remove(id);
+                    active.remove(entry);
                 }
                 *len = len.saturating_sub(1);
             }
@@ -204,12 +210,12 @@ impl AdjacencyPostingList {
     }
 
     #[inline]
-    pub fn iter(&self) -> btree_set::Iter<'_, RelId> {
+    pub fn iter(&self) -> btree_set::Iter<'_, OrderedAdjacencyEntry> {
         self.read_view().iter()
     }
 
-    /// Iterates relationship IDs in order without constructing a full read
-    /// view for delta-backed postings.
+    /// Iterates adjacency entries in neighbor/relationship order without
+    /// constructing a full read view for delta-backed postings.
     pub fn iter_copied(&self) -> AdjacencyPostingIter<'_> {
         AdjacencyPostingIter::new(self)
     }
@@ -287,12 +293,12 @@ impl AdjacencyPostingList {
         }
     }
 
-    fn materialize(&self) -> BTreeSet<RelId> {
+    fn materialize(&self) -> BTreeSet<OrderedAdjacencyEntry> {
         self.iter_copied().collect()
     }
 
     #[inline]
-    fn read_view(&self) -> &BTreeSet<RelId> {
+    fn read_view(&self) -> &BTreeSet<OrderedAdjacencyEntry> {
         match self.state.as_ref() {
             AdjacencyPostingState::Pivot(pivot) => pivot,
             AdjacencyPostingState::Delta { read_view, .. } => read_view
@@ -314,13 +320,13 @@ pub struct AdjacencyPostingIter<'a> {
 }
 
 enum AdjacencyPostingIterInner<'a> {
-    Pivot(btree_set::Iter<'a, RelId>),
+    Pivot(btree_set::Iter<'a, OrderedAdjacencyEntry>),
     Delta(DeltaAdjacencyPostingIter<'a>),
 }
 
 struct DeltaAdjacencyPostingIter<'a> {
-    pivot: Peekable<btree_set::Iter<'a, RelId>>,
-    deltas: Vec<Peekable<btree_map::Iter<'a, RelId, bool>>>,
+    pivot: Peekable<btree_set::Iter<'a, OrderedAdjacencyEntry>>,
+    deltas: Vec<Peekable<btree_map::Iter<'a, OrderedAdjacencyEntry, bool>>>,
     remaining: usize,
 }
 
@@ -355,24 +361,24 @@ impl<'a> AdjacencyPostingIter<'a> {
 }
 
 impl Iterator for DeltaAdjacencyPostingIter<'_> {
-    type Item = RelId;
+    type Item = OrderedAdjacencyEntry;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let mut next_id = self.pivot.peek().map(|id| **id);
+            let mut next_entry = self.pivot.peek().map(|entry| **entry);
             for delta in &mut self.deltas {
-                if let Some(id) = delta.peek().map(|entry| *entry.0) {
-                    next_id = Some(next_id.map_or(id, |current| current.min(id)));
+                if let Some(entry) = delta.peek().map(|entry| *entry.0) {
+                    next_entry = Some(next_entry.map_or(entry, |current| current.min(entry)));
                 }
             }
-            let next_id = next_id?;
+            let next_entry = next_entry?;
             let mut present = false;
-            if self.pivot.peek().is_some_and(|id| **id == next_id) {
+            if self.pivot.peek().is_some_and(|entry| **entry == next_entry) {
                 self.pivot.next();
                 present = true;
             }
             for delta in &mut self.deltas {
-                if delta.peek().is_some_and(|entry| *entry.0 == next_id) {
+                if delta.peek().is_some_and(|entry| *entry.0 == next_entry) {
                     let (_, override_present) =
                         delta.next().expect("peeked delta entry must exist");
                     present = *override_present;
@@ -380,7 +386,7 @@ impl Iterator for DeltaAdjacencyPostingIter<'_> {
             }
             if present {
                 self.remaining = self.remaining.saturating_sub(1);
-                return Some(next_id);
+                return Some(next_entry);
             }
         }
     }
@@ -391,7 +397,7 @@ impl Iterator for DeltaAdjacencyPostingIter<'_> {
 }
 
 impl Iterator for AdjacencyPostingIter<'_> {
-    type Item = RelId;
+    type Item = OrderedAdjacencyEntry;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
@@ -412,7 +418,7 @@ impl Iterator for AdjacencyPostingIter<'_> {
 impl ExactSizeIterator for AdjacencyPostingIter<'_> {}
 impl FusedIterator for AdjacencyPostingIter<'_> {}
 
-fn pivot_set(state: &AdjacencyPostingState) -> &BTreeSet<RelId> {
+fn pivot_set(state: &AdjacencyPostingState) -> &BTreeSet<OrderedAdjacencyEntry> {
     let AdjacencyPostingState::Pivot(pivot) = state else {
         unreachable!("mini-delta pivots are always consolidated states");
     };
@@ -421,25 +427,27 @@ fn pivot_set(state: &AdjacencyPostingState) -> &BTreeSet<RelId> {
 
 fn presence_before_active(
     pivot: &AdjacencyPostingState,
-    sealed: &[Arc<BTreeMap<RelId, bool>>],
-    id: &RelId,
+    sealed: &[Arc<BTreeMap<OrderedAdjacencyEntry, bool>>],
+    entry: &OrderedAdjacencyEntry,
 ) -> bool {
     sealed
         .iter()
         .rev()
-        .find_map(|block| block.get(id).copied())
-        .unwrap_or_else(|| pivot_set(pivot).contains(id))
+        .find_map(|block| block.get(entry).copied())
+        .unwrap_or_else(|| pivot_set(pivot).contains(entry))
 }
 
 fn override_presence(
-    sealed: &[Arc<BTreeMap<RelId, bool>>],
-    active: &BTreeMap<RelId, bool>,
-    id: &RelId,
+    sealed: &[Arc<BTreeMap<OrderedAdjacencyEntry, bool>>],
+    active: &BTreeMap<OrderedAdjacencyEntry, bool>,
+    entry: &OrderedAdjacencyEntry,
 ) -> Option<bool> {
-    active
-        .get(id)
-        .copied()
-        .or_else(|| sealed.iter().rev().find_map(|block| block.get(id).copied()))
+    active.get(entry).copied().or_else(|| {
+        sealed
+            .iter()
+            .rev()
+            .find_map(|block| block.get(entry).copied())
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -452,12 +460,6 @@ pub enum AdjacencyDirection {
 pub enum AdjacencyLayout {
     Sparse,
     Dense,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OrderedAdjacencyEntry {
-    pub relationship_id: RelId,
-    pub neighbor_id: NodeId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -500,7 +502,7 @@ mod tests {
         let mut posting = AdjacencyPostingList::from(rel_ids(0..8));
         let snapshot = posting.clone();
 
-        assert!(posting.insert(RelId(8)));
+        assert!(posting.insert(entry(8)));
 
         assert!(!posting.shares_pivot_with(&snapshot));
         assert_eq!(posting.mini_delta_len(), 0);
@@ -515,19 +517,55 @@ mod tests {
     }
 
     #[test]
+    fn posting_order_uses_neighbor_before_relationship_identity() {
+        let posting = AdjacencyPostingList::from(BTreeSet::from([
+            OrderedAdjacencyEntry {
+                neighbor_id: NodeId(9),
+                relationship_id: RelId(1),
+            },
+            OrderedAdjacencyEntry {
+                neighbor_id: NodeId(3),
+                relationship_id: RelId(8),
+            },
+            OrderedAdjacencyEntry {
+                neighbor_id: NodeId(3),
+                relationship_id: RelId(2),
+            },
+        ]));
+
+        assert_eq!(
+            posting.iter_copied().collect::<Vec<_>>(),
+            vec![
+                OrderedAdjacencyEntry {
+                    neighbor_id: NodeId(3),
+                    relationship_id: RelId(2),
+                },
+                OrderedAdjacencyEntry {
+                    neighbor_id: NodeId(3),
+                    relationship_id: RelId(8),
+                },
+                OrderedAdjacencyEntry {
+                    neighbor_id: NodeId(9),
+                    relationship_id: RelId(1),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn shared_dense_posting_buffers_changes_without_detaching_pivot() {
         let mut posting = AdjacencyPostingList::from(rel_ids(0..128));
         let snapshot = posting.clone();
 
-        assert!(posting.remove(&RelId(2)));
-        assert!(posting.insert(RelId(256)));
+        assert!(posting.remove(&entry(2)));
+        assert!(posting.insert(entry(256)));
 
         assert!(posting.shares_pivot_with(&snapshot));
         assert_eq!(posting.mini_delta_len(), 2);
-        assert!(!posting.contains(&RelId(2)));
-        assert!(posting.contains(&RelId(256)));
-        assert!(snapshot.contains(&RelId(2)));
-        assert!(!snapshot.contains(&RelId(256)));
+        assert!(!posting.contains(&entry(2)));
+        assert!(posting.contains(&entry(256)));
+        assert!(snapshot.contains(&entry(2)));
+        assert!(!snapshot.contains(&entry(256)));
     }
 
     #[test]
@@ -535,7 +573,7 @@ mod tests {
         let mut posting = AdjacencyPostingList::from(rel_ids(0..128));
         let snapshot = posting.clone();
         for id in 0..ADJACENCY_MINI_DELTA_MAX_ENTRIES {
-            assert!(posting.insert(RelId(1_000 + id as u64)));
+            assert!(posting.insert(entry(1_000 + id as u64)));
         }
 
         assert!(posting.shares_pivot_with(&snapshot));
@@ -551,7 +589,7 @@ mod tests {
         let mut posting = AdjacencyPostingList::from(rel_ids(0..128));
         let snapshot = posting.clone();
         for id in 0..ADJACENCY_DELTA_CONSOLIDATION_ENTRIES {
-            assert!(posting.insert(RelId(1_000 + id as u64)));
+            assert!(posting.insert(entry(1_000 + id as u64)));
         }
 
         assert!(posting.shares_pivot_with(&snapshot));
@@ -570,7 +608,7 @@ mod tests {
         let mut posting = AdjacencyPostingList::from(rel_ids(0..128));
         let snapshot = posting.clone();
         for id in 0..ADJACENCY_DELTA_HARD_MAX_ENTRIES {
-            assert!(posting.insert(RelId(1_000 + id as u64)));
+            assert!(posting.insert(entry(1_000 + id as u64)));
         }
 
         assert!(!posting.shares_pivot_with(&snapshot));
@@ -585,17 +623,17 @@ mod tests {
         let snapshot = posting.clone();
         let mut reference = rel_ids(0..256);
         for id in (0..128_u64).step_by(2) {
-            assert!(posting.remove(&RelId(id)));
-            reference.remove(&RelId(id));
+            assert!(posting.remove(&entry(id)));
+            reference.remove(&entry(id));
         }
         for id in 1_000..1_064_u64 {
-            assert!(posting.insert(RelId(id)));
-            reference.insert(RelId(id));
+            assert!(posting.insert(entry(id)));
+            reference.insert(entry(id));
         }
-        assert!(posting.insert(RelId(2)));
-        reference.insert(RelId(2));
-        assert!(posting.remove(&RelId(1_001)));
-        reference.remove(&RelId(1_001));
+        assert!(posting.insert(entry(2)));
+        reference.insert(entry(2));
+        assert!(posting.remove(&entry(1_001)));
+        reference.remove(&entry(1_001));
 
         let AdjacencyPostingState::Delta { read_view, .. } = posting.state.as_ref() else {
             panic!("posting should retain delta state");
@@ -621,11 +659,11 @@ mod tests {
         let mut reference = BTreeSet::new();
         let mut snapshots = Vec::new();
         for step in 0..512_u64 {
-            let id = RelId((step.wrapping_mul(73).wrapping_add(19)) % 181);
+            let entry = entry((step.wrapping_mul(73).wrapping_add(19)) % 181);
             if step % 3 == 0 {
-                assert_eq!(posting.remove(&id), reference.remove(&id));
+                assert_eq!(posting.remove(&entry), reference.remove(&entry));
             } else {
-                assert_eq!(posting.insert(id), reference.insert(id));
+                assert_eq!(posting.insert(entry), reference.insert(entry));
             }
             if step % 37 == 0 {
                 snapshots.push((posting.clone(), reference.clone()));
@@ -639,11 +677,18 @@ mod tests {
         }
     }
 
-    fn rel_ids(range: std::ops::Range<u64>) -> BTreeSet<RelId> {
-        range.map(RelId).collect()
+    fn entry(id: u64) -> OrderedAdjacencyEntry {
+        OrderedAdjacencyEntry {
+            neighbor_id: NodeId(id),
+            relationship_id: RelId(id),
+        }
     }
 
-    fn rel_ids_vec(range: std::ops::Range<u64>) -> Vec<RelId> {
-        range.map(RelId).collect()
+    fn rel_ids(range: std::ops::Range<u64>) -> BTreeSet<OrderedAdjacencyEntry> {
+        range.map(entry).collect()
+    }
+
+    fn rel_ids_vec(range: std::ops::Range<u64>) -> Vec<OrderedAdjacencyEntry> {
+        range.map(entry).collect()
     }
 }

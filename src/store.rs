@@ -4350,7 +4350,10 @@ fn maintained_adjacency_groups(
                 rel_type: *rel_type,
                 direction: AdjacencyDirection::Outgoing,
             },
-            rel_ids.iter_copied().collect(),
+            rel_ids
+                .iter_copied()
+                .map(|entry| entry.relationship_id)
+                .collect(),
         );
     }
     for ((node_id, rel_type), rel_ids) in incoming.iter() {
@@ -4360,7 +4363,10 @@ fn maintained_adjacency_groups(
                 rel_type: *rel_type,
                 direction: AdjacencyDirection::Incoming,
             },
-            rel_ids.iter_copied().collect(),
+            rel_ids
+                .iter_copied()
+                .map(|entry| entry.relationship_id)
+                .collect(),
         );
     }
     groups
@@ -8808,7 +8814,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_adjacency_visitor_bounds_compact_sort_keys() {
+    fn ordered_adjacency_visitor_streams_without_degree_sized_sort_keys() {
         let mut catalog = Catalog::default();
         let mut store = GraphStore::in_memory();
         let source = store
@@ -8823,18 +8829,25 @@ mod tests {
                 .unwrap();
         }
         let mention_type = catalog.rel_type_id("MENTIONS").unwrap();
-        let error = store
+        let mut visited = Vec::new();
+        let control = store
             .try_visit_ordered_adjacent_relationships_owned(
                 source,
                 Some(mention_type),
                 AdjacencyDirection::Outgoing,
-                2 * std::mem::size_of::<(NodeId, RelId)>(),
-                |_| Ok(GraphScanControl::Continue),
+                1,
+                |relationship| {
+                    visited.push(relationship.id);
+                    Ok(if visited.len() == 2 {
+                        GraphScanControl::Stop
+                    } else {
+                        GraphScanControl::Continue
+                    })
+                },
             )
-            .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("ordered adjacency keys use 48 bytes"));
+            .unwrap();
+        assert_eq!(control, GraphScanControl::Stop);
+        assert_eq!(visited, vec![RelId(0), RelId(1)]);
     }
 
     #[test]
