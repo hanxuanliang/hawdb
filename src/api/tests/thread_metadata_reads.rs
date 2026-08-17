@@ -127,6 +127,40 @@ fn thread_detail_and_source_lookup_are_bounded_and_snapshot_pinned() {
 }
 
 #[test]
+fn thread_detail_identity_lookup_uses_bounded_union_seek() {
+    let mut db = Database::new();
+    db.query("CREATE (:Thread {id: 'physical-a', thread_id: 'logical-a', title: 'Alpha'})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'logical-b', thread_id: 'logical-a', title: 'Matches both'})")
+        .unwrap();
+    for id in 0..32 {
+        db.query(&format!(
+            "CREATE (:Thread {{id: 'physical-{id}', thread_id: 'logical-{id}', title: 'Filler {id}'}})"
+        ))
+        .unwrap();
+    }
+    db.query("CREATE INDEX ON :Thread(id)").unwrap();
+    db.query("CREATE INDEX ON :Thread(thread_id)").unwrap();
+    let parameters = BTreeMap::from([("id".to_string(), Value::String("logical-a".to_string()))]);
+
+    let explain = db
+        .explain_query_with_params(THREAD_DETAIL_QUERY, &parameters)
+        .unwrap();
+    let physical_plan = explain.physical_plan.explain(0);
+    assert!(physical_plan.contains("IndexNodeUnionSeek"));
+    assert!(physical_plan.contains("NodeProjectionScanExec"));
+
+    let output = db
+        .query_with_params(THREAD_DETAIL_QUERY, &parameters)
+        .unwrap();
+    assert_eq!(output.rows.len(), 1);
+    assert_eq!(
+        output.rows[0].get("title"),
+        Some(&Value::String("Alpha".to_string()))
+    );
+}
+
+#[test]
 fn thread_identity_and_sync_reads_use_exact_bounded_queries() {
     let mut db = Database::new();
     db.query("CREATE (:ThreadIdentity {id: 'identity-a', thread_node_id: 'thread-a', thread_id: 'logical-a', space_id: '', source: 'codex'})")

@@ -328,6 +328,42 @@ fn relationship_existence_predicates_cover_nowledge_orphan_entities() {
 }
 
 #[test]
+fn relationship_existence_stops_before_hydrating_later_large_targets() {
+    let execution_memory = crate::executor::ExecutionMemoryConfig {
+        blocking_operator_bytes: NonZeroUsize::new(1024).unwrap(),
+        ..crate::executor::ExecutionMemoryConfig::default()
+    };
+    let mut db = Database::new_with_config(DatabaseConfig {
+        execution_memory,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Probe {id: 'probe'})-[:LINK]->(:Payload {id: 'first'})")
+        .unwrap();
+    db.query_with_params(
+        "CREATE (:Payload {id: 'later', content: $content})",
+        &BTreeMap::from([("content".to_string(), Value::String("x".repeat(64 * 1024)))]),
+    )
+    .unwrap();
+    db.query(
+        "MATCH (p:Probe {id: 'probe'}), (later:Payload {id: 'later'}) \
+         CREATE (p)-[:LINK]->(later)",
+    )
+    .unwrap();
+
+    let cypher = "MATCH (p:Probe) WHERE (p)-[:LINK]->(:Payload) RETURN p.id AS id";
+    let explain = db.explain_query(cypher).unwrap();
+    let physical_plan = explain.physical_plan.explain(0);
+    assert!(physical_plan.contains("RelationshipExists"));
+
+    let output = db.query(cypher).unwrap();
+    assert_eq!(output.rows.len(), 1);
+    assert_eq!(
+        output.rows[0].get("id"),
+        Some(&Value::String("probe".to_string()))
+    );
+}
+
+#[test]
 fn deletes_only_nodes_matching_relationship_existence_predicates() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'memory-1'})").unwrap();
