@@ -4,6 +4,7 @@ use super::{
         estimate_node_cartesian_product_cost, estimate_physical_plan_cost,
         push_optional_relationship_count_sum_cost_decision,
     },
+    logical_rewrite::{rewrite_logical_plan, LogicalRewriteOutput},
     selected_trace::selected_plan_trace,
     stages::{
         DIRECT_PHYSICAL_FALLBACK_STAGE, LOGICAL_GROUPING_STAGE, PHYSICAL_SEARCH_STAGE,
@@ -128,7 +129,8 @@ impl CascadesOptimizer {
         catalog: &OptimizerCatalog,
         directive: OptimizerSearchDirective,
     ) -> Result<PhysicalPlanRoot, OptimizerSearchDirectiveError> {
-        let logical = root.plan();
+        let rewrite = rewrite_logical_plan(root.plan());
+        let logical = rewrite.plan();
         let required_groups = logical_group_count(logical);
         let max_groups = self.context.optimizer_config().max_groups;
         if directive == OptimizerSearchDirective::Memo && required_groups > max_groups {
@@ -149,6 +151,7 @@ impl CascadesOptimizer {
             } else {
                 OptimizationSearchReport::direct_fallback(required_groups, max_groups)
             };
+            record_logical_rewrite(&mut report, &rewrite);
             report.push_stage_event(
                 LOGICAL_GROUPING_STAGE.trace(StageStats::new(1, required_groups)),
             );
@@ -170,6 +173,7 @@ impl CascadesOptimizer {
         let mut stage_events = Vec::new();
         let plan = best_physical(&memo, root, catalog, &mut decisions, &mut stage_events);
         let mut report = OptimizationSearchReport::memo(memo.group_count());
+        record_logical_rewrite(&mut report, &rewrite);
         report
             .push_stage_event(LOGICAL_GROUPING_STAGE.trace(StageStats::new(1, memo.group_count())));
         let (applied_rules, skipped_rules) = stage_rule_counts(&stage_events);
@@ -187,6 +191,13 @@ impl CascadesOptimizer {
             report.push_decision("selected memo search: explicit optimizer search directive");
         }
         Ok(PhysicalPlanRoot::new(plan, report.into_trace(selected)))
+    }
+}
+
+fn record_logical_rewrite(report: &mut OptimizationSearchReport, rewrite: &LogicalRewriteOutput) {
+    report.push_stage_event(rewrite.trace().clone());
+    for event in rewrite.events().iter().cloned() {
+        report.push_rule_event(event);
     }
 }
 
@@ -302,6 +313,10 @@ impl GroupExpr {
             | LogicalPlan::OptionalRelationshipCountSum { .. }
             | LogicalPlan::ThreadRepairStats { .. }
             | LogicalPlan::ShortestPath { .. } => Self {
+                logical: logical.clone(),
+                children: Vec::new(),
+            },
+            LogicalPlan::Limit { limit: Some(0), .. } => Self {
                 logical: logical.clone(),
                 children: Vec::new(),
             },
@@ -543,6 +558,7 @@ impl GroupExpr {
                     stage_events,
                 )),
             },
+            LogicalPlan::Limit { limit: Some(0), .. } => PhysicalPlan::EmptyExec,
             LogicalPlan::Limit {
                 offset,
                 limit: Some(limit),
@@ -725,6 +741,7 @@ fn graph_expansion_budget(top_k: usize, max_hops: usize) -> GraphExpansionBudget
 
 fn logical_group_count(logical: &LogicalPlan) -> usize {
     match logical {
+        LogicalPlan::Limit { limit: Some(0), .. } => 1,
         LogicalPlan::Expand { input, .. }
         | LogicalPlan::NodeColumnLookup { input, .. }
         | LogicalPlan::OptionalDegree { input, .. }
@@ -980,7 +997,11 @@ fn logical_to_physical_direct(
             limit,
             input,
         } => {
-            if let (Some(limit), LogicalPlan::Sort { items, input }) = (limit, input.as_ref()) {
+            if *limit == Some(0) {
+                PhysicalPlan::EmptyExec
+            } else if let (Some(limit), LogicalPlan::Sort { items, input }) =
+                (limit, input.as_ref())
+            {
                 let input = logical_to_physical_direct(input, catalog, decisions, stage_events);
                 select_bounded_sort_plan(items.clone(), *offset, *limit, input, catalog, decisions)
             } else {

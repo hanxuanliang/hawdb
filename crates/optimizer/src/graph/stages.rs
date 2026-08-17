@@ -1,5 +1,7 @@
 use crate::{ApplyOrder, OptimizationStage};
 
+pub(super) const LOGICAL_REWRITE_STAGE: OptimizationStage =
+    OptimizationStage::new("logical_rewrite", ApplyOrder::FixedPoint);
 pub(super) const LOGICAL_GROUPING_STAGE: OptimizationStage =
     OptimizationStage::new("logical_grouping", ApplyOrder::Once);
 pub(super) const PHYSICAL_SEARCH_STAGE: OptimizationStage =

@@ -9,6 +9,7 @@ mod access_path;
 mod cardinality;
 mod catalog;
 mod costing;
+mod logical_rewrite;
 mod lowering;
 mod properties;
 mod roots;

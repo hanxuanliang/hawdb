@@ -7,6 +7,13 @@ use skein_plan::{SortDirection, SortItem, SortKey};
 
 pub(super) fn selected_plan_properties(plan: &PhysicalPlan) -> PhysicalProperties {
     match plan {
+        PhysicalPlan::EmptyExec => PhysicalProperties {
+            distribution: Distribution::Single,
+            scan_pruning: ScanPruningSupport::ExactEmpty,
+            vector_precision: VectorPrecision::NotVector,
+            memory_budget: MemoryBudgetClass::Constant,
+            ..PhysicalProperties::default()
+        },
         PhysicalPlan::FilterExec { input, .. }
         | PhysicalPlan::ProjectExec { input, .. }
         | PhysicalPlan::LimitExec { input, .. }

@@ -40,6 +40,7 @@ pub enum PhysicalPlanKind {
     DeleteRelationship,
     DeleteRelationshipTargetNodes,
     CreateRelationship,
+    EmptyExec,
     SeqNodeScan,
     SourceSegmentScan,
     NodeCartesianProductExec,
@@ -130,6 +131,7 @@ impl PhysicalPlanKind {
             PhysicalPlanKind::DeleteRelationship,
             PhysicalPlanKind::DeleteRelationshipTargetNodes,
             PhysicalPlanKind::CreateRelationship,
+            PhysicalPlanKind::EmptyExec,
             PhysicalPlanKind::SeqNodeScan,
             PhysicalPlanKind::SourceSegmentScan,
             PhysicalPlanKind::NodeCartesianProductExec,
@@ -204,6 +206,7 @@ impl PhysicalPlanKind {
             PhysicalPlanKind::DeleteRelationship => "DeleteRelationship",
             PhysicalPlanKind::DeleteRelationshipTargetNodes => "DeleteRelationshipTargetNodes",
             PhysicalPlanKind::CreateRelationship => "CreateRelationship",
+            PhysicalPlanKind::EmptyExec => "EmptyExec",
             PhysicalPlanKind::SeqNodeScan => "SeqNodeScan",
             PhysicalPlanKind::SourceSegmentScan => "SourceSegmentScan",
             PhysicalPlanKind::NodeCartesianProductExec => "NodeCartesianProductExec",
@@ -278,7 +281,8 @@ impl PhysicalPlanKind {
             | PhysicalPlanKind::OptionalDegreeExec
             | PhysicalPlanKind::OptionalRelationshipCountSumExec
             | PhysicalPlanKind::ShortestPathExec => PhysicalPlanClass::Traversal,
-            PhysicalPlanKind::NodeCartesianProductExec
+            PhysicalPlanKind::EmptyExec
+            | PhysicalPlanKind::NodeCartesianProductExec
             | PhysicalPlanKind::FilterExec
             | PhysicalPlanKind::ProjectExec
             | PhysicalPlanKind::AggregateExec

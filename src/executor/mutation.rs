@@ -877,7 +877,8 @@ pub fn mutation_command(plan: &PhysicalPlan) -> Result<Option<GraphMutation>> {
                 target_properties: target_properties.clone(),
             },
         ))),
-        PhysicalPlan::SeqNodeScan { .. }
+        PhysicalPlan::EmptyExec
+        | PhysicalPlan::SeqNodeScan { .. }
         | PhysicalPlan::SourceSegmentScan { .. }
         | PhysicalPlan::NodeCartesianProductExec { .. }
         | PhysicalPlan::NodeColumnLookupExec { .. }

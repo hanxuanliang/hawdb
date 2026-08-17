@@ -537,7 +537,7 @@ fn residual_node_property_in_uses_distinct_value_count() {
 }
 
 #[test]
-fn residual_node_property_in_empty_list_estimates_zero_rows() {
+fn empty_in_list_uses_empty_exec_with_cardinality_lower_bound() {
     let logical = LogicalPlan::Filter {
         predicate: Predicate::PropertyIn {
             variable: "m".to_string(),
@@ -562,16 +562,39 @@ fn residual_node_property_in_empty_list_estimates_zero_rows() {
         ),
     );
 
-    let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
-        .optimize_with_catalog(&logical, &catalog);
-
-    assert_eq!(
-        trace.selected_plan_cost,
-        PlanCost {
-            estimated_rows: 0,
-            cost: 2_004,
-        }
-    );
+    let optimizer = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 });
+    let root = LogicalPlanRoot::new(logical);
+    let mut selected_plans = Vec::new();
+    for directive in [
+        OptimizerSearchDirective::Memo,
+        OptimizerSearchDirective::DirectFallback,
+    ] {
+        let output = optimizer
+            .optimize_root_with_catalog_and_directive(&root, &catalog, directive)
+            .expect("empty predicate should fit either optimizer path");
+        let (plan, trace) = output.into_parts();
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 1,
+                cost: 0,
+            }
+        );
+        assert_eq!(trace.selected_plan, "EmptyExec");
+        assert_eq!(
+            trace.selected_plan_operator_counts.get("EmptyExec"),
+            Some(&1)
+        );
+        assert!(!trace
+            .selected_plan_operator_counts
+            .contains_key("SeqNodeScan"));
+        assert!(trace.rule_events.iter().any(|event| {
+            event.rule() == "transformation:replace_false_filter_with_empty_limit"
+        }));
+        assert_eq!(trace.stage_events[0].name(), "logical_rewrite");
+        selected_plans.push(plan);
+    }
+    assert_eq!(selected_plans[0], selected_plans[1]);
 }
 
 #[test]

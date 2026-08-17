@@ -28,6 +28,24 @@ fn spill_test_config(name: &str) -> ExecutionMemoryConfig {
 }
 
 #[test]
+fn empty_exec_returns_without_scanning_or_buffering_rows() {
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::in_memory();
+    store
+        .create_node(&mut catalog, "Item", properties([("rank", Value::Int(1))]))
+        .unwrap();
+
+    let output =
+        execute_with_row_limit_profile(&PhysicalPlan::EmptyExec, &mut catalog, &mut store, None)
+            .unwrap();
+
+    assert!(output.rows.is_empty());
+    assert!(output.profile.scan_pruning_reports.is_empty());
+    assert_eq!(output.profile.pipeline_memory_report.intermediate_rows, 0);
+    assert_eq!(output.profile.pipeline_memory_report.output_rows, 0);
+}
+
+#[test]
 fn sort_pipeline_spills_runs_under_a_tight_memory_budget() {
     let mut catalog = Catalog::default();
     let mut store = GraphStore::in_memory();

@@ -314,6 +314,9 @@ pub(super) fn execute_prepared_binding_batches(
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
     runtime_checkpoint(context.task_context)?;
+    if execution_limit.output_rows == Some(0) {
+        return Ok(BatchControl::Continue);
+    }
     let pipeline_account = context.memory_ledger.account(
         QueryMemoryClass::PipelineBatch,
         format!("{} pipeline", plan.plan().kind().as_str()),
@@ -407,6 +410,7 @@ fn execute_binding_batches_inner(
         ..
     } = context;
     match plan {
+        PhysicalPlan::EmptyExec => Ok(BatchControl::Continue),
         PhysicalPlan::SeqNodeScan { variable, label } => {
             stream_node_scan_batches(variable, label, None, context, execution_limit, emit)
         }

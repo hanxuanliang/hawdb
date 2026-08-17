@@ -66,6 +66,7 @@ impl PhysicalPlan {
                 PhysicalPlanKind::DeleteRelationshipTargetNodes
             }
             PhysicalPlan::CreateRelationship { .. } => PhysicalPlanKind::CreateRelationship,
+            PhysicalPlan::EmptyExec => PhysicalPlanKind::EmptyExec,
             PhysicalPlan::SeqNodeScan { .. } => PhysicalPlanKind::SeqNodeScan,
             PhysicalPlan::SourceSegmentScan { .. } => PhysicalPlanKind::SourceSegmentScan,
             PhysicalPlan::NodeCartesianProductExec { .. } => {
@@ -148,6 +149,7 @@ impl PhysicalPlan {
             | PhysicalPlan::DeleteRelationship { .. }
             | PhysicalPlan::DeleteRelationshipTargetNodes { .. }
             | PhysicalPlan::CreateRelationship { .. }
+            | PhysicalPlan::EmptyExec
             | PhysicalPlan::SeqNodeScan { .. }
             | PhysicalPlan::SourceSegmentScan { .. }
             | PhysicalPlan::IndexNodeSeek { .. }

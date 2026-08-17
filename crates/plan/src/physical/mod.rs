@@ -270,6 +270,7 @@ pub enum PhysicalPlan {
         target_label: String,
         target_properties: BTreeMap<String, Value>,
     },
+    EmptyExec,
     SeqNodeScan {
         variable: String,
         label: String,

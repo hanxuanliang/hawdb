@@ -684,6 +684,7 @@ impl PhysicalPlan {
                 write_properties(output, target_properties);
                 output.push(')');
             }
+            PhysicalPlan::EmptyExec => output.push_str("EmptyExec"),
             PhysicalPlan::SeqNodeScan { variable, label } => {
                 output.push_str("SeqNodeScan(");
                 write_identifier(output, variable);

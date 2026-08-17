@@ -52,6 +52,12 @@ pub(super) fn estimate_physical_plan_cost(
     catalog: &OptimizerCatalog,
 ) -> PlanCost {
     match plan {
+        PhysicalPlan::EmptyExec => PlanCost {
+            // Optimizer cardinalities retain a lower bound of one so an
+            // exact-empty branch cannot annihilate parent cost estimates.
+            estimated_rows: 1,
+            cost: 0,
+        },
         PhysicalPlan::SeqNodeScan { label, .. } => {
             let rows = catalog.label_count(label);
             PlanCost {
@@ -347,6 +353,7 @@ pub(super) fn estimate_physical_plan_cost_breakdown(
     catalog: &OptimizerCatalog,
 ) -> PlanCostBreakdown {
     match plan {
+        PhysicalPlan::EmptyExec => PlanCostBreakdown::new(1, 0, 0, 0, 0),
         PhysicalPlan::SeqNodeScan { label, .. } => {
             let rows = catalog.label_count(label);
             PlanCostBreakdown::new(rows, 0, 0, estimate_node_full_scan_cost(rows), 0)

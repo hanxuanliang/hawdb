@@ -296,6 +296,7 @@ impl PhysicalPlan {
                     "{pad}CreateRelationship source_label={source_label} rel_type={rel_type} target_label={target_label}"
                 )
             }
+            PhysicalPlan::EmptyExec => format!("{pad}EmptyExec"),
             PhysicalPlan::SeqNodeScan { variable, label } => {
                 format!("{pad}SeqNodeScan variable={variable} label={label}")
             }
