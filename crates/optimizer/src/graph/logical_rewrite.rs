@@ -209,7 +209,11 @@ fn rewrite_filter(
     input: LogicalPlan,
     events: &mut Vec<RuleEvent>,
 ) -> LogicalPlan {
-    let predicate = simplify_predicate(predicate);
+    let simplified = simplify_predicate(predicate.clone());
+    if simplified != predicate {
+        record(events, "simplify_filter_predicate");
+    }
+    let predicate = simplified;
     match predicate {
         Predicate::ConstantBool(true) => {
             record(events, "remove_true_filter");
@@ -540,10 +544,53 @@ fn simplify_conjunction(predicates: Vec<Predicate>) -> Predicate {
             predicate => append_unique(&mut simplified, [predicate]),
         }
     }
+    if has_conflicting_exact_conjunction(&simplified) {
+        return Predicate::ConstantBool(false);
+    }
     match simplified.len() {
         0 => Predicate::ConstantBool(true),
         1 => simplified.pop().expect("single predicate should exist"),
         _ => Predicate::And(simplified),
+    }
+}
+
+fn has_conflicting_exact_conjunction(predicates: &[Predicate]) -> bool {
+    predicates.iter().enumerate().any(|(index, predicate)| {
+        predicates[index + 1..]
+            .iter()
+            .any(|other| exact_predicates_conflict(predicate, other))
+    })
+}
+
+fn exact_predicates_conflict(left: &Predicate, right: &Predicate) -> bool {
+    match (left, right) {
+        (
+            Predicate::IdEq {
+                variable: left_variable,
+                value: left_value,
+            },
+            Predicate::IdEq {
+                variable: right_variable,
+                value: right_value,
+            },
+        ) => left_variable == right_variable && left_value != right_value,
+        (
+            Predicate::PropertyEq {
+                variable: left_variable,
+                property: left_property,
+                value: left_value,
+            },
+            Predicate::PropertyEq {
+                variable: right_variable,
+                property: right_property,
+                value: right_value,
+            },
+        ) => {
+            left_variable == right_variable
+                && left_property == right_property
+                && left_value != right_value
+        }
+        _ => false,
     }
 }
 
@@ -557,10 +604,105 @@ fn simplify_disjunction(predicates: Vec<Predicate>) -> Predicate {
             predicate => append_unique(&mut simplified, [predicate]),
         }
     }
+    if let Some(predicate) = collapse_exact_disjunction(&simplified) {
+        return predicate;
+    }
     match simplified.len() {
         0 => Predicate::ConstantBool(false),
         1 => simplified.pop().expect("single predicate should exist"),
         _ => Predicate::Or(simplified),
+    }
+}
+
+fn collapse_exact_disjunction(predicates: &[Predicate]) -> Option<Predicate> {
+    let mut id_variable = None;
+    let mut id_values = Vec::new();
+    let mut property_key = None;
+    let mut property_values = Vec::new();
+
+    for predicate in predicates {
+        match predicate {
+            Predicate::IdEq { variable, value } if property_key.is_none() => {
+                if id_variable
+                    .as_ref()
+                    .is_some_and(|current| current != variable)
+                {
+                    return None;
+                }
+                id_variable.get_or_insert_with(|| variable.clone());
+                push_unique_value(&mut id_values, value.clone());
+            }
+            Predicate::IdIn { variable, values } if property_key.is_none() => {
+                if id_variable
+                    .as_ref()
+                    .is_some_and(|current| current != variable)
+                {
+                    return None;
+                }
+                id_variable.get_or_insert_with(|| variable.clone());
+                for value in values {
+                    push_unique_value(&mut id_values, value.clone());
+                }
+            }
+            Predicate::PropertyEq {
+                variable,
+                property,
+                value,
+            } if id_variable.is_none() => {
+                let key = (variable.clone(), property.clone());
+                if property_key.as_ref().is_some_and(|current| current != &key) {
+                    return None;
+                }
+                property_key.get_or_insert(key);
+                push_unique_value(&mut property_values, value.clone());
+            }
+            Predicate::PropertyIn {
+                variable,
+                property,
+                values,
+            } if id_variable.is_none() => {
+                let key = (variable.clone(), property.clone());
+                if property_key.as_ref().is_some_and(|current| current != &key) {
+                    return None;
+                }
+                property_key.get_or_insert(key);
+                for value in values {
+                    push_unique_value(&mut property_values, value.clone());
+                }
+            }
+            _ => return None,
+        }
+    }
+
+    if let Some(variable) = id_variable {
+        return match id_values.as_slice() {
+            [value] => Some(Predicate::IdEq {
+                variable,
+                value: value.clone(),
+            }),
+            _ => Some(Predicate::IdIn {
+                variable,
+                values: id_values,
+            }),
+        };
+    }
+    property_key.map(|(variable, property)| match property_values.as_slice() {
+        [value] => Predicate::PropertyEq {
+            variable,
+            property,
+            value: value.clone(),
+        },
+        _ => Predicate::PropertyIn {
+            variable,
+            property,
+            values: property_values,
+        },
+    })
+}
+
+fn push_unique_value(values: &mut Vec<Value>, value: Value) {
+    if !values.contains(&value) {
+        values.push(value);
     }
 }
 
@@ -575,9 +717,7 @@ fn append_unique(output: &mut Vec<Predicate>, predicates: impl IntoIterator<Item
 fn deduplicate_values(values: Vec<Value>) -> Vec<Value> {
     let mut output = Vec::with_capacity(values.len());
     for value in values {
-        if !output.contains(&value) {
-            output.push(value);
-        }
+        push_unique_value(&mut output, value);
     }
     output
 }
@@ -647,8 +787,13 @@ mod tests {
 
     #[test]
     fn rewrite_is_idempotent_and_fuses_filters() {
+        let outer = Predicate::PropertyEq {
+            variable: "m".to_string(),
+            property: "space_id".to_string(),
+            value: Value::Int(1),
+        };
         let plan = LogicalPlan::Filter {
-            predicate: Predicate::And(vec![Predicate::ConstantBool(true), property_eq(1)]),
+            predicate: Predicate::And(vec![Predicate::ConstantBool(true), outer.clone()]),
             input: Box::new(LogicalPlan::Filter {
                 predicate: property_eq(2),
                 input: Box::new(scan()),
@@ -664,7 +809,7 @@ mod tests {
             LogicalPlan::Filter {
                 predicate: Predicate::And(predicates),
                 input,
-            } if predicates == &vec![property_eq(2), property_eq(1)]
+            } if predicates == &vec![property_eq(2), outer]
                 && matches!(input.as_ref(), LogicalPlan::NodeScan { .. })
         ));
         assert!(first
@@ -823,6 +968,35 @@ mod tests {
                         LogicalPlan::Expand { rel_properties, optional: true, .. }
                             if rel_properties.is_empty()
                     )
+        ));
+    }
+
+    #[test]
+    fn exact_or_predicates_collapse_to_one_multiseek_predicate() {
+        let plan = LogicalPlan::Filter {
+            predicate: Predicate::Or(vec![property_eq(2), property_eq(1), property_eq(2)]),
+            input: Box::new(scan()),
+        };
+
+        assert!(matches!(
+            rewrite_logical_plan(&plan).plan(),
+            LogicalPlan::Filter {
+                predicate: Predicate::PropertyIn { values, .. },
+                ..
+            } if values == &vec![Value::Int(2), Value::Int(1)]
+        ));
+    }
+
+    #[test]
+    fn conflicting_exact_predicates_become_empty() {
+        let plan = LogicalPlan::Filter {
+            predicate: Predicate::And(vec![property_eq(1), property_eq(2)]),
+            input: Box::new(scan()),
+        };
+
+        assert!(matches!(
+            rewrite_logical_plan(&plan).plan(),
+            LogicalPlan::Limit { limit: Some(0), .. }
         ));
     }
 }

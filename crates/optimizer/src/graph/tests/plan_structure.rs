@@ -157,6 +157,66 @@ fn source_predicate_is_indexed_before_graph_expansion() {
 }
 
 #[test]
+fn exact_or_lookup_lowers_to_one_index_multiseek() {
+    let logical = LogicalPlan::Filter {
+        predicate: Predicate::Or(vec![
+            Predicate::PropertyEq {
+                variable: "m".to_string(),
+                property: "stable_id".to_string(),
+                value: Value::String("memory:1".to_string()),
+            },
+            Predicate::PropertyEq {
+                variable: "m".to_string(),
+                property: "stable_id".to_string(),
+                value: Value::String("memory:2".to_string()),
+            },
+        ]),
+        input: Box::new(LogicalPlan::NodeScan {
+            variable: "m".to_string(),
+            label: "Memory".to_string(),
+        }),
+    };
+    let catalog = OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new(
+            [("Memory".to_string(), "stable_id".to_string())],
+            [],
+            [],
+            [],
+        ),
+        OptimizerCatalogStatistics::new(
+            [("Memory".to_string(), 10_000)],
+            [],
+            [],
+            [],
+            [],
+            [(("Memory".to_string(), "stable_id".to_string()), 10_000)],
+            [],
+        ),
+    );
+
+    let (plan, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+        .optimize_with_catalog(&logical, &catalog);
+
+    assert!(matches!(
+        plan,
+        PhysicalPlan::IndexNodeMultiSeek {
+            property,
+            values,
+            ..
+        } if property == "stable_id"
+            && values
+                == vec![
+                    Value::String("memory:1".to_string()),
+                    Value::String("memory:2".to_string()),
+                ]
+    ));
+    assert!(trace
+        .rule_events
+        .iter()
+        .any(|event| { event.rule() == "transformation:simplify_filter_predicate" }));
+}
+
+#[test]
 fn optimizer_trace_reports_physical_plan_operator_and_class_counts() {
     let logical = LogicalPlan::Project {
         items: vec![Projection {
