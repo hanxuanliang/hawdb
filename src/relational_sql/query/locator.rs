@@ -1,17 +1,12 @@
 use crate::error::{Result, SkeinError};
 use crate::sql::{SqlNullOrder, SqlOrderDirection};
+use skein_executor::columnar::RelationalRowLocator;
 use skein_executor::external_order::ExternalOrderRecord;
 use skein_storage::{RelationalKey, RelationalScalarType, RelationalTableSchema, RelationalValue};
 use std::cmp::Ordering;
 use std::io::{Cursor, Read};
 
 const TYPED_LOCATOR_RECORD_VERSION: u8 = 1;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct RelationalRowLocator {
-    table_id: u32,
-    primary_key: RelationalKey,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RelationalRowSetLocator {
@@ -29,19 +24,6 @@ pub(super) struct RelationalSortKey {
 pub(super) struct RelationalSortRecord {
     sort_keys: Box<[RelationalSortKey]>,
     locator: RelationalRowSetLocator,
-}
-
-impl RelationalRowLocator {
-    pub(super) fn new(table_id: u32, primary_key: RelationalKey) -> Self {
-        Self {
-            table_id,
-            primary_key,
-        }
-    }
-
-    pub(super) fn primary_key(&self) -> &RelationalKey {
-        &self.primary_key
-    }
 }
 
 impl RelationalRowSetLocator {
@@ -64,7 +46,7 @@ impl RelationalRowSetLocator {
             ),
             |total, locator| {
                 locator.as_ref().map_or(total, |locator| {
-                    total.saturating_add(relational_key_allocated_bytes(&locator.primary_key))
+                    total.saturating_add(locator.allocated_bytes())
                 })
             },
         )
@@ -207,13 +189,13 @@ impl<'a> RelationalLocatorLayout<'a> {
                     "typed relational locator table count exceeds u32".to_string(),
                 )
             })?;
-            if locator.table_id != expected_table_id {
+            if locator.table_id() != expected_table_id {
                 return Err(SkeinError::Execution(format!(
                     "typed relational locator table id {} does not match layout slot {expected_table_id}",
-                    locator.table_id
+                    locator.table_id()
                 )));
             }
-            layout.validate_primary_key(&locator.primary_key)?;
+            layout.validate_primary_key(locator.primary_key())?;
         }
         Ok(())
     }
@@ -294,7 +276,7 @@ fn typed_record_encoded_len(record: &RelationalSortRecord) -> Result<usize> {
             continue;
         };
         len = checked_add(len, 8, "locator metadata")?;
-        for value in &locator.primary_key.0 {
+        for value in &locator.primary_key().0 {
             len = checked_add(len, relational_value_encoded_len(value)?, "primary key")?;
         }
     }
@@ -322,9 +304,9 @@ fn encode_typed_record(record: &RelationalSortRecord, output: &mut Vec<u8>) -> R
             None => output.push(0),
             Some(locator) => {
                 output.push(1);
-                output.extend_from_slice(&locator.table_id.to_le_bytes());
-                write_len(output, locator.primary_key.0.len())?;
-                for value in &locator.primary_key.0 {
+                output.extend_from_slice(&locator.table_id().to_le_bytes());
+                write_len(output, locator.primary_key().0.len())?;
+                for value in &locator.primary_key().0 {
                     write_relational_value(output, value, false)?;
                 }
             }
@@ -398,18 +380,6 @@ fn relational_value_encoded_len(value: &RelationalValue) -> Result<usize> {
             "typed relational locator cannot spill an overflow reference".to_string(),
         )),
     }
-}
-
-fn relational_key_allocated_bytes(key: &RelationalKey) -> usize {
-    key.0
-        .len()
-        .saturating_mul(std::mem::size_of::<RelationalValue>())
-        .saturating_add(
-            key.0
-                .iter()
-                .map(RelationalValue::estimated_payload_bytes)
-                .sum::<usize>(),
-        )
 }
 
 fn write_relational_value(

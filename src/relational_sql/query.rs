@@ -24,6 +24,7 @@ use skein_executor::observer::ExecutionObserver;
 use skein_executor::pipeline::{BatchControl, BindingBatch};
 use skein_executor::{
     BlockingOperatorMemoryReport, ExecutionLimit, QueryMemoryClass, QueryMemoryLedger,
+    RelationalRowLocator,
 };
 use skein_optimizer::{
     select_relational_access_path, RelationalAccessPathDescriptor, RelationalAccessPathKind,
@@ -40,8 +41,8 @@ use std::num::NonZeroUsize;
 mod locator;
 
 use self::locator::{
-    hex_encode, RelationalLocatorLayout, RelationalRowLocator, RelationalRowSetLocator,
-    RelationalSortKey, RelationalSortRecord,
+    hex_encode, RelationalLocatorLayout, RelationalRowSetLocator, RelationalSortKey,
+    RelationalSortRecord,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

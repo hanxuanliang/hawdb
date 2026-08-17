@@ -2,6 +2,7 @@
 
 use skein_core::{Result, SkeinError, Value};
 use skein_plan::ComparisonOp;
+use skein_storage::{RelationalKey, RelationalValue};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -14,7 +15,53 @@ pub enum LogicalType {
     Float64,
     Utf8,
     NodeId,
+    RelationalRowLocator,
     Dynamic,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationalRowLocator {
+    table_id: u32,
+    primary_key: RelationalKey,
+}
+
+impl RelationalRowLocator {
+    pub fn new(table_id: u32, primary_key: RelationalKey) -> Self {
+        Self {
+            table_id,
+            primary_key,
+        }
+    }
+
+    pub fn table_id(&self) -> u32 {
+        self.table_id
+    }
+
+    pub fn primary_key(&self) -> &RelationalKey {
+        &self.primary_key
+    }
+
+    pub fn allocated_bytes(&self) -> usize {
+        self.primary_key
+            .0
+            .capacity()
+            .saturating_mul(std::mem::size_of::<RelationalValue>())
+            .saturating_add(
+                self.primary_key
+                    .0
+                    .iter()
+                    .map(|value| match value {
+                        RelationalValue::Text(value) => value.capacity(),
+                        RelationalValue::Bytea(value) => value.capacity(),
+                        RelationalValue::Null
+                        | RelationalValue::Boolean(_)
+                        | RelationalValue::BigInt(_)
+                        | RelationalValue::DoublePrecision(_)
+                        | RelationalValue::Overflow(_) => 0,
+                    })
+                    .sum::<usize>(),
+            )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -245,6 +292,7 @@ pub enum ColumnVector {
         validity: Validity,
     },
     NodeId(Arc<[u64]>),
+    RelationalRowLocator(Arc<[RelationalRowLocator]>),
     Dynamic(Arc<[Value]>),
 }
 
@@ -277,6 +325,10 @@ impl ColumnVector {
         Self::NodeId(values.into())
     }
 
+    pub fn relational_row_locators(values: Vec<RelationalRowLocator>) -> Self {
+        Self::RelationalRowLocator(values.into())
+    }
+
     pub fn len(&self) -> usize {
         match self {
             Self::Bool { values, .. } => values.len(),
@@ -284,6 +336,7 @@ impl ColumnVector {
             Self::Float64 { values, .. } => values.len(),
             Self::Utf8 { values, .. } => values.len(),
             Self::NodeId(values) => values.len(),
+            Self::RelationalRowLocator(values) => values.len(),
             Self::Dynamic(values) => values.len(),
         }
     }
@@ -299,6 +352,7 @@ impl ColumnVector {
             Self::Float64 { .. } => LogicalType::Float64,
             Self::Utf8 { .. } => LogicalType::Utf8,
             Self::NodeId(_) => LogicalType::NodeId,
+            Self::RelationalRowLocator(_) => LogicalType::RelationalRowLocator,
             Self::Dynamic(_) => LogicalType::Dynamic,
         }
     }
@@ -310,6 +364,7 @@ impl ColumnVector {
             | Self::Float64 { validity, .. }
             | Self::Utf8 { validity, .. } => validity.is_valid(row),
             Self::NodeId(values) => row < values.len(),
+            Self::RelationalRowLocator(values) => row < values.len(),
             Self::Dynamic(values) => values.get(row).is_some_and(|value| *value != Value::Null),
         }
     }
@@ -332,8 +387,16 @@ impl ColumnVector {
                 None
             }
             Self::NodeId(values) => values.get(row).map(|value| Value::Int(*value as i64)),
+            Self::RelationalRowLocator(_) => None,
             Self::Dynamic(values) => values.get(row).cloned(),
         }
+    }
+
+    pub fn relational_row_locator(&self, row: usize) -> Option<&RelationalRowLocator> {
+        let Self::RelationalRowLocator(values) = self else {
+            return None;
+        };
+        values.get(row)
     }
 
     pub fn estimated_memory_bytes(&self) -> usize {
@@ -345,7 +408,7 @@ impl ColumnVector {
                 Validity::All { .. } => 0,
                 Validity::Bitmap { words, .. } => words.len() * std::mem::size_of::<u64>(),
             },
-            Self::NodeId(_) | Self::Dynamic(_) => 0,
+            Self::NodeId(_) | Self::RelationalRowLocator(_) | Self::Dynamic(_) => 0,
         };
         validity_bytes.saturating_add(match self {
             Self::Bool { values, .. } => values.len(),
@@ -356,6 +419,12 @@ impl ColumnVector {
                 |total, value| total.saturating_add(value.len()),
             ),
             Self::NodeId(values) => values.len() * std::mem::size_of::<u64>(),
+            Self::RelationalRowLocator(values) => values.iter().fold(
+                values
+                    .len()
+                    .saturating_mul(std::mem::size_of::<RelationalRowLocator>()),
+                |total, locator| total.saturating_add(locator.allocated_bytes()),
+            ),
             Self::Dynamic(values) => values.len() * std::mem::size_of::<Value>(),
         })
     }
@@ -1107,6 +1176,43 @@ mod tests {
         let projected = batch.project(&[SlotId(0)]).unwrap();
 
         assert!(Arc::ptr_eq(projected.column(SlotId(0)).unwrap(), &column));
+    }
+
+    #[test]
+    fn relational_locator_projection_preserves_compact_identity_storage() {
+        let schema = Arc::new(
+            BindingSchema::try_new(vec![SlotDescriptor {
+                id: SlotId(0),
+                name: "row_locator".to_string(),
+                logical_type: LogicalType::RelationalRowLocator,
+            }])
+            .unwrap(),
+        );
+        let locator = RelationalRowLocator::new(
+            3,
+            RelationalKey(vec![
+                RelationalValue::BigInt(7),
+                RelationalValue::Text("thread-1".to_string()),
+            ]),
+        );
+        let nested_bytes = locator.allocated_bytes();
+        let column = Arc::new(ColumnVector::relational_row_locators(vec![locator]));
+        let batch = ColumnarBatch::try_new(schema, vec![Arc::clone(&column)]).unwrap();
+        let projected = batch.project(&[SlotId(0)]).unwrap();
+
+        assert!(Arc::ptr_eq(projected.column(SlotId(0)).unwrap(), &column));
+        let actual = projected
+            .column(SlotId(0))
+            .unwrap()
+            .relational_row_locator(0)
+            .unwrap();
+        assert_eq!(actual.table_id(), 3);
+        assert_eq!(actual.primary_key().0.len(), 2);
+        assert_eq!(column.value(0), None);
+        assert_eq!(
+            column.estimated_memory_bytes(),
+            std::mem::size_of::<RelationalRowLocator>() + nested_bytes
+        );
     }
 
     #[test]
