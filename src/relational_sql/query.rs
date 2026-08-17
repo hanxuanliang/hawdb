@@ -252,15 +252,20 @@ fn execute_select<'state>(
         .from_alias
         .clone()
         .unwrap_or_else(|| select.from.name.clone());
-    let base_access = choose_base_access(
-        select.selection.as_ref(),
+    let has_aggregate = select.projection.iter().any(projection_contains_aggregate);
+    let prefer_ordered_access =
+        select.joins.is_empty() && !select.distinct && !has_aggregate && select.group_by.is_empty();
+    let base_access = choose_base_access(RelationalBaseAccessPlanning {
+        predicate: select.selection.as_ref(),
+        order_by: &select.order_by,
+        prefer_ordered_access,
         parameters,
         state,
-        base_schema,
-        &select.from.name,
-        &base_qualifier,
-        limits.max_intermediate_rows.saturating_add(1),
-    )?;
+        schema: base_schema,
+        table: &select.from.name,
+        qualifier: &base_qualifier,
+        cardinality_limit: limits.max_intermediate_rows.saturating_add(1),
+    })?;
     let access_path = base_access.descriptor.clone();
     let mut planned_joins = Vec::with_capacity(select.joins.len());
     let mut join_access_paths = Vec::with_capacity(select.joins.len());
@@ -283,10 +288,21 @@ fn execute_select<'state>(
             access: join_access.access,
         });
     }
-    let has_aggregate = select.projection.iter().any(projection_contains_aggregate);
+    let ordered_index_projection = !select.order_by.is_empty()
+        && base_access.descriptor.order_prefix_len == select.order_by.len()
+        && select.joins.is_empty()
+        && !select.distinct
+        && !has_aggregate
+        && select.group_by.is_empty()
+        && predicate_is_covered_by_access(
+            select.selection.as_ref(),
+            &base_access.descriptor,
+            &select.from.name,
+            &base_qualifier,
+        );
     let has_blocking_operator = has_aggregate
         || !select.group_by.is_empty()
-        || !select.order_by.is_empty()
+        || (!select.order_by.is_empty() && !ordered_index_projection)
         || select.distinct;
     if explain_only {
         return format_relational_explain(
@@ -330,6 +346,31 @@ fn execute_select<'state>(
     )?;
     let mut pipeline = RelationalPipelineState::new(task_context, limits);
     let index_runtime = RelationalIndexRuntime::new(index_read_mode, limits.index_read);
+    if ordered_index_projection {
+        let output = execute_ordered_index_projection(
+            select,
+            parameters,
+            state,
+            base_schema,
+            &base_qualifier,
+            &base_access.access,
+            &mut pipeline,
+            &index_runtime,
+            &row_runtime,
+            limits,
+        )?;
+        pipeline.finish()?;
+        return Ok(RelationalQueryOutput {
+            rows: output.rows,
+            intermediate_rows: pipeline.intermediate_rows,
+            hydration: row_runtime.hydration(),
+            access_path,
+            join_access_paths,
+            index_execution_evidence: index_runtime.evidence(),
+            row_execution_evidence: row_runtime.evidence(),
+            blocking_operator_memory_reports: output.blocking_operator_memory_reports,
+        });
+    }
     if !has_blocking_operator {
         let output = execute_streaming_projection(
             select,
@@ -438,7 +479,7 @@ fn format_relational_explain(
             report_operator: None,
         });
     }
-    if !select.order_by.is_empty() {
+    if !select.order_by.is_empty() && output.access_path.order_prefix_len != select.order_by.len() {
         nodes.push(RelationalExplainNode {
             operator: "TopNExec",
             estimated_rows: bound_limit.map(|limit| usize::try_from(limit).unwrap_or(usize::MAX)),
@@ -499,7 +540,14 @@ fn format_relational_explain(
         operator_info: format!("columns={}", select.projection.len()),
         report_operator: None,
     });
-    if select.selection.is_some() {
+    if select.selection.is_some()
+        && !predicate_is_covered_by_access(
+            select.selection.as_ref(),
+            &output.access_path,
+            &select.from.name,
+            select.from_alias.as_deref().unwrap_or(&select.from.name),
+        )
+    {
         nodes.push(RelationalExplainNode {
             operator: "SelectionExec",
             estimated_rows: Some(output.access_path.estimated_rows),
@@ -671,8 +719,11 @@ fn explain_access_path(
     row_evidence: &RelationalRowExecutionEvidence,
 ) -> String {
     let planned = format!(
-        "equality_prefix={}, unique_point={}, row_fetch={}",
-        descriptor.equality_prefix_len, descriptor.unique_point, descriptor.requires_row_fetch
+        "equality_prefix={}, order_prefix={}, unique_point={}, row_fetch={}",
+        descriptor.equality_prefix_len,
+        descriptor.order_prefix_len,
+        descriptor.unique_point,
+        descriptor.requires_row_fetch
     );
     let row = format!(
         "row_runtime_path={}, row_base_generation={}, row_delta_generation={}, row_base_epoch={}, row_visible_epoch={}, row_root_set_digest={}, row_descriptor_reads={}, row_logical_pages={}, row_logical_bytes={}, row_physical_pages={}, row_physical_bytes={}, row_cache_hits={}, row_cache_misses={}, row_cache_admission_rejections={}, row_overlay_entries={}, row_overlay_bytes={}, row_rows={}",
@@ -776,15 +827,32 @@ fn explain_column(column: &SqlColumnRef) -> String {
         .unwrap_or_else(|| column.name.clone())
 }
 
-fn choose_base_access(
-    predicate: Option<&SqlPredicate>,
-    parameters: &[Value],
-    state: &RelationalState,
-    schema: &RelationalTableSchema,
-    table: &str,
-    qualifier: &str,
+struct RelationalBaseAccessPlanning<'a> {
+    predicate: Option<&'a SqlPredicate>,
+    order_by: &'a [crate::sql::SqlOrderItem],
+    prefer_ordered_access: bool,
+    parameters: &'a [Value],
+    state: &'a RelationalState,
+    schema: &'a RelationalTableSchema,
+    table: &'a str,
+    qualifier: &'a str,
     cardinality_limit: usize,
+}
+
+fn choose_base_access(
+    planning: RelationalBaseAccessPlanning<'_>,
 ) -> Result<RelationalAccessCandidate> {
+    let RelationalBaseAccessPlanning {
+        predicate,
+        order_by,
+        prefer_ordered_access,
+        parameters,
+        state,
+        schema,
+        table,
+        qualifier,
+        cardinality_limit,
+    } = planning;
     let mut equalities = Vec::new();
     if let Some(predicate) = predicate {
         collect_conjunctive_equalities(predicate, &mut equalities);
@@ -860,38 +928,53 @@ fn choose_base_access(
 
     for (ordinal, columns) in schema.unique_constraints.iter().enumerate() {
         if let Some(candidate) = index_access_candidate(
-            state,
-            table,
+            &planning,
             relational_unique_index_name(ordinal),
             columns,
             true,
             &bound,
-            cardinality_limit,
         )? {
             candidates.push(candidate);
         }
     }
     for index in &schema.indexes {
         if let Some(candidate) = index_access_candidate(
-            state,
-            table,
+            &planning,
             index.name.clone(),
             &index.columns,
             index.unique,
             &bound,
-            cardinality_limit,
         )? {
             candidates.push(candidate);
         }
     }
 
-    let selected = select_relational_access_path(
+    let ordered_candidates = candidates
+        .iter()
+        .filter(|candidate| {
+            prefer_ordered_access
+                && !order_by.is_empty()
+                && candidate.descriptor.order_prefix_len == order_by.len()
+                && predicate_is_covered_by_access(
+                    predicate,
+                    &candidate.descriptor,
+                    table,
+                    qualifier,
+                )
+        })
+        .map(|candidate| candidate.descriptor.clone())
+        .collect::<Vec<_>>();
+    let descriptors = if ordered_candidates.is_empty() {
         candidates
             .iter()
-            .map(|candidate| candidate.descriptor.clone()),
-    )
-    .map_err(|error| SkeinError::Execution(format!("invalid relational access path: {error}")))?
-    .expect("full scan is always an access-path candidate");
+            .map(|candidate| candidate.descriptor.clone())
+            .collect()
+    } else {
+        ordered_candidates
+    };
+    let selected = select_relational_access_path(descriptors)
+        .map_err(|error| SkeinError::Execution(format!("invalid relational access path: {error}")))?
+        .expect("full scan is always an access-path candidate");
     let position = candidates
         .iter()
         .position(|candidate| candidate.descriptor == selected)
@@ -911,14 +994,21 @@ fn complete_key(
 }
 
 fn index_access_candidate(
-    state: &RelationalState,
-    table: &str,
+    planning: &RelationalBaseAccessPlanning<'_>,
     name: String,
     columns: &[String],
     unique: bool,
     bound: &BTreeMap<String, RelationalValue>,
-    cardinality_limit: usize,
 ) -> Result<Option<RelationalAccessCandidate>> {
+    let RelationalBaseAccessPlanning {
+        order_by,
+        state,
+        schema,
+        table,
+        qualifier,
+        cardinality_limit,
+        ..
+    } = planning;
     let prefix = columns
         .iter()
         .map_while(|column| bound.get(column).cloned())
@@ -927,15 +1017,17 @@ fn index_access_candidate(
         return Ok(None);
     }
     let prefix_len = prefix.len();
+    let order_prefix_len =
+        index_order_prefix_len(order_by, columns, prefix_len, schema, table, qualifier);
     let key = RelationalKey(prefix);
     let estimated_rows =
-        match state.index_prefix_cardinality_at_most(table, &name, &key, cardinality_limit) {
+        match state.index_prefix_cardinality_at_most(table, &name, &key, *cardinality_limit) {
             Some(rows) => rows,
             None if !state.materialized_index_postings_resident() => {
                 if unique && prefix_len == columns.len() {
                     usize::from(state.row_count(table) != 0)
                 } else {
-                    state.row_count(table).min(cardinality_limit)
+                    state.row_count(table).min(*cardinality_limit)
                 }
             }
             None => {
@@ -951,7 +1043,7 @@ fn index_access_candidate(
             index_columns: columns.to_vec(),
             access_columns: columns[..prefix_len].iter().cloned().collect(),
             equality_prefix_len: prefix_len,
-            order_prefix_len: 0,
+            order_prefix_len,
             unique_point: unique && prefix_len == columns.len(),
             covering: false,
             requires_row_fetch: true,
@@ -959,6 +1051,77 @@ fn index_access_candidate(
         },
         access: RelationalBaseAccess::Index { name, prefix: key },
     }))
+}
+
+fn index_order_prefix_len(
+    order_by: &[crate::sql::SqlOrderItem],
+    index_columns: &[String],
+    equality_prefix_len: usize,
+    schema: &RelationalTableSchema,
+    table: &str,
+    qualifier: &str,
+) -> usize {
+    if order_by.is_empty()
+        || equality_prefix_len.saturating_add(order_by.len()) > index_columns.len()
+    {
+        return 0;
+    }
+    for (ordinal, item) in order_by.iter().enumerate() {
+        if item.direction != SqlOrderDirection::Asc
+            || item
+                .column
+                .qualifier
+                .as_deref()
+                .is_some_and(|candidate| candidate != table && candidate != qualifier)
+            || item.column.name != index_columns[equality_prefix_len + ordinal]
+        {
+            return 0;
+        }
+        let Some(position) = schema.column_position(&item.column.name) else {
+            return 0;
+        };
+        if schema.columns[position].nullable && !matches!(item.nulls, SqlNullOrder::First) {
+            return 0;
+        }
+    }
+    order_by.len()
+}
+
+fn predicate_is_covered_by_access(
+    predicate: Option<&SqlPredicate>,
+    access: &RelationalAccessPathDescriptor,
+    table: &str,
+    qualifier: &str,
+) -> bool {
+    fn covered(
+        predicate: &SqlPredicate,
+        access: &RelationalAccessPathDescriptor,
+        table: &str,
+        qualifier: &str,
+        columns: &mut BTreeSet<String>,
+    ) -> bool {
+        match predicate {
+            SqlPredicate::And(left, right) => {
+                covered(left, access, table, qualifier, columns)
+                    && covered(right, access, table, qualifier, columns)
+            }
+            SqlPredicate::Compare {
+                left,
+                op: SqlComparisonOp::Eq,
+                ..
+            } => {
+                left.qualifier
+                    .as_deref()
+                    .is_none_or(|candidate| candidate == table || candidate == qualifier)
+                    && access.access_columns.contains(&left.name)
+                    && columns.insert(left.name.clone())
+            }
+            _ => false,
+        }
+    }
+
+    predicate
+        .is_none_or(|predicate| covered(predicate, access, table, qualifier, &mut BTreeSet::new()))
 }
 
 fn collect_conjunctive_equalities<'a>(
@@ -2301,6 +2464,91 @@ fn hex_digit(value: u8) -> Result<u8> {
             "relational spill byte string contains invalid hex".to_string(),
         )),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_ordered_index_projection<'a>(
+    select: &'a SelectStatement,
+    parameters: &[Value],
+    state: &'a RelationalState,
+    base_schema: &'a RelationalTableSchema,
+    base_qualifier: &'a str,
+    base_access: &RelationalBaseAccess,
+    pipeline: &mut RelationalPipelineState<'_>,
+    index_runtime: &RelationalIndexRuntime<'a>,
+    row_runtime: &RelationalRowRuntime<'a>,
+    limits: RelationalQueryLimits,
+) -> Result<StreamingProjectionOutput> {
+    let RelationalBaseAccess::Index { name, prefix } = base_access else {
+        return Err(SkeinError::Execution(
+            "ordered relational projection requires an index range access".to_string(),
+        ));
+    };
+    let mut offset = usize::try_from(bind_bound(select.offset, parameters, "OFFSET")?.unwrap_or(0))
+        .map_err(|_| SkeinError::Semantic("SQL OFFSET is too large".to_string()))?;
+    let requested = bind_bound(select.limit, parameters, "LIMIT")?
+        .map(|value| {
+            usize::try_from(value)
+                .map_err(|_| SkeinError::Semantic("SQL LIMIT is too large".to_string()))
+        })
+        .transpose()?
+        .unwrap_or(usize::MAX);
+    let mut output = Vec::with_capacity(requested.min(limits.max_output_rows));
+    let mut payload_bytes = 0usize;
+    if requested != 0 {
+        index_runtime.visit_prefix_entries(
+            state,
+            &select.from.name,
+            name,
+            prefix,
+            |_, primary_key| {
+                pipeline.account_row()?;
+                if offset != 0 {
+                    offset -= 1;
+                    return Ok(true);
+                }
+                if output.len() >= requested {
+                    return Ok(false);
+                }
+                if output.len() >= limits.max_output_rows {
+                    return Err(SkeinError::Execution(format!(
+                        "relational SQL output exceeds max_output_rows {}",
+                        limits.max_output_rows
+                    )));
+                }
+                let row = row_runtime
+                    .read_output_point(&select.from.name, primary_key)?
+                    .ok_or_else(|| {
+                        SkeinError::StorageIntegrity(format!(
+                            "relational index {name} on table {} points to missing row {primary_key:?}",
+                            select.from.name
+                        ))
+                    })?;
+                let bound = BoundRow {
+                    bindings: vec![Binding {
+                        table: &select.from.name,
+                        qualifier: base_qualifier,
+                        schema: base_schema,
+                        row: Some(row),
+                    }],
+                };
+                let projected = project_bound_row(&bound, &select.projection)?;
+                payload_bytes = payload_bytes.saturating_add(map_payload_bytes(&projected));
+                if payload_bytes > limits.max_output_payload_bytes {
+                    return Err(SkeinError::Execution(format!(
+                        "relational SQL output exceeds max_output_payload_bytes {}",
+                        limits.max_output_payload_bytes
+                    )));
+                }
+                output.push(projected);
+                Ok(output.len() < requested)
+            },
+        )?;
+    }
+    Ok(StreamingProjectionOutput {
+        rows: output,
+        blocking_operator_memory_reports: Vec::new(),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -731,6 +731,12 @@ mod tests {
                 )
                 .expect("insert large base document");
             database
+                .query_sql_with_params(
+                    "INSERT INTO documents (id, owner, body) VALUES ('doc-mid', 'owner-order', $1)",
+                    &[Value::String("m".repeat(96 * 1024))],
+                )
+                .expect("insert ordered base document");
+            database
                 .query_sql("INSERT INTO anchors (id, document_id) VALUES ('anchor-1', 'doc-1')")
                 .expect("insert base anchor");
 
@@ -797,6 +803,17 @@ mod tests {
                     "INSERT INTO documents (id, owner, body) VALUES ('doc-2', 'owner-1', 'body-2')",
                 )
                 .expect("insert live document");
+            for (id, body) in [("doc-a", "a"), ("doc-z", "z")] {
+                database
+                    .query_sql_with_params(
+                        "INSERT INTO documents (id, owner, body) VALUES ($1, 'owner-order', $2)",
+                        &[
+                            Value::String(id.to_string()),
+                            Value::String(body.repeat(96 * 1024)),
+                        ],
+                    )
+                    .expect("insert ordered live document");
+            }
             database
                 .query_sql("INSERT INTO anchors (id, document_id) VALUES ('anchor-2', 'doc-2')")
                 .expect("insert live anchor");
@@ -812,6 +829,16 @@ mod tests {
                 .expect("read live-merged relational index");
             assert_eq!(rows.rows.len(), 1);
             assert_eq!(rows.rows[0]["id"], Value::String("doc-2".to_string()));
+            let ordered_page = database
+                .query_sql(
+                    "SELECT id, body FROM documents WHERE owner = 'owner-order' ORDER BY id ASC LIMIT 1 OFFSET 1",
+                )
+                .expect("merge live entries into index order before pagination");
+            assert_eq!(ordered_page.rows.len(), 1);
+            assert_eq!(
+                ordered_page.rows[0]["id"],
+                Value::String("doc-mid".to_string())
+            );
             let live = database
                 .query_sql("EXPLAIN ANALYZE SELECT id FROM documents WHERE id = 'doc-2'")
                 .expect("read the live row overlay");
@@ -864,14 +891,29 @@ mod tests {
             )
             .expect("reopen demand-index database");
             let recovered = database
-                .query_sql("EXPLAIN ANALYZE SELECT id FROM documents WHERE owner = 'owner-1'")
-                .expect("read recovery-delta relational index");
+                .query_sql(
+                    "EXPLAIN ANALYZE SELECT id FROM documents WHERE owner = 'owner-1' ORDER BY id ASC LIMIT 1",
+                )
+                .expect("read ordered recovery-delta relational index");
             let recovered_info = relational_explain_operator_info(&recovered, "IndexRangeScanExec");
             assert!(recovered_info.contains("runtime_path=demand_paged"));
+            assert!(recovered_info.contains("order_prefix=1"));
             assert!(!recovered_info.contains("delta_generation=none"));
             assert!(recovered_info.contains("delta_entries="));
             assert!(recovered_info.contains("row_runtime_path=snapshot_rows"));
             assert!(!recovered_info.contains("row_delta_generation=none"));
+            assert!(recovered.rows.iter().all(|row| {
+                !matches!(row.get("id"), Some(Value::String(id)) if id.contains("TopNExec"))
+            }));
+            let recovered_page = database
+                .query_sql(
+                    "SELECT id FROM documents WHERE owner = 'owner-order' ORDER BY id ASC LIMIT 1 OFFSET 1",
+                )
+                .expect("preserve index order through recovery delta pagination");
+            assert_eq!(
+                recovered_page.rows[0]["id"],
+                Value::String("doc-mid".to_string())
+            );
         }
         {
             let tight_config = DatabaseConfig {
@@ -1146,6 +1188,9 @@ mod tests {
                 )
                 .expect("create parent table");
             database
+                .query_sql("CREATE INDEX parents_body_order ON parents (body, code, id)")
+                .expect("create parent body ordering index");
+            database
                 .query_sql(
                     "CREATE TABLE children (id TEXT PRIMARY KEY, parent_code TEXT NOT NULL REFERENCES parents(code))",
                 )
@@ -1183,6 +1228,18 @@ mod tests {
             assert!(info.contains("runtime_path=transaction_workspace"));
             assert!(info.contains("transaction_workspace=1"));
             assert!(info.contains("canonical_fallback=0"));
+
+            let ordered = transaction
+                .query_sql(
+                    "EXPLAIN ANALYZE SELECT id FROM parents WHERE body = 'body-1' ORDER BY code ASC, id ASC LIMIT 1",
+                )
+                .expect("read ordered transaction-local index entry");
+            let ordered_info = relational_explain_operator_info(&ordered, "IndexRangeScanExec");
+            assert!(ordered_info.contains("runtime_path=transaction_workspace"));
+            assert!(ordered_info.contains("order_prefix=2"));
+            assert!(ordered.rows.iter().all(|row| {
+                !matches!(row.get("id"), Some(Value::String(id)) if id.contains("TopNExec"))
+            }));
 
             transaction
                 .query_sql("UPDATE parents SET code = 'base-code-2' WHERE id = 'base'")
@@ -1773,8 +1830,40 @@ mod tests {
         assert_eq!(page.rows.len(), 1);
         assert_eq!(page.rows[0]["id"], text("message-2"));
         assert_eq!(page.access_path.name, "idx_messages_order");
+        assert_eq!(page.access_path.equality_prefix_len, 1);
+        assert_eq!(page.access_path.order_prefix_len, 2);
+        assert_eq!(page.intermediate_rows, 2);
+        assert!(page.blocking_operator_memory_reports.is_empty());
         assert_eq!(page.hydration.hydrated_rows, 1);
         assert!(page.hydration.decompressed_bytes > 8 * 1024);
+
+        let explained_page = execute_relational_query_sql_with_runtime(
+            "EXPLAIN SELECT id, body FROM messages WHERE stream_id = $1 ORDER BY order_index ASC, id ASC LIMIT $2 OFFSET $3",
+            &[text("stream-1"), Value::Int(1), Value::Int(1)],
+            snapshot.value(),
+            RelationalQueryReadModes::new(
+                RelationalIndexReadMode::Materialized,
+                RelationalRowReadMode::CanonicalMemory,
+            ),
+            query_limits(16, 64 * 1024),
+            &skein_executor::ExecutionMemoryConfig::default(),
+            None,
+        )
+        .expect("explain ordered index page");
+        assert!(explained_page.rows.iter().all(|row| {
+            !matches!(row.get("id"), Some(Value::String(id)) if id.contains("TopNExec"))
+        }));
+        let index_scan = explained_page
+            .rows
+            .iter()
+            .find(|row| {
+                matches!(row.get("id"), Some(Value::String(id)) if id.contains("IndexRangeScanExec"))
+            })
+            .expect("ordered index range scan in explain");
+        assert!(matches!(
+            index_scan.get("operator info"),
+            Some(Value::String(info)) if info.contains("order_prefix=2")
+        ));
 
         let joined = execute_relational_query_sql_with_runtime(
             "SELECT m.id FROM messages AS m INNER JOIN anchors AS a ON a.document_id = m.document_id AND a.message_id = m.id WHERE m.stream_id = $1",

@@ -1416,6 +1416,28 @@ impl RelationalIndexPages {
             }
         }
     }
+
+    fn visit_prefix_entries<'a>(
+        &'a self,
+        prefix: &RelationalKey,
+        mut visit: impl FnMut(&'a RelationalKey, &'a RelationalKey) -> bool,
+    ) {
+        let Some(start) = self.page_index(prefix) else {
+            return;
+        };
+        'pages: for page in &self.pages[start..] {
+            for (index_key, postings) in page.range(prefix.clone()..) {
+                if !relational_key_has_prefix(index_key, prefix) {
+                    break 'pages;
+                }
+                for primary_key in postings.iter() {
+                    if !visit(index_key, primary_key) {
+                        break 'pages;
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn relational_key_has_prefix(key: &RelationalKey, prefix: &RelationalKey) -> bool {
@@ -3167,6 +3189,26 @@ impl RelationalState {
                 }
             }
             true
+        });
+        Some(())
+    }
+
+    /// Visits ordered `(index_key, primary_key)` entries selected by a leading
+    /// index-key prefix without materializing the posting list.
+    ///
+    /// The callback observes index order first and primary-key order within
+    /// equal index keys. Returning `false` stops the scan.
+    pub fn visit_index_prefix_entries<'a>(
+        &'a self,
+        table: &str,
+        index: &str,
+        prefix: &RelationalKey,
+        mut visit: impl FnMut(&'a RelationalKey, &'a RelationalKey) -> bool,
+    ) -> Option<()> {
+        let segment = self.segments.get(table)?;
+        let index = segment.indexes.get(index)?;
+        index.visit_prefix_entries(prefix, |index_key, primary_key| {
+            visit(index_key, primary_key)
         });
         Some(())
     }

@@ -109,11 +109,24 @@ impl<'a> RelationalIndexRuntime<'a> {
         prefix: &RelationalKey,
         mut visit: impl FnMut(&RelationalKey) -> Result<bool>,
     ) -> Result<bool> {
+        self.visit_prefix_entries(state, table, index, prefix, |_, primary_key| {
+            visit(primary_key)
+        })
+    }
+
+    pub(crate) fn visit_prefix_entries(
+        &self,
+        state: &RelationalState,
+        table: &str,
+        index: &str,
+        prefix: &RelationalKey,
+        mut visit: impl FnMut(&RelationalKey, &RelationalKey) -> Result<bool>,
+    ) -> Result<bool> {
         if matches!(self.mode, RelationalIndexReadMode::Materialized) {
-            return visit_materialized_prefix(state, table, index, prefix, &mut visit);
+            return visit_materialized_prefix_entries(state, table, index, prefix, &mut visit);
         }
-        let fallback = |visit: &mut dyn FnMut(&RelationalKey) -> Result<bool>| {
-            visit_materialized_prefix(state, table, index, prefix, visit)
+        let fallback = |visit: &mut dyn FnMut(&RelationalKey, &RelationalKey) -> Result<bool>| {
+            visit_materialized_prefix_entries(state, table, index, prefix, visit)
         };
         self.visit_demand_or_fallback(
             RelationalIndexProbe {
@@ -129,8 +142,10 @@ impl<'a> RelationalIndexRuntime<'a> {
     fn visit_demand_or_fallback<'input>(
         &self,
         probe: RelationalIndexProbe<'input>,
-        visit: &mut dyn FnMut(&RelationalKey) -> Result<bool>,
-        fallback: impl FnOnce(&mut dyn FnMut(&RelationalKey) -> Result<bool>) -> Result<bool>,
+        visit: &mut dyn FnMut(&RelationalKey, &RelationalKey) -> Result<bool>,
+        fallback: impl FnOnce(
+            &mut dyn FnMut(&RelationalKey, &RelationalKey) -> Result<bool>,
+        ) -> Result<bool>,
     ) -> Result<bool> {
         let RelationalIndexProbe {
             table,
@@ -166,9 +181,9 @@ impl<'a> RelationalIndexRuntime<'a> {
         let mut callback_error = None;
         let mut keep_going = true;
         let mut produced_provisional_rows = false;
-        let mut visit_locator = |locator: &RelationalKey| {
+        let mut visit_locator = |index_key: &RelationalKey, locator: &RelationalKey| {
             produced_provisional_rows = true;
-            match visit(locator) {
+            match visit(index_key, locator) {
                 Ok(continue_scan) => {
                     keep_going = continue_scan;
                     continue_scan
@@ -180,15 +195,16 @@ impl<'a> RelationalIndexRuntime<'a> {
             }
         };
         let attempt = match target {
-            PersistentTarget::Store(store) => store.visit_relational_index_read_view_prefix(
-                table,
-                index,
-                prefix,
-                remaining,
-                &mut visit_locator,
-            ),
+            PersistentTarget::Store(store) => store
+                .visit_relational_index_read_view_prefix_entries(
+                    table,
+                    index,
+                    prefix,
+                    remaining,
+                    &mut visit_locator,
+                ),
             PersistentTarget::Transaction(view) => {
-                Some(view.visit_prefix(table, index, prefix, remaining, &mut visit_locator))
+                Some(view.visit_prefix_entries(table, index, prefix, remaining, &mut visit_locator))
             }
         };
         if let Some(error) = callback_error {
@@ -400,24 +416,26 @@ impl<'a> RelationalIndexRuntime<'a> {
     }
 }
 
-fn visit_materialized_prefix<'state>(
+fn visit_materialized_prefix_entries<'state>(
     state: &'state RelationalState,
     table: &str,
     index: &str,
     prefix: &RelationalKey,
-    visit: &mut dyn FnMut(&RelationalKey) -> Result<bool>,
+    visit: &mut dyn FnMut(&RelationalKey, &RelationalKey) -> Result<bool>,
 ) -> Result<bool> {
     let mut error = None;
     let mut keep_going = true;
     state
-        .visit_index_prefix_rows(table, index, prefix, |key, _| match visit(key) {
-            Ok(continue_scan) => {
-                keep_going = continue_scan;
-                continue_scan
-            }
-            Err(candidate_error) => {
-                error = Some(candidate_error);
-                false
+        .visit_index_prefix_entries(table, index, prefix, |index_key, primary_key| {
+            match visit(index_key, primary_key) {
+                Ok(continue_scan) => {
+                    keep_going = continue_scan;
+                    continue_scan
+                }
+                Err(candidate_error) => {
+                    error = Some(candidate_error);
+                    false
+                }
             }
         })
         .ok_or_else(|| {

@@ -216,40 +216,147 @@ impl RelationalTransactionIndexView {
         self.overlay.append(capture)
     }
 
-    pub(crate) fn visit_prefix(
+    pub(crate) fn visit_prefix_entries(
         &self,
         table: &str,
         index: &str,
         prefix: &RelationalKey,
         limits: RelationalIndexReadLimits,
-        visit: impl FnMut(&RelationalKey) -> bool,
-    ) -> Result<RelationalIndexReadViewReport, RelationalIndexShadowError> {
-        self.visit_accounted(
-            table,
-            index,
-            RelationalIndexReadSelector::Prefix(prefix),
-            limits,
-            visit,
-        )
-    }
-
-    fn visit_accounted(
-        &self,
-        table: &str,
-        index: &str,
-        selector: RelationalIndexReadSelector<'_>,
-        requested: RelationalIndexReadLimits,
-        visit: impl FnMut(&RelationalKey) -> bool,
+        visit: impl FnMut(&RelationalKey, &RelationalKey) -> bool,
     ) -> Result<RelationalIndexReadViewReport, RelationalIndexShadowError> {
         let transaction_remaining = self
             .read_ledger
             .remaining_limits()
             .map_err(relational_read_error)?;
-        let limits = intersect_read_limits(requested, transaction_remaining);
-        let report = self.visit_with_overlay(table, index, selector, limits, visit)?;
+        let limits = intersect_read_limits(limits, transaction_remaining);
+        let report = self.visit_prefix_entries_with_overlay(table, index, prefix, limits, visit)?;
         self.read_ledger
             .record(&report)
             .map_err(relational_read_error)?;
+        Ok(report)
+    }
+
+    fn visit_prefix_entries_with_overlay(
+        &self,
+        table: &str,
+        index: &str,
+        prefix: &RelationalKey,
+        limits: RelationalIndexReadLimits,
+        mut visit: impl FnMut(&RelationalKey, &RelationalKey) -> bool,
+    ) -> Result<RelationalIndexReadViewReport, RelationalIndexShadowError> {
+        let selector = RelationalIndexReadSelector::Prefix(prefix);
+        let mut posting_states =
+            BTreeMap::<(RelationalKey, RelationalKey), TransactionPostingState>::new();
+        let mut entries_visited = 0usize;
+        let mut entries_matched = 0usize;
+        let mut bytes_visited = 0usize;
+        for batch in &self.overlay.batches {
+            bytes_visited = bytes_visited
+                .checked_add(batch.encoded_bytes)
+                .ok_or_else(|| admission("transaction index byte accounting overflow"))?;
+            for change in batch.changes.iter() {
+                entries_visited = entries_visited
+                    .checked_add(1)
+                    .ok_or_else(|| admission("transaction index entry accounting overflow"))?;
+                if change.table != table
+                    || change.index != index
+                    || !selector.matches(&change.index_key)
+                {
+                    continue;
+                }
+                entries_matched = entries_matched.checked_add(1).ok_or_else(|| {
+                    admission("transaction index matched-entry accounting overflow")
+                })?;
+                let entry_key = (change.index_key.clone(), change.primary_key.clone());
+                match posting_states.entry(entry_key) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(TransactionPostingState::first(change.kind));
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        entry.get_mut().apply(change.kind)?;
+                    }
+                }
+            }
+        }
+        let overlay = posting_states
+            .into_iter()
+            .filter_map(|(entry, state)| state.effect().map(|kind| (entry, kind)))
+            .collect::<BTreeMap<_, _>>();
+        let reserved_inserts = overlay
+            .values()
+            .filter(|kind| **kind == RelationalIndexChangeKind::Insert)
+            .count();
+        let backend_rows = limits
+            .max_rows
+            .get()
+            .checked_sub(reserved_inserts)
+            .and_then(NonZeroUsize::new)
+            .ok_or_else(|| {
+                admission(format!(
+                    "transaction index ordered overlay reserves {reserved_inserts} rows, exhausting row limit {}",
+                    limits.max_rows
+                ))
+            })?;
+        let backend_bytes = limits
+            .max_bytes
+            .get()
+            .checked_sub(bytes_visited)
+            .and_then(NonZeroUsize::new)
+            .ok_or_else(|| {
+                admission(format!(
+                    "transaction index overlay needs {bytes_visited} bytes, exhausting byte limit {}",
+                    limits.max_bytes
+                ))
+            })?;
+        let backend_limits = RelationalIndexReadLimits {
+            max_rows: backend_rows,
+            max_bytes: backend_bytes,
+            ..limits
+        };
+        let mut merge = super::OrderedIndexEntryMerge {
+            pending: overlay,
+            visit: &mut visit,
+            max_rows: limits.max_rows.get(),
+            rows_visited: 0,
+            stopped_early: false,
+            error: None,
+        };
+        let mut report = {
+            let mut emit_base = |index_key: &RelationalKey, primary_key: &RelationalKey| {
+                merge.visit_base(index_key, primary_key)
+            };
+            self.base
+                .visit_prefix_entries(table, index, prefix, backend_limits, &mut emit_base)?
+        };
+        if let Some(error) = merge.error.take() {
+            return Err(error);
+        }
+        merge.finish();
+        if let Some(error) = merge.error.take() {
+            return Err(error);
+        }
+        report.live_batches_visited = checked_add(
+            report.live_batches_visited,
+            self.overlay.batches.len(),
+            "transaction index batch count",
+        )?;
+        report.live_entries_visited = checked_add(
+            report.live_entries_visited,
+            entries_visited,
+            "transaction index entry count",
+        )?;
+        report.live_entries_matched = checked_add(
+            report.live_entries_matched,
+            entries_matched,
+            "transaction index matched-entry count",
+        )?;
+        report.live_bytes_visited = checked_add(
+            report.live_bytes_visited,
+            bytes_visited,
+            "transaction index byte count",
+        )?;
+        report.rows_visited = merge.rows_visited;
+        report.stopped_early |= merge.stopped_early;
         Ok(report)
     }
 

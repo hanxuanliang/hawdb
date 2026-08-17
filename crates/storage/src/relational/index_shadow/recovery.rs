@@ -582,6 +582,74 @@ pub struct RelationalIndexRecoveryReadReport {
     pub stopped_early: bool,
 }
 
+struct RecoveryOrderedMerge<'a, F> {
+    pending: BTreeMap<(RelationalKey, RelationalKey), RelationalIndexChangeKind>,
+    visit: &'a mut F,
+    max_rows: usize,
+    rows_visited: usize,
+    stopped_early: bool,
+    error: Option<RelationalIndexShadowError>,
+}
+
+impl<F> RecoveryOrderedMerge<'_, F>
+where
+    F: FnMut(&RelationalKey, &RelationalKey) -> bool,
+{
+    fn emit(&mut self, index_key: &RelationalKey, primary_key: &RelationalKey) -> bool {
+        let Some(rows_visited) = self.rows_visited.checked_add(1) else {
+            self.error = Some(admission("recovery index output row counter overflow"));
+            return false;
+        };
+        if rows_visited > self.max_rows {
+            self.error = Some(admission(format!(
+                "recovery index lookup exceeds row limit {}",
+                self.max_rows
+            )));
+            return false;
+        }
+        self.rows_visited = rows_visited;
+        if !(self.visit)(index_key, primary_key) {
+            self.stopped_early = true;
+            return false;
+        }
+        true
+    }
+
+    fn visit_base(&mut self, index_key: &RelationalKey, primary_key: &RelationalKey) -> bool {
+        let base_entry = (index_key.clone(), primary_key.clone());
+        while self
+            .pending
+            .first_key_value()
+            .is_some_and(|(entry, _)| entry < &base_entry)
+        {
+            let Some(((pending_index_key, pending_primary_key), kind)) = self.pending.pop_first()
+            else {
+                break;
+            };
+            if kind == RelationalIndexChangeKind::Insert
+                && !self.emit(&pending_index_key, &pending_primary_key)
+            {
+                return false;
+            }
+        }
+        match self.pending.remove(&base_entry) {
+            Some(RelationalIndexChangeKind::Delete) => true,
+            Some(RelationalIndexChangeKind::Insert) | None => self.emit(index_key, primary_key),
+        }
+    }
+
+    fn finish(&mut self) {
+        while !self.stopped_early && self.error.is_none() {
+            let Some(((index_key, primary_key), kind)) = self.pending.pop_first() else {
+                break;
+            };
+            if kind == RelationalIndexChangeKind::Insert && !self.emit(&index_key, &primary_key) {
+                break;
+            }
+        }
+    }
+}
+
 pub struct RelationalIndexRecoveryReader {
     base: RelationalIndexShadowReader,
     manifest: RelationalIndexRecoveryManifest,
@@ -797,17 +865,149 @@ impl RelationalIndexRecoveryReader {
         index: &str,
         prefix: &RelationalKey,
         limits: RelationalIndexReadLimits,
-        visit: impl FnMut(&RelationalKey) -> bool,
+        mut visit: impl FnMut(&RelationalKey) -> bool,
+    ) -> Result<RelationalIndexRecoveryReadReport, RelationalIndexShadowError> {
+        self.visit_prefix_entries(table, index, prefix, limits, |_, primary_key| {
+            visit(primary_key)
+        })
+    }
+
+    pub fn visit_prefix_entries(
+        &self,
+        table: &str,
+        index: &str,
+        prefix: &RelationalKey,
+        limits: RelationalIndexReadLimits,
+        mut visit: impl FnMut(&RelationalKey, &RelationalKey) -> bool,
     ) -> Result<RelationalIndexRecoveryReadReport, RelationalIndexShadowError> {
         let encoded_prefix = encode_relational_key(prefix)?;
-        self.visit_merged(
+        if self.is_poisoned() {
+            return Err(RelationalIndexShadowError::Corrupt(
+                "relational index recovery reader is poisoned".to_string(),
+            ));
+        }
+        let mut pending = BTreeMap::new();
+        let mut report = RelationalIndexRecoveryReadReport {
+            base: RelationalIndexReadReport::default(),
+            delta_pages_read: 0,
+            delta_bytes_read: 0,
+            delta_file_pages_read: 0,
+            delta_file_bytes_read: 0,
+            delta_cache_hits: 0,
+            delta_cache_misses: 0,
+            delta_cache_admission_rejections: 0,
+            delta_entries_visited: 0,
+            rows_visited: 0,
+            stopped_early: false,
+        };
+        for descriptor in &self.manifest.pages {
+            if report.delta_pages_read >= limits.max_pages.get() {
+                return Err(admission(format!(
+                    "recovery index lookup exceeds page limit {}",
+                    limits.max_pages
+                )));
+            }
+            let encoded_len = usize::try_from(descriptor.encoded_len)
+                .map_err(|_| corrupt("recovery delta encoded length overflows usize"))?;
+            let total_bytes = report
+                .delta_bytes_read
+                .checked_add(encoded_len)
+                .ok_or_else(|| admission("recovery read byte counter overflow"))?;
+            if total_bytes > limits.max_bytes.get() {
+                return Err(admission(format!(
+                    "recovery index lookup needs {total_bytes} bytes, exceeding byte limit {}",
+                    limits.max_bytes
+                )));
+            }
+            let page_read = self.visit_page(descriptor, |entry| {
+                report.delta_entries_visited = report
+                    .delta_entries_visited
+                    .checked_add(1)
+                    .ok_or_else(|| admission("recovery delta entry counter overflow"))?;
+                if entry.key.table != table
+                    || entry.key.index != index
+                    || !entry.key.index_key.starts_with(&encoded_prefix)
+                {
+                    return Ok(());
+                }
+                let index_key = super::demand_read::decode_relational_key(&entry.key.index_key)
+                    .inspect_err(|_| self.poison())?;
+                let primary_key = super::demand_read::decode_relational_key(&entry.key.primary_key)
+                    .inspect_err(|_| self.poison())?;
+                pending.insert((index_key, primary_key), entry.value.kind);
+                if pending.len() >= limits.max_rows.get() {
+                    return Err(admission(format!(
+                        "recovery ordered merge needs {} entries, exhausting row limit {}",
+                        pending.len(),
+                        limits.max_rows
+                    )));
+                }
+                Ok(())
+            })?;
+            report.delta_pages_read += 1;
+            report.delta_bytes_read += encoded_len;
+            report.delta_cache_hits += usize::from(page_read.cache_hit);
+            report.delta_cache_misses += usize::from(page_read.cache_miss);
+            report.delta_cache_admission_rejections +=
+                usize::from(page_read.cache_admission_rejected);
+            if !page_read.cache_hit {
+                report.delta_file_pages_read += 1;
+                report.delta_file_bytes_read += encoded_len;
+            }
+        }
+        let base_pages = limits
+            .max_pages
+            .get()
+            .checked_sub(report.delta_pages_read)
+            .and_then(NonZeroUsize::new)
+            .ok_or_else(|| admission("recovery ordered merge exhausted its page budget"))?;
+        let base_bytes = limits
+            .max_bytes
+            .get()
+            .checked_sub(report.delta_bytes_read)
+            .and_then(NonZeroUsize::new)
+            .ok_or_else(|| admission("recovery ordered merge exhausted its byte budget"))?;
+        let reserved_inserts = pending
+            .values()
+            .filter(|kind| **kind == RelationalIndexChangeKind::Insert)
+            .count();
+        let base_rows = limits
+            .max_rows
+            .get()
+            .checked_sub(reserved_inserts)
+            .and_then(NonZeroUsize::new)
+            .ok_or_else(|| admission("recovery ordered merge exhausted its row budget"))?;
+        let base_limits = RelationalIndexReadLimits {
+            max_pages: base_pages,
+            max_rows: base_rows,
+            max_bytes: base_bytes,
+            ..limits
+        };
+        let mut merge = RecoveryOrderedMerge {
+            pending,
+            visit: &mut visit,
+            max_rows: limits.max_rows.get(),
+            rows_visited: 0,
+            stopped_early: false,
+            error: None,
+        };
+        report.base = self.base.visit_prefix_entries(
             table,
             index,
-            limits,
-            |candidate| candidate.starts_with(&encoded_prefix),
-            |base, visit| base.visit_prefix_postings(table, index, prefix, limits, visit),
-            visit,
-        )
+            prefix,
+            base_limits,
+            |index_key, primary_key| merge.visit_base(index_key, primary_key),
+        )?;
+        if let Some(error) = merge.error.take() {
+            return Err(error);
+        }
+        merge.finish();
+        if let Some(error) = merge.error.take() {
+            return Err(error);
+        }
+        report.rows_visited = merge.rows_visited;
+        report.stopped_early = merge.stopped_early || report.base.stopped_early;
+        Ok(report)
     }
 
     fn visit_merged(

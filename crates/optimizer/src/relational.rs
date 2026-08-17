@@ -32,6 +32,13 @@ impl RelationalAccessPathDescriptor {
         if self.equality_prefix_len > self.index_columns.len() {
             return Err("relational equality prefix exceeds index columns");
         }
+        if self
+            .equality_prefix_len
+            .saturating_add(self.order_prefix_len)
+            > self.index_columns.len()
+        {
+            return Err("relational order prefix exceeds remaining index columns");
+        }
         let expected_access_columns = self.index_columns[..self.equality_prefix_len]
             .iter()
             .cloned()
@@ -191,5 +198,16 @@ mod tests {
         .unwrap();
 
         assert_eq!(selected.name, "idx_b");
+    }
+
+    #[test]
+    fn ordered_suffix_must_fit_after_the_equality_prefix() {
+        let mut candidate = path("idx_a_b", &["a", "b"], 1, false, 10);
+        candidate.order_prefix_len = 2;
+
+        assert_eq!(
+            candidate.validate(),
+            Err("relational order prefix exceeds remaining index columns")
+        );
     }
 }

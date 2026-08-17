@@ -104,6 +104,24 @@ impl RelationalIndexShadowReader {
         limits: RelationalIndexReadLimits,
         mut visit: impl FnMut(&super::RelationalKey) -> bool,
     ) -> Result<RelationalIndexReadReport, RelationalIndexShadowError> {
+        self.visit_prefix_entries(table, index, prefix, limits, |_, primary_key| {
+            visit(primary_key)
+        })
+    }
+
+    /// Visits ordered `(index_key, primary_key)` entries whose complete index
+    /// key has the supplied leading relational-key prefix.
+    ///
+    /// Values observed by `visit` are provisional until this method returns
+    /// `Ok`; callers must discard them on error.
+    pub fn visit_prefix_entries(
+        &self,
+        table: &str,
+        index: &str,
+        prefix: &super::RelationalKey,
+        limits: RelationalIndexReadLimits,
+        mut visit: impl FnMut(&super::RelationalKey, &super::RelationalKey) -> bool,
+    ) -> Result<RelationalIndexReadReport, RelationalIndexShadowError> {
         let descriptor = self.root_descriptor(table, index)?.clone();
         let encoded = self.encode_lookup_key(prefix)?;
         let mut context = ReadContext::new(self, limits);
@@ -246,7 +264,7 @@ impl<'a> ReadContext<'a> {
         height: u32,
         expected_upper_bound: Option<&[u8]>,
         prefix: &[u8],
-        visit: &mut impl FnMut(&super::RelationalKey) -> bool,
+        visit: &mut impl FnMut(&super::RelationalKey, &super::RelationalKey) -> bool,
     ) -> Result<VisitOutcome, RelationalIndexShadowError> {
         let page = self.read_page(page_id)?;
         if let Some(expected) = expected_upper_bound {
@@ -304,7 +322,7 @@ impl<'a> ReadContext<'a> {
         &mut self,
         entries: Vec<crate::IndexLeafEntry>,
         prefix: &[u8],
-        visit: &mut impl FnMut(&super::RelationalKey) -> bool,
+        visit: &mut impl FnMut(&super::RelationalKey, &super::RelationalKey) -> bool,
     ) -> Result<VisitOutcome, RelationalIndexShadowError> {
         let start = entries.partition_point(|entry| entry.key.as_slice() < prefix);
         for entry in entries.into_iter().skip(start) {
@@ -321,11 +339,25 @@ impl<'a> ReadContext<'a> {
                 .matched_index_keys
                 .checked_add(1)
                 .ok_or_else(|| self.admission("matched-key counter overflow"))?;
-            if self.visit_posting(&entry.posting, visit)? == VisitOutcome::Stopped {
+            let index_key = decode_relational_key(&entry.key).inspect_err(|_| {
+                self.reader.poison();
+            })?;
+            if self.visit_ordered_posting(&index_key, &entry.posting, visit)?
+                == VisitOutcome::Stopped
+            {
                 return Ok(VisitOutcome::Stopped);
             }
         }
         Ok(VisitOutcome::Continue)
+    }
+
+    fn visit_ordered_posting(
+        &mut self,
+        index_key: &super::RelationalKey,
+        posting: &IndexLeafPosting,
+        visit: &mut impl FnMut(&super::RelationalKey, &super::RelationalKey) -> bool,
+    ) -> Result<VisitOutcome, RelationalIndexShadowError> {
+        self.visit_posting(posting, &mut |primary_key| visit(index_key, primary_key))
     }
 
     fn visit_posting(
