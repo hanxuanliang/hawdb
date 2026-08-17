@@ -422,9 +422,17 @@ memory:
 ordered spill. Mergeable grouped aggregates spill partial states. Other grouped
 aggregates spill only the group key and one normalized operand per aggregate;
 they MUST NOT retain or serialize unrelated variables or properties from the
-upstream binding. `DistinctExec` uses ordered spill runs followed by bounded
-merge deduplication. `NodeCartesianProductExec` partitions an oversized build
-side into bounded spill runs and replays those runs for each streamed probe row.
+upstream binding. Aggregate output construction MUST retain one root owner while
+an in-memory group, partial group, or decoded spill row becomes a `Binding`.
+The handoff atomically moves the retained charge from blocking state to the
+pipeline batch, admitting any representation-size increase against both the
+batch account and query root without requiring both representations to be
+charged after ownership has moved. Input rows and merge entries MUST remain
+charged until their values have entered the accumulator, while completed output
+batches remain charged until synchronous emission. `DistinctExec` uses ordered
+spill runs followed by bounded merge deduplication. `NodeCartesianProductExec`
+partitions an oversized build side into bounded spill runs and replays those
+runs for each streamed probe row.
 Replay retains the encoded spill lease until the right binding is admitted to
 the blocking account. Before cloning either input, each output row reserves the
 sum of both input resident estimates in a query-rooted pipeline-batch account;

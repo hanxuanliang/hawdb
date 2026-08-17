@@ -73,6 +73,43 @@ impl OperatorMemoryTracker {
         }
         self.used_bytes = 0;
     }
+
+    pub(crate) fn transfer_to(
+        &mut self,
+        source_bytes: usize,
+        target: &mut Self,
+        target_bytes: usize,
+    ) -> Result<()> {
+        if source_bytes > self.used_bytes {
+            return Err(SkeinError::Execution(format!(
+                "operator memory transfer tried to release {source_bytes} bytes while using {} bytes",
+                self.used_bytes
+            )));
+        }
+        if target.would_exceed(target_bytes) {
+            return Err(SkeinError::Execution(format!(
+                "operator memory transfer would use {} bytes, exceeding its {}-byte budget",
+                target.used_bytes.saturating_add(target_bytes),
+                target.budget_bytes
+            )));
+        }
+        match (&mut self.lease, &mut target.lease) {
+            (Some(source), Some(target)) => {
+                source.transfer_to(source_bytes, target, target_bytes)?;
+            }
+            (None, None) => {}
+            _ => {
+                return Err(SkeinError::Execution(
+                    "operator memory transfer cannot cross accounted and unaccounted trackers"
+                        .to_string(),
+                ));
+            }
+        }
+        self.used_bytes -= source_bytes;
+        target.used_bytes = target.used_bytes.saturating_add(target_bytes);
+        target.peak_bytes = target.peak_bytes.max(target.used_bytes);
+        Ok(())
+    }
 }
 
 pub struct SpillBudgetTracker {

@@ -207,6 +207,105 @@ impl QueryMemoryLedger {
             class_state.used_bytes = class_state.used_bytes.saturating_sub(released);
         }
     }
+
+    fn transfer(
+        &self,
+        source_account_id: u64,
+        source_bytes: usize,
+        target_account_id: u64,
+        target_bytes: usize,
+    ) -> Result<()> {
+        if source_account_id == target_account_id {
+            return Err(SkeinError::Execution(
+                "query memory transfer requires distinct accounts".to_string(),
+            ));
+        }
+        let mut state =
+            self.inner.state.lock().map_err(|_| {
+                SkeinError::Execution("query memory ledger is poisoned".to_string())
+            })?;
+        let (source_class, source_used) = state
+            .accounts
+            .get(&source_account_id)
+            .map(|account| (account.class, account.used_bytes))
+            .ok_or_else(|| {
+                SkeinError::Execution(
+                    "source query memory account is no longer registered".to_string(),
+                )
+            })?;
+        if source_bytes > source_used {
+            return Err(SkeinError::Execution(format!(
+                "query memory transfer tried to release {source_bytes} bytes from a source account using {source_used} bytes"
+            )));
+        }
+        let (target_class, target_owner, target_budget, target_used) = state
+            .accounts
+            .get(&target_account_id)
+            .map(|account| {
+                (
+                    account.class,
+                    Arc::clone(&account.owner),
+                    account.budget_bytes,
+                    account.used_bytes,
+                )
+            })
+            .ok_or_else(|| {
+                SkeinError::Execution(
+                    "target query memory account is no longer registered".to_string(),
+                )
+            })?;
+        let target_next = target_used.checked_add(target_bytes).ok_or_else(|| {
+            SkeinError::Execution(format!(
+                "query memory account {target_owner} ({}) byte accounting overflow",
+                target_class.as_str()
+            ))
+        })?;
+        if target_next > target_budget {
+            return Err(SkeinError::Execution(format!(
+                "query memory account {target_owner} ({}) would use {target_next} bytes, exceeding its {target_budget}-byte budget",
+                target_class.as_str()
+            )));
+        }
+        let root_after_release = state.used_bytes.checked_sub(source_bytes).ok_or_else(|| {
+            SkeinError::Execution(
+                "query memory ledger underflow during ownership transfer".to_string(),
+            )
+        })?;
+        let root_next = root_after_release.checked_add(target_bytes).ok_or_else(|| {
+            SkeinError::Execution(format!(
+                "query memory ledger byte accounting overflow while transferring ownership to {target_owner} ({})",
+                target_class.as_str()
+            ))
+        })?;
+        if root_next > self.inner.budget_bytes {
+            return Err(SkeinError::Execution(format!(
+                "query memory ledger would use {root_next} bytes while transferring ownership to {target_owner} ({}), exceeding query_memory_bytes {}",
+                target_class.as_str(),
+                self.inner.budget_bytes
+            )));
+        }
+
+        let source = state
+            .accounts
+            .get_mut(&source_account_id)
+            .expect("validated source query memory account remains registered");
+        source.used_bytes -= source_bytes;
+        let target = state
+            .accounts
+            .get_mut(&target_account_id)
+            .expect("validated target query memory account remains registered");
+        target.used_bytes = target_next;
+        target.peak_bytes = target.peak_bytes.max(target_next);
+        state.used_bytes = root_next;
+        state.peak_bytes = state.peak_bytes.max(root_next);
+        if let Some(class_state) = state.classes.get_mut(&source_class) {
+            class_state.used_bytes = class_state.used_bytes.saturating_sub(source_bytes);
+        }
+        let class_state = state.classes.entry(target_class).or_default();
+        class_state.used_bytes = class_state.used_bytes.saturating_add(target_bytes);
+        class_state.peak_bytes = class_state.peak_bytes.max(class_state.used_bytes);
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -255,6 +354,34 @@ impl QueryMemoryLease {
     pub fn reset(&mut self) {
         self.shrink(self.bytes);
     }
+
+    pub(crate) fn transfer_to(
+        &mut self,
+        source_bytes: usize,
+        target: &mut Self,
+        target_bytes: usize,
+    ) -> Result<()> {
+        if !Arc::ptr_eq(&self.account.ledger.inner, &target.account.ledger.inner) {
+            return Err(SkeinError::Execution(
+                "query memory transfer requires accounts from the same ledger".to_string(),
+            ));
+        }
+        if source_bytes > self.bytes {
+            return Err(SkeinError::Execution(format!(
+                "query memory transfer tried to release {source_bytes} bytes from a {}-byte lease",
+                self.bytes,
+            )));
+        }
+        self.account.ledger.transfer(
+            self.account.account_id,
+            source_bytes,
+            target.account.account_id,
+            target_bytes,
+        )?;
+        self.bytes -= source_bytes;
+        target.bytes = target.bytes.saturating_add(target_bytes);
+        Ok(())
+    }
 }
 
 impl Drop for QueryMemoryLease {
@@ -296,6 +423,45 @@ mod tests {
         assert_eq!(ledger.snapshot().used_bytes, 6);
         drop(left_lease);
         assert_eq!(ledger.snapshot().used_bytes, 0);
+    }
+
+    #[test]
+    fn ownership_transfer_does_not_require_double_root_capacity() {
+        let budget = NonZeroUsize::new(8).unwrap();
+        let ledger = QueryMemoryLedger::new(budget);
+        let source = ledger.account(QueryMemoryClass::BlockingState, "source", budget);
+        let target = ledger.account(QueryMemoryClass::PipelineBatch, "target", budget);
+        let mut source_lease = source.reserve(8).unwrap();
+        let mut target_lease = target.reserve(0).unwrap();
+
+        source_lease.transfer_to(8, &mut target_lease, 8).unwrap();
+
+        assert_eq!(source_lease.bytes(), 0);
+        assert_eq!(target_lease.bytes(), 8);
+        let snapshot = ledger.snapshot();
+        assert_eq!(snapshot.used_bytes, 8);
+        assert_eq!(snapshot.peak_bytes, 8);
+        drop((source_lease, target_lease));
+        assert_eq!(ledger.snapshot().used_bytes, 0);
+    }
+
+    #[test]
+    fn failed_ownership_transfer_preserves_source_charge() {
+        let budget = NonZeroUsize::new(8).unwrap();
+        let ledger = QueryMemoryLedger::new(budget);
+        let source = ledger.account(QueryMemoryClass::BlockingState, "source", budget);
+        let target = ledger.account(QueryMemoryClass::PipelineBatch, "target", budget);
+        let mut source_lease = source.reserve(8).unwrap();
+        let mut target_lease = target.reserve(0).unwrap();
+
+        let error = source_lease
+            .transfer_to(8, &mut target_lease, 9)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("9 bytes"));
+        assert_eq!(source_lease.bytes(), 8);
+        assert_eq!(target_lease.bytes(), 0);
+        assert_eq!(ledger.snapshot().used_bytes, 8);
     }
 
     #[test]

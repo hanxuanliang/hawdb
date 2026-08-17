@@ -2,7 +2,9 @@
 
 use crate::binding::{binding_memory_bytes, Binding};
 use crate::kernel::OperatorMemoryTracker;
+use crate::{QueryMemoryAccount, QueryMemoryClass, QueryMemoryLedger};
 use skein_core::{Result, RuntimeTaskContext, SkeinError};
+use std::num::NonZeroUsize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchControl {
@@ -11,6 +13,101 @@ pub enum BatchControl {
 }
 
 pub type BindingBatch = Vec<Binding>;
+
+pub(crate) struct AccountedBindingBatch {
+    operator: &'static str,
+    bindings: BindingBatch,
+    batch_rows: usize,
+    tracker: OperatorMemoryTracker,
+}
+
+impl AccountedBindingBatch {
+    pub(crate) fn with_ledger(
+        operator: &'static str,
+        batch_rows: usize,
+        memory_budget: NonZeroUsize,
+        memory_ledger: &QueryMemoryLedger,
+    ) -> Self {
+        Self::with_account(
+            operator,
+            batch_rows,
+            memory_budget,
+            memory_ledger.account(
+                QueryMemoryClass::PipelineBatch,
+                format!("{operator} output batch"),
+                memory_budget,
+            ),
+        )
+    }
+
+    fn with_account(
+        operator: &'static str,
+        batch_rows: usize,
+        memory_budget: NonZeroUsize,
+        account: QueryMemoryAccount,
+    ) -> Self {
+        Self {
+            operator,
+            bindings: Vec::with_capacity(batch_rows),
+            batch_rows,
+            tracker: OperatorMemoryTracker::with_account(memory_budget, account),
+        }
+    }
+
+    pub(crate) fn transfer_from(
+        &mut self,
+        source: &mut OperatorMemoryTracker,
+        source_bytes: usize,
+        binding: Binding,
+        emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+    ) -> Result<BatchControl> {
+        let target_bytes = binding_memory_bytes(&binding);
+        if target_bytes > self.tracker.budget_bytes {
+            return Err(SkeinError::Execution(format!(
+                "{} output row uses {target_bytes} bytes, exceeding batch_payload_bytes {}",
+                self.operator, self.tracker.budget_bytes
+            )));
+        }
+        if self.tracker.would_exceed(target_bytes)
+            && !self.bindings.is_empty()
+            && self.emit(emit)? == BatchControl::Stop
+        {
+            return Ok(BatchControl::Stop);
+        }
+        source
+            .transfer_to(source_bytes, &mut self.tracker, target_bytes)
+            .map_err(|error| {
+                SkeinError::Execution(format!(
+                    "{} output batch could not take ownership of a {target_bytes}-byte binding: {error}",
+                    self.operator
+                ))
+            })?;
+        self.bindings.push(binding);
+        Ok(BatchControl::Continue)
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.bindings.is_empty()
+    }
+
+    pub(crate) fn is_full(&self) -> bool {
+        self.bindings.len() == self.batch_rows
+    }
+
+    pub(crate) fn emit(
+        &mut self,
+        emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+    ) -> Result<BatchControl> {
+        if self.bindings.is_empty() {
+            return Ok(BatchControl::Continue);
+        }
+        self.tracker.reset();
+        emit(std::mem::replace(
+            &mut self.bindings,
+            Vec::with_capacity(self.batch_rows),
+        ))
+    }
+}
 
 pub struct AccountedBindingSet {
     bindings: Vec<Binding>,
@@ -152,6 +249,45 @@ mod tests {
             .unwrap();
 
         assert_eq!(control, BatchControl::Stop);
+        assert_eq!(ledger.snapshot().used_bytes, 0);
+    }
+
+    #[test]
+    fn accounted_batch_flushes_before_a_byte_budget_overflow() {
+        let first = binding(1);
+        let second = binding(2);
+        let row_bytes = binding_memory_bytes(&first);
+        let root_budget = NonZeroUsize::new(row_bytes.saturating_mul(3)).unwrap();
+        let output_budget = NonZeroUsize::new(row_bytes.saturating_add(1)).unwrap();
+        let ledger = QueryMemoryLedger::new(root_budget);
+        let mut source = OperatorMemoryTracker::with_account(
+            root_budget,
+            ledger.account(QueryMemoryClass::BlockingState, "source", root_budget),
+        );
+        let mut output = AccountedBindingBatch::with_ledger("test", 8, output_budget, &ledger);
+        let mut batch_sizes = Vec::new();
+        let mut emit = |batch: BindingBatch| {
+            batch_sizes.push(batch.len());
+            Ok(BatchControl::Continue)
+        };
+
+        source.try_charge(row_bytes).unwrap();
+        assert_eq!(
+            output
+                .transfer_from(&mut source, row_bytes, first, &mut emit)
+                .unwrap(),
+            BatchControl::Continue
+        );
+        source.try_charge(row_bytes).unwrap();
+        assert_eq!(
+            output
+                .transfer_from(&mut source, row_bytes, second, &mut emit)
+                .unwrap(),
+            BatchControl::Continue
+        );
+        output.emit(&mut emit).unwrap();
+
+        assert_eq!(batch_sizes, vec![1, 1]);
         assert_eq!(ledger.snapshot().used_bytes, 0);
     }
 }

@@ -150,6 +150,16 @@ the query root before the corresponding executor allocation. Pipeline batches,
 blocking state, spill encoding buffers, morsel output, and result
 materialization are separate accounts under that root.
 
+`Transfer(source, target)` models a synchronous ownership handoff without a
+release/reserve gap and without requiring double root capacity for one retained
+object. The implementation's byte-granular transfer validates the target
+account and the post-transfer root total before changing either lease; a larger
+representation is therefore admitted as part of the same atomic transition.
+Aggregate group, partial-group, and spill-merge output uses this transition to
+move ownership from blocking state to its pipeline batch. Input rows remain
+charged until accumulation completes, and an emitted batch releases its lease
+only at the synchronous consumer boundary.
+
 The model distinguishes a streaming completion, which owns no query memory,
 from a materialized-result handoff, which may retain an admitted result lease
 until the caller-owned result is dropped. Failure and cancellation release all

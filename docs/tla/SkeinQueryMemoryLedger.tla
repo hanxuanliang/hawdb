@@ -50,6 +50,14 @@ Release(account) ==
     /\ used' = [used EXCEPT ![account] = @ - 1]
     /\ UNCHANGED <<peak, status>>
 
+Transfer(source, target) ==
+    /\ status = "running"
+    /\ source # target
+    /\ used[source] > 0
+    /\ used[target] < AccountBudget
+    /\ used' = [used EXCEPT ![source] = @ - 1, ![target] = @ + 1]
+    /\ UNCHANGED <<peak, status>>
+
 ReturnMaterialized ==
     /\ status = "running"
     /\ status' = "returned"
@@ -82,6 +90,7 @@ Cancel ==
 Next ==
     \/ \E account \in Accounts: Reserve(account)
     \/ \E account \in Accounts: Release(account)
+    \/ \E source, target \in Accounts: Transfer(source, target)
     \/ ReturnMaterialized
     \/ CompleteStreaming
     \/ DropReturnedResult

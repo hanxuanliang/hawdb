@@ -196,7 +196,7 @@ pub(super) fn stream_partial_aggregate_batches(
             ordinal as usize,
             memory,
         ));
-        return emit_partial_groups(groups, context, emit);
+        return emit_partial_groups(groups, tracker, context, emit);
     }
     if !groups.is_empty() {
         runs.push(spill_partial_group_run(
@@ -272,32 +272,34 @@ fn finish_partial_group(
 
 fn emit_partial_groups(
     groups: BTreeMap<Vec<Value>, PartialGroup>,
+    mut group_tracker: OperatorMemoryTracker,
     context: AggregateExecutionContext<'_>,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
-    let mut batch = Vec::with_capacity(context.batch_rows);
+    let mut output = AccountedBindingBatch::with_ledger(
+        "AggregateExec",
+        context.batch_rows,
+        context.output_memory_budget,
+        context.memory_ledger,
+    );
     let mut emitted = 0usize;
     for (key, group) in groups {
         runtime_checkpoint(context.task_context)?;
-        batch.push(finish_partial_group(
-            key,
-            group.states,
-            context.group_keys,
-            context.items,
-        ));
+        let group_bytes = group.memory_bytes(&key);
+        let binding = finish_partial_group(key, group.states, context.group_keys, context.items);
+        if output.transfer_from(&mut group_tracker, group_bytes, binding, emit)?
+            == BatchControl::Stop
+        {
+            return Ok(BatchControl::Stop);
+        }
         emitted = emitted.saturating_add(1);
-        if flush_aggregate_batch(
-            &mut batch,
-            context.batch_rows,
-            emitted,
-            context.execution_limit,
-            emit,
-        )? == BatchControl::Stop
+        if flush_aggregate_batch(&mut output, emitted, context.execution_limit, emit)?
+            == BatchControl::Stop
         {
             return Ok(BatchControl::Stop);
         }
     }
-    if !batch.is_empty() && emit(batch)? == BatchControl::Stop {
+    if !output.is_empty() && output.emit(emit)? == BatchControl::Stop {
         return Ok(BatchControl::Stop);
     }
     Ok(BatchControl::Continue)
@@ -591,7 +593,12 @@ fn merge_partial_runs(
     } else {
         None
     };
-    let mut batch = Vec::with_capacity(context.batch_rows);
+    let mut output = AccountedBindingBatch::with_ledger(
+        "AggregateExec",
+        context.batch_rows,
+        context.output_memory_budget,
+        context.memory_ledger,
+    );
     let mut emitted = 0usize;
     while left.is_some() || right.is_some() {
         runtime_checkpoint(context.task_context)?;
@@ -604,21 +611,14 @@ fn merge_partial_runs(
             advance_right,
             released_bytes,
         } = selection;
-        batch.push(finish_partial_group(
-            row.key,
-            row.states,
-            context.group_keys,
-            context.items,
-        ));
-        tracker.release(released_bytes);
+        let binding = finish_partial_group(row.key, row.states, context.group_keys, context.items);
+        if output.transfer_from(&mut tracker, released_bytes, binding, emit)? == BatchControl::Stop
+        {
+            return Ok(BatchControl::Stop);
+        }
         emitted = emitted.saturating_add(1);
-        if flush_aggregate_batch(
-            &mut batch,
-            context.batch_rows,
-            emitted,
-            context.execution_limit,
-            emit,
-        )? == BatchControl::Stop
+        if flush_aggregate_batch(&mut output, emitted, context.execution_limit, emit)?
+            == BatchControl::Stop
         {
             return Ok(BatchControl::Stop);
         }
@@ -641,7 +641,7 @@ fn merge_partial_runs(
             )?;
         }
     }
-    if !batch.is_empty() && emit(batch)? == BatchControl::Stop {
+    if !output.is_empty() && output.emit(emit)? == BatchControl::Stop {
         return Ok(BatchControl::Stop);
     }
     Ok(BatchControl::Continue)

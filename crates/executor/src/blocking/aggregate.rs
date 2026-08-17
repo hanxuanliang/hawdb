@@ -421,6 +421,7 @@ struct AggregateExecutionContext<'a> {
     catalog: &'a Catalog,
     batch_rows: usize,
     memory_budget: NonZeroUsize,
+    output_memory_budget: NonZeroUsize,
     memory_ledger: &'a QueryMemoryLedger,
     execution_limit: ExecutionLimit,
     task_context: Option<&'a RuntimeTaskContext>,
@@ -494,7 +495,18 @@ pub fn stream_aggregate_batches(
             input_rows,
             memory,
         ));
-        return emit(vec![accumulator.finish()]);
+        let mut output = AccountedBindingBatch::with_ledger(
+            "AggregateExec",
+            memory.batch_rows.get(),
+            memory.batch_payload_bytes,
+            memory_ledger,
+        );
+        let binding = accumulator.finish();
+        let source_bytes = tracker.used_bytes;
+        if output.transfer_from(&mut tracker, source_bytes, binding, emit)? == BatchControl::Stop {
+            return Ok(BatchControl::Stop);
+        }
+        return output.emit(emit);
     }
 
     if items.iter().all(partial_aggregation_is_mergeable) {
@@ -509,6 +521,7 @@ pub fn stream_aggregate_batches(
                 catalog,
                 batch_rows: memory.batch_rows.get(),
                 memory_budget: memory.blocking_operator_bytes,
+                output_memory_budget: memory.batch_payload_bytes,
                 memory_ledger,
                 execution_limit,
                 task_context,
@@ -571,11 +584,12 @@ pub fn stream_aggregate_batches(
             catalog,
             batch_rows: memory.batch_rows.get(),
             memory_budget: memory.blocking_operator_bytes,
+            output_memory_budget: memory.batch_payload_bytes,
             memory_ledger,
             execution_limit,
             task_context,
         };
-        return aggregate_sorted_group_rows(rows, aggregate_context, emit);
+        return aggregate_sorted_group_rows(rows, tracker, aggregate_context, emit);
     }
     if !rows.is_empty() {
         runs.push(spill_group_run(&mut rows, &mut spill_budget, task_context)?);
@@ -603,6 +617,7 @@ pub fn stream_aggregate_batches(
         catalog,
         batch_rows: memory.batch_rows.get(),
         memory_budget: memory.blocking_operator_bytes,
+        output_memory_budget: memory.batch_payload_bytes,
         memory_ledger,
         execution_limit,
         task_context,
@@ -717,6 +732,7 @@ fn merge_group_run_pair(
 
 fn aggregate_sorted_group_rows(
     rows: Vec<GroupRunRow>,
+    mut input_tracker: OperatorMemoryTracker,
     context: AggregateExecutionContext<'_>,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
@@ -726,6 +742,7 @@ fn aggregate_sorted_group_rows(
         catalog: _,
         batch_rows,
         memory_budget,
+        output_memory_budget,
         memory_ledger,
         execution_limit,
         task_context,
@@ -739,19 +756,30 @@ fn aggregate_sorted_group_rows(
             memory_budget,
         ),
     );
-    let mut batch = Vec::with_capacity(batch_rows);
+    let mut output = AccountedBindingBatch::with_ledger(
+        "AggregateExec",
+        batch_rows,
+        output_memory_budget,
+        memory_ledger,
+    );
     let mut accumulator: Option<GroupAccumulator<'_>> = None;
     let mut emitted = 0usize;
     for row in rows {
         runtime_checkpoint(task_context)?;
+        let row_bytes = row.memory_bytes();
         if accumulator
             .as_ref()
             .is_some_and(|accumulator| accumulator.key != row.key)
         {
-            batch.push(accumulator.take().expect("group exists").finish());
-            tracker.reset();
+            let binding = accumulator.take().expect("group exists").finish();
+            let source_bytes = tracker.used_bytes;
+            if output.transfer_from(&mut tracker, source_bytes, binding, emit)?
+                == BatchControl::Stop
+            {
+                return Ok(BatchControl::Stop);
+            }
             emitted = emitted.saturating_add(1);
-            if flush_aggregate_batch(&mut batch, batch_rows, emitted, execution_limit, emit)?
+            if flush_aggregate_batch(&mut output, emitted, execution_limit, emit)?
                 == BatchControl::Stop
             {
                 return Ok(BatchControl::Stop);
@@ -769,12 +797,17 @@ fn aggregate_sorted_group_rows(
             row.inputs,
             &mut tracker,
         )?;
+        input_tracker.release(row_bytes);
     }
     runtime_checkpoint(task_context)?;
     if let Some(accumulator) = accumulator {
-        batch.push(accumulator.finish());
+        let binding = accumulator.finish();
+        let source_bytes = tracker.used_bytes;
+        if output.transfer_from(&mut tracker, source_bytes, binding, emit)? == BatchControl::Stop {
+            return Ok(BatchControl::Stop);
+        }
     }
-    if !batch.is_empty() && emit(batch)? == BatchControl::Stop {
+    if !output.is_empty() && output.emit(emit)? == BatchControl::Stop {
         return Ok(BatchControl::Stop);
     }
     Ok(BatchControl::Continue)
@@ -792,6 +825,7 @@ fn merge_group_runs(
         catalog: _,
         batch_rows,
         memory_budget,
+        output_memory_budget,
         memory_ledger,
         execution_limit,
         task_context,
@@ -832,22 +866,32 @@ fn merge_group_runs(
             heap.push(entry);
         }
     }
-    let mut batch = Vec::with_capacity(batch_rows);
+    let mut output = AccountedBindingBatch::with_ledger(
+        "AggregateExec",
+        batch_rows,
+        output_memory_budget,
+        memory_ledger,
+    );
     let mut accumulator: Option<GroupAccumulator<'_>> = None;
     let mut emitted = 0usize;
     while let Some(entry) = heap.pop() {
         runtime_checkpoint(task_context)?;
-        merge_tracker.release(entry.row.memory_bytes());
+        let row_bytes = entry.row.memory_bytes();
         let run_index = entry.run_index;
         let row = entry.row;
         if accumulator
             .as_ref()
             .is_some_and(|accumulator| accumulator.key != row.key)
         {
-            batch.push(accumulator.take().expect("group exists").finish());
-            accumulator_tracker.reset();
+            let binding = accumulator.take().expect("group exists").finish();
+            let source_bytes = accumulator_tracker.used_bytes;
+            if output.transfer_from(&mut accumulator_tracker, source_bytes, binding, emit)?
+                == BatchControl::Stop
+            {
+                return Ok(BatchControl::Stop);
+            }
             emitted = emitted.saturating_add(1);
-            if flush_aggregate_batch(&mut batch, batch_rows, emitted, execution_limit, emit)?
+            if flush_aggregate_batch(&mut output, emitted, execution_limit, emit)?
                 == BatchControl::Stop
             {
                 return Ok(BatchControl::Stop);
@@ -869,6 +913,7 @@ fn merge_group_runs(
             row.inputs,
             &mut accumulator_tracker,
         )?;
+        merge_tracker.release(row_bytes);
         if let Some(next) = read_group_merge_entry(
             &mut readers[run_index],
             run_index,
@@ -883,9 +928,15 @@ fn merge_group_runs(
     }
     runtime_checkpoint(task_context)?;
     if let Some(accumulator) = accumulator {
-        batch.push(accumulator.finish());
+        let binding = accumulator.finish();
+        let source_bytes = accumulator_tracker.used_bytes;
+        if output.transfer_from(&mut accumulator_tracker, source_bytes, binding, emit)?
+            == BatchControl::Stop
+        {
+            return Ok(BatchControl::Stop);
+        }
     }
-    if !batch.is_empty() && emit(batch)? == BatchControl::Stop {
+    if !output.is_empty() && output.emit(emit)? == BatchControl::Stop {
         return Ok(BatchControl::Stop);
     }
     Ok(BatchControl::Continue)
@@ -956,15 +1007,13 @@ fn update_group_accumulator_inputs(
 }
 
 fn flush_aggregate_batch(
-    batch: &mut BindingBatch,
-    batch_rows: usize,
+    batch: &mut AccountedBindingBatch,
     emitted: usize,
     execution_limit: ExecutionLimit,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
-    if (batch.len() == batch_rows || execution_limit.is_reached(emitted))
-        && (emit(std::mem::replace(batch, Vec::with_capacity(batch_rows)))? == BatchControl::Stop
-            || execution_limit.is_reached(emitted))
+    if (batch.is_full() || execution_limit.is_reached(emitted))
+        && (batch.emit(emit)? == BatchControl::Stop || execution_limit.is_reached(emitted))
     {
         return Ok(BatchControl::Stop);
     }
