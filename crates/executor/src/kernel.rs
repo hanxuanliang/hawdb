@@ -226,19 +226,6 @@ pub fn push_bounded_operator_binding(
     Ok(())
 }
 
-pub fn collect_bounded_operator_bindings(
-    operator: &str,
-    bindings: impl IntoIterator<Item = Binding>,
-    memory_budget: NonZeroUsize,
-) -> Result<Vec<Binding>> {
-    let mut output = Vec::new();
-    let mut tracker = OperatorMemoryTracker::new(memory_budget);
-    for binding in bindings {
-        push_bounded_operator_binding(operator, &mut output, binding, &mut tracker)?;
-    }
-    Ok(output)
-}
-
 pub fn collect_bounded_operator_bindings_with_account(
     operator: &str,
     bindings: impl IntoIterator<Item = Binding>,

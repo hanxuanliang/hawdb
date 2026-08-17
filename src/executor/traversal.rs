@@ -25,38 +25,20 @@ pub(super) fn all_shortest_paths(
     result_limit: usize,
     task_context: Option<&RuntimeTaskContext>,
 ) -> Result<(Vec<Vec<NodeId>>, usize, usize)> {
+    let memory_ledger = QueryMemoryLedger::new(memory_budget);
+    let memory_account = memory_ledger.account(
+        QueryMemoryClass::BlockingState,
+        "ShortestPathExec test",
+        memory_budget,
+    );
     executor_traversal::all_shortest_paths(
         store,
         search,
         memory_budget,
         result_limit,
+        memory_account,
         task_context,
         &skein_executor::observer::NoopExecutionObserver,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn one_hop_relationships_with_budget(
-    store: &GraphStore,
-    source: NodeId,
-    rel_type_id: Option<crate::schema::RelTypeId>,
-    target_label_ids: Option<&[crate::schema::LabelId]>,
-    rel_properties: &BTreeMap<String, Value>,
-    relationship_scan_filter: Option<&PropertyFilter>,
-    direction: RelationshipDirection,
-    memory_budget_bytes: usize,
-    observer: &dyn skein_executor::observer::ExecutionObserver,
-) -> Result<Vec<(RelRecord, NodeRecord)>> {
-    executor_traversal::one_hop_relationships_with_budget(
-        store,
-        source,
-        rel_type_id,
-        target_label_ids,
-        rel_properties,
-        relationship_scan_filter,
-        direction,
-        memory_budget_bytes,
-        observer,
     )
 }
 

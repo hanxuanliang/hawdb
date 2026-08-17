@@ -203,6 +203,15 @@ their visibility follows `SkeinConcurrentSnapshots.tla`; durable canonical
 adjacency ordering and publication continue to follow
 `SkeinGraphDescriptorPaging.tla`.
 
+Node, property, composite, range, and text index scans refine the pipeline
+account branch through `AccountedBindingBatch`: each row is charged before it
+enters the retained batch, row and byte boundaries release only at synchronous
+emission, and early stop or error drops the remaining lease. Relationship
+existence predicates and optional degree projections use the adjacency visitor
+instead of a materialized match vector. Their ordered storage fallback receives
+the query blocking account, so any compact cross-type merge keys remain under
+the same root.
+
 Traversal materialization refines the same synchronous-transfer rule.
 `ShortestPathExec` retains frontier and completed paths in one rooted blocking
 account, consumes adjacency through the bounded visitor, and moves hydrated

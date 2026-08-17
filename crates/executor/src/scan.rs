@@ -3,7 +3,7 @@
 use crate::binding::{binding_memory_bytes, Binding};
 use crate::kernel::{push_bounded_operator_binding, OperatorMemoryTracker};
 use crate::observer::ExecutionObserver;
-use crate::pipeline::{runtime_checkpoint, BatchControl, BindingBatch};
+use crate::pipeline::{runtime_checkpoint, AccountedBindingBatch, BatchControl, BindingBatch};
 use crate::predicate::{
     label_ids_for_pattern, node_matches_label_pattern, node_matches_property_filter,
 };
@@ -38,16 +38,24 @@ pub struct NodeScanContext<'a> {
     pub store: &'a dyn GraphExecutionRead,
     pub execution_limit: ExecutionLimit,
     pub memory_budget: NonZeroUsize,
-    pub memory_account: Option<&'a QueryMemoryAccount>,
+    pub memory_account: &'a QueryMemoryAccount,
+    pub batch_memory_budget: NonZeroUsize,
+    pub batch_memory_account: &'a QueryMemoryAccount,
     pub batch_rows: usize,
     pub task_context: Option<&'a RuntimeTaskContext>,
 }
 
 impl NodeScanContext<'_> {
     fn memory_tracker(self) -> OperatorMemoryTracker {
-        self.memory_account.map_or_else(
-            || OperatorMemoryTracker::new(self.memory_budget),
-            |account| OperatorMemoryTracker::with_account(self.memory_budget, account.clone()),
+        OperatorMemoryTracker::with_account(self.memory_budget, self.memory_account.clone())
+    }
+
+    fn output_batch(self, operator: &'static str) -> AccountedBindingBatch {
+        AccountedBindingBatch::with_account(
+            operator,
+            self.batch_rows,
+            self.batch_memory_budget,
+            self.batch_memory_account.clone(),
         )
     }
 }
@@ -238,7 +246,7 @@ pub fn stream_node_scan_batches(
             spec.property_filter,
         )?;
         observer.record_scan_pruning_report(scan.report.clone());
-        let mut batch = Vec::with_capacity(context.batch_rows);
+        let mut batch = context.output_batch("NodeScanExec");
         let mut emitted = 0usize;
         for node in scan.nodes {
             runtime_checkpoint(context.task_context)?;
@@ -246,21 +254,18 @@ pub fn stream_node_scan_batches(
             if !predicate(&binding)? {
                 continue;
             }
-            batch.push(binding);
+            if batch.push(binding, emit)? == BatchControl::Stop {
+                return Ok(BatchControl::Stop);
+            }
             emitted = emitted.saturating_add(1);
-            if batch.len() == context.batch_rows
-                && emit(std::mem::replace(
-                    &mut batch,
-                    Vec::with_capacity(context.batch_rows),
-                ))? == BatchControl::Stop
-            {
+            if batch.is_full() && batch.emit(emit)? == BatchControl::Stop {
                 return Ok(BatchControl::Stop);
             }
             if context.execution_limit.is_reached(emitted) {
                 break;
             }
         }
-        if !batch.is_empty() && emit(batch)? == BatchControl::Stop {
+        if !batch.is_empty() && batch.emit(emit)? == BatchControl::Stop {
             return Ok(BatchControl::Stop);
         }
         return Ok(if context.execution_limit.is_reached(emitted) {
@@ -271,7 +276,7 @@ pub fn stream_node_scan_batches(
     }
 
     let label_ids = label_ids_for_pattern(context.catalog, spec.label);
-    let mut batch = Vec::with_capacity(context.batch_rows);
+    let mut batch = context.output_batch("NodeScanExec");
     let mut emitted = 0usize;
     let mut visit = |node: NodeRecord| {
         runtime_checkpoint(context.task_context)?;
@@ -289,14 +294,11 @@ pub fn stream_node_scan_batches(
         if !predicate(&binding)? {
             return Ok(ScanControl::Continue);
         }
-        batch.push(binding);
+        if batch.push(binding, emit)? == BatchControl::Stop {
+            return Ok(ScanControl::Stop);
+        }
         emitted = emitted.saturating_add(1);
-        if batch.len() == context.batch_rows
-            && emit(std::mem::replace(
-                &mut batch,
-                Vec::with_capacity(context.batch_rows),
-            ))? == BatchControl::Stop
-        {
+        if batch.is_full() && batch.emit(emit)? == BatchControl::Stop {
             return Ok(ScanControl::Stop);
         }
         Ok(if context.execution_limit.is_reached(emitted) {
@@ -322,11 +324,7 @@ pub fn stream_node_scan_batches(
         output_count: emitted,
         filtered_out_count: candidate_count.saturating_sub(emitted),
     });
-    let final_emit_control = if batch.is_empty() {
-        BatchControl::Continue
-    } else {
-        emit(batch)?
-    };
+    let final_emit_control = batch.emit(emit)?;
     if final_emit_control == BatchControl::Stop {
         return Ok(BatchControl::Stop);
     }
@@ -431,19 +429,16 @@ pub fn stream_index_node_seek_batches(
     let Some(label_id) = context.catalog.label_id(label) else {
         return Ok(BatchControl::Continue);
     };
-    let mut batch = Vec::with_capacity(context.batch_rows);
+    let mut batch = context.output_batch("IndexNodeSeekExec");
     let mut emitted = 0usize;
     let mut matched = 0usize;
     let mut visit = |node| {
         matched = matched.saturating_add(1);
-        batch.push(node_binding(variable, node));
+        if batch.push(node_binding(variable, node), emit)? == BatchControl::Stop {
+            return Ok(ScanControl::Stop);
+        }
         emitted = emitted.saturating_add(1);
-        if batch.len() == context.batch_rows
-            && emit(std::mem::replace(
-                &mut batch,
-                Vec::with_capacity(context.batch_rows),
-            ))? == BatchControl::Stop
-        {
+        if batch.is_full() && batch.emit(emit)? == BatchControl::Stop {
             return Ok(ScanControl::Stop);
         }
         Ok(if context.execution_limit.is_reached(emitted) {
@@ -455,11 +450,7 @@ pub fn stream_index_node_seek_batches(
     let control = context
         .store
         .visit_nodes_by_property_owned(label_id, property, values, &mut visit)?;
-    let final_emit_control = if batch.is_empty() {
-        BatchControl::Continue
-    } else {
-        emit(batch)?
-    };
+    let final_emit_control = batch.emit(emit)?;
     let candidate_count_before_pruning = context.store.node_count_for_label(Some(label_id));
     observer.record_scan_pruning_report(ScanPruningReport {
         target_kind: ScanPruningTargetKind::Node,

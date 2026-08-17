@@ -16,6 +16,11 @@ pub(super) fn stream_node_scan_batches(
         "NodeScanExec",
         context.memory.blocking_operator_bytes,
     );
+    let batch_memory_account = context.memory_ledger.account(
+        QueryMemoryClass::PipelineBatch,
+        "NodeScanExec output",
+        context.memory.batch_payload_bytes,
+    );
     let mut predicate = |binding: &Binding| match filter {
         Some((predicate, _)) => evaluate_predicate_observed(
             predicate,
@@ -23,6 +28,10 @@ pub(super) fn stream_node_scan_batches(
             context.store,
             binding,
             context.observer,
+            skein_executor::store::AdjacencyReadMemory {
+                budget_bytes: context.memory.blocking_operator_bytes.get(),
+                account: Some(&memory_account),
+            },
         ),
         None => Ok(true),
     };
@@ -37,7 +46,9 @@ pub(super) fn stream_node_scan_batches(
             store: context.store,
             execution_limit,
             memory_budget: context.memory.blocking_operator_bytes,
-            memory_account: Some(&memory_account),
+            memory_account: &memory_account,
+            batch_memory_budget: context.memory.batch_payload_bytes,
+            batch_memory_account: &batch_memory_account,
             batch_rows: context.memory.batch_rows.get(),
             task_context: context.task_context,
         },
@@ -61,6 +72,11 @@ pub(super) fn stream_index_node_seek_batches(
         "IndexNodeSeekExec",
         context.memory.blocking_operator_bytes,
     );
+    let batch_memory_account = context.memory_ledger.account(
+        QueryMemoryClass::PipelineBatch,
+        "IndexNodeSeekExec output",
+        context.memory.batch_payload_bytes,
+    );
     skein_executor::scan::stream_index_node_seek_batches(
         variable,
         label,
@@ -71,7 +87,9 @@ pub(super) fn stream_index_node_seek_batches(
             store: context.store,
             execution_limit,
             memory_budget: context.memory.blocking_operator_bytes,
-            memory_account: Some(&memory_account),
+            memory_account: &memory_account,
+            batch_memory_budget: context.memory.batch_payload_bytes,
+            batch_memory_account: &batch_memory_account,
             batch_rows: context.memory.batch_rows.get(),
             task_context: context.task_context,
         },
@@ -82,22 +100,35 @@ pub(super) fn stream_index_node_seek_batches(
 
 pub(super) fn stream_visited_node_batches(
     variable: &str,
-    batch_rows: usize,
+    context: BatchReadContext<'_>,
     execution_limit: ExecutionLimit,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
     visit: impl FnOnce(&mut dyn FnMut(NodeRecord) -> GraphScanControl) -> Result<GraphScanControl>,
 ) -> Result<BatchControl> {
-    let mut batch = Vec::with_capacity(batch_rows);
+    let mut batch = AccountedBindingBatch::with_ledger(
+        "IndexNodeScanExec",
+        context.memory.batch_rows.get(),
+        context.memory.batch_payload_bytes,
+        context.memory_ledger,
+    );
     let mut emitted = 0usize;
     let mut callback_error = None;
     let mut consumer = |node| {
-        batch.push(single_node_binding(variable, node));
+        if let Err(error) = runtime_checkpoint(context.task_context) {
+            callback_error = Some(error);
+            return GraphScanControl::Stop;
+        }
+        match batch.push(single_node_binding(variable, node), emit) {
+            Ok(BatchControl::Continue) => {}
+            Ok(BatchControl::Stop) => return GraphScanControl::Stop,
+            Err(error) => {
+                callback_error = Some(error);
+                return GraphScanControl::Stop;
+            }
+        }
         emitted = emitted.saturating_add(1);
-        if batch.len() == batch_rows {
-            match emit(std::mem::replace(
-                &mut batch,
-                Vec::with_capacity(batch_rows),
-            )) {
+        if batch.is_full() {
+            match batch.emit(emit) {
                 Ok(BatchControl::Continue) => {}
                 Ok(BatchControl::Stop) => return GraphScanControl::Stop,
                 Err(error) => {
@@ -116,7 +147,7 @@ pub(super) fn stream_visited_node_batches(
     if let Some(error) = callback_error {
         return Err(error);
     }
-    if !batch.is_empty() && emit(batch)? == BatchControl::Stop {
+    if !batch.is_empty() && batch.emit(emit)? == BatchControl::Stop {
         return Ok(BatchControl::Stop);
     }
     Ok(if control == GraphScanControl::Stop {
@@ -138,6 +169,11 @@ pub(super) fn execute_node_scan_with_optional_filter(
         "NodeScanExec",
         context.memory.blocking_operator_bytes,
     );
+    let batch_memory_account = context.memory_ledger.account(
+        QueryMemoryClass::PipelineBatch,
+        "NodeScanExec output",
+        context.memory.batch_payload_bytes,
+    );
     let mut predicate = |binding: &Binding| match filter {
         Some((predicate, _)) => evaluate_predicate_observed(
             predicate,
@@ -145,6 +181,10 @@ pub(super) fn execute_node_scan_with_optional_filter(
             context.store,
             binding,
             context.observer,
+            skein_executor::store::AdjacencyReadMemory {
+                budget_bytes: context.memory.blocking_operator_bytes.get(),
+                account: Some(&memory_account),
+            },
         ),
         None => Ok(true),
     };
@@ -159,7 +199,9 @@ pub(super) fn execute_node_scan_with_optional_filter(
             store: context.store,
             execution_limit,
             memory_budget: context.memory.blocking_operator_bytes,
-            memory_account: Some(&memory_account),
+            memory_account: &memory_account,
+            batch_memory_budget: context.memory.batch_payload_bytes,
+            batch_memory_account: &batch_memory_account,
             batch_rows: 1,
             task_context: context.task_context,
         },
@@ -280,6 +322,11 @@ pub(super) fn execute_node_column_lookup(
         "NodeColumnLookupExec",
         memory_budget,
     );
+    let batch_memory_account = context.memory_ledger.account(
+        QueryMemoryClass::PipelineBatch,
+        "NodeColumnLookupExec output",
+        context.memory.batch_payload_bytes,
+    );
     skein_executor::scan::execute_node_column_lookup(
         spec,
         input,
@@ -288,7 +335,9 @@ pub(super) fn execute_node_column_lookup(
             store: context.store,
             execution_limit,
             memory_budget,
-            memory_account: Some(&memory_account),
+            memory_account: &memory_account,
+            batch_memory_budget: context.memory.batch_payload_bytes,
+            batch_memory_account: &batch_memory_account,
             batch_rows: 1,
             task_context: None,
         },
@@ -306,6 +355,11 @@ pub(super) fn stream_filtered_adjacency_expand_batches(
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
     let BatchReadContext { catalog, store, .. } = context;
+    let predicate_account = context.memory_ledger.account(
+        QueryMemoryClass::BlockingState,
+        "AdjacencyExpandExec residual predicate",
+        context.memory.blocking_operator_bytes,
+    );
     let mut emitted = 0usize;
     stream_adjacency_expand_batches(
         plan,
@@ -329,6 +383,10 @@ pub(super) fn stream_filtered_adjacency_expand_batches(
                     store,
                     &binding,
                     context.observer,
+                    skein_executor::store::AdjacencyReadMemory {
+                        budget_bytes: context.memory.blocking_operator_bytes.get(),
+                        account: Some(&predicate_account),
+                    },
                 )? {
                     filtered.push(binding);
                     if filtered.len() == remaining {

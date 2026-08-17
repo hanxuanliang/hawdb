@@ -14,7 +14,7 @@ pub enum BatchControl {
 
 pub type BindingBatch = Vec<Binding>;
 
-pub(crate) struct AccountedBindingBatch {
+pub struct AccountedBindingBatch {
     operator: &'static str,
     bindings: BindingBatch,
     batch_rows: usize,
@@ -22,7 +22,7 @@ pub(crate) struct AccountedBindingBatch {
 }
 
 impl AccountedBindingBatch {
-    pub(crate) fn with_ledger(
+    pub fn with_ledger(
         operator: &'static str,
         batch_rows: usize,
         memory_budget: NonZeroUsize,
@@ -40,7 +40,7 @@ impl AccountedBindingBatch {
         )
     }
 
-    fn with_account(
+    pub fn with_account(
         operator: &'static str,
         batch_rows: usize,
         memory_budget: NonZeroUsize,
@@ -64,8 +64,8 @@ impl AccountedBindingBatch {
         let target_bytes = binding_memory_bytes(&binding);
         if target_bytes > self.tracker.budget_bytes {
             return Err(SkeinError::Execution(format!(
-                "{} output row uses {target_bytes} bytes, exceeding batch_payload_bytes {}",
-                self.operator, self.tracker.budget_bytes
+                "intermediate row uses {target_bytes} bytes, exceeding batch_payload_bytes {}",
+                self.tracker.budget_bytes
             )));
         }
         if self.tracker.would_exceed(target_bytes)
@@ -86,15 +86,38 @@ impl AccountedBindingBatch {
         Ok(BatchControl::Continue)
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn push(
+        &mut self,
+        binding: Binding,
+        emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+    ) -> Result<BatchControl> {
+        let bytes = binding_memory_bytes(&binding);
+        if bytes > self.tracker.budget_bytes {
+            return Err(SkeinError::Execution(format!(
+                "intermediate row uses {bytes} bytes, exceeding batch_payload_bytes {}",
+                self.tracker.budget_bytes
+            )));
+        }
+        if self.tracker.would_exceed(bytes)
+            && !self.bindings.is_empty()
+            && self.emit(emit)? == BatchControl::Stop
+        {
+            return Ok(BatchControl::Stop);
+        }
+        self.tracker.try_charge(bytes)?;
+        self.bindings.push(binding);
+        Ok(BatchControl::Continue)
+    }
+
+    pub fn is_empty(&self) -> bool {
         self.bindings.is_empty()
     }
 
-    pub(crate) fn is_full(&self) -> bool {
+    pub fn is_full(&self) -> bool {
         self.bindings.len() == self.batch_rows
     }
 
-    pub(crate) fn emit(
+    pub fn emit(
         &mut self,
         emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
     ) -> Result<BatchControl> {

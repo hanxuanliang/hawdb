@@ -15,9 +15,9 @@ use crate::store::{
     MatchedRelationshipCopyMerge, MatchedRelationshipCreate, MatchedRelationshipMerge,
     MatchedRelationshipRetargetMerge, MatchedRelationshipSourceRetargetMerge, MutationLimits,
     NodeId, NodeRecord, NodeSetAssignment, NodeSetValue, ProjectedGraphDefinition, PropertyFilter,
-    RelRecord, RelationshipDeleteRequest, RelationshipOnCreatePropertyValue,
-    RelationshipPropertiesUpdate, RelationshipPropertyUpdate, RelationshipSetAssignment,
-    RelationshipTargetNodeDelete, ScanPruningReport, SourceScanCandidateRead,
+    RelationshipDeleteRequest, RelationshipOnCreatePropertyValue, RelationshipPropertiesUpdate,
+    RelationshipPropertyUpdate, RelationshipSetAssignment, RelationshipTargetNodeDelete,
+    ScanPruningReport, SourceScanCandidateRead,
 };
 use crate::value::Value;
 use skein_analytics::ProjectedGraphExecution;
@@ -66,7 +66,8 @@ pub(crate) use skein_executor::memory::{
 };
 use skein_executor::memory::{DEFAULT_EXECUTION_BATCH_ROWS, SOURCE_SEGMENT_SCAN_MAX_WAVE_BYTES};
 use skein_executor::pipeline::{
-    emit_owned_binding_batches, runtime_checkpoint, BatchControl, BindingBatch,
+    emit_owned_binding_batches, runtime_checkpoint, AccountedBindingBatch, BatchControl,
+    BindingBatch,
 };
 use skein_executor::predicate::{
     label_ids_for_pattern, node_matches_label_pattern, node_matches_property_filter,

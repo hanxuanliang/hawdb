@@ -8,10 +8,32 @@ pub fn evaluate_predicate(
     binding: &Binding,
     observer: &dyn ExecutionObserver,
 ) -> Result<bool> {
+    evaluate_predicate_with_memory(
+        predicate,
+        catalog,
+        store,
+        binding,
+        observer,
+        AdjacencyReadMemory {
+            budget_bytes: DEFAULT_BLOCKING_OPERATOR_MEMORY_BYTES,
+            account: None,
+        },
+    )
+}
+
+pub fn evaluate_predicate_with_memory(
+    predicate: &Predicate,
+    catalog: &Catalog,
+    store: &dyn GraphExecutionRead,
+    binding: &Binding,
+    observer: &dyn ExecutionObserver,
+    adjacency_memory: AdjacencyReadMemory<'_>,
+) -> Result<bool> {
     let context = PredicateEvaluationContext {
         catalog,
         store,
         observer,
+        adjacency_memory,
     };
     Ok(evaluate_predicate_truth(predicate, binding, &context)?.is_true())
 }
@@ -20,6 +42,7 @@ struct PredicateEvaluationContext<'a> {
     catalog: &'a Catalog,
     store: &'a dyn GraphExecutionRead,
     observer: &'a dyn ExecutionObserver,
+    adjacency_memory: AdjacencyReadMemory<'a>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -351,17 +374,25 @@ fn relationship_exists(
         Some(rel_type_id)
     };
     let target_label_ids = label_ids_for_pattern(catalog, target_label);
-    one_hop_relationships(
+    let mut found = false;
+    visit_one_hop_relationships_with_budget(
         store,
-        source.id,
-        rel_type_id,
-        target_label_ids.as_deref(),
-        &BTreeMap::new(),
-        None,
-        direction,
+        OneHopRelationshipSpec {
+            source: source.id,
+            rel_type_id,
+            target_label_ids: target_label_ids.as_deref(),
+            rel_properties: &BTreeMap::new(),
+            relationship_scan_filter: None,
+            direction,
+        },
+        context.adjacency_memory,
         context.observer,
-    )
-    .map(|relationships| !relationships.is_empty())
+        &mut |_, _| {
+            found = true;
+            Ok(ScanControl::Stop)
+        },
+    )?;
+    Ok(found)
 }
 
 fn bound_relationship_exists(
@@ -383,21 +414,29 @@ fn bound_relationship_exists(
     let Some(rel_type_id) = catalog.rel_type_id(rel_type) else {
         return Ok(false);
     };
-    one_hop_relationships(
+    let mut found = false;
+    visit_one_hop_relationships_with_budget(
         store,
-        source.id,
-        Some(rel_type_id),
-        None,
-        &BTreeMap::new(),
-        None,
-        direction,
+        OneHopRelationshipSpec {
+            source: source.id,
+            rel_type_id: Some(rel_type_id),
+            target_label_ids: None,
+            rel_properties: &BTreeMap::new(),
+            relationship_scan_filter: None,
+            direction,
+        },
+        context.adjacency_memory,
         context.observer,
-    )
-    .map(|relationships| {
-        relationships
-            .iter()
-            .any(|(_, candidate)| candidate.id == target.id)
-    })
+        &mut |_, candidate| {
+            if candidate.id == target.id {
+                found = true;
+                Ok(ScanControl::Stop)
+            } else {
+                Ok(ScanControl::Continue)
+            }
+        },
+    )?;
+    Ok(found)
 }
 
 fn predicate_expression_value(

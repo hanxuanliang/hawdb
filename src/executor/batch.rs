@@ -131,6 +131,11 @@ impl OptionalDegreeSpec<'_> {
             context.catalog.rel_type_id(rel_type)
         };
         let target_label_ids = label_ids_for_pattern(context.catalog, target_label);
+        let adjacency_account = context.memory_ledger.account(
+            QueryMemoryClass::BlockingState,
+            "OptionalDegreeExec adjacency",
+            context.memory.blocking_operator_bytes,
+        );
         let mut emitted = 0usize;
         execute_prepared_binding_batches(
             BatchPlanRef::descendant(input),
@@ -147,20 +152,30 @@ impl OptionalDegreeSpec<'_> {
                                 "missing variable '{source_variable}' during optional degree"
                             ))
                         })?;
-                        one_hop_relationships_with_budget(
+                        let mut degree = 0usize;
+                        skein_executor::traversal::visit_one_hop_relationships_with_budget(
                             context.store,
-                            source.id,
-                            rel_type_id,
-                            target_label_ids.as_deref(),
-                            rel_properties,
-                            None,
-                            direction,
-                            context.memory.blocking_operator_bytes.get(),
+                            skein_executor::traversal::OneHopRelationshipSpec {
+                                source: source.id,
+                                rel_type_id,
+                                target_label_ids: target_label_ids.as_deref(),
+                                rel_properties,
+                                relationship_scan_filter: None,
+                                direction,
+                            },
+                            skein_executor::store::AdjacencyReadMemory {
+                                budget_bytes: context.memory.blocking_operator_bytes.get(),
+                                account: Some(&adjacency_account),
+                            },
                             context.observer,
-                        )?
-                        .into_iter()
-                        .filter(|(_, target)| node_properties_match(target, target_properties))
-                        .count()
+                            &mut |_, target| {
+                                if node_properties_match(&target, target_properties) {
+                                    degree = degree.saturating_add(1);
+                                }
+                                Ok(skein_executor::store::ScanControl::Continue)
+                            },
+                        )?;
+                        degree
                     };
                     binding
                         .values
@@ -439,15 +454,9 @@ fn execute_binding_batches_inner(
             let Some(label_id) = catalog.label_id(label) else {
                 return Ok(BatchControl::Continue);
             };
-            stream_visited_node_batches(
-                variable,
-                memory.batch_rows.get(),
-                execution_limit,
-                emit,
-                |consumer| {
-                    store.visit_nodes_by_composite_property_owned(label_id, predicates, consumer)
-                },
-            )
+            stream_visited_node_batches(variable, context, execution_limit, emit, |consumer| {
+                store.visit_nodes_by_composite_property_owned(label_id, predicates, consumer)
+            })
         }
         PhysicalPlan::IndexNodeRangeSeek {
             variable,
@@ -459,21 +468,15 @@ fn execute_binding_batches_inner(
             let Some(label_id) = catalog.label_id(label) else {
                 return Ok(BatchControl::Continue);
             };
-            stream_visited_node_batches(
-                variable,
-                memory.batch_rows.get(),
-                execution_limit,
-                emit,
-                |consumer| {
-                    store.visit_nodes_by_property_range_owned(
-                        label_id,
-                        property,
-                        lower.as_ref(),
-                        upper.as_ref(),
-                        consumer,
-                    )
-                },
-            )
+            stream_visited_node_batches(variable, context, execution_limit, emit, |consumer| {
+                store.visit_nodes_by_property_range_owned(
+                    label_id,
+                    property,
+                    lower.as_ref(),
+                    upper.as_ref(),
+                    consumer,
+                )
+            })
         }
         PhysicalPlan::IndexNodeTextSeek {
             variable,
@@ -484,17 +487,9 @@ fn execute_binding_batches_inner(
             let Some(label_id) = catalog.label_id(label) else {
                 return Ok(BatchControl::Continue);
             };
-            stream_visited_node_batches(
-                variable,
-                memory.batch_rows.get(),
-                execution_limit,
-                emit,
-                |consumer| {
-                    store.visit_nodes_by_full_text_property_owned(
-                        label_id, property, query, consumer,
-                    )
-                },
-            )
+            stream_visited_node_batches(variable, context, execution_limit, emit, |consumer| {
+                store.visit_nodes_by_full_text_property_owned(label_id, property, query, consumer)
+            })
         }
         PhysicalPlan::ShortestPathExec {
             source_label,
@@ -943,6 +938,11 @@ fn execute_binding_batches_inner(
                     emit,
                 );
             }
+            let predicate_account = context.memory_ledger.account(
+                QueryMemoryClass::BlockingState,
+                "FilterExec relationship predicate",
+                context.memory.blocking_operator_bytes,
+            );
             let mut emitted = 0usize;
             execute_prepared_binding_batches(
                 BatchPlanRef::descendant(input),
@@ -964,6 +964,10 @@ fn execute_binding_batches_inner(
                             store,
                             &binding,
                             context.observer,
+                            skein_executor::store::AdjacencyReadMemory {
+                                budget_bytes: context.memory.blocking_operator_bytes.get(),
+                                account: Some(&predicate_account),
+                            },
                         )? {
                             filtered.push(binding);
                             if filtered.len() == remaining {
