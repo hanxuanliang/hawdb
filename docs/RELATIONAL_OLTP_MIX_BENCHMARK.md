@@ -19,6 +19,22 @@ content updates. Every mutation commits its own transaction because
 per-request durability is the workload's truth. The scan/aggregate class
 (space `COUNT(*)`, per-thread `GROUP BY` rollup) is sampled separately.
 
+Before the mixed phase, the harness also executes the three-statement Mem
+thread-detail read shape on one pinned read transaction per sample:
+
+1. exact thread-document lookup through `(owner_kind, owner_id)`;
+2. `COUNT(*)` plus `SUM(token_count)` for one thread;
+3. deterministic `(order_index, content_message_id)` pagination with
+   `LIMIT 50` and late hydration of 8 KiB message bodies.
+
+The dedicated thread uses large bodies while the rest of the historical mixed
+fixture remains unchanged. The JSON report includes p50/p95/p99 latency,
+intermediate rows, hydration rows and bytes, row/index page reads, cache
+outcomes, and the ordered-page operator list. The harness fails if the ordered
+page reintroduces `TopNExec`; an index-ordered `LimitExec -> ProjectionExec ->
+IndexRangeScanExec` path is required. This makes the benchmark evidence useful
+for both latency comparison and resource-bound regression diagnosis.
+
 The rollup deliberately cannot yet take its production form — the current
 aggregate subset rejects `ORDER BY`, so the "top threads by message count"
 query is expressed without the ordering. Closing that subset gap is an
@@ -26,7 +42,8 @@ executor capability task, not a storage-layout prerequisite.
 
 ## Baseline — current row-oriented engine
 
-Recorded 2026-08-12 on the row-oriented engine (branch
+Recorded 2026-08-12 on the row-oriented engine before the dedicated thread-read
+suite was added (branch
 `feat/columnar-canonical-redesign`, macOS/arm64, release profile), 50,000
 rows:
 
