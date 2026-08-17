@@ -13,7 +13,7 @@ use crate::predicate::{
     node_matches_property_filter, property_filter_from_properties, property_filter_matches_values,
     relationship_properties_match,
 };
-use crate::store::{GraphExecutionRead, ScanControl};
+use crate::store::{AdjacencyReadMemory, GraphExecutionRead, ScanControl};
 use crate::{ExecutionLimit, ExecutionMemoryConfig};
 use skein_core::{
     Catalog, LabelId, RelTypeId, RelationshipDirection, Result, RuntimeTaskContext, SkeinError,
@@ -310,7 +310,7 @@ pub struct OneHopRelationshipSpec<'a> {
 pub fn visit_one_hop_relationships_with_budget(
     store: &dyn GraphExecutionRead,
     spec: OneHopRelationshipSpec<'_>,
-    memory_budget_bytes: usize,
+    memory: AdjacencyReadMemory<'_>,
     observer: &dyn ExecutionObserver,
     consumer: &mut dyn FnMut(RelRecord, NodeRecord) -> Result<ScanControl>,
 ) -> Result<ScanControl> {
@@ -336,9 +336,10 @@ pub fn visit_one_hop_relationships_with_budget(
         {
             let match_bytes =
                 relationship_memory_bytes(&relationship).saturating_add(node_memory_bytes(&target));
-            if match_bytes > memory_budget_bytes {
+            if match_bytes > memory.budget_bytes {
                 return Err(SkeinError::Execution(format!(
-                    "adjacency result uses {match_bytes} bytes, exceeding blocking_operator_bytes {memory_budget_bytes}"
+                    "adjacency result uses {match_bytes} bytes, exceeding blocking_operator_bytes {}",
+                    memory.budget_bytes
                 )));
             }
             return consumer(relationship, target);
@@ -350,7 +351,7 @@ pub fn visit_one_hop_relationships_with_budget(
         && store
             .relationship_count_for_type(spec.rel_type_id)
             .saturating_mul(std::mem::size_of::<&RelRecord>())
-            <= memory_budget_bytes
+            <= memory.budget_bytes
     {
         let scan = store.scan_relationships_with_filter_pruning(spec.rel_type_id, Some(filter))?;
         observer.record_scan_pruning_report(scan.report.clone());
@@ -373,7 +374,7 @@ pub fn visit_one_hop_relationships_with_budget(
                 spec.rel_type_id,
                 adjacency_direction,
                 filter,
-                memory_budget_bytes,
+                memory,
                 &mut visit,
             )?;
             if let Some(report) = report {
@@ -385,7 +386,7 @@ pub fn visit_one_hop_relationships_with_budget(
                 spec.source,
                 spec.rel_type_id,
                 adjacency_direction,
-                memory_budget_bytes,
+                memory,
                 &mut visit,
             )
         }
@@ -426,7 +427,10 @@ pub fn one_hop_relationships_with_budget(
             relationship_scan_filter,
             direction,
         },
-        memory_budget_bytes,
+        AdjacencyReadMemory {
+            budget_bytes: memory_budget_bytes,
+            account: None,
+        },
         observer,
         &mut |relationship, target| {
             let match_bytes =
@@ -459,7 +463,7 @@ pub struct BoundedExpandSpec<'a> {
 pub fn visit_bounded_expand_targets(
     store: &dyn GraphExecutionRead,
     spec: BoundedExpandSpec<'_>,
-    memory_budget_bytes: usize,
+    memory: AdjacencyReadMemory<'_>,
     task_context: Option<&RuntimeTaskContext>,
     consumer: &mut dyn FnMut(NodeRecord, usize) -> Result<ScanControl>,
 ) -> Result<ScanControl> {
@@ -474,9 +478,10 @@ pub fn visit_bounded_expand_targets(
         .max_hops
         .saturating_add(1)
         .saturating_mul(traversal_frame_bytes);
-    if traversal_state_bytes > memory_budget_bytes {
+    if traversal_state_bytes > memory.budget_bytes {
         return Err(SkeinError::Execution(format!(
-            "AdjacencyExpandExec traversal frames use {traversal_state_bytes} bytes, exceeding blocking_operator_bytes {memory_budget_bytes}"
+            "AdjacencyExpandExec traversal frames use {traversal_state_bytes} bytes, exceeding blocking_operator_bytes {}",
+            memory.budget_bytes
         )));
     }
 
@@ -485,7 +490,7 @@ pub fn visit_bounded_expand_targets(
         spec: BoundedExpandSpec<'_>,
         current: NodeId,
         depth: usize,
-        memory_budget_bytes: usize,
+        memory: AdjacencyReadMemory<'_>,
         task_context: Option<&RuntimeTaskContext>,
         consumer: &mut dyn FnMut(NodeRecord, usize) -> Result<ScanControl>,
     ) -> Result<ScanControl> {
@@ -495,9 +500,10 @@ pub fn visit_bounded_expand_targets(
             && node_matches_label_pattern(&node, spec.target_label_ids)
         {
             let item_bytes = node_memory_bytes(&node).saturating_add(std::mem::size_of::<usize>());
-            if item_bytes > memory_budget_bytes {
+            if item_bytes > memory.budget_bytes {
                 return Err(SkeinError::Execution(format!(
-                    "AdjacencyExpandExec result uses {item_bytes} bytes, exceeding blocking_operator_bytes {memory_budget_bytes}"
+                    "AdjacencyExpandExec result uses {item_bytes} bytes, exceeding blocking_operator_bytes {}",
+                    memory.budget_bytes
                 )));
             }
             if consumer(node, depth)? == ScanControl::Stop {
@@ -513,7 +519,7 @@ pub fn visit_bounded_expand_targets(
                 spec,
                 relationship.target,
                 depth + 1,
-                memory_budget_bytes,
+                memory,
                 task_context,
                 consumer,
             )
@@ -522,20 +528,12 @@ pub fn visit_bounded_expand_targets(
             current,
             Some(spec.rel_type_id),
             AdjacencyDirection::Outgoing,
-            memory_budget_bytes,
+            memory,
             &mut visit,
         )
     }
 
-    visit_depth(
-        store,
-        spec,
-        spec.source,
-        0,
-        memory_budget_bytes,
-        task_context,
-        consumer,
-    )
+    visit_depth(store, spec, spec.source, 0, memory, task_context, consumer)
 }
 
 pub fn bounded_expand_targets(

@@ -168,15 +168,17 @@ drop both account leases.
 
 Typed adjacency expansion refines the zero-transient-state branch of this
 model: `AdjacencyPostingList` keeps live entries ordered in snapshot-owned
-storage, and `GraphStore::try_visit_ordered_adjacent_relationships_owned`
-merges the canonical and live cursors without reserving a degree-sized query
-buffer. This claim does not include the untyped cross-relationship-type
-fallback, which still constructs compact keys behind the static blocking
-operator limit and must be connected to the query root before it can satisfy
-the stronger requirement in the storage spec. Posting pivots and bounded
-deltas remain immutable for pinned snapshots, so their visibility follows
-`SkeinConcurrentSnapshots.tla`; durable canonical adjacency ordering and
-publication continue to follow `SkeinGraphDescriptorPaging.tla`.
+storage, and the ordered reader merges canonical and live cursors without
+reserving a degree-sized query buffer. The untyped cross-relationship-type and
+filtered ordering fallbacks charge every compact key to the query blocking
+account before insertion. Expansion result batches hold a pipeline lease while
+being constructed and transfer it synchronously at emission; the optional
+expanded-node report set is charged to the same blocking account. Root
+rejection therefore stops collection and releases all three transient states.
+Posting pivots and bounded deltas remain immutable for pinned snapshots, so
+their visibility follows `SkeinConcurrentSnapshots.tla`; durable canonical
+adjacency ordering and publication continue to follow
+`SkeinGraphDescriptorPaging.tla`.
 
 ## Bounded Morsel Merge
 

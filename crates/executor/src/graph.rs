@@ -1,4 +1,6 @@
 use crate::binding::{binding_payload_bytes, Binding};
+use crate::{QueryMemoryAccount, QueryMemoryLease};
+use skein_core::Result;
 use skein_plan::GraphExpansionBudget;
 use skein_storage::NodeId;
 use std::collections::BTreeSet;
@@ -45,6 +47,7 @@ pub struct GraphExpansionExecutionState {
     budget: Option<GraphExpansionBudget>,
     seed_count: usize,
     expanded_nodes: BTreeSet<NodeId>,
+    expanded_nodes_lease: Option<QueryMemoryLease>,
     expanded_edge_count: usize,
     reranked_seed_count: usize,
     payload_bytes_used: usize,
@@ -62,6 +65,7 @@ impl GraphExpansionExecutionState {
             budget,
             seed_count,
             expanded_nodes: BTreeSet::new(),
+            expanded_nodes_lease: None,
             expanded_edge_count: 0,
             reranked_seed_count,
             payload_bytes_used: 0,
@@ -70,18 +74,30 @@ impl GraphExpansionExecutionState {
         }
     }
 
+    pub fn with_memory_account(
+        budget: Option<GraphExpansionBudget>,
+        seed_count: usize,
+        reranked_seed_count: usize,
+        memory_account: &QueryMemoryAccount,
+    ) -> Result<Self> {
+        Ok(Self {
+            expanded_nodes_lease: Some(memory_account.reserve(0)?),
+            ..Self::new(budget, seed_count, reranked_seed_count)
+        })
+    }
+
     pub fn try_push(
         &mut self,
         output: &mut Vec<Binding>,
         candidate: Binding,
         target_id: Option<NodeId>,
         hop: usize,
-    ) -> bool {
-        if !self.try_admit(&candidate, target_id, hop) {
-            return false;
+    ) -> Result<bool> {
+        if !self.try_admit(&candidate, target_id, hop)? {
+            return Ok(false);
         }
         output.push(candidate);
-        true
+        Ok(true)
     }
 
     pub fn try_admit(
@@ -89,27 +105,38 @@ impl GraphExpansionExecutionState {
         candidate: &Binding,
         target_id: Option<NodeId>,
         hop: usize,
-    ) -> bool {
+    ) -> Result<bool> {
         let Some(budget) = self.budget else {
             self.returned_count = self.returned_count.saturating_add(1);
-            return true;
+            return Ok(true);
         };
         if self.returned_count >= budget.candidate_limit {
             self.truncation_reason = Some(GraphExpansionTruncationReason::CandidateLimit);
-            return false;
+            return Ok(false);
         }
         let candidate_bytes = binding_payload_bytes(candidate);
         if self.payload_bytes_used.saturating_add(candidate_bytes) > budget.payload_byte_limit {
             self.truncation_reason = Some(GraphExpansionTruncationReason::PayloadByteLimit);
-            return false;
+            return Ok(false);
+        }
+        if let Some(target_id) = target_id
+            && !self.expanded_nodes.contains(&target_id)
+        {
+            const EXPANDED_NODE_MEMORY_BYTES: usize =
+                std::mem::size_of::<NodeId>() + 3 * std::mem::size_of::<usize>();
+            if let Some(lease) = self.expanded_nodes_lease.as_mut() {
+                lease.grow(EXPANDED_NODE_MEMORY_BYTES)?;
+            }
+            if !self.expanded_nodes.insert(target_id)
+                && let Some(lease) = self.expanded_nodes_lease.as_mut()
+            {
+                lease.shrink(EXPANDED_NODE_MEMORY_BYTES);
+            }
         }
         self.payload_bytes_used = self.payload_bytes_used.saturating_add(candidate_bytes);
         self.returned_count = self.returned_count.saturating_add(1);
-        if let Some(target_id) = target_id {
-            self.expanded_nodes.insert(target_id);
-        }
         self.expanded_edge_count = self.expanded_edge_count.saturating_add(hop);
-        true
+        Ok(true)
     }
 
     pub fn record_seed(&mut self) {
@@ -206,8 +233,10 @@ mod tests {
         );
         let mut output = Vec::new();
 
-        assert!(state.try_push(&mut output, binding.clone(), None, 1));
-        assert!(!state.try_push(&mut output, binding, None, 1));
+        assert!(state
+            .try_push(&mut output, binding.clone(), None, 1)
+            .unwrap());
+        assert!(!state.try_push(&mut output, binding, None, 1).unwrap());
         assert_eq!(
             state.truncation_reason,
             Some(GraphExpansionTruncationReason::CandidateLimit)
@@ -231,11 +260,40 @@ mod tests {
         );
         let mut output = Vec::new();
 
-        assert!(!state.try_push(&mut output, binding, None, 1));
+        assert!(!state.try_push(&mut output, binding, None, 1).unwrap());
         assert!(output.is_empty());
         assert_eq!(
             state.truncation_reason,
             Some(GraphExpansionTruncationReason::PayloadByteLimit)
         );
+    }
+
+    #[test]
+    fn expansion_node_set_uses_and_releases_the_query_root() {
+        let ledger = crate::QueryMemoryLedger::new(std::num::NonZeroUsize::new(64).unwrap());
+        let account = ledger.account(
+            crate::QueryMemoryClass::BlockingState,
+            "test expansion",
+            std::num::NonZeroUsize::new(64).unwrap(),
+        );
+        let mut state = GraphExpansionExecutionState::with_memory_account(
+            Some(GraphExpansionBudget {
+                candidate_limit: 2,
+                payload_byte_limit: usize::MAX,
+            }),
+            1,
+            0,
+            &account,
+        )
+        .unwrap();
+        let binding = Binding::values(std::collections::BTreeMap::new());
+
+        assert!(state.try_admit(&binding, Some(NodeId(7)), 1).unwrap());
+        assert!(ledger.snapshot().used_bytes > 0);
+        assert!(state.try_admit(&binding, Some(NodeId(7)), 1).unwrap());
+        assert_eq!(state.expanded_nodes.len(), 1);
+
+        drop(state);
+        assert_eq!(ledger.snapshot().used_bytes, 0);
     }
 }

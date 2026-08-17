@@ -7,7 +7,7 @@ use crate::pipeline::{runtime_checkpoint, BatchControl, BindingBatch};
 use crate::predicate::{
     label_ids_for_pattern, node_matches_label_pattern, node_matches_property_filter,
 };
-use crate::store::{GraphExecutionRead, ScanControl};
+use crate::store::{AdjacencyReadMemory, GraphExecutionRead, ScanControl};
 use crate::traversal::{
     visit_bounded_expand_targets, visit_one_hop_relationships_with_budget, BoundedExpandSpec,
     OneHopRelationshipSpec,
@@ -84,7 +84,7 @@ pub fn stream_expand_binding(
     target_label_ids: Option<&[LabelId]>,
     filters: &AdjacencyExpandFilters<'_>,
     store: &dyn GraphExecutionRead,
-    memory_budget_bytes: usize,
+    memory: AdjacencyReadMemory<'_>,
     task_context: Option<&RuntimeTaskContext>,
     observer: &dyn ExecutionObserver,
     consumer: &mut dyn FnMut(ExpandedBinding) -> Result<ScanControl>,
@@ -113,7 +113,7 @@ pub fn stream_expand_binding(
                 relationship_scan_filter: filters.relationship_scan_filter,
                 direction: spec.direction,
             },
-            memory_budget_bytes,
+            memory,
             observer,
             &mut |relationship, target| {
                 runtime_checkpoint(task_context)?;
@@ -139,7 +139,7 @@ pub fn stream_expand_binding(
                     target_id: Some(target.id),
                     hop: 1,
                 };
-                ensure_expanded_binding_fits(&expanded, memory_budget_bytes)?;
+                ensure_expanded_binding_fits(&expanded, memory.budget_bytes)?;
                 matched = true;
                 consumer(expanded)
             },
@@ -154,7 +154,7 @@ pub fn stream_expand_binding(
                 min_hops: spec.min_hops,
                 max_hops: spec.max_hops,
             },
-            memory_budget_bytes,
+            memory,
             task_context,
             &mut |target, hop| {
                 if bound_target_id.is_some_and(|node_id| node_id != target.id)
@@ -175,7 +175,7 @@ pub fn stream_expand_binding(
                     target_id: Some(target.id),
                     hop,
                 };
-                ensure_expanded_binding_fits(&expanded, memory_budget_bytes)?;
+                ensure_expanded_binding_fits(&expanded, memory.budget_bytes)?;
                 matched = true;
                 consumer(expanded)
             },
@@ -196,7 +196,7 @@ pub fn stream_expand_binding(
             target_id: None,
             hop: 0,
         };
-        ensure_expanded_binding_fits(&expanded, memory_budget_bytes)?;
+        ensure_expanded_binding_fits(&expanded, memory.budget_bytes)?;
         return consumer(expanded);
     }
     Ok(ScanControl::Continue)
@@ -961,7 +961,10 @@ mod tests {
             None,
             &AdjacencyExpandFilters::default(),
             &store,
-            1024 * 1024,
+            AdjacencyReadMemory {
+                budget_bytes: 1024 * 1024,
+                account: None,
+            },
             None,
             &NoopExecutionObserver,
             &mut |_| {

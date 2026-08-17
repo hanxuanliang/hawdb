@@ -5,8 +5,9 @@ use crate::schema::Catalog;
 use crate::store::{GraphScanControl, GraphStore};
 use skein_core::{LabelId, RelTypeId};
 use skein_executor::store::{
-    GraphExecutionRead, PrunedNodeScan, PrunedRelationshipScan, ScanControl,
+    AdjacencyReadMemory, GraphExecutionRead, PrunedNodeScan, PrunedRelationshipScan, ScanControl,
 };
+use skein_executor::QueryMemoryLease;
 use skein_storage::{AdjacencyDirection, NodeId, NodeRecord, PropertyFilter, RelId, RelRecord};
 
 fn to_store_control(control: ScanControl) -> GraphScanControl {
@@ -97,15 +98,20 @@ impl GraphExecutionRead for GraphStore {
         node_id: NodeId,
         rel_type: Option<RelTypeId>,
         direction: AdjacencyDirection,
-        memory_budget_bytes: usize,
+        memory: AdjacencyReadMemory<'_>,
         consumer: &mut dyn FnMut(RelRecord) -> Result<ScanControl>,
     ) -> Result<ScanControl> {
-        GraphStore::try_visit_ordered_adjacent_relationships_owned(
+        let mut key_lease = memory
+            .account
+            .map(|account| account.reserve(0))
+            .transpose()?;
+        GraphStore::try_visit_ordered_adjacent_relationships_accounted(
             self,
             node_id,
             rel_type,
             direction,
-            memory_budget_bytes,
+            memory.budget_bytes,
+            |bytes| grow_optional_lease(&mut key_lease, bytes),
             |relationship| consumer(relationship).map(to_store_control),
         )
         .map(to_execution_control)
@@ -146,10 +152,14 @@ impl GraphExecutionRead for GraphStore {
         rel_type: Option<RelTypeId>,
         direction: AdjacencyDirection,
         filter: &PropertyFilter,
-        memory_budget_bytes: usize,
+        memory: AdjacencyReadMemory<'_>,
         consumer: &mut dyn FnMut(RelRecord) -> Result<ScanControl>,
     ) -> Result<(ScanControl, Option<skein_storage::ScanPruningReport>)> {
         let mut entries = Vec::new();
+        let mut key_lease = memory
+            .account
+            .map(|account| account.reserve(0))
+            .transpose()?;
         let mut collection_error = None;
         let (control, report) = GraphStore::visit_adjacent_relationships_with_filter_owned(
             self,
@@ -160,7 +170,8 @@ impl GraphExecutionRead for GraphStore {
             |relationship| match push_ordered_adjacency_entry(
                 &mut entries,
                 ordered_adjacency_key(&relationship, direction),
-                memory_budget_bytes,
+                memory.budget_bytes,
+                &mut key_lease,
             ) {
                 Ok(()) => GraphScanControl::Continue,
                 Err(error) => {
@@ -219,6 +230,7 @@ fn push_ordered_adjacency_entry(
     entries: &mut Vec<(NodeId, RelId)>,
     entry: (NodeId, RelId),
     memory_budget_bytes: usize,
+    key_lease: &mut Option<QueryMemoryLease>,
 ) -> Result<()> {
     let entry_bytes = std::mem::size_of::<(NodeId, RelId)>();
     let required_bytes = entries.len().saturating_add(1).saturating_mul(entry_bytes);
@@ -227,7 +239,15 @@ fn push_ordered_adjacency_entry(
             "ordered adjacency keys use {required_bytes} bytes, exceeding blocking_operator_bytes {memory_budget_bytes}"
         )));
     }
+    grow_optional_lease(key_lease, entry_bytes)?;
     entries.push(entry);
+    Ok(())
+}
+
+fn grow_optional_lease(lease: &mut Option<QueryMemoryLease>, bytes: usize) -> Result<()> {
+    if let Some(lease) = lease {
+        lease.grow(bytes)?;
+    }
     Ok(())
 }
 

@@ -1486,6 +1486,25 @@ impl GraphStore {
         rel_type: Option<RelTypeId>,
         direction: AdjacencyDirection,
         memory_budget_bytes: usize,
+        consumer: impl FnMut(RelRecord) -> Result<GraphScanControl>,
+    ) -> Result<GraphScanControl> {
+        self.try_visit_ordered_adjacent_relationships_accounted(
+            node_id,
+            rel_type,
+            direction,
+            memory_budget_bytes,
+            |_| Ok(()),
+            consumer,
+        )
+    }
+
+    pub(crate) fn try_visit_ordered_adjacent_relationships_accounted(
+        &self,
+        node_id: NodeId,
+        rel_type: Option<RelTypeId>,
+        direction: AdjacencyDirection,
+        memory_budget_bytes: usize,
+        charge_key_bytes: impl FnMut(usize) -> Result<()>,
         mut consumer: impl FnMut(RelRecord) -> Result<GraphScanControl>,
     ) -> Result<GraphScanControl> {
         let Some(rel_type) = rel_type else {
@@ -1494,6 +1513,7 @@ impl GraphStore {
                 None,
                 direction,
                 memory_budget_bytes,
+                charge_key_bytes,
                 consumer,
             );
         };
@@ -1586,6 +1606,7 @@ impl GraphStore {
         rel_type: Option<RelTypeId>,
         direction: AdjacencyDirection,
         memory_budget_bytes: usize,
+        mut charge_key_bytes: impl FnMut(usize) -> Result<()>,
         mut consumer: impl FnMut(RelRecord) -> Result<GraphScanControl>,
     ) -> Result<GraphScanControl> {
         let mut entries = Vec::new();
@@ -1598,6 +1619,7 @@ impl GraphStore {
                     &mut entries,
                     ordered_relationship_key(&relationship, direction),
                     memory_budget_bytes,
+                    &mut charge_key_bytes,
                 )?;
                 Ok(GraphScanControl::Continue)
             },
@@ -2590,16 +2612,16 @@ fn push_compact_adjacency_key(
     entries: &mut Vec<OrderedAdjacencyEntry>,
     entry: OrderedAdjacencyEntry,
     memory_budget_bytes: usize,
+    charge_key_bytes: &mut impl FnMut(usize) -> Result<()>,
 ) -> Result<()> {
-    let required_bytes = entries
-        .len()
-        .saturating_add(1)
-        .saturating_mul(std::mem::size_of::<OrderedAdjacencyEntry>());
+    let entry_bytes = std::mem::size_of::<OrderedAdjacencyEntry>();
+    let required_bytes = entries.len().saturating_add(1).saturating_mul(entry_bytes);
     if required_bytes > memory_budget_bytes {
         return Err(SkeinError::Execution(format!(
             "ordered adjacency keys use {required_bytes} bytes, exceeding blocking_operator_bytes {memory_budget_bytes}"
         )));
     }
+    charge_key_bytes(entry_bytes)?;
     entries.push(entry);
     Ok(())
 }

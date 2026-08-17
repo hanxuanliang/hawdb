@@ -739,6 +739,94 @@ fn shortest_path_rejects_an_oversized_frontier() {
 }
 
 #[test]
+fn untyped_adjacency_ordering_is_rejected_by_the_query_root_before_collection() {
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::in_memory();
+    let source = store
+        .create_node(&mut catalog, "Source", BTreeMap::new())
+        .unwrap();
+    for ordinal in 0..128 {
+        let target = store
+            .create_node(
+                &mut catalog,
+                "Target",
+                properties([("id", Value::Int(ordinal))]),
+            )
+            .unwrap();
+        let rel_type = if ordinal & 1 == 0 { "FIRST" } else { "SECOND" };
+        store
+            .create_relationship(
+                &mut catalog,
+                source,
+                target,
+                rel_type,
+                properties([("keep", Value::Bool(true))]),
+            )
+            .unwrap();
+    }
+    let plan = PhysicalPlan::AdjacencyExpandExec {
+        source_variable: "source".to_string(),
+        source_label: "Source".to_string(),
+        rel_variable: Some("relationship".to_string()),
+        rel_type: String::new(),
+        rel_properties: BTreeMap::new(),
+        direction: RelationshipDirection::Outgoing,
+        target_variable: "target".to_string(),
+        target_label: "Target".to_string(),
+        min_hops: 1,
+        max_hops: 1,
+        optional: false,
+        graph_budget: None,
+        input: Box::new(PhysicalPlan::SeqNodeScan {
+            variable: "source".to_string(),
+            label: "Source".to_string(),
+        }),
+    };
+    let memory = ExecutionMemoryConfig {
+        query_memory_bytes: NonZeroUsize::new(1_024).unwrap(),
+        batch_payload_bytes: NonZeroUsize::new(16 * 1_024).unwrap(),
+        blocking_operator_bytes: NonZeroUsize::new(16 * 1_024).unwrap(),
+        ..ExecutionMemoryConfig::default()
+    };
+    let mut external = NoExternalReadOperator;
+
+    let error = execute_with_row_limit_profile_and_external_and_memory(
+        &plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &memory,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("query memory ledger"));
+    assert!(error.to_string().contains("AdjacencyExpandExec"));
+
+    let filtered_plan = PhysicalPlan::FilterExec {
+        predicate: Predicate::PropertyEq {
+            variable: "relationship".to_string(),
+            property: "keep".to_string(),
+            value: Value::Bool(true),
+        },
+        input: Box::new(plan),
+    };
+    let error = execute_with_row_limit_profile_and_external_and_memory(
+        &filtered_plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &memory,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("query memory ledger"));
+    assert!(error.to_string().contains("AdjacencyExpandExec"));
+}
+
+#[test]
 fn sort_rejects_spill_run_count_over_budget() {
     let mut catalog = Catalog::default();
     let mut store = GraphStore::in_memory();

@@ -383,11 +383,17 @@ pub(super) fn stream_adjacency_expand_batches(
             "expected adjacency expand plan".to_string(),
         ));
     };
-    let mut graph_expansion = GraphExpansionExecutionState::new(
+    let adjacency_account = context.memory_ledger.account(
+        QueryMemoryClass::BlockingState,
+        "AdjacencyExpandExec",
+        memory.blocking_operator_bytes,
+    );
+    let mut graph_expansion = GraphExpansionExecutionState::with_memory_account(
         *graph_budget,
         0,
         context.observer.current_vector_rerank_count(),
-    );
+        &adjacency_account,
+    )?;
     let rel_type_id = if rel_type.is_empty() {
         None
     } else {
@@ -407,6 +413,12 @@ pub(super) fn stream_adjacency_expand_batches(
     let target_label_ids = label_ids_for_pattern(catalog, target_label);
     let batch_rows = memory.batch_rows.get();
     let batch_payload_bytes = memory.batch_payload_bytes.get();
+    let output_account = context.memory_ledger.account(
+        QueryMemoryClass::PipelineBatch,
+        "AdjacencyExpandExec output",
+        memory.batch_payload_bytes,
+    );
+    let mut output_lease = output_account.reserve(0)?;
     let mut output = Vec::with_capacity(batch_rows);
     let mut output_bytes = 0usize;
     let control = execute_binding_batches(
@@ -434,7 +446,10 @@ pub(super) fn stream_adjacency_expand_batches(
                     target_label_ids.as_deref(),
                     &filters,
                     store,
-                    memory.blocking_operator_bytes.get(),
+                    skein_executor::store::AdjacencyReadMemory {
+                        budget_bytes: memory.blocking_operator_bytes.get(),
+                        account: Some(&adjacency_account),
+                    },
                     context.task_context,
                     context.observer,
                     &mut |candidate| {
@@ -450,11 +465,10 @@ pub(super) fn stream_adjacency_expand_batches(
                                 || output_bytes.saturating_add(candidate_bytes)
                                     > batch_payload_bytes)
                         {
-                            if emit(std::mem::replace(
-                                &mut output,
-                                Vec::with_capacity(batch_rows),
-                            ))? == BatchControl::Stop
-                            {
+                            let emitted =
+                                std::mem::replace(&mut output, Vec::with_capacity(batch_rows));
+                            output_lease.reset();
+                            if emit(emitted)? == BatchControl::Stop {
                                 return Ok(skein_executor::store::ScanControl::Stop);
                             }
                             output_bytes = 0;
@@ -463,9 +477,10 @@ pub(super) fn stream_adjacency_expand_batches(
                             &candidate.binding,
                             candidate.target_id,
                             candidate.hop,
-                        ) {
+                        )? {
                             return Ok(skein_executor::store::ScanControl::Stop);
                         }
+                        output_lease.grow(candidate_bytes)?;
                         output_bytes = output_bytes.saturating_add(candidate_bytes);
                         output.push(candidate.binding);
                         if execution_limit.is_reached(graph_expansion.returned_count()) {
@@ -483,6 +498,9 @@ pub(super) fn stream_adjacency_expand_batches(
         },
     )?;
     graph_expansion.set_reranked_seed_count(context.observer.current_vector_rerank_count());
+    if !output.is_empty() {
+        output_lease.reset();
+    }
     if !output.is_empty() && emit(output)? == BatchControl::Stop {
         record_graph_expansion_state(
             context.observer,

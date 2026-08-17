@@ -5,6 +5,8 @@ use skein_storage::{
     AdjacencyDirection, NodeId, NodeRecord, PropertyFilter, RelRecord, ScanPruningReport,
 };
 
+use crate::QueryMemoryAccount;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanControl {
     Continue,
@@ -19,6 +21,17 @@ pub struct PrunedRelationshipScan<'a> {
 pub struct PrunedNodeScan<'a> {
     pub nodes: Box<dyn Iterator<Item = NodeRecord> + 'a>,
     pub report: ScanPruningReport,
+}
+
+/// Per-query memory boundary for ordered adjacency reads.
+///
+/// Storage implementations may need compact transient keys to preserve order
+/// across relationship types. Such keys must satisfy both this local byte
+/// limit and the optional query-root account before allocation.
+#[derive(Clone, Copy)]
+pub struct AdjacencyReadMemory<'a> {
+    pub budget_bytes: usize,
+    pub account: Option<&'a QueryMemoryAccount>,
 }
 
 /// The graph reads required by storage-independent execution operators.
@@ -62,7 +75,7 @@ pub trait GraphExecutionRead {
         node_id: NodeId,
         rel_type: Option<RelTypeId>,
         direction: AdjacencyDirection,
-        _memory_budget_bytes: usize,
+        _memory: AdjacencyReadMemory<'_>,
         consumer: &mut dyn FnMut(RelRecord) -> Result<ScanControl>,
     ) -> Result<ScanControl> {
         self.visit_adjacent_relationships_owned(node_id, rel_type, direction, consumer)
@@ -83,7 +96,7 @@ pub trait GraphExecutionRead {
         rel_type: Option<RelTypeId>,
         direction: AdjacencyDirection,
         filter: &PropertyFilter,
-        _memory_budget_bytes: usize,
+        _memory: AdjacencyReadMemory<'_>,
         consumer: &mut dyn FnMut(RelRecord) -> Result<ScanControl>,
     ) -> Result<(ScanControl, Option<ScanPruningReport>)> {
         self.visit_adjacent_relationships_with_filter_owned(
