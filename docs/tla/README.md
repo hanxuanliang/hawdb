@@ -162,10 +162,13 @@ only at the synchronous consumer boundary.
 
 The model distinguishes a streaming completion, which owns no query memory,
 from a materialized-result handoff, which may retain an admitted result lease
-until the caller-owned result is dropped. Failure and cancellation release all
-accounts. TLC checks the root and local bounds plus the no-leak terminal-state
-invariant. The implementation records root budget, peak charge, completion
-charge, and account count in `PipelineMemoryReport`.
+until the caller-owned result is dropped. The handoff is enabled only after the
+pipeline, blocking, spill-staging, and morsel-output accounts reach zero, and a
+returned state may retain bytes only in the result account. Failure and
+cancellation release all accounts. TLC checks the root and local bounds, this
+handoff isolation, and the no-leak terminal-state invariant. The implementation
+records root budget, peak charge, completion charge, and account count in
+`PipelineMemoryReport`.
 
 Relational ordering refines the blocking-state and spill-staging branches with
 `ExternalTopN<RelationalSortRecord>`. Retained state contains typed sort keys,

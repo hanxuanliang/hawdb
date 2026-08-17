@@ -9,11 +9,12 @@ EXTENDS Integers, Naturals, FiniteSets
 (* result boundary; streaming completion cannot retain such a lease.         *)
 (***************************************************************************)
 
-CONSTANT QueryBudget, AccountBudget, Accounts
+CONSTANT QueryBudget, AccountBudget, Accounts, ResultAccount
 
 ASSUME /\ QueryBudget \in Nat \ {0}
        /\ AccountBudget \in Nat \ {0}
        /\ Accounts # {}
+       /\ ResultAccount \in Accounts
 
 Statuses == {"running", "returned", "succeeded", "failed", "cancelled"}
 
@@ -60,6 +61,7 @@ Transfer(source, target) ==
 
 ReturnMaterialized ==
     /\ status = "running"
+    /\ \A account \in Accounts \ {ResultAccount}: used[account] = 0
     /\ status' = "returned"
     /\ UNCHANGED <<used, peak>>
 
@@ -113,6 +115,10 @@ TerminalStateHasNoLease ==
 
 ReturnedStateOnlyOwnsAdmittedMemory ==
     status = "returned" => TotalUsed <= QueryBudget
+
+ReturnedStateOwnsOnlyResult ==
+    status = "returned" =>
+        \A account \in Accounts \ {ResultAccount}: used[account] = 0
 
 Spec == Init /\ [][Next]_vars
 
