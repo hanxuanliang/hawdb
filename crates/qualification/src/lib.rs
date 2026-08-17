@@ -952,7 +952,11 @@ mod tests {
         assert_eq!(report.identity.source_revision, "test-revision");
         assert_eq!(report.identity.dataset_id, "test-dataset");
         assert_eq!(report.foreground.query_count, 4);
-        assert_eq!(report.background.query_count, 1);
+        assert_eq!(
+            report.background.query_count, 1,
+            "background errors: {:?}",
+            report.errors
+        );
         assert!(report.storage.raw_dataset_exceeds_runtime_memory);
         assert_eq!(report.runtime.final_admitted_memory_bytes, 0);
         assert!(report.json().is_object());

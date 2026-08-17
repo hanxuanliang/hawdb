@@ -355,6 +355,13 @@ fn emit_distinct_run(
     let mut emitted = 0usize;
     while let Some(record) = reader.read_binding_record(memory_budget.get(), spill_budget)? {
         runtime_checkpoint(task_context)?;
+        if !output.is_empty()
+            && tracker.would_exceed(record.decoded_binding_bytes())
+            && emit_accounted_distinct_batch(&mut output, &mut tracker, batch_rows, emit)?
+                == BatchControl::Stop
+        {
+            return Ok(BatchControl::Stop);
+        }
         let binding = record.try_map(
             "DistinctExec output",
             memory_budget.get(),

@@ -168,6 +168,10 @@ pub(crate) struct SpillBindingRecord {
 }
 
 impl SpillBindingRecord {
+    pub(crate) fn decoded_binding_bytes(&self) -> usize {
+        self.decoded_binding_bytes
+    }
+
     pub(crate) fn try_map<T>(
         self,
         operator: &str,
