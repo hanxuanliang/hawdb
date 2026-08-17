@@ -23,8 +23,8 @@ use skein_plan::{
     RelationshipCountFilter, RelationshipCountLeg, ShortestPathProjection,
     ShortestPathProjectionExpression,
 };
-use skein_storage::{AdjacencyDirection, NodeId, NodeRecord, PropertyFilter, RelId, RelRecord};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use skein_storage::{AdjacencyDirection, NodeId, NodeRecord, PropertyFilter, RelRecord};
+use std::collections::{BTreeMap, VecDeque};
 use std::num::NonZeroUsize;
 
 pub struct ShortestPathExecInput<'a> {
@@ -297,6 +297,101 @@ pub fn one_hop_relationships(
     )
 }
 
+#[derive(Clone, Copy)]
+pub struct OneHopRelationshipSpec<'a> {
+    pub source: NodeId,
+    pub rel_type_id: Option<RelTypeId>,
+    pub target_label_ids: Option<&'a [LabelId]>,
+    pub rel_properties: &'a BTreeMap<String, Value>,
+    pub relationship_scan_filter: Option<&'a PropertyFilter>,
+    pub direction: RelationshipDirection,
+}
+
+pub fn visit_one_hop_relationships_with_budget(
+    store: &dyn GraphExecutionRead,
+    spec: OneHopRelationshipSpec<'_>,
+    memory_budget_bytes: usize,
+    observer: &dyn ExecutionObserver,
+    consumer: &mut dyn FnMut(RelRecord, NodeRecord) -> Result<ScanControl>,
+) -> Result<ScanControl> {
+    let relationship_filter = combine_property_filters(
+        property_filter_from_properties(spec.rel_properties),
+        spec.relationship_scan_filter.cloned(),
+    );
+    let mut admit_relationship = |relationship: RelRecord| -> Result<ScanControl> {
+        let Some(target_id) =
+            relationship_target_for_source_direction(&relationship, spec.source, spec.direction)
+        else {
+            return Ok(ScanControl::Continue);
+        };
+        if !relationship_properties_match(&relationship, spec.rel_properties)
+            || relationship_filter.as_ref().is_some_and(|filter| {
+                !property_filter_matches_values(filter, relationship.id.0, &relationship.properties)
+            })
+        {
+            return Ok(ScanControl::Continue);
+        }
+        if let Some(target) = store.node_owned(target_id)?
+            && node_matches_label_pattern(&target, spec.target_label_ids)
+        {
+            let match_bytes =
+                relationship_memory_bytes(&relationship).saturating_add(node_memory_bytes(&target));
+            if match_bytes > memory_budget_bytes {
+                return Err(SkeinError::Execution(format!(
+                    "adjacency result uses {match_bytes} bytes, exceeding blocking_operator_bytes {memory_budget_bytes}"
+                )));
+            }
+            return consumer(relationship, target);
+        }
+        Ok(ScanControl::Continue)
+    };
+    let mut visit_direction = |adjacency_direction: AdjacencyDirection,
+                               skip_undirected_self_loops: bool|
+     -> Result<ScanControl> {
+        let mut visit = |relationship: RelRecord| {
+            if skip_undirected_self_loops
+                && relationship.source == spec.source
+                && relationship.target == spec.source
+            {
+                return Ok(ScanControl::Continue);
+            }
+            admit_relationship(relationship)
+        };
+        if let Some(filter) = relationship_filter.as_ref() {
+            let (control, report) = store.visit_ordered_adjacent_relationships_with_filter_owned(
+                spec.source,
+                spec.rel_type_id,
+                adjacency_direction,
+                filter,
+                memory_budget_bytes,
+                &mut visit,
+            )?;
+            if let Some(report) = report {
+                observer.record_scan_pruning_report(report);
+            }
+            Ok(control)
+        } else {
+            store.visit_ordered_adjacent_relationships_owned(
+                spec.source,
+                spec.rel_type_id,
+                adjacency_direction,
+                memory_budget_bytes,
+                &mut visit,
+            )
+        }
+    };
+    match spec.direction {
+        RelationshipDirection::Outgoing => visit_direction(AdjacencyDirection::Outgoing, false),
+        RelationshipDirection::Incoming => visit_direction(AdjacencyDirection::Incoming, false),
+        RelationshipDirection::Undirected => {
+            if visit_direction(AdjacencyDirection::Outgoing, false)? == ScanControl::Stop {
+                return Ok(ScanControl::Stop);
+            }
+            visit_direction(AdjacencyDirection::Incoming, true)
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn one_hop_relationships_with_budget(
     store: &dyn GraphExecutionRead,
@@ -310,104 +405,127 @@ pub fn one_hop_relationships_with_budget(
     observer: &dyn ExecutionObserver,
 ) -> Result<Vec<(RelRecord, NodeRecord)>> {
     let mut matches = Vec::new();
-    let mut seen = BTreeSet::new();
     let mut used_bytes = 0usize;
-    let relationship_filter = combine_property_filters(
-        property_filter_from_properties(rel_properties),
-        relationship_scan_filter.cloned(),
-    );
-    let mut admit_relationship = |relationship: RelRecord| -> Result<()> {
-        let Some(target_id) =
-            relationship_target_for_source_direction(&relationship, source, direction)
-        else {
-            return Ok(());
-        };
-        if !seen.insert(relationship.id)
-            || !relationship_properties_match(&relationship, rel_properties)
-            || relationship_filter.as_ref().is_some_and(|filter| {
-                !property_filter_matches_values(filter, relationship.id.0, &relationship.properties)
-            })
-        {
-            return Ok(());
-        }
-        let seen_bytes =
-            std::mem::size_of::<RelId>().saturating_add(std::mem::size_of::<usize>() * 4);
-        if used_bytes.saturating_add(seen_bytes) > memory_budget_bytes {
-            return Err(SkeinError::Execution(format!(
-                "adjacency state exceeds blocking_operator_bytes {memory_budget_bytes}"
-            )));
-        }
-        used_bytes = used_bytes.saturating_add(seen_bytes);
-        if let Some(target) = store.node_owned(target_id)?
-            && node_matches_label_pattern(&target, target_label_ids)
-        {
+    visit_one_hop_relationships_with_budget(
+        store,
+        OneHopRelationshipSpec {
+            source,
+            rel_type_id,
+            target_label_ids,
+            rel_properties,
+            relationship_scan_filter,
+            direction,
+        },
+        memory_budget_bytes,
+        observer,
+        &mut |relationship, target| {
             let match_bytes =
                 relationship_memory_bytes(&relationship).saturating_add(node_memory_bytes(&target));
-            if match_bytes > memory_budget_bytes
-                || used_bytes.saturating_add(match_bytes) > memory_budget_bytes
-            {
+            if used_bytes.saturating_add(match_bytes) > memory_budget_bytes {
                 return Err(SkeinError::Execution(format!(
                     "adjacency result state exceeds blocking_operator_bytes {memory_budget_bytes}"
                 )));
             }
             used_bytes = used_bytes.saturating_add(match_bytes);
             matches.push((relationship, target));
-        }
-        Ok(())
-    };
-    if !store.is_out_of_core()
-        && let Some(filter) = relationship_filter.as_ref()
-        && store
-            .relationship_count_for_type(rel_type_id)
-            .saturating_mul(std::mem::size_of::<&RelRecord>())
-            <= memory_budget_bytes
-    {
-        let scan = store.scan_relationships_with_filter_pruning(rel_type_id, Some(filter))?;
-        observer.record_scan_pruning_report(scan.report.clone());
-        for relationship in scan.relationships {
-            admit_relationship(relationship)?;
-        }
-        matches.sort_by_key(|(relationship, target)| (target.id, relationship.id));
-        return Ok(matches);
-    }
-    let mut visit_direction = |adjacency_direction: AdjacencyDirection| -> Result<()> {
-        let mut visit = |relationship: RelRecord| {
-            admit_relationship(relationship)?;
             Ok(ScanControl::Continue)
-        };
-        if store.is_out_of_core()
-            && let Some(filter) = relationship_filter.as_ref()
-        {
-            let (_, report) = store.visit_adjacent_relationships_with_filter_owned(
-                source,
-                rel_type_id,
-                adjacency_direction,
-                filter,
-                &mut visit,
-            )?;
-            if let Some(report) = report {
-                observer.record_scan_pruning_report(report);
-            }
-        } else {
-            store.visit_adjacent_relationships_owned(
-                source,
-                rel_type_id,
-                adjacency_direction,
-                &mut visit,
-            )?;
-        }
-        Ok(())
-    };
-    match direction {
-        RelationshipDirection::Outgoing => visit_direction(AdjacencyDirection::Outgoing)?,
-        RelationshipDirection::Incoming => visit_direction(AdjacencyDirection::Incoming)?,
-        RelationshipDirection::Undirected => {
-            visit_direction(AdjacencyDirection::Outgoing)?;
-            visit_direction(AdjacencyDirection::Incoming)?;
-        }
-    }
+        },
+    )?;
     matches.sort_by_key(|(relationship, target)| (target.id, relationship.id));
     Ok(matches)
+}
+
+const MAX_STREAMING_EXPAND_RECURSION_DEPTH: usize = 256;
+
+#[derive(Clone, Copy)]
+pub struct BoundedExpandSpec<'a> {
+    pub source: NodeId,
+    pub rel_type_id: RelTypeId,
+    pub target_label_ids: Option<&'a [LabelId]>,
+    pub min_hops: usize,
+    pub max_hops: usize,
+}
+
+pub fn visit_bounded_expand_targets(
+    store: &dyn GraphExecutionRead,
+    spec: BoundedExpandSpec<'_>,
+    memory_budget_bytes: usize,
+    task_context: Option<&RuntimeTaskContext>,
+    consumer: &mut dyn FnMut(NodeRecord, usize) -> Result<ScanControl>,
+) -> Result<ScanControl> {
+    if spec.max_hops > MAX_STREAMING_EXPAND_RECURSION_DEPTH {
+        return Err(SkeinError::Execution(format!(
+            "AdjacencyExpandExec max_hops {} exceeds streaming recursion limit {MAX_STREAMING_EXPAND_RECURSION_DEPTH}",
+            spec.max_hops
+        )));
+    }
+    let traversal_frame_bytes = std::mem::size_of::<(NodeId, usize)>();
+    let traversal_state_bytes = spec
+        .max_hops
+        .saturating_add(1)
+        .saturating_mul(traversal_frame_bytes);
+    if traversal_state_bytes > memory_budget_bytes {
+        return Err(SkeinError::Execution(format!(
+            "AdjacencyExpandExec traversal frames use {traversal_state_bytes} bytes, exceeding blocking_operator_bytes {memory_budget_bytes}"
+        )));
+    }
+
+    fn visit_depth(
+        store: &dyn GraphExecutionRead,
+        spec: BoundedExpandSpec<'_>,
+        current: NodeId,
+        depth: usize,
+        memory_budget_bytes: usize,
+        task_context: Option<&RuntimeTaskContext>,
+        consumer: &mut dyn FnMut(NodeRecord, usize) -> Result<ScanControl>,
+    ) -> Result<ScanControl> {
+        runtime_checkpoint(task_context)?;
+        if depth >= spec.min_hops
+            && let Some(node) = store.node_owned(current)?
+            && node_matches_label_pattern(&node, spec.target_label_ids)
+        {
+            let item_bytes = node_memory_bytes(&node).saturating_add(std::mem::size_of::<usize>());
+            if item_bytes > memory_budget_bytes {
+                return Err(SkeinError::Execution(format!(
+                    "AdjacencyExpandExec result uses {item_bytes} bytes, exceeding blocking_operator_bytes {memory_budget_bytes}"
+                )));
+            }
+            if consumer(node, depth)? == ScanControl::Stop {
+                return Ok(ScanControl::Stop);
+            }
+        }
+        if depth == spec.max_hops {
+            return Ok(ScanControl::Continue);
+        }
+        let mut visit = |relationship: RelRecord| {
+            visit_depth(
+                store,
+                spec,
+                relationship.target,
+                depth + 1,
+                memory_budget_bytes,
+                task_context,
+                consumer,
+            )
+        };
+        store.visit_ordered_adjacent_relationships_owned(
+            current,
+            Some(spec.rel_type_id),
+            AdjacencyDirection::Outgoing,
+            memory_budget_bytes,
+            &mut visit,
+        )
+    }
+
+    visit_depth(
+        store,
+        spec,
+        spec.source,
+        0,
+        memory_budget_bytes,
+        task_context,
+        consumer,
+    )
 }
 
 pub fn bounded_expand_targets(

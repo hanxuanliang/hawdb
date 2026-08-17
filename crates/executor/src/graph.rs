@@ -77,16 +77,28 @@ impl GraphExpansionExecutionState {
         target_id: Option<NodeId>,
         hop: usize,
     ) -> bool {
+        if !self.try_admit(&candidate, target_id, hop) {
+            return false;
+        }
+        output.push(candidate);
+        true
+    }
+
+    pub fn try_admit(
+        &mut self,
+        candidate: &Binding,
+        target_id: Option<NodeId>,
+        hop: usize,
+    ) -> bool {
         let Some(budget) = self.budget else {
             self.returned_count = self.returned_count.saturating_add(1);
-            output.push(candidate);
             return true;
         };
         if self.returned_count >= budget.candidate_limit {
             self.truncation_reason = Some(GraphExpansionTruncationReason::CandidateLimit);
             return false;
         }
-        let candidate_bytes = binding_payload_bytes(&candidate);
+        let candidate_bytes = binding_payload_bytes(candidate);
         if self.payload_bytes_used.saturating_add(candidate_bytes) > budget.payload_byte_limit {
             self.truncation_reason = Some(GraphExpansionTruncationReason::PayloadByteLimit);
             return false;
@@ -97,7 +109,6 @@ impl GraphExpansionExecutionState {
             self.expanded_nodes.insert(target_id);
         }
         self.expanded_edge_count = self.expanded_edge_count.saturating_add(hop);
-        output.push(candidate);
         true
     }
 

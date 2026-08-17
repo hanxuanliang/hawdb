@@ -7,7 +7,7 @@ use skein_core::{LabelId, RelTypeId};
 use skein_executor::store::{
     GraphExecutionRead, PrunedNodeScan, PrunedRelationshipScan, ScanControl,
 };
-use skein_storage::{AdjacencyDirection, NodeId, NodeRecord, PropertyFilter, RelRecord};
+use skein_storage::{AdjacencyDirection, NodeId, NodeRecord, PropertyFilter, RelId, RelRecord};
 
 fn to_store_control(control: ScanControl) -> GraphScanControl {
     match control {
@@ -92,6 +92,25 @@ impl GraphExecutionRead for GraphStore {
         .map(to_execution_control)
     }
 
+    fn visit_ordered_adjacent_relationships_owned(
+        &self,
+        node_id: NodeId,
+        rel_type: Option<RelTypeId>,
+        direction: AdjacencyDirection,
+        memory_budget_bytes: usize,
+        consumer: &mut dyn FnMut(RelRecord) -> Result<ScanControl>,
+    ) -> Result<ScanControl> {
+        GraphStore::try_visit_ordered_adjacent_relationships_owned(
+            self,
+            node_id,
+            rel_type,
+            direction,
+            memory_budget_bytes,
+            |relationship| consumer(relationship).map(to_store_control),
+        )
+        .map(to_execution_control)
+    }
+
     fn visit_adjacent_relationships_with_filter_owned(
         &self,
         node_id: NodeId,
@@ -121,6 +140,44 @@ impl GraphExecutionRead for GraphStore {
         }
     }
 
+    fn visit_ordered_adjacent_relationships_with_filter_owned(
+        &self,
+        node_id: NodeId,
+        rel_type: Option<RelTypeId>,
+        direction: AdjacencyDirection,
+        filter: &PropertyFilter,
+        memory_budget_bytes: usize,
+        consumer: &mut dyn FnMut(RelRecord) -> Result<ScanControl>,
+    ) -> Result<(ScanControl, Option<skein_storage::ScanPruningReport>)> {
+        let mut entries = Vec::new();
+        let mut collection_error = None;
+        let (control, report) = GraphStore::visit_adjacent_relationships_with_filter_owned(
+            self,
+            node_id,
+            rel_type,
+            direction,
+            filter,
+            |relationship| match push_ordered_adjacency_entry(
+                &mut entries,
+                ordered_adjacency_key(&relationship, direction),
+                memory_budget_bytes,
+            ) {
+                Ok(()) => GraphScanControl::Continue,
+                Err(error) => {
+                    collection_error = Some(error);
+                    GraphScanControl::Stop
+                }
+            },
+        )?;
+        if let Some(error) = collection_error {
+            return Err(error);
+        }
+        if control == GraphScanControl::Stop {
+            return Ok((ScanControl::Stop, report));
+        }
+        emit_ordered_adjacency_entries(self, entries, consumer).map(|control| (control, report))
+    }
+
     fn scan_relationships_with_filter_pruning<'a>(
         &'a self,
         rel_type: Option<RelTypeId>,
@@ -145,4 +202,51 @@ impl GraphExecutionRead for GraphStore {
             report: scan.report,
         })
     }
+}
+
+fn ordered_adjacency_key(
+    relationship: &RelRecord,
+    direction: AdjacencyDirection,
+) -> (NodeId, RelId) {
+    let neighbor = match direction {
+        AdjacencyDirection::Outgoing => relationship.target,
+        AdjacencyDirection::Incoming => relationship.source,
+    };
+    (neighbor, relationship.id)
+}
+
+fn push_ordered_adjacency_entry(
+    entries: &mut Vec<(NodeId, RelId)>,
+    entry: (NodeId, RelId),
+    memory_budget_bytes: usize,
+) -> Result<()> {
+    let entry_bytes = std::mem::size_of::<(NodeId, RelId)>();
+    let required_bytes = entries.len().saturating_add(1).saturating_mul(entry_bytes);
+    if required_bytes > memory_budget_bytes {
+        return Err(crate::error::SkeinError::Execution(format!(
+            "ordered adjacency keys use {required_bytes} bytes, exceeding blocking_operator_bytes {memory_budget_bytes}"
+        )));
+    }
+    entries.push(entry);
+    Ok(())
+}
+
+fn emit_ordered_adjacency_entries(
+    store: &GraphStore,
+    mut entries: Vec<(NodeId, RelId)>,
+    consumer: &mut dyn FnMut(RelRecord) -> Result<ScanControl>,
+) -> Result<ScanControl> {
+    entries.sort_unstable();
+    for (_, relationship_id) in entries {
+        let Some(relationship) = store.relationship_owned(relationship_id)? else {
+            return Err(crate::error::SkeinError::StorageIntegrity(format!(
+                "ordered adjacency references missing relationship {}",
+                relationship_id.0
+            )));
+        };
+        if consumer(relationship)? == ScanControl::Stop {
+            return Ok(ScanControl::Stop);
+        }
+    }
+    Ok(ScanControl::Continue)
 }

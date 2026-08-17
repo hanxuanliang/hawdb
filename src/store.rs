@@ -7247,6 +7247,25 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(relationship_ids.len(), 70);
+            let mut ordered_prefix = Vec::new();
+            let control = store
+                .try_visit_ordered_adjacent_relationships_owned(
+                    source,
+                    Some(mention_type),
+                    AdjacencyDirection::Outgoing,
+                    1024 * 1024,
+                    |relationship| {
+                        ordered_prefix.push(relationship.id);
+                        Ok(if ordered_prefix.len() == 5 {
+                            GraphScanControl::Stop
+                        } else {
+                            GraphScanControl::Continue
+                        })
+                    },
+                )
+                .unwrap();
+            assert_eq!(control, GraphScanControl::Stop);
+            assert_eq!(ordered_prefix, (0..5).map(RelId).collect::<Vec<_>>());
             let cold = store.storage_residency_report().graph_index_reads;
             assert!(cold.adjacency_dense_blocks_read > 0);
             assert!(cold.adjacency_descriptor_pages_visited > 0);
@@ -8786,6 +8805,36 @@ mod tests {
                 neighbor_id: source,
             }]
         );
+    }
+
+    #[test]
+    fn ordered_adjacency_visitor_bounds_compact_sort_keys() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let source = store
+            .create_node(&mut catalog, "Memory", BTreeMap::new())
+            .unwrap();
+        for _ in 0..3 {
+            let target = store
+                .create_node(&mut catalog, "Entity", BTreeMap::new())
+                .unwrap();
+            store
+                .create_relationship(&mut catalog, source, target, "MENTIONS", BTreeMap::new())
+                .unwrap();
+        }
+        let mention_type = catalog.rel_type_id("MENTIONS").unwrap();
+        let error = store
+            .try_visit_ordered_adjacent_relationships_owned(
+                source,
+                Some(mention_type),
+                AdjacencyDirection::Outgoing,
+                2 * std::mem::size_of::<(NodeId, RelId)>(),
+                |_| Ok(GraphScanControl::Continue),
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("ordered adjacency keys use 48 bytes"));
     }
 
     #[test]

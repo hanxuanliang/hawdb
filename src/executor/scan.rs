@@ -377,15 +377,20 @@ pub(super) fn stream_adjacency_expand_batches(
     };
     let target_label_ids = label_ids_for_pattern(catalog, target_label);
     let batch_rows = memory.batch_rows.get();
+    let batch_payload_bytes = memory.batch_payload_bytes.get();
     let mut output = Vec::with_capacity(batch_rows);
-    let control =
-        execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
+    let mut output_bytes = 0usize;
+    let control = execute_binding_batches(
+        input,
+        context,
+        ExecutionLimit::unlimited(),
+        &mut |batch| {
             runtime_checkpoint(context.task_context)?;
             for binding in batch {
                 runtime_checkpoint(context.task_context)?;
                 graph_expansion.record_seed();
-                for candidate in expand_binding(
-                    binding,
+                let expand_control = stream_expand_binding(
+                    &binding,
                     AdjacencyExpandSpec {
                         source_variable,
                         rel_variable: rel_variable.as_deref(),
@@ -403,31 +408,51 @@ pub(super) fn stream_adjacency_expand_batches(
                     memory.blocking_operator_bytes.get(),
                     context.task_context,
                     context.observer,
-                )? {
-                    runtime_checkpoint(context.task_context)?;
-                    if !graph_expansion.try_push(
-                        &mut output,
-                        candidate.binding,
-                        candidate.target_id,
-                        candidate.hop,
-                    ) {
-                        return Ok(BatchControl::Stop);
-                    }
-                    if output.len() == batch_rows
-                        && emit(std::mem::replace(
-                            &mut output,
-                            Vec::with_capacity(batch_rows),
-                        ))? == BatchControl::Stop
-                    {
-                        return Ok(BatchControl::Stop);
-                    }
-                    if execution_limit.is_reached(graph_expansion.returned_count()) {
-                        return Ok(BatchControl::Stop);
-                    }
+                    &mut |candidate| {
+                        runtime_checkpoint(context.task_context)?;
+                        let candidate_bytes = binding_memory_bytes(&candidate.binding);
+                        if candidate_bytes > batch_payload_bytes {
+                            return Err(SkeinError::Execution(format!(
+                                "intermediate row uses {candidate_bytes} bytes, exceeding batch_payload_bytes {batch_payload_bytes}"
+                            )));
+                        }
+                        if !output.is_empty()
+                            && (output.len() == batch_rows
+                                || output_bytes.saturating_add(candidate_bytes)
+                                    > batch_payload_bytes)
+                        {
+                            if emit(std::mem::replace(
+                                &mut output,
+                                Vec::with_capacity(batch_rows),
+                            ))? == BatchControl::Stop
+                            {
+                                return Ok(skein_executor::store::ScanControl::Stop);
+                            }
+                            output_bytes = 0;
+                        }
+                        if !graph_expansion.try_admit(
+                            &candidate.binding,
+                            candidate.target_id,
+                            candidate.hop,
+                        ) {
+                            return Ok(skein_executor::store::ScanControl::Stop);
+                        }
+                        output_bytes = output_bytes.saturating_add(candidate_bytes);
+                        output.push(candidate.binding);
+                        if execution_limit.is_reached(graph_expansion.returned_count()) {
+                            Ok(skein_executor::store::ScanControl::Stop)
+                        } else {
+                            Ok(skein_executor::store::ScanControl::Continue)
+                        }
+                    },
+                )?;
+                if expand_control == skein_executor::store::ScanControl::Stop {
+                    return Ok(BatchControl::Stop);
                 }
             }
             Ok(BatchControl::Continue)
-        })?;
+        },
+    )?;
     graph_expansion.set_reranked_seed_count(context.observer.current_vector_rerank_count());
     if !output.is_empty() && emit(output)? == BatchControl::Stop {
         record_graph_expansion_state(

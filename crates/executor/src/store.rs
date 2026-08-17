@@ -57,6 +57,17 @@ pub trait GraphExecutionRead {
         consumer: &mut dyn FnMut(RelRecord) -> Result<ScanControl>,
     ) -> Result<ScanControl>;
 
+    fn visit_ordered_adjacent_relationships_owned(
+        &self,
+        node_id: NodeId,
+        rel_type: Option<RelTypeId>,
+        direction: AdjacencyDirection,
+        _memory_budget_bytes: usize,
+        consumer: &mut dyn FnMut(RelRecord) -> Result<ScanControl>,
+    ) -> Result<ScanControl> {
+        self.visit_adjacent_relationships_owned(node_id, rel_type, direction, consumer)
+    }
+
     fn visit_adjacent_relationships_with_filter_owned(
         &self,
         node_id: NodeId,
@@ -65,6 +76,20 @@ pub trait GraphExecutionRead {
         filter: &PropertyFilter,
         consumer: &mut dyn FnMut(RelRecord) -> Result<ScanControl>,
     ) -> Result<(ScanControl, Option<ScanPruningReport>)>;
+
+    fn visit_ordered_adjacent_relationships_with_filter_owned(
+        &self,
+        node_id: NodeId,
+        rel_type: Option<RelTypeId>,
+        direction: AdjacencyDirection,
+        filter: &PropertyFilter,
+        _memory_budget_bytes: usize,
+        consumer: &mut dyn FnMut(RelRecord) -> Result<ScanControl>,
+    ) -> Result<(ScanControl, Option<ScanPruningReport>)> {
+        self.visit_adjacent_relationships_with_filter_owned(
+            node_id, rel_type, direction, filter, consumer,
+        )
+    }
 
     fn scan_relationships_with_filter_pruning<'a>(
         &'a self,

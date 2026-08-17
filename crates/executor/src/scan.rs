@@ -8,7 +8,10 @@ use crate::predicate::{
     label_ids_for_pattern, node_matches_label_pattern, node_matches_property_filter,
 };
 use crate::store::{GraphExecutionRead, ScanControl};
-use crate::traversal::{bounded_expand_targets, one_hop_relationships_with_budget};
+use crate::traversal::{
+    visit_bounded_expand_targets, visit_one_hop_relationships_with_budget, BoundedExpandSpec,
+    OneHopRelationshipSpec,
+};
 use crate::ExecutionLimit;
 use skein_core::{
     Catalog, LabelId, RelTypeId, RelationshipDirection, Result, RuntimeTaskContext, SkeinError,
@@ -64,8 +67,8 @@ pub struct AdjacencyExpandSpec<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn expand_binding(
-    binding: Binding,
+pub fn stream_expand_binding(
+    binding: &Binding,
     spec: AdjacencyExpandSpec<'_>,
     rel_type_id: Option<RelTypeId>,
     target_label_ids: Option<&[LabelId]>,
@@ -74,7 +77,8 @@ pub fn expand_binding(
     memory_budget_bytes: usize,
     task_context: Option<&RuntimeTaskContext>,
     observer: &dyn ExecutionObserver,
-) -> Result<Vec<ExpandedBinding>> {
+    consumer: &mut dyn FnMut(ExpandedBinding) -> Result<ScanControl>,
+) -> Result<ScanControl> {
     runtime_checkpoint(task_context)?;
     let source = binding.nodes.get(spec.source_variable).ok_or_else(|| {
         SkeinError::Execution(format!(
@@ -83,113 +87,121 @@ pub fn expand_binding(
         ))
     })?;
     let bound_target_id = binding.nodes.get(spec.target_variable).map(|node| node.id);
-    let mut output = Vec::new();
-    let mut output_bytes = 0usize;
-    if spec.rel_variable.is_some()
+    let mut matched = false;
+    let control = if spec.rel_variable.is_some()
         || !spec.rel_properties.is_empty()
         || filters.relationship_scan_filter.is_some()
         || spec.direction != RelationshipDirection::Outgoing
     {
-        for (relationship, target) in one_hop_relationships_with_budget(
+        visit_one_hop_relationships_with_budget(
             store,
-            source.id,
-            rel_type_id,
-            target_label_ids,
-            spec.rel_properties,
-            filters.relationship_scan_filter,
-            spec.direction,
+            OneHopRelationshipSpec {
+                source: source.id,
+                rel_type_id,
+                target_label_ids,
+                rel_properties: spec.rel_properties,
+                relationship_scan_filter: filters.relationship_scan_filter,
+                direction: spec.direction,
+            },
             memory_budget_bytes,
             observer,
-        )? {
-            runtime_checkpoint(task_context)?;
-            if bound_target_id.is_some_and(|node_id| node_id != target.id)
-                || filters
-                    .target_scan_filter
-                    .is_some_and(|filter| !node_matches_property_filter(&target, filter))
-            {
-                continue;
-            }
-            let mut nodes = binding.nodes.clone();
-            nodes.insert(spec.target_variable.to_string(), target.clone());
-            let mut relationships = binding.relationships.clone();
-            if let Some(rel_variable) = spec.rel_variable {
-                relationships.insert(rel_variable.to_string(), relationship.clone());
-            }
-            let expanded = ExpandedBinding {
-                binding: Binding {
-                    values: binding.values.clone(),
-                    nodes,
-                    relationships,
-                },
-                target_id: Some(target.id),
-                hop: 1,
-            };
-            admit_expanded_binding(&expanded, &mut output_bytes, memory_budget_bytes)?;
-            output.push(expanded);
-        }
+            &mut |relationship, target| {
+                runtime_checkpoint(task_context)?;
+                if bound_target_id.is_some_and(|node_id| node_id != target.id)
+                    || filters
+                        .target_scan_filter
+                        .is_some_and(|filter| !node_matches_property_filter(&target, filter))
+                {
+                    return Ok(ScanControl::Continue);
+                }
+                let mut nodes = binding.nodes.clone();
+                nodes.insert(spec.target_variable.to_string(), target.clone());
+                let mut relationships = binding.relationships.clone();
+                if let Some(rel_variable) = spec.rel_variable {
+                    relationships.insert(rel_variable.to_string(), relationship);
+                }
+                let expanded = ExpandedBinding {
+                    binding: Binding {
+                        values: binding.values.clone(),
+                        nodes,
+                        relationships,
+                    },
+                    target_id: Some(target.id),
+                    hop: 1,
+                };
+                ensure_expanded_binding_fits(&expanded, memory_budget_bytes)?;
+                matched = true;
+                consumer(expanded)
+            },
+        )?
     } else {
-        for (target, hop) in bounded_expand_targets(
+        visit_bounded_expand_targets(
             store,
-            source.id,
-            rel_type_id.expect("typed bounded expand checked by planner"),
-            target_label_ids,
-            spec.min_hops,
-            spec.max_hops,
+            BoundedExpandSpec {
+                source: source.id,
+                rel_type_id: rel_type_id.expect("typed bounded expand checked by planner"),
+                target_label_ids,
+                min_hops: spec.min_hops,
+                max_hops: spec.max_hops,
+            },
             memory_budget_bytes,
-        )? {
-            runtime_checkpoint(task_context)?;
-            if bound_target_id.is_some_and(|node_id| node_id != target.id)
-                || filters
-                    .target_scan_filter
-                    .is_some_and(|filter| !node_matches_property_filter(&target, filter))
-            {
-                continue;
-            }
-            let mut nodes = binding.nodes.clone();
-            nodes.insert(spec.target_variable.to_string(), target.clone());
-            let expanded = ExpandedBinding {
-                binding: Binding {
-                    values: binding.values.clone(),
-                    nodes,
-                    relationships: binding.relationships.clone(),
-                },
-                target_id: Some(target.id),
-                hop,
-            };
-            admit_expanded_binding(&expanded, &mut output_bytes, memory_budget_bytes)?;
-            output.push(expanded);
-        }
+            task_context,
+            &mut |target, hop| {
+                if bound_target_id.is_some_and(|node_id| node_id != target.id)
+                    || filters
+                        .target_scan_filter
+                        .is_some_and(|filter| !node_matches_property_filter(&target, filter))
+                {
+                    return Ok(ScanControl::Continue);
+                }
+                let mut nodes = binding.nodes.clone();
+                nodes.insert(spec.target_variable.to_string(), target.clone());
+                let expanded = ExpandedBinding {
+                    binding: Binding {
+                        values: binding.values.clone(),
+                        nodes,
+                        relationships: binding.relationships.clone(),
+                    },
+                    target_id: Some(target.id),
+                    hop,
+                };
+                ensure_expanded_binding_fits(&expanded, memory_budget_bytes)?;
+                matched = true;
+                consumer(expanded)
+            },
+        )?
+    };
+    if control == ScanControl::Stop {
+        return Ok(ScanControl::Stop);
     }
-    if spec.optional && output.is_empty() {
-        let mut nodes = binding.nodes;
+    if spec.optional && !matched {
+        let mut nodes = binding.nodes.clone();
         nodes.insert(spec.target_variable.to_string(), null_lookup_node());
         let expanded = ExpandedBinding {
             binding: Binding {
-                values: binding.values,
+                values: binding.values.clone(),
                 nodes,
-                relationships: binding.relationships,
+                relationships: binding.relationships.clone(),
             },
             target_id: None,
             hop: 0,
         };
-        admit_expanded_binding(&expanded, &mut output_bytes, memory_budget_bytes)?;
-        output.push(expanded);
+        ensure_expanded_binding_fits(&expanded, memory_budget_bytes)?;
+        return consumer(expanded);
     }
-    Ok(output)
+    Ok(ScanControl::Continue)
 }
 
-fn admit_expanded_binding(
+fn ensure_expanded_binding_fits(
     expanded: &ExpandedBinding,
-    used_bytes: &mut usize,
     memory_budget_bytes: usize,
 ) -> Result<()> {
     let bytes = binding_memory_bytes(&expanded.binding);
-    if bytes > memory_budget_bytes || used_bytes.saturating_add(bytes) > memory_budget_bytes {
+    if bytes > memory_budget_bytes {
         return Err(SkeinError::Execution(format!(
-            "AdjacencyExpandExec seed state exceeds blocking_operator_bytes {memory_budget_bytes}"
+            "AdjacencyExpandExec result uses {bytes} bytes, exceeding blocking_operator_bytes {memory_budget_bytes}"
         )));
     }
-    *used_bytes = used_bytes.saturating_add(bytes);
     Ok(())
 }
 
@@ -799,6 +811,162 @@ pub fn source_storage_scan_predicate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observer::NoopExecutionObserver;
+    use crate::store::{PrunedNodeScan, PrunedRelationshipScan};
+    use skein_storage::{AdjacencyDirection, RelId, RelRecord};
+    use std::cell::Cell;
+
+    struct HighDegreeStore {
+        degree: usize,
+        relationship_visits: Cell<usize>,
+    }
+
+    impl GraphExecutionRead for HighDegreeStore {
+        fn is_out_of_core(&self) -> bool {
+            false
+        }
+
+        fn node_owned(&self, id: NodeId) -> Result<Option<NodeRecord>> {
+            Ok(Some(NodeRecord {
+                id,
+                labels: BTreeSet::new(),
+                properties: BTreeMap::new(),
+            }))
+        }
+
+        fn node_count_for_label(&self, _label_id: Option<LabelId>) -> usize {
+            self.degree.saturating_add(1)
+        }
+
+        fn relationship_count_for_type(&self, _rel_type: Option<RelTypeId>) -> usize {
+            self.degree
+        }
+
+        fn visit_nodes_owned(
+            &self,
+            _label_id: Option<LabelId>,
+            _consumer: &mut dyn FnMut(NodeRecord) -> Result<ScanControl>,
+        ) -> Result<ScanControl> {
+            panic!("node scans are not used by adjacency expansion tests")
+        }
+
+        fn visit_nodes_by_property_owned(
+            &self,
+            _label_id: LabelId,
+            _property: &str,
+            _values: &[Value],
+            _consumer: &mut dyn FnMut(NodeRecord) -> Result<ScanControl>,
+        ) -> Result<ScanControl> {
+            panic!("property scans are not used by adjacency expansion tests")
+        }
+
+        fn visit_adjacent_relationships_owned(
+            &self,
+            node_id: NodeId,
+            rel_type: Option<RelTypeId>,
+            direction: AdjacencyDirection,
+            consumer: &mut dyn FnMut(RelRecord) -> Result<ScanControl>,
+        ) -> Result<ScanControl> {
+            assert_eq!(node_id, NodeId(0));
+            assert_eq!(rel_type, Some(RelTypeId(0)));
+            assert_eq!(direction, AdjacencyDirection::Outgoing);
+            for offset in 0..self.degree {
+                self.relationship_visits
+                    .set(self.relationship_visits.get().saturating_add(1));
+                if consumer(RelRecord {
+                    id: RelId(offset as u64),
+                    source: NodeId(0),
+                    target: NodeId(offset as u64 + 1),
+                    rel_type: RelTypeId(0),
+                    properties: BTreeMap::new(),
+                })? == ScanControl::Stop
+                {
+                    return Ok(ScanControl::Stop);
+                }
+            }
+            Ok(ScanControl::Continue)
+        }
+
+        fn visit_adjacent_relationships_with_filter_owned(
+            &self,
+            node_id: NodeId,
+            rel_type: Option<RelTypeId>,
+            direction: AdjacencyDirection,
+            _filter: &PropertyFilter,
+            consumer: &mut dyn FnMut(RelRecord) -> Result<ScanControl>,
+        ) -> Result<(ScanControl, Option<ScanPruningReport>)> {
+            self.visit_adjacent_relationships_owned(node_id, rel_type, direction, consumer)
+                .map(|control| (control, None))
+        }
+
+        fn scan_relationships_with_filter_pruning<'a>(
+            &'a self,
+            _rel_type: Option<RelTypeId>,
+            _filter: Option<&PropertyFilter>,
+        ) -> Result<PrunedRelationshipScan<'a>> {
+            panic!("relationship scans are not used by adjacency expansion tests")
+        }
+
+        fn scan_nodes_with_filter_pruning<'a>(
+            &'a self,
+            _catalog: &Catalog,
+            _label_id: Option<LabelId>,
+            _filter: Option<&PropertyFilter>,
+        ) -> Result<PrunedNodeScan<'a>> {
+            panic!("node scans are not used by adjacency expansion tests")
+        }
+    }
+
+    fn high_degree_expand_visits(rel_variable: Option<&str>) -> (usize, usize) {
+        let store = HighDegreeStore {
+            degree: 100_000,
+            relationship_visits: Cell::new(0),
+        };
+        let binding = Binding {
+            values: BTreeMap::new(),
+            nodes: BTreeMap::from([(
+                "source".to_string(),
+                NodeRecord {
+                    id: NodeId(0),
+                    labels: BTreeSet::new(),
+                    properties: BTreeMap::new(),
+                },
+            )]),
+            relationships: BTreeMap::new(),
+        };
+        let mut emitted = 0usize;
+        let control = stream_expand_binding(
+            &binding,
+            AdjacencyExpandSpec {
+                source_variable: "source",
+                rel_variable,
+                rel_properties: &BTreeMap::new(),
+                direction: RelationshipDirection::Outgoing,
+                target_variable: "target",
+                min_hops: 1,
+                max_hops: 1,
+                optional: false,
+            },
+            Some(RelTypeId(0)),
+            None,
+            &AdjacencyExpandFilters::default(),
+            &store,
+            1024 * 1024,
+            None,
+            &NoopExecutionObserver,
+            &mut |_| {
+                emitted = emitted.saturating_add(1);
+                Ok(if emitted == 50 {
+                    ScanControl::Stop
+                } else {
+                    ScanControl::Continue
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(control, ScanControl::Stop);
+        (emitted, store.relationship_visits.get())
+    }
 
     #[test]
     fn exact_label_detection_rejects_union_patterns() {
@@ -832,5 +1000,15 @@ mod tests {
             })
         ));
         assert_eq!(source_storage_scan_predicate(&predicate, "other"), None);
+    }
+
+    #[test]
+    fn bounded_one_hop_expand_stops_storage_visit_at_limit() {
+        assert_eq!(high_degree_expand_visits(None), (50, 50));
+    }
+
+    #[test]
+    fn relationship_binding_expand_stops_storage_visit_at_limit() {
+        assert_eq!(high_degree_expand_visits(Some("relationship")), (50, 50));
     }
 }

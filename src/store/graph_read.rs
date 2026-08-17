@@ -1447,6 +1447,142 @@ impl GraphStore {
         Ok(GraphScanControl::Continue)
     }
 
+    pub fn try_visit_ordered_adjacent_relationships_owned(
+        &self,
+        node_id: NodeId,
+        rel_type: Option<RelTypeId>,
+        direction: AdjacencyDirection,
+        memory_budget_bytes: usize,
+        mut consumer: impl FnMut(RelRecord) -> Result<GraphScanControl>,
+    ) -> Result<GraphScanControl> {
+        let (Some(reader), Some(adjacency), Some(rel_type)) = (
+            self.canonical_base.as_ref(),
+            self.canonical_adjacency.as_ref(),
+            rel_type,
+        ) else {
+            return self.try_visit_compact_sorted_adjacency(
+                node_id,
+                rel_type,
+                direction,
+                memory_budget_bytes,
+                consumer,
+            );
+        };
+
+        let mut delta_entries = Vec::new();
+        for relationship in self.relationships.values() {
+            if relationship.rel_type != rel_type
+                || !relationship_is_adjacent(relationship, node_id, direction)
+            {
+                continue;
+            }
+            push_compact_adjacency_key(
+                &mut delta_entries,
+                ordered_relationship_key(relationship, direction),
+                memory_budget_bytes,
+            )?;
+        }
+        delta_entries.sort_unstable();
+        let mut delta_index = 0usize;
+        let mut graph_control = GraphScanControl::Continue;
+        let mut consumer_error = None;
+        let (report, canonical_control) = adjacency
+            .scan_endpoint_entries_control(node_id, direction, Some(rel_type), |entry| {
+                let relationship = match entry {
+                    CanonicalAdjacencyEntry::Inline(relationship) => relationship,
+                    CanonicalAdjacencyEntry::CanonicalReference { relationship_id } => reader
+                        .get_relationship(relationship_id)
+                        .map_err(|error| {
+                            skein_storage::CanonicalAdjacencyError::Source(error.to_string())
+                        })?
+                        .ok_or_else(|| {
+                            skein_storage::CanonicalAdjacencyError::Corrupt(format!(
+                                "canonical adjacency references missing relationship {}",
+                                relationship_id.0
+                            ))
+                        })?,
+                };
+                if self.relationship_tombstones.contains(&relationship.id)
+                    || self.relationships.contains_key(&relationship.id)
+                {
+                    return Ok(CanonicalScanControl::Continue);
+                }
+                let canonical_key = ordered_relationship_key(&relationship, direction);
+                match emit_compact_adjacency_before(
+                    self,
+                    &delta_entries,
+                    &mut delta_index,
+                    Some(canonical_key),
+                    &mut consumer,
+                ) {
+                    Ok(GraphScanControl::Continue) => {}
+                    Ok(GraphScanControl::Stop) => {
+                        graph_control = GraphScanControl::Stop;
+                        return Ok(CanonicalScanControl::Stop);
+                    }
+                    Err(error) => {
+                        consumer_error = Some(error);
+                        graph_control = GraphScanControl::Stop;
+                        return Ok(CanonicalScanControl::Stop);
+                    }
+                }
+                match consumer(relationship) {
+                    Ok(GraphScanControl::Continue) => Ok(CanonicalScanControl::Continue),
+                    Ok(GraphScanControl::Stop) => {
+                        graph_control = GraphScanControl::Stop;
+                        Ok(CanonicalScanControl::Stop)
+                    }
+                    Err(error) => {
+                        consumer_error = Some(error);
+                        graph_control = GraphScanControl::Stop;
+                        Ok(CanonicalScanControl::Stop)
+                    }
+                }
+            })
+            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+        self.graph_index_read_metrics.record_adjacency(
+            match direction {
+                AdjacencyDirection::Outgoing => PersistentGraphIndexClass::ForwardAdjacency,
+                AdjacencyDirection::Incoming => PersistentGraphIndexClass::ReverseAdjacency,
+            },
+            report,
+        );
+        if let Some(error) = consumer_error {
+            return Err(error);
+        }
+        if canonical_control == CanonicalScanControl::Stop {
+            return Ok(graph_control);
+        }
+        emit_compact_adjacency_before(self, &delta_entries, &mut delta_index, None, &mut consumer)
+    }
+
+    fn try_visit_compact_sorted_adjacency(
+        &self,
+        node_id: NodeId,
+        rel_type: Option<RelTypeId>,
+        direction: AdjacencyDirection,
+        memory_budget_bytes: usize,
+        mut consumer: impl FnMut(RelRecord) -> Result<GraphScanControl>,
+    ) -> Result<GraphScanControl> {
+        let mut entries = Vec::new();
+        self.try_visit_adjacent_relationships_owned(
+            node_id,
+            rel_type,
+            direction,
+            |relationship| {
+                push_compact_adjacency_key(
+                    &mut entries,
+                    ordered_relationship_key(&relationship, direction),
+                    memory_budget_bytes,
+                )?;
+                Ok(GraphScanControl::Continue)
+            },
+        )?;
+        entries.sort_unstable();
+        let mut index = 0usize;
+        emit_compact_adjacency_before(self, &entries, &mut index, None, &mut consumer)
+    }
+
     pub fn visit_adjacent_relationships_with_filter_owned(
         &self,
         node_id: NodeId,
@@ -2433,6 +2569,71 @@ impl GraphStore {
             AdjacencyDirection::Incoming => self.incoming.get(&(node_id, rel_type)),
         }
     }
+}
+
+fn relationship_is_adjacent(
+    relationship: &RelRecord,
+    node_id: NodeId,
+    direction: AdjacencyDirection,
+) -> bool {
+    match direction {
+        AdjacencyDirection::Outgoing => relationship.source == node_id,
+        AdjacencyDirection::Incoming => relationship.target == node_id,
+    }
+}
+
+fn ordered_relationship_key(
+    relationship: &RelRecord,
+    direction: AdjacencyDirection,
+) -> (NodeId, RelId) {
+    let neighbor = match direction {
+        AdjacencyDirection::Outgoing => relationship.target,
+        AdjacencyDirection::Incoming => relationship.source,
+    };
+    (neighbor, relationship.id)
+}
+
+fn push_compact_adjacency_key(
+    entries: &mut Vec<(NodeId, RelId)>,
+    entry: (NodeId, RelId),
+    memory_budget_bytes: usize,
+) -> Result<()> {
+    let required_bytes = entries
+        .len()
+        .saturating_add(1)
+        .saturating_mul(std::mem::size_of::<(NodeId, RelId)>());
+    if required_bytes > memory_budget_bytes {
+        return Err(SkeinError::Execution(format!(
+            "ordered adjacency keys use {required_bytes} bytes, exceeding blocking_operator_bytes {memory_budget_bytes}"
+        )));
+    }
+    entries.push(entry);
+    Ok(())
+}
+
+fn emit_compact_adjacency_before(
+    store: &GraphStore,
+    entries: &[(NodeId, RelId)],
+    index: &mut usize,
+    before: Option<(NodeId, RelId)>,
+    consumer: &mut impl FnMut(RelRecord) -> Result<GraphScanControl>,
+) -> Result<GraphScanControl> {
+    while let Some(entry) = entries.get(*index).copied() {
+        if before.is_some_and(|before| entry >= before) {
+            break;
+        }
+        *index = index.saturating_add(1);
+        let Some(relationship) = store.relationship_owned(entry.1)? else {
+            return Err(SkeinError::StorageIntegrity(format!(
+                "ordered adjacency references missing relationship {}",
+                entry.1 .0
+            )));
+        };
+        if consumer(relationship)? == GraphScanControl::Stop {
+            return Ok(GraphScanControl::Stop);
+        }
+    }
+    Ok(GraphScanControl::Continue)
 }
 
 enum RelationshipProjectionProbe<'a> {
