@@ -27,6 +27,7 @@ pub use summary::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScanPruningStrategy {
     FullLabelScan,
+    ExactCount,
     Empty,
     IdEq,
     IdIn,

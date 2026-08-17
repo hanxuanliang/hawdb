@@ -598,6 +598,9 @@ fn scan_pruning_strategy_value(strategy: &ScanPruningStrategy) -> Value {
         ScanPruningStrategy::FullLabelScan => {
             Value::Map(BTreeMap::from([kind_value_pair("full_label_scan")]))
         }
+        ScanPruningStrategy::ExactCount => {
+            Value::Map(BTreeMap::from([kind_value_pair("exact_count")]))
+        }
         ScanPruningStrategy::Empty => Value::Map(BTreeMap::from([kind_value_pair("empty")])),
         ScanPruningStrategy::IdEq => Value::Map(BTreeMap::from([kind_value_pair("id_eq")])),
         ScanPruningStrategy::IdIn => Value::Map(BTreeMap::from([kind_value_pair("id_in")])),

@@ -288,7 +288,8 @@ fn counts_single_node_matches() {
     let explain = db
         .explain_query("MATCH (m:Memory) RETURN count(*) AS total")
         .unwrap();
-    assert!(explain.trace.selected_plan.contains("AggregateExec"));
+    assert!(explain.trace.selected_plan.contains("NodeCountExec"));
+    assert!(!explain.trace.selected_plan.contains("AggregateExec"));
 }
 
 #[test]

@@ -10485,6 +10485,7 @@ fn scan_pruning_report_json(report: &ScanPruningReport) -> serde_json::Value {
 fn scan_pruning_strategy_json(strategy: &ScanPruningStrategy) -> serde_json::Value {
     match strategy {
         ScanPruningStrategy::FullLabelScan => serde_json::json!({"kind": "full_label_scan"}),
+        ScanPruningStrategy::ExactCount => serde_json::json!({"kind": "exact_count"}),
         ScanPruningStrategy::Empty => serde_json::json!({"kind": "empty"}),
         ScanPruningStrategy::IdEq => serde_json::json!({"kind": "id_eq"}),
         ScanPruningStrategy::IdIn => serde_json::json!({"kind": "id_in"}),

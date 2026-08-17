@@ -5155,6 +5155,9 @@ fn scan_pruning_strategy_json(strategy: &skein::store::ScanPruningStrategy) -> s
         skein::store::ScanPruningStrategy::FullLabelScan => {
             serde_json::json!({"kind": "full_label_scan"})
         }
+        skein::store::ScanPruningStrategy::ExactCount => {
+            serde_json::json!({"kind": "exact_count"})
+        }
         skein::store::ScanPruningStrategy::Empty => serde_json::json!({"kind": "empty"}),
         skein::store::ScanPruningStrategy::IdEq => serde_json::json!({"kind": "id_eq"}),
         skein::store::ScanPruningStrategy::IdIn => serde_json::json!({"kind": "id_in"}),

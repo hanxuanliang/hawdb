@@ -77,7 +77,13 @@ fn node_count_exec_uses_label_count_without_scanning() {
         output.rows,
         vec![BTreeMap::from([("item_count".to_string(), Value::Int(3))])]
     );
-    assert!(output.profile.scan_pruning_reports.is_empty());
+    assert_eq!(output.profile.scan_pruning_reports.len(), 1);
+    let count_report = &output.profile.scan_pruning_reports[0];
+    assert_eq!(count_report.strategy, ScanPruningStrategy::ExactCount);
+    assert!(count_report.pruned);
+    assert_eq!(count_report.candidate_count_before_pruning, 3);
+    assert_eq!(count_report.pruned_candidate_count, 3);
+    assert_eq!(count_report.output_count, 1);
     assert_eq!(output.profile.pipeline_memory_report.output_rows, 1);
 }
 

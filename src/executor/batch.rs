@@ -1,6 +1,8 @@
 //! Streaming batch orchestration and pipeline dispatch.
 
 use super::*;
+use skein_executor::observer::ExecutionObserver;
+use skein_storage::{ScanPruningStrategy, ScanPruningTargetKind};
 
 fn charge_graph_algorithm_memory(
     algorithm: &'static str,
@@ -877,13 +879,31 @@ fn execute_binding_batches_inner(
             }])
         }
         PhysicalPlan::NodeCountExec { label, output } => {
+            let label_id = (!label.is_empty())
+                .then(|| catalog.label_id(label))
+                .flatten();
             let count = if label.is_empty() {
                 store.node_count_for_label(None)
-            } else if let Some(label_id) = catalog.label_id(label) {
+            } else if let Some(label_id) = label_id {
                 store.node_count_for_label(Some(label_id))
             } else {
                 0
             };
+            context
+                .observer
+                .record_scan_pruning_report(ScanPruningReport {
+                    target_kind: ScanPruningTargetKind::Node,
+                    label_id,
+                    rel_type_id: None,
+                    strategy: ScanPruningStrategy::ExactCount,
+                    pruned: true,
+                    exact_empty: count == 0,
+                    candidate_count_before_pruning: count,
+                    pruned_candidate_count: count,
+                    candidate_count_before_filter: 0,
+                    output_count: 1,
+                    filtered_out_count: 0,
+                });
             let count = i64::try_from(count).map_err(|_| {
                 SkeinError::Execution(format!(
                     "node count for label '{label}' exceeds the supported i64 result range"
