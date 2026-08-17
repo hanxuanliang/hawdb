@@ -58,6 +58,7 @@ ProjectExec columns=[title]
   IndexNodeSeek variable=m label=Memory property=id value=Int(7)
 
 [stage-trace]
+logical_rewrite order=fixed_point input=3 output=3 applied=0 skipped=0
 logical_grouping order=once input=1 output=3 applied=0 skipped=0
 access_path_selection order=bottom_up input=1 output=1 applied=1 skipped=0
 physical_search order=bottom_up input=3 output=1 applied=1 skipped=0
