@@ -91,7 +91,11 @@ remaining root budget before the associated allocation is constructed. The
 implementation MAY use conservative resident-memory estimates, but MUST NOT
 omit an executor-owned buffer merely because another operator already has a
 local limit. Spill serialization MUST reserve staging memory before allocating
-its encoded record buffer, independently from the persistent spill-byte quota.
+its complete encoded record buffer, independently from the persistent
+spill-byte quota. Spill decoding MUST retain that encoded staging lease until
+the decoded sort, aggregate, distinct, or output state has been admitted to its
+blocking account. A merge MUST NOT release the selected decoded row before a
+replacement row or an emitted batch owns the corresponding root-ledger charge.
 
 Leases MUST release through normal completion, cancellation, error, and panic
 unwinding. A streaming row consumer holds only the current transfer lease and

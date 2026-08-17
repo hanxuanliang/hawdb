@@ -166,6 +166,15 @@ the decoded record has been admitted to the blocking account. Normal
 completion, early consumer stop, decode failure, cancellation, and unwinding
 drop both account leases.
 
+The shared Binding spill fallback used by generic sort, partial and mixed
+aggregate, and distinct operators follows the same refinement. The writer
+derives the complete record length from the codec before allocating its buffer.
+The reader retains the encoded staging lease while constructing the decoded
+operator item and admits that item to the query-rooted blocking tracker before
+releasing staging. Pair compaction, final fan-in, and emitted sort/distinct
+batches preserve a rooted owner across each synchronous ownership transfer;
+normal completion and every error path therefore return both accounts to zero.
+
 Typed adjacency expansion refines the zero-transient-state branch of this
 model: `AdjacencyPostingList` keeps live entries ordered in snapshot-owned
 storage, and the ordered reader merges canonical and live cursors without

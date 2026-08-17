@@ -1,5 +1,5 @@
-use crate::binding::{binding_memory_bytes, binding_payload_bytes, Binding};
-use crate::kernel::SpillBudgetTracker;
+use crate::binding::Binding;
+use crate::kernel::{ensure_operator_item_fits, OperatorMemoryTracker, SpillBudgetTracker};
 use crate::QueryMemoryLease;
 use pool::{process_marker, RunLease, SPILL_FILE_PREFIX, SPILL_FILE_SUFFIX};
 use skein_core::{LabelId, RelTypeId, Result, SkeinError, Value};
@@ -96,11 +96,17 @@ impl SpillWriter {
         binding: &Binding,
         spill_budget: &mut SpillBudgetTracker,
     ) -> Result<u64> {
-        let _staging_lease =
-            spill_budget.reserve_staging(binding_memory_bytes(binding).saturating_add(8))?;
-        let mut payload = Vec::with_capacity(binding_payload_bytes(binding));
+        let encoded_len = binding_record_encoded_len(binding)?;
+        let _staging_lease = spill_budget.reserve_staging(encoded_len)?;
+        let mut payload = Vec::with_capacity(encoded_len);
         write_u64(&mut payload, ordinal)?;
         write_binding(&mut payload, binding)?;
+        if payload.len() != encoded_len {
+            return Err(SkeinError::Execution(format!(
+                "spill binding codec declared {encoded_len} bytes but encoded {} bytes",
+                payload.len()
+            )));
+        }
         let payload_len = u64::try_from(payload.len()).map_err(|_| {
             SkeinError::Execution("spill record exceeds the supported size".to_string())
         })?;
@@ -154,6 +160,65 @@ pub struct SpillReader {
 pub(crate) struct SpillRecordPayload {
     bytes: Vec<u8>,
     _lease: Option<QueryMemoryLease>,
+}
+
+pub(crate) struct SpillBindingRecord {
+    payload: SpillRecordPayload,
+    decoded_binding_bytes: usize,
+}
+
+impl SpillBindingRecord {
+    pub(crate) fn try_map<T>(
+        self,
+        operator: &str,
+        max_item_bytes: usize,
+        tracker: &mut OperatorMemoryTracker,
+        map: impl FnOnce(u64, Binding) -> Result<T>,
+        memory_bytes: impl FnOnce(&T) -> usize,
+    ) -> Result<T> {
+        let Self {
+            payload,
+            decoded_binding_bytes,
+        } = self;
+        tracker.try_charge(decoded_binding_bytes)?;
+        let item = match decode_binding_record(payload.as_slice())
+            .and_then(|(ordinal, binding)| map(ordinal, binding))
+        {
+            Ok(item) => item,
+            Err(error) => {
+                tracker.release(decoded_binding_bytes);
+                return Err(error);
+            }
+        };
+        let bytes = memory_bytes(&item);
+        if bytes > max_item_bytes {
+            tracker.release(decoded_binding_bytes);
+            return Err(SkeinError::Execution(format!(
+                "{operator} spill merge item uses {bytes} bytes, exceeding its {max_item_bytes}-byte allowance"
+            )));
+        }
+        if let Err(error) = ensure_operator_item_fits(operator, bytes, tracker) {
+            tracker.release(decoded_binding_bytes);
+            return Err(error);
+        }
+        if bytes > decoded_binding_bytes {
+            let additional_bytes = bytes - decoded_binding_bytes;
+            if tracker.would_exceed(additional_bytes) {
+                tracker.release(decoded_binding_bytes);
+                return Err(SkeinError::Execution(format!(
+                    "{operator} spill merge fan-in uses more than blocking_operator_bytes {}",
+                    tracker.budget_bytes
+                )));
+            }
+            if let Err(error) = tracker.try_charge(additional_bytes) {
+                tracker.release(decoded_binding_bytes);
+                return Err(error);
+            }
+        } else {
+            tracker.release(decoded_binding_bytes - bytes);
+        }
+        Ok(item)
+    }
 }
 
 impl SpillRecordPayload {
@@ -236,6 +301,210 @@ impl SpillReader {
             _lease: lease,
         }))
     }
+
+    pub(crate) fn read_binding_record(
+        &mut self,
+        max_record_bytes: usize,
+        spill_budget: &SpillBudgetTracker,
+    ) -> Result<Option<SpillBindingRecord>> {
+        let Some(payload) = self.read_record_payload(max_record_bytes, spill_budget)? else {
+            return Ok(None);
+        };
+        let mut cursor = Cursor::new(payload.as_slice());
+        read_u64(&mut cursor)?;
+        let decoded_binding_bytes = estimate_binding_memory_bytes(&mut cursor)?;
+        if cursor.position() != payload.as_slice().len() as u64 {
+            return Err(SkeinError::Execution(
+                "spill record contains trailing bytes".to_string(),
+            ));
+        }
+        Ok(Some(SpillBindingRecord {
+            payload,
+            decoded_binding_bytes,
+        }))
+    }
+}
+
+fn decode_binding_record(payload: &[u8]) -> Result<(u64, Binding)> {
+    let mut cursor = Cursor::new(payload);
+    let ordinal = read_u64(&mut cursor)?;
+    let binding = read_binding(&mut cursor)?;
+    if cursor.position() != payload.len() as u64 {
+        return Err(SkeinError::Execution(
+            "spill record contains trailing bytes".to_string(),
+        ));
+    }
+    Ok((ordinal, binding))
+}
+
+fn estimate_binding_memory_bytes(input: &mut Cursor<&[u8]>) -> Result<usize> {
+    let (mut payload_bytes, values) = estimate_value_map_payload(input, 0)?;
+    let nodes = read_len(input)?;
+    for _ in 0..nodes {
+        payload_bytes = encoded_len_add(payload_bytes, skip_string(input)?)?;
+        read_u64(input)?;
+        payload_bytes = encoded_len_add(payload_bytes, std::mem::size_of::<u64>())?;
+        let labels = read_len(input)?;
+        for _ in 0..labels {
+            read_u32(input)?;
+        }
+        payload_bytes = encoded_len_add(
+            payload_bytes,
+            encoded_len_mul(labels, std::mem::size_of::<LabelId>())?,
+        )?;
+        let (properties, _) = estimate_value_map_payload(input, 0)?;
+        payload_bytes = encoded_len_add(payload_bytes, properties)?;
+    }
+    let relationships = read_len(input)?;
+    for _ in 0..relationships {
+        payload_bytes = encoded_len_add(payload_bytes, skip_string(input)?)?;
+        read_u64(input)?;
+        read_u64(input)?;
+        read_u64(input)?;
+        read_u32(input)?;
+        payload_bytes = encoded_len_add(
+            payload_bytes,
+            std::mem::size_of::<u64>() * 3 + std::mem::size_of::<RelTypeId>(),
+        )?;
+        let (properties, _) = estimate_value_map_payload(input, 0)?;
+        payload_bytes = encoded_len_add(payload_bytes, properties)?;
+    }
+    let entry_count = values
+        .checked_add(nodes)
+        .and_then(|count| count.checked_add(relationships))
+        .ok_or_else(|| SkeinError::Execution("spill binding entry count overflow".to_string()))?;
+    encoded_len_add(
+        std::mem::size_of::<Binding>(),
+        encoded_len_add(
+            payload_bytes,
+            encoded_len_mul(entry_count, std::mem::size_of::<usize>() * 6)?,
+        )?,
+    )
+}
+
+fn estimate_value_map_payload(input: &mut Cursor<&[u8]>, depth: usize) -> Result<(usize, usize)> {
+    check_depth(depth)?;
+    let count = read_len(input)?;
+    let mut payload_bytes = 0usize;
+    for _ in 0..count {
+        payload_bytes = encoded_len_add(payload_bytes, skip_string(input)?)?;
+        payload_bytes = encoded_len_add(payload_bytes, estimate_value_payload(input, depth + 1)?)?;
+    }
+    Ok((payload_bytes, count))
+}
+
+fn estimate_value_payload(input: &mut Cursor<&[u8]>, depth: usize) -> Result<usize> {
+    check_depth(depth)?;
+    match read_u8(input)? {
+        0 => Ok(0),
+        1 => match read_u8(input)? {
+            0 | 1 => Ok(std::mem::size_of::<bool>()),
+            value => Err(SkeinError::Execution(format!(
+                "invalid boolean tag in spill record: {value}"
+            ))),
+        },
+        2 => {
+            read_i64(input)?;
+            Ok(std::mem::size_of::<i64>())
+        }
+        3 => {
+            read_u64(input)?;
+            Ok(std::mem::size_of::<f64>())
+        }
+        4 => skip_string(input),
+        5 => {
+            let count = read_len(input)?;
+            let mut payload_bytes = 0usize;
+            for _ in 0..count {
+                payload_bytes =
+                    encoded_len_add(payload_bytes, estimate_value_payload(input, depth + 1)?)?;
+            }
+            Ok(payload_bytes)
+        }
+        6 => estimate_value_map_payload(input, depth + 1).map(|(bytes, _)| bytes),
+        tag => Err(SkeinError::Execution(format!(
+            "invalid value tag in spill record: {tag}"
+        ))),
+    }
+}
+
+fn skip_string(input: &mut Cursor<&[u8]>) -> Result<usize> {
+    let len = read_len(input)?;
+    let start = usize::try_from(input.position()).map_err(|_| {
+        SkeinError::Execution("spill cursor position does not fit in memory".to_string())
+    })?;
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| SkeinError::Execution("spill string position overflow".to_string()))?;
+    let bytes = input
+        .get_ref()
+        .get(start..end)
+        .ok_or_else(|| SkeinError::Execution("truncated string in spill record".to_string()))?;
+    std::str::from_utf8(bytes)
+        .map_err(|error| SkeinError::Execution(format!("invalid spill string: {error}")))?;
+    input.set_position(end as u64);
+    Ok(len)
+}
+
+fn binding_record_encoded_len(binding: &Binding) -> Result<usize> {
+    encoded_len_add(8, binding_encoded_len(binding)?)
+}
+
+fn binding_encoded_len(binding: &Binding) -> Result<usize> {
+    let mut bytes = value_map_encoded_len(&binding.values, 0)?;
+    bytes = encoded_len_add(bytes, 8)?;
+    for (name, node) in &binding.nodes {
+        bytes = encoded_len_add(bytes, string_encoded_len(name)?)?;
+        bytes = encoded_len_add(bytes, 8)?;
+        bytes = encoded_len_add(bytes, 8)?;
+        bytes = encoded_len_add(bytes, encoded_len_mul(node.labels.len(), 8)?)?;
+        bytes = encoded_len_add(bytes, value_map_encoded_len(&node.properties, 0)?)?;
+    }
+    bytes = encoded_len_add(bytes, 8)?;
+    for (name, relationship) in &binding.relationships {
+        bytes = encoded_len_add(bytes, string_encoded_len(name)?)?;
+        bytes = encoded_len_add(bytes, 8 * 4)?;
+        bytes = encoded_len_add(bytes, value_map_encoded_len(&relationship.properties, 0)?)?;
+    }
+    Ok(bytes)
+}
+
+fn value_map_encoded_len(values: &BTreeMap<String, Value>, depth: usize) -> Result<usize> {
+    check_depth(depth)?;
+    values.iter().try_fold(8usize, |bytes, (name, value)| {
+        encoded_len_add(
+            encoded_len_add(bytes, string_encoded_len(name)?)?,
+            value_encoded_len(value, depth + 1)?,
+        )
+    })
+}
+
+fn value_encoded_len(value: &Value, depth: usize) -> Result<usize> {
+    check_depth(depth)?;
+    match value {
+        Value::Null => Ok(1),
+        Value::Bool(_) => Ok(2),
+        Value::Int(_) | Value::Float(_) => Ok(9),
+        Value::String(value) => encoded_len_add(1, string_encoded_len(value)?),
+        Value::List(values) => values.iter().try_fold(9usize, |bytes, value| {
+            encoded_len_add(bytes, value_encoded_len(value, depth + 1)?)
+        }),
+        Value::Map(values) => encoded_len_add(1, value_map_encoded_len(values, depth + 1)?),
+    }
+}
+
+fn string_encoded_len(value: &str) -> Result<usize> {
+    encoded_len_add(8, value.len())
+}
+
+fn encoded_len_add(left: usize, right: usize) -> Result<usize> {
+    left.checked_add(right)
+        .ok_or_else(|| SkeinError::Execution("spill record encoded length overflow".to_string()))
+}
+
+fn encoded_len_mul(left: usize, right: usize) -> Result<usize> {
+    left.checked_mul(right)
+        .ok_or_else(|| SkeinError::Execution("spill record encoded length overflow".to_string()))
 }
 
 fn write_binding(output: &mut Vec<u8>, binding: &Binding) -> Result<()> {
@@ -481,6 +750,7 @@ fn read_i64(input: &mut Cursor<&[u8]>) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::binding::binding_memory_bytes;
     use crate::kernel::OperatorMemoryTracker;
     use crate::{ExecutionMemoryConfig, QueryMemoryClass, QueryMemoryLedger};
     use std::num::{NonZeroU64, NonZeroUsize};
@@ -506,7 +776,7 @@ mod tests {
     #[test]
     fn spill_staging_shares_the_query_root_with_operator_state() {
         let mut memory = test_memory("query-ledger");
-        memory.query_memory_bytes = NonZeroUsize::new(256).unwrap();
+        memory.query_memory_bytes = NonZeroUsize::new(200).unwrap();
         memory.blocking_operator_bytes = NonZeroUsize::new(256).unwrap();
         let ledger = QueryMemoryLedger::new(memory.query_memory_bytes);
         let mut tracker = OperatorMemoryTracker::with_account(
@@ -529,13 +799,75 @@ mod tests {
         let error = writer.write(0, &binding, &mut spill_budget).unwrap_err();
 
         assert!(
-            error.to_string().contains("query_memory_bytes 256"),
+            error.to_string().contains("query_memory_bytes 200"),
             "{error}"
         );
         assert_eq!(ledger.snapshot().used_bytes, 100);
         drop(writer);
         drop(run);
         drop(tracker);
+        assert_eq!(ledger.snapshot().used_bytes, 0);
+        std::fs::remove_dir_all(&memory.spill_directory).unwrap();
+    }
+
+    #[test]
+    fn decoded_spill_state_is_admitted_before_payload_staging_is_released() {
+        let mut memory = test_memory("decode-query-ledger");
+        memory.query_memory_bytes = NonZeroUsize::new(300).unwrap();
+        memory.blocking_operator_bytes = NonZeroUsize::new(300).unwrap();
+        let ledger = QueryMemoryLedger::new(memory.query_memory_bytes);
+        let mut spill_budget = SpillBudgetTracker::with_ledger("Test", &memory, &ledger);
+        let binding = Binding {
+            values: BTreeMap::from([("payload".to_string(), Value::String("x".repeat(64)))]),
+            nodes: BTreeMap::new(),
+            relationships: BTreeMap::new(),
+        };
+        let (run, mut writer) = spill_budget.create_run("decode-query-ledger").unwrap();
+        writer.write(0, &binding, &mut spill_budget).unwrap();
+        writer.finish().unwrap();
+
+        let mut retained = OperatorMemoryTracker::with_account(
+            memory.blocking_operator_bytes,
+            ledger.account(
+                QueryMemoryClass::BlockingState,
+                "retained state",
+                memory.blocking_operator_bytes,
+            ),
+        );
+        retained.try_charge(100).unwrap();
+        let mut decoded = OperatorMemoryTracker::with_account(
+            memory.blocking_operator_bytes,
+            ledger.account(
+                QueryMemoryClass::BlockingState,
+                "decoded state",
+                memory.blocking_operator_bytes,
+            ),
+        );
+        let mut reader = run.reader().unwrap();
+        let record = reader
+            .read_binding_record(memory.blocking_operator_bytes.get(), &spill_budget)
+            .unwrap()
+            .expect("spill record");
+        let error = record
+            .try_map(
+                "Test merge",
+                memory.blocking_operator_bytes.get(),
+                &mut decoded,
+                |_, binding| Ok(binding),
+                binding_memory_bytes,
+            )
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("query_memory_bytes 300"),
+            "{error}"
+        );
+        assert_eq!(decoded.used_bytes, 0);
+        assert_eq!(ledger.snapshot().used_bytes, 100);
+        drop(reader);
+        drop(run);
+        drop(decoded);
+        drop(retained);
         assert_eq!(ledger.snapshot().used_bytes, 0);
         std::fs::remove_dir_all(&memory.spill_directory).unwrap();
     }
@@ -583,9 +915,31 @@ mod tests {
         writer.write(42, &binding, &mut spill_budget).unwrap();
         writer.finish().unwrap();
         let mut reader = run.reader().unwrap();
-        assert_eq!(reader.read(usize::MAX).unwrap(), Some((42, binding)));
+        assert_eq!(
+            reader.read(usize::MAX).unwrap(),
+            Some((42, binding.clone()))
+        );
         assert_eq!(reader.read(usize::MAX).unwrap(), None);
         drop(reader);
+        let mut accounted_reader = run.reader().unwrap();
+        let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
+        let record = accounted_reader
+            .read_binding_record(memory.blocking_operator_bytes.get(), &spill_budget)
+            .unwrap()
+            .expect("spill record");
+        let decoded = record
+            .try_map(
+                "CodecTest merge",
+                memory.blocking_operator_bytes.get(),
+                &mut tracker,
+                |ordinal, binding| Ok((ordinal, binding)),
+                |(_, binding)| binding_memory_bytes(binding),
+            )
+            .unwrap();
+        assert_eq!(decoded, (42, binding));
+        assert_eq!(tracker.used_bytes, binding_memory_bytes(&decoded.1));
+        tracker.reset();
+        drop(accounted_reader);
         drop(run);
         assert_eq!(memory.spill_pool_snapshot().unwrap().active_bytes, 0);
         std::fs::remove_dir(&memory.spill_directory).unwrap();

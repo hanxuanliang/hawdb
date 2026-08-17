@@ -447,6 +447,10 @@ Spill admission has two levels. Each blocking operator retains its cumulative
 byte and run limits, while all queries whose `ExecutionMemoryConfig` resolves
 to the same spill directory share one process-wide live-byte and live-run
 pool. A record MUST reserve both levels before it enters the writer buffer.
+The in-memory encoded length MUST be derived from the codec layout rather than
+from a decoded-row estimate. During merge, the encoded payload remains charged
+until the decoded row is admitted to the same query root; sort, aggregate, and
+distinct merge fan-in MUST NOT use an unrooted operator tracker.
 The pool MUST account for unflushed reservations when preserving
 `min_spill_free_bytes`, release live capacity only after its run is removed,
 and fail closed when filesystem capacity cannot be inspected. If multiple

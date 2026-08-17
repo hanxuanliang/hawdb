@@ -10,8 +10,8 @@ use crate::observer::ExecutionObserver;
 use crate::pipeline::{emit_binding_iterator, runtime_checkpoint, BatchControl, BindingBatch};
 use crate::spill;
 use crate::{
-    BlockingOperatorMemoryReport, ExecutionLimit, ExecutionMemoryConfig, QueryMemoryClass,
-    QueryMemoryLedger,
+    BlockingOperatorMemoryReport, ExecutionLimit, ExecutionMemoryConfig, QueryMemoryAccount,
+    QueryMemoryClass, QueryMemoryLedger,
 };
 use skein_core::{Catalog, Result, RuntimeTaskContext, SkeinError, Value};
 use skein_plan::{
@@ -41,14 +41,18 @@ pub struct BlockingExecutionContext<'a> {
 }
 
 impl BlockingExecutionContext<'_> {
+    pub fn operator_account(&self, operator: &'static str) -> QueryMemoryAccount {
+        self.memory_ledger.account(
+            QueryMemoryClass::BlockingState,
+            operator,
+            self.memory.blocking_operator_bytes,
+        )
+    }
+
     pub fn operator_tracker(&self, operator: &'static str) -> OperatorMemoryTracker {
         OperatorMemoryTracker::with_account(
             self.memory.blocking_operator_bytes,
-            self.memory_ledger.account(
-                QueryMemoryClass::BlockingState,
-                operator,
-                self.memory.blocking_operator_bytes,
-            ),
+            self.operator_account(operator),
         )
     }
 }

@@ -103,13 +103,14 @@ pub(super) fn stream_partial_aggregate_batches(
     observer: &dyn ExecutionObserver,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
+    let blocking_account = context.memory_ledger.account(
+        QueryMemoryClass::BlockingState,
+        "AggregateExec partial state",
+        memory.blocking_operator_bytes,
+    );
     let mut tracker = OperatorMemoryTracker::with_account(
         memory.blocking_operator_bytes,
-        context.memory_ledger.account(
-            QueryMemoryClass::BlockingState,
-            "AggregateExec partial state",
-            memory.blocking_operator_bytes,
-        ),
+        blocking_account.clone(),
     );
     let mut spill_budget =
         SpillBudgetTracker::with_ledger("AggregateExec", memory, context.memory_ledger);
@@ -205,7 +206,14 @@ pub(super) fn stream_partial_aggregate_batches(
         )?);
         tracker.reset();
     }
-    runs = compact_partial_runs(runs, items, memory, &mut spill_budget, context.task_context)?;
+    runs = compact_partial_runs(
+        runs,
+        items,
+        memory,
+        &mut spill_budget,
+        &blocking_account,
+        context.task_context,
+    )?;
     observer.record_blocking_memory_report(spill_backed_report(
         "AggregateExec",
         &tracker,
@@ -214,7 +222,7 @@ pub(super) fn stream_partial_aggregate_batches(
         &spill_budget,
         ordinal as usize,
     ));
-    merge_partial_runs(&runs, context, emit)
+    merge_partial_runs(&runs, &spill_budget, &blocking_account, context, emit)
 }
 
 fn partial_item_limit_error(bytes: usize, limit: usize) -> SkeinError {
@@ -429,17 +437,22 @@ fn read_partial_row(
     reader: &mut spill::SpillReader,
     items: &[Aggregation],
     memory_budget: NonZeroUsize,
+    spill_budget: &SpillBudgetTracker,
+    tracker: &mut OperatorMemoryTracker,
 ) -> Result<Option<PartialRunRow>> {
-    let Some((ordinal, binding)) = reader.read(memory_budget.get())? else {
-        return Ok(None);
-    };
-    let row = decode_partial_binding(ordinal, binding, items)?;
     let limit = memory_budget.get().saturating_div(3).max(1);
-    let bytes = row.memory_bytes();
-    if bytes > limit {
-        return Err(partial_item_limit_error(bytes, limit));
-    }
-    Ok(Some(row))
+    reader
+        .read_binding_record(memory_budget.get(), spill_budget)?
+        .map(|record| {
+            record.try_map(
+                "AggregateExec partial merge",
+                limit,
+                tracker,
+                |ordinal, binding| decode_partial_binding(ordinal, binding, items),
+                PartialRunRow::memory_bytes,
+            )
+        })
+        .transpose()
 }
 
 fn compact_partial_runs(
@@ -447,6 +460,7 @@ fn compact_partial_runs(
     items: &[Aggregation],
     memory: &ExecutionMemoryConfig,
     spill_budget: &mut SpillBudgetTracker,
+    blocking_account: &QueryMemoryAccount,
     task_context: Option<&RuntimeTaskContext>,
 ) -> Result<Vec<spill::SpillRun>> {
     while runs.len() > 2 {
@@ -464,6 +478,7 @@ fn compact_partial_runs(
                 items,
                 memory.blocking_operator_bytes,
                 spill_budget,
+                blocking_account,
                 task_context,
             )?);
         }
@@ -478,50 +493,58 @@ fn merge_partial_run_pair(
     items: &[Aggregation],
     memory_budget: NonZeroUsize,
     spill_budget: &mut SpillBudgetTracker,
+    blocking_account: &QueryMemoryAccount,
     task_context: Option<&RuntimeTaskContext>,
 ) -> Result<spill::SpillRun> {
     let mut left_reader = left.reader()?;
     let mut right_reader = right.reader()?;
-    let mut left_row = read_partial_row(&mut left_reader, items, memory_budget)?;
-    let mut right_row = read_partial_row(&mut right_reader, items, memory_budget)?;
+    let mut tracker = OperatorMemoryTracker::with_account(memory_budget, blocking_account.clone());
+    let mut left_row = read_partial_row(
+        &mut left_reader,
+        items,
+        memory_budget,
+        spill_budget,
+        &mut tracker,
+    )?;
+    let mut right_row = read_partial_row(
+        &mut right_reader,
+        items,
+        memory_budget,
+        spill_budget,
+        &mut tracker,
+    )?;
     let (run, mut writer) = spill_budget.create_run("aggregate-partial-merge")?;
     while left_row.is_some() || right_row.is_some() {
         runtime_checkpoint(task_context)?;
-        let (row, advance_left, advance_right) = match (&left_row, &right_row) {
-            (Some(left), Some(right)) => match left.key.cmp(&right.key) {
-                Ordering::Less => {
-                    let row = left_row.take().expect("left partial row exists");
-                    (row, true, false)
-                }
-                Ordering::Greater => {
-                    let row = right_row.take().expect("right partial row exists");
-                    (row, false, true)
-                }
-                Ordering::Equal => {
-                    let mut row = left_row.take().expect("left partial row exists");
-                    let other = right_row.take().expect("right partial row exists");
-                    row.ordinal = row.ordinal.min(other.ordinal);
-                    merge_partial_states(&mut row.states, other.states)?;
-                    (row, true, true)
-                }
-            },
-            (Some(_), None) => {
-                let row = left_row.take().expect("left partial row exists");
-                (row, true, false)
-            }
-            (None, Some(_)) => {
-                let row = right_row.take().expect("right partial row exists");
-                (row, false, true)
-            }
-            (None, None) => break,
+        let Some(selection) = take_next_partial_row(&mut left_row, &mut right_row)? else {
+            break;
         };
+        let PartialRowSelection {
+            row,
+            advance_left,
+            advance_right,
+            released_bytes,
+        } = selection;
         let binding = encode_partial_binding(row.key, row.states)?;
         writer.write(row.ordinal, &binding, spill_budget)?;
+        tracker.release(released_bytes);
         if advance_left {
-            left_row = read_partial_row(&mut left_reader, items, memory_budget)?;
+            left_row = read_partial_row(
+                &mut left_reader,
+                items,
+                memory_budget,
+                spill_budget,
+                &mut tracker,
+            )?;
         }
         if advance_right {
-            right_row = read_partial_row(&mut right_reader, items, memory_budget)?;
+            right_row = read_partial_row(
+                &mut right_reader,
+                items,
+                memory_budget,
+                spill_budget,
+                &mut tracker,
+            )?;
         }
     }
     writer.finish()?;
@@ -530,6 +553,8 @@ fn merge_partial_run_pair(
 
 fn merge_partial_runs(
     runs: &[spill::SpillRun],
+    spill_budget: &SpillBudgetTracker,
+    blocking_account: &QueryMemoryAccount,
     context: AggregateExecutionContext<'_>,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
@@ -542,13 +567,27 @@ fn merge_partial_runs(
             "AggregateExec partial merge fan-in exceeds two runs".to_string(),
         ));
     }
+    let mut tracker =
+        OperatorMemoryTracker::with_account(context.memory_budget, blocking_account.clone());
     let mut left = if let Some(reader) = readers.get_mut(0) {
-        read_partial_row(reader, context.items, context.memory_budget)?
+        read_partial_row(
+            reader,
+            context.items,
+            context.memory_budget,
+            spill_budget,
+            &mut tracker,
+        )?
     } else {
         None
     };
     let mut right = if let Some(reader) = readers.get_mut(1) {
-        read_partial_row(reader, context.items, context.memory_budget)?
+        read_partial_row(
+            reader,
+            context.items,
+            context.memory_budget,
+            spill_budget,
+            &mut tracker,
+        )?
     } else {
         None
     };
@@ -556,28 +595,22 @@ fn merge_partial_runs(
     let mut emitted = 0usize;
     while left.is_some() || right.is_some() {
         runtime_checkpoint(context.task_context)?;
-        let (row, advance_left, advance_right) = match (&left, &right) {
-            (Some(left_row), Some(right_row)) => match left_row.key.cmp(&right_row.key) {
-                Ordering::Less => (left.take().expect("left partial row exists"), true, false),
-                Ordering::Greater => (right.take().expect("right partial row exists"), false, true),
-                Ordering::Equal => {
-                    let mut row = left.take().expect("left partial row exists");
-                    let other = right.take().expect("right partial row exists");
-                    row.ordinal = row.ordinal.min(other.ordinal);
-                    merge_partial_states(&mut row.states, other.states)?;
-                    (row, true, true)
-                }
-            },
-            (Some(_), None) => (left.take().expect("left partial row exists"), true, false),
-            (None, Some(_)) => (right.take().expect("right partial row exists"), false, true),
-            (None, None) => break,
+        let Some(selection) = take_next_partial_row(&mut left, &mut right)? else {
+            break;
         };
+        let PartialRowSelection {
+            row,
+            advance_left,
+            advance_right,
+            released_bytes,
+        } = selection;
         batch.push(finish_partial_group(
             row.key,
             row.states,
             context.group_keys,
             context.items,
         ));
+        tracker.release(released_bytes);
         emitted = emitted.saturating_add(1);
         if flush_aggregate_batch(
             &mut batch,
@@ -590,14 +623,81 @@ fn merge_partial_runs(
             return Ok(BatchControl::Stop);
         }
         if advance_left {
-            left = read_partial_row(&mut readers[0], context.items, context.memory_budget)?;
+            left = read_partial_row(
+                &mut readers[0],
+                context.items,
+                context.memory_budget,
+                spill_budget,
+                &mut tracker,
+            )?;
         }
         if advance_right {
-            right = read_partial_row(&mut readers[1], context.items, context.memory_budget)?;
+            right = read_partial_row(
+                &mut readers[1],
+                context.items,
+                context.memory_budget,
+                spill_budget,
+                &mut tracker,
+            )?;
         }
     }
     if !batch.is_empty() && emit(batch)? == BatchControl::Stop {
         return Ok(BatchControl::Stop);
     }
     Ok(BatchControl::Continue)
+}
+
+struct PartialRowSelection {
+    row: PartialRunRow,
+    advance_left: bool,
+    advance_right: bool,
+    released_bytes: usize,
+}
+
+fn take_next_partial_row(
+    left: &mut Option<PartialRunRow>,
+    right: &mut Option<PartialRunRow>,
+) -> Result<Option<PartialRowSelection>> {
+    let ordering = match (left.as_ref(), right.as_ref()) {
+        (None, None) => return Ok(None),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(left), Some(right)) => left.key.cmp(&right.key),
+    };
+    let selection = match ordering {
+        Ordering::Less => {
+            let row = left.take().expect("left partial row exists");
+            let released_bytes = row.memory_bytes();
+            PartialRowSelection {
+                row,
+                advance_left: true,
+                advance_right: false,
+                released_bytes,
+            }
+        }
+        Ordering::Greater => {
+            let row = right.take().expect("right partial row exists");
+            let released_bytes = row.memory_bytes();
+            PartialRowSelection {
+                row,
+                advance_left: false,
+                advance_right: true,
+                released_bytes,
+            }
+        }
+        Ordering::Equal => {
+            let mut row = left.take().expect("left partial row exists");
+            let other = right.take().expect("right partial row exists");
+            let released_bytes = row.memory_bytes().saturating_add(other.memory_bytes());
+            row.ordinal = row.ordinal.min(other.ordinal);
+            merge_partial_states(&mut row.states, other.states)?;
+            PartialRowSelection {
+                row,
+                advance_left: true,
+                advance_right: true,
+                released_bytes,
+            }
+        }
+    };
+    Ok(Some(selection))
 }

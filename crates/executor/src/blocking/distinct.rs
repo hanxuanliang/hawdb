@@ -4,6 +4,7 @@ struct DistinctOperator<'a> {
     memory: &'a ExecutionMemoryConfig,
     task_context: Option<&'a RuntimeTaskContext>,
     observer: &'a dyn ExecutionObserver,
+    blocking_account: QueryMemoryAccount,
     tracker: OperatorMemoryTracker,
     spill_budget: SpillBudgetTracker,
     distinct: BTreeMap<Vec<(String, Value)>, (u64, Binding)>,
@@ -30,11 +31,16 @@ pub fn stream_distinct_batches(
 
 impl<'a> DistinctOperator<'a> {
     fn new(context: BlockingExecutionContext<'a>) -> Self {
-        let tracker = context.operator_tracker("DistinctExec");
+        let blocking_account = context.operator_account("DistinctExec");
+        let tracker = OperatorMemoryTracker::with_account(
+            context.memory.blocking_operator_bytes,
+            blocking_account.clone(),
+        );
         Self {
             memory: context.memory,
             task_context: context.task_context,
             observer: context.observer,
+            blocking_account,
             tracker,
             spill_budget: SpillBudgetTracker::with_ledger(
                 "DistinctExec",
@@ -99,6 +105,7 @@ impl<'a> DistinctOperator<'a> {
             self.runs,
             self.memory,
             &mut self.spill_budget,
+            &self.blocking_account,
             self.task_context,
             &mut peak_tracked_bytes,
         )?;
@@ -107,10 +114,14 @@ impl<'a> DistinctOperator<'a> {
             self.runs
                 .first()
                 .expect("compaction retains one distinct run"),
-            self.memory.blocking_operator_bytes,
-            self.memory.batch_rows.get(),
-            execution_limit,
-            self.task_context,
+            DistinctRunExecutionContext {
+                memory_budget: self.memory.blocking_operator_bytes,
+                spill_budget: &self.spill_budget,
+                blocking_account: &self.blocking_account,
+                batch_rows: self.memory.batch_rows.get(),
+                execution_limit,
+                task_context: self.task_context,
+            },
             emit,
         )
     }
@@ -155,6 +166,7 @@ fn compact_distinct_runs(
     mut runs: Vec<spill::SpillRun>,
     memory: &ExecutionMemoryConfig,
     spill_budget: &mut SpillBudgetTracker,
+    blocking_account: &QueryMemoryAccount,
     task_context: Option<&RuntimeTaskContext>,
     peak_tracked_bytes: &mut usize,
 ) -> Result<Vec<spill::SpillRun>> {
@@ -172,6 +184,7 @@ fn compact_distinct_runs(
                 &right,
                 memory,
                 spill_budget,
+                blocking_account,
                 task_context,
                 peak_tracked_bytes,
             )?);
@@ -191,24 +204,31 @@ struct DistinctRunRow {
 fn read_distinct_run_row(
     reader: &mut spill::SpillReader,
     memory_limit: usize,
+    spill_budget: &SpillBudgetTracker,
+    tracker: &mut OperatorMemoryTracker,
 ) -> Result<Option<DistinctRunRow>> {
-    let Some((ordinal, binding)) = reader.read(memory_limit)? else {
-        return Ok(None);
-    };
-    let key = distinct_binding_key(&binding);
-    let memory_bytes =
-        binding_memory_bytes(&binding).saturating_add(distinct_key_memory_bytes(&key));
-    if memory_bytes > memory_limit {
-        return Err(SkeinError::Execution(format!(
-            "DistinctExec spill merge row uses {memory_bytes} bytes, exceeding the per-row memory limit {memory_limit}"
-        )));
-    }
-    Ok(Some(DistinctRunRow {
-        key,
-        ordinal,
-        binding,
-        memory_bytes,
-    }))
+    reader
+        .read_binding_record(memory_limit, spill_budget)?
+        .map(|record| {
+            record.try_map(
+                "DistinctExec merge",
+                memory_limit,
+                tracker,
+                |ordinal, binding| {
+                    let key = distinct_binding_key(&binding);
+                    let memory_bytes = binding_memory_bytes(&binding)
+                        .saturating_add(distinct_key_memory_bytes(&key));
+                    Ok(DistinctRunRow {
+                        key,
+                        ordinal,
+                        binding,
+                        memory_bytes,
+                    })
+                },
+                |row| row.memory_bytes,
+            )
+        })
+        .transpose()
 }
 
 fn merge_distinct_run_pair(
@@ -216,6 +236,7 @@ fn merge_distinct_run_pair(
     right: &spill::SpillRun,
     memory: &ExecutionMemoryConfig,
     spill_budget: &mut SpillBudgetTracker,
+    blocking_account: &QueryMemoryAccount,
     task_context: Option<&RuntimeTaskContext>,
     peak_tracked_bytes: &mut usize,
 ) -> Result<spill::SpillRun> {
@@ -228,8 +249,18 @@ fn merge_distinct_run_pair(
     }
     let mut left_reader = left.reader()?;
     let mut right_reader = right.reader()?;
-    let mut left_row = read_distinct_run_row(&mut left_reader, per_row_memory)?;
-    let mut right_row = read_distinct_run_row(&mut right_reader, per_row_memory)?;
+    let mut tracker = OperatorMemoryTracker::with_account(
+        memory.blocking_operator_bytes,
+        blocking_account.clone(),
+    );
+    let mut left_row =
+        read_distinct_run_row(&mut left_reader, per_row_memory, spill_budget, &mut tracker)?;
+    let mut right_row = read_distinct_run_row(
+        &mut right_reader,
+        per_row_memory,
+        spill_budget,
+        &mut tracker,
+    )?;
     let (run, mut writer) = spill_budget.create_run("distinct-merge")?;
     loop {
         runtime_checkpoint(task_context)?;
@@ -239,57 +270,103 @@ fn merge_distinct_run_pair(
                 .map_or(0, |row| row.memory_bytes)
                 .saturating_add(right_row.as_ref().map_or(0, |row| row.memory_bytes)),
         );
-        let selected = match (&left_row, &right_row) {
+        let selection = match (&left_row, &right_row) {
             (None, None) => break,
-            (Some(_), None) => left_row.take(),
-            (None, Some(_)) => right_row.take(),
-            (Some(left), Some(right)) => match left.key.cmp(&right.key) {
-                Ordering::Less => left_row.take(),
-                Ordering::Greater => right_row.take(),
-                Ordering::Equal => {
-                    let left = left_row.take().expect("left row exists");
-                    let right = right_row.take().expect("right row exists");
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (Some(left), Some(right)) => left.key.cmp(&right.key),
+        };
+        let (selected, released_bytes) = match selection {
+            Ordering::Less => {
+                let released_bytes = left_row.as_ref().expect("left row exists").memory_bytes;
+                (left_row.take(), released_bytes)
+            }
+            Ordering::Greater => {
+                let released_bytes = right_row.as_ref().expect("right row exists").memory_bytes;
+                (right_row.take(), released_bytes)
+            }
+            Ordering::Equal => {
+                let released_bytes = left_row
+                    .as_ref()
+                    .expect("left row exists")
+                    .memory_bytes
+                    .saturating_add(right_row.as_ref().expect("right row exists").memory_bytes);
+                let left = left_row.take().expect("left row exists");
+                let right = right_row.take().expect("right row exists");
+                (
                     Some(if left.ordinal <= right.ordinal {
                         left
                     } else {
                         right
-                    })
-                }
-            },
+                    }),
+                    released_bytes,
+                )
+            }
         };
         let selected = selected.expect("distinct merge selected one row");
         writer.write(selected.ordinal, &selected.binding, spill_budget)?;
+        tracker.release(released_bytes);
         if left_row.is_none() {
-            left_row = read_distinct_run_row(&mut left_reader, per_row_memory)?;
+            left_row = read_distinct_run_row(
+                &mut left_reader,
+                per_row_memory,
+                spill_budget,
+                &mut tracker,
+            )?;
         }
         if right_row.is_none() {
-            right_row = read_distinct_run_row(&mut right_reader, per_row_memory)?;
+            right_row = read_distinct_run_row(
+                &mut right_reader,
+                per_row_memory,
+                spill_budget,
+                &mut tracker,
+            )?;
         }
     }
     writer.finish()?;
     Ok(run)
 }
 
-fn emit_distinct_run(
-    run: &spill::SpillRun,
+struct DistinctRunExecutionContext<'a> {
     memory_budget: NonZeroUsize,
+    spill_budget: &'a SpillBudgetTracker,
+    blocking_account: &'a QueryMemoryAccount,
     batch_rows: usize,
     execution_limit: ExecutionLimit,
-    task_context: Option<&RuntimeTaskContext>,
+    task_context: Option<&'a RuntimeTaskContext>,
+}
+
+fn emit_distinct_run(
+    run: &spill::SpillRun,
+    context: DistinctRunExecutionContext<'_>,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
+    let DistinctRunExecutionContext {
+        memory_budget,
+        spill_budget,
+        blocking_account,
+        batch_rows,
+        execution_limit,
+        task_context,
+    } = context;
     let mut reader = run.reader()?;
     let mut output = Vec::with_capacity(batch_rows);
+    let mut tracker = OperatorMemoryTracker::with_account(memory_budget, blocking_account.clone());
     let mut emitted = 0usize;
-    while let Some((_, binding)) = reader.read(memory_budget.get())? {
+    while let Some(record) = reader.read_binding_record(memory_budget.get(), spill_budget)? {
         runtime_checkpoint(task_context)?;
+        let binding = record.try_map(
+            "DistinctExec output",
+            memory_budget.get(),
+            &mut tracker,
+            |_, binding| Ok(binding),
+            binding_memory_bytes,
+        )?;
         output.push(binding);
         emitted = emitted.saturating_add(1);
         if output.len() == batch_rows
-            && emit(std::mem::replace(
-                &mut output,
-                Vec::with_capacity(batch_rows),
-            ))? == BatchControl::Stop
+            && emit_accounted_distinct_batch(&mut output, &mut tracker, batch_rows, emit)?
+                == BatchControl::Stop
         {
             return Ok(BatchControl::Stop);
         }
@@ -297,10 +374,24 @@ fn emit_distinct_run(
             break;
         }
     }
-    if !output.is_empty() && emit(output)? == BatchControl::Stop {
+    if !output.is_empty()
+        && emit_accounted_distinct_batch(&mut output, &mut tracker, batch_rows, emit)?
+            == BatchControl::Stop
+    {
         return Ok(BatchControl::Stop);
     }
     Ok(BatchControl::Continue)
+}
+
+fn emit_accounted_distinct_batch(
+    batch: &mut BindingBatch,
+    tracker: &mut OperatorMemoryTracker,
+    batch_rows: usize,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let outgoing = std::mem::replace(batch, Vec::with_capacity(batch_rows));
+    tracker.reset();
+    emit(outgoing)
 }
 
 fn distinct_key_memory_bytes(key: &[(String, Value)]) -> usize {

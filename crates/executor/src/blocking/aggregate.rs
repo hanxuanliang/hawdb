@@ -519,8 +519,10 @@ pub fn stream_aggregate_batches(
         );
     }
 
-    let mut tracker =
-        OperatorMemoryTracker::with_account(memory.blocking_operator_bytes, primary_account);
+    let mut tracker = OperatorMemoryTracker::with_account(
+        memory.blocking_operator_bytes,
+        primary_account.clone(),
+    );
     let mut spill_budget = SpillBudgetTracker::with_ledger("AggregateExec", memory, memory_ledger);
     let mut rows = Vec::<GroupRunRow>::new();
     let mut runs = Vec::<spill::SpillRun>::new();
@@ -579,7 +581,14 @@ pub fn stream_aggregate_batches(
         runs.push(spill_group_run(&mut rows, &mut spill_budget, task_context)?);
         tracker.reset();
     }
-    runs = compact_group_runs(runs, items.len(), memory, &mut spill_budget, task_context)?;
+    runs = compact_group_runs(
+        runs,
+        items.len(),
+        memory,
+        &mut spill_budget,
+        &primary_account,
+        task_context,
+    )?;
     observer.record_blocking_memory_report(spill_backed_report(
         "AggregateExec",
         &tracker,
@@ -598,7 +607,7 @@ pub fn stream_aggregate_batches(
         execution_limit,
         task_context,
     };
-    merge_group_runs(&runs, aggregate_context, emit)
+    merge_group_runs(&runs, &spill_budget, aggregate_context, emit)
 }
 
 fn spill_group_run(
@@ -624,6 +633,7 @@ fn compact_group_runs(
     aggregate_input_count: usize,
     memory: &ExecutionMemoryConfig,
     spill_budget: &mut SpillBudgetTracker,
+    blocking_account: &QueryMemoryAccount,
     task_context: Option<&RuntimeTaskContext>,
 ) -> Result<Vec<spill::SpillRun>> {
     while runs.len() > 2 {
@@ -641,6 +651,7 @@ fn compact_group_runs(
                 aggregate_input_count,
                 memory,
                 spill_budget,
+                blocking_account,
                 task_context,
             )?);
         }
@@ -656,48 +667,47 @@ fn merge_group_run_pair(
     aggregate_input_count: usize,
     memory: &ExecutionMemoryConfig,
     spill_budget: &mut SpillBudgetTracker,
+    blocking_account: &QueryMemoryAccount,
     task_context: Option<&RuntimeTaskContext>,
 ) -> Result<spill::SpillRun> {
     runtime_checkpoint(task_context)?;
     let mut readers = [left.reader()?, right.reader()?];
     let mut heap = BinaryHeap::new();
-    let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
+    let mut tracker = OperatorMemoryTracker::with_account(
+        memory.blocking_operator_bytes,
+        blocking_account.clone(),
+    );
     let per_row_budget = memory.blocking_operator_bytes.get() / 2;
     for (run_index, reader) in readers.iter_mut().enumerate() {
-        if let Some((ordinal, binding)) = reader.read(memory.blocking_operator_bytes.get())? {
-            let row = decode_compact_group_binding(ordinal, binding, aggregate_input_count)?;
-            let entry = GroupMergeEntry { row, run_index };
-            let bytes = entry.row.memory_bytes();
-            if bytes > per_row_budget {
-                return Err(SkeinError::Execution(format!(
-                    "AggregateExec spill merge row uses {bytes} bytes, exceeding half of blocking_operator_bytes {}",
-                    memory.blocking_operator_bytes
-                )));
-            }
-            tracker.try_charge(bytes)?;
+        if let Some(entry) = read_group_merge_entry(
+            reader,
+            run_index,
+            aggregate_input_count,
+            memory.blocking_operator_bytes.get(),
+            per_row_budget,
+            spill_budget,
+            &mut tracker,
+        )? {
             heap.push(entry);
         }
     }
     let (run, mut writer) = spill_budget.create_run("aggregate-merge")?;
     while let Some(entry) = heap.pop() {
         runtime_checkpoint(task_context)?;
-        tracker.release(entry.row.memory_bytes());
         let run_index = entry.run_index;
+        let entry_bytes = entry.row.memory_bytes();
         let binding = encode_compact_group_binding(entry.row.key, entry.row.inputs);
         writer.write(entry.row.ordinal, &binding, spill_budget)?;
-        if let Some((ordinal, binding)) =
-            readers[run_index].read(memory.blocking_operator_bytes.get())?
-        {
-            let row = decode_compact_group_binding(ordinal, binding, aggregate_input_count)?;
-            let next = GroupMergeEntry { row, run_index };
-            let bytes = next.row.memory_bytes();
-            if bytes > per_row_budget || tracker.would_exceed(bytes) {
-                return Err(SkeinError::Execution(format!(
-                    "AggregateExec spill merge exceeds blocking_operator_bytes {}",
-                    memory.blocking_operator_bytes
-                )));
-            }
-            tracker.try_charge(bytes)?;
+        tracker.release(entry_bytes);
+        if let Some(next) = read_group_merge_entry(
+            &mut readers[run_index],
+            run_index,
+            aggregate_input_count,
+            memory.blocking_operator_bytes.get(),
+            per_row_budget,
+            spill_budget,
+            &mut tracker,
+        )? {
             heap.push(next);
         }
     }
@@ -772,6 +782,7 @@ fn aggregate_sorted_group_rows(
 
 fn merge_group_runs(
     runs: &[spill::SpillRun],
+    spill_budget: &SpillBudgetTracker,
     context: AggregateExecutionContext<'_>,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
@@ -809,18 +820,15 @@ fn merge_group_runs(
     );
     for (run_index, reader) in readers.iter_mut().enumerate() {
         runtime_checkpoint(task_context)?;
-        if let Some((ordinal, binding)) = reader.read(memory_budget.get())? {
-            let row = decode_compact_group_binding(ordinal, binding, items.len())?;
-            let entry = GroupMergeEntry { row, run_index };
-            let bytes = entry.row.memory_bytes();
-            ensure_operator_item_fits("AggregateExec merge", bytes, &merge_tracker)?;
-            if merge_tracker.would_exceed(bytes) {
-                return Err(SkeinError::Execution(format!(
-                    "AggregateExec merge fan-in uses more than blocking_operator_bytes {}",
-                    merge_tracker.budget_bytes
-                )));
-            }
-            merge_tracker.try_charge(bytes)?;
+        if let Some(entry) = read_group_merge_entry(
+            reader,
+            run_index,
+            items.len(),
+            memory_budget.get(),
+            memory_budget.get(),
+            spill_budget,
+            &mut merge_tracker,
+        )? {
             heap.push(entry);
         }
     }
@@ -861,18 +869,15 @@ fn merge_group_runs(
             row.inputs,
             &mut accumulator_tracker,
         )?;
-        if let Some((ordinal, binding)) = readers[run_index].read(memory_budget.get())? {
-            let row = decode_compact_group_binding(ordinal, binding, items.len())?;
-            let next = GroupMergeEntry { row, run_index };
-            let bytes = next.row.memory_bytes();
-            ensure_operator_item_fits("AggregateExec merge", bytes, &merge_tracker)?;
-            if merge_tracker.would_exceed(bytes) {
-                return Err(SkeinError::Execution(format!(
-                    "AggregateExec merge fan-in uses more than blocking_operator_bytes {}",
-                    merge_tracker.budget_bytes
-                )));
-            }
-            merge_tracker.try_charge(bytes)?;
+        if let Some(next) = read_group_merge_entry(
+            &mut readers[run_index],
+            run_index,
+            items.len(),
+            memory_budget.get(),
+            memory_budget.get(),
+            spill_budget,
+            &mut merge_tracker,
+        )? {
             heap.push(next);
         }
     }
@@ -884,6 +889,35 @@ fn merge_group_runs(
         return Ok(BatchControl::Stop);
     }
     Ok(BatchControl::Continue)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_group_merge_entry(
+    reader: &mut spill::SpillReader,
+    run_index: usize,
+    aggregate_input_count: usize,
+    max_record_bytes: usize,
+    max_item_bytes: usize,
+    spill_budget: &SpillBudgetTracker,
+    tracker: &mut OperatorMemoryTracker,
+) -> Result<Option<GroupMergeEntry>> {
+    reader
+        .read_binding_record(max_record_bytes, spill_budget)?
+        .map(|record| {
+            record.try_map(
+                "AggregateExec merge",
+                max_item_bytes,
+                tracker,
+                |ordinal, binding| {
+                    Ok(GroupMergeEntry {
+                        row: decode_compact_group_binding(ordinal, binding, aggregate_input_count)?,
+                        run_index,
+                    })
+                },
+                |entry| entry.row.memory_bytes(),
+            )
+        })
+        .transpose()
 }
 
 fn update_group_accumulator(
