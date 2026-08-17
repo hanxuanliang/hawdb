@@ -58,6 +58,10 @@ pub(super) fn estimate_physical_plan_cost(
             estimated_rows: 1,
             cost: 0,
         },
+        PhysicalPlan::NodeCountExec { .. } => PlanCost {
+            estimated_rows: 1,
+            cost: 1,
+        },
         PhysicalPlan::SeqNodeScan { label, .. } => {
             let rows = catalog.label_count(label);
             PlanCost {
@@ -354,6 +358,7 @@ pub(super) fn estimate_physical_plan_cost_breakdown(
 ) -> PlanCostBreakdown {
     match plan {
         PhysicalPlan::EmptyExec => PlanCostBreakdown::new(1, 0, 0, 0, 0),
+        PhysicalPlan::NodeCountExec { .. } => PlanCostBreakdown::new(1, 1, 0, 0, 0),
         PhysicalPlan::SeqNodeScan { label, .. } => {
             let rows = catalog.label_count(label);
             PlanCostBreakdown::new(rows, 0, 0, estimate_node_full_scan_cost(rows), 0)

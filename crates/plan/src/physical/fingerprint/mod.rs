@@ -938,6 +938,16 @@ impl PhysicalPlan {
                 write_identifier(output, projection);
                 output.push(')');
             }
+            PhysicalPlan::NodeCountExec {
+                label,
+                output: projection,
+            } => {
+                output.push_str("NodeCountExec(");
+                write_identifier(output, label);
+                output.push_str(",output=");
+                write_identifier(output, projection);
+                output.push(')');
+            }
             PhysicalPlan::ThreadRepairStatsExec {
                 label,
                 identity_label,

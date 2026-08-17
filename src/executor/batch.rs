@@ -876,6 +876,25 @@ fn execute_binding_batches_inner(
                 relationships: BTreeMap::new(),
             }])
         }
+        PhysicalPlan::NodeCountExec { label, output } => {
+            let count = if label.is_empty() {
+                store.node_count_for_label(None)
+            } else if let Some(label_id) = catalog.label_id(label) {
+                store.node_count_for_label(Some(label_id))
+            } else {
+                0
+            };
+            let count = i64::try_from(count).map_err(|_| {
+                SkeinError::Execution(format!(
+                    "node count for label '{label}' exceeds the supported i64 result range"
+                ))
+            })?;
+            emit(vec![Binding {
+                values: BTreeMap::from([(output.clone(), Value::Int(count))]),
+                nodes: BTreeMap::new(),
+                relationships: BTreeMap::new(),
+            }])
+        }
         PhysicalPlan::AdjacencyExpandExec { input, .. } => stream_adjacency_expand_batches(
             plan,
             input,

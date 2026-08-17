@@ -53,6 +53,7 @@ pub enum PhysicalPlanKind {
     AdjacencyExpandExec,
     OptionalDegreeExec,
     OptionalRelationshipCountSumExec,
+    NodeCountExec,
     ThreadRepairStatsExec,
     ShortestPathExec,
     FilterExec,
@@ -144,6 +145,7 @@ impl PhysicalPlanKind {
             PhysicalPlanKind::AdjacencyExpandExec,
             PhysicalPlanKind::OptionalDegreeExec,
             PhysicalPlanKind::OptionalRelationshipCountSumExec,
+            PhysicalPlanKind::NodeCountExec,
             PhysicalPlanKind::ThreadRepairStatsExec,
             PhysicalPlanKind::ShortestPathExec,
             PhysicalPlanKind::FilterExec,
@@ -221,6 +223,7 @@ impl PhysicalPlanKind {
             PhysicalPlanKind::OptionalRelationshipCountSumExec => {
                 "OptionalRelationshipCountSumExec"
             }
+            PhysicalPlanKind::NodeCountExec => "NodeCountExec",
             PhysicalPlanKind::ThreadRepairStatsExec => "ThreadRepairStatsExec",
             PhysicalPlanKind::ShortestPathExec => "ShortestPathExec",
             PhysicalPlanKind::FilterExec => "FilterExec",
@@ -281,7 +284,8 @@ impl PhysicalPlanKind {
             | PhysicalPlanKind::OptionalDegreeExec
             | PhysicalPlanKind::OptionalRelationshipCountSumExec
             | PhysicalPlanKind::ShortestPathExec => PhysicalPlanClass::Traversal,
-            PhysicalPlanKind::EmptyExec
+            PhysicalPlanKind::NodeCountExec
+            | PhysicalPlanKind::EmptyExec
             | PhysicalPlanKind::NodeCartesianProductExec
             | PhysicalPlanKind::FilterExec
             | PhysicalPlanKind::ProjectExec

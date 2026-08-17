@@ -46,6 +46,42 @@ fn empty_exec_returns_without_scanning_or_buffering_rows() {
 }
 
 #[test]
+fn node_count_exec_uses_label_count_without_scanning() {
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::in_memory();
+    for rank in 0..3 {
+        store
+            .create_node(
+                &mut catalog,
+                "Item",
+                properties([("rank", Value::Int(rank))]),
+            )
+            .unwrap();
+    }
+    store
+        .create_node(&mut catalog, "Other", properties([]))
+        .unwrap();
+
+    let output = execute_with_row_limit_profile(
+        &PhysicalPlan::NodeCountExec {
+            label: "Item".to_string(),
+            output: "item_count".to_string(),
+        },
+        &mut catalog,
+        &mut store,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(
+        output.rows,
+        vec![BTreeMap::from([("item_count".to_string(), Value::Int(3))])]
+    );
+    assert!(output.profile.scan_pruning_reports.is_empty());
+    assert_eq!(output.profile.pipeline_memory_report.output_rows, 1);
+}
+
+#[test]
 fn sort_pipeline_spills_runs_under_a_tight_memory_budget() {
     let mut catalog = Catalog::default();
     let mut store = GraphStore::in_memory();

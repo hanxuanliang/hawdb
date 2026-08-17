@@ -7,8 +7,8 @@ use super::{
     logical_rewrite::{rewrite_logical_plan, LogicalRewriteOutput},
     selected_trace::selected_plan_trace,
     stages::{
-        DIRECT_PHYSICAL_FALLBACK_STAGE, LOGICAL_GROUPING_STAGE, PHYSICAL_SEARCH_STAGE,
-        SELECTED_PLAN_COSTING_STAGE,
+        ACCESS_PATH_SELECTION_STAGE, DIRECT_PHYSICAL_FALLBACK_STAGE, LOGICAL_GROUPING_STAGE,
+        PHYSICAL_SEARCH_STAGE, SELECTED_PLAN_COSTING_STAGE,
     },
     LogicalPlanRoot, OptimizationSearchReport, OptimizedLogicalPlanRoot, OptimizerCatalog,
     OptimizerConfig, OptimizerTrace, PhysicalPlan, PhysicalPlanRoot, StageStats,
@@ -18,7 +18,7 @@ use crate::{
     StageTrace,
 };
 use skein_core::Value;
-use skein_plan::{GraphExpansionBudget, LogicalPlan, SortItem};
+use skein_plan::{AggregateFunction, AggregateTarget, GraphExpansionBudget, LogicalPlan, SortItem};
 use std::collections::BTreeMap;
 
 mod access;
@@ -362,6 +362,9 @@ impl GroupExpr {
         decisions: &mut Vec<String>,
         stage_events: &mut Vec<StageTrace>,
     ) -> PhysicalPlan {
+        if let Some(plan) = select_node_count_fast_path(&self.logical, decisions, stage_events) {
+            return plan;
+        }
         if let Some(plan) = simple::lower_simple_logical(&self.logical) {
             return plan;
         }
@@ -802,6 +805,9 @@ fn logical_to_physical_direct(
     decisions: &mut Vec<String>,
     stage_events: &mut Vec<StageTrace>,
 ) -> PhysicalPlan {
+    if let Some(plan) = select_node_count_fast_path(logical, decisions, stage_events) {
+        return plan;
+    }
     if let Some(plan) = simple::lower_simple_logical(logical) {
         return plan;
     }
@@ -1019,6 +1025,47 @@ fn logical_to_physical_direct(
         }
         _ => unreachable!("leaf logical plans are lowered before direct child planning"),
     }
+}
+
+fn select_node_count_fast_path(
+    logical: &LogicalPlan,
+    decisions: &mut Vec<String>,
+    stage_events: &mut Vec<StageTrace>,
+) -> Option<PhysicalPlan> {
+    let LogicalPlan::Aggregate {
+        group_keys,
+        items,
+        input,
+    } = logical
+    else {
+        return None;
+    };
+    let [item] = items.as_slice() else {
+        return None;
+    };
+    let LogicalPlan::NodeScan { variable, label } = input.as_ref() else {
+        return None;
+    };
+    let exact_node_count = group_keys.is_empty()
+        && item.function == AggregateFunction::Count
+        && match &item.target {
+            AggregateTarget::All => !item.distinct,
+            AggregateTarget::Variable(target) => target == variable,
+            AggregateTarget::Property { .. } => false,
+        };
+    if !exact_node_count {
+        return None;
+    }
+
+    decisions.push(format!(
+        "selected implementation:node_count_fast_path: use exact label count for {label}"
+    ));
+    stage_events
+        .push(ACCESS_PATH_SELECTION_STAGE.trace(StageStats::new(1, 1).with_rule_counts(1, 0)));
+    Some(PhysicalPlan::NodeCountExec {
+        label: label.clone(),
+        output: item.name.clone(),
+    })
 }
 
 struct ExpandEstimateRequest<'a> {

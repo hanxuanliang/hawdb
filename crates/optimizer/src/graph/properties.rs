@@ -14,6 +14,12 @@ pub(super) fn selected_plan_properties(plan: &PhysicalPlan) -> PhysicalPropertie
             memory_budget: MemoryBudgetClass::Constant,
             ..PhysicalProperties::default()
         },
+        PhysicalPlan::NodeCountExec { .. } => PhysicalProperties {
+            distribution: Distribution::Single,
+            vector_precision: VectorPrecision::NotVector,
+            memory_budget: MemoryBudgetClass::Constant,
+            ..PhysicalProperties::default()
+        },
         PhysicalPlan::FilterExec { input, .. }
         | PhysicalPlan::ProjectExec { input, .. }
         | PhysicalPlan::LimitExec { input, .. }

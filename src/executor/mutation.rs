@@ -878,6 +878,7 @@ pub fn mutation_command(plan: &PhysicalPlan) -> Result<Option<GraphMutation>> {
             },
         ))),
         PhysicalPlan::EmptyExec
+        | PhysicalPlan::NodeCountExec { .. }
         | PhysicalPlan::SeqNodeScan { .. }
         | PhysicalPlan::SourceSegmentScan { .. }
         | PhysicalPlan::NodeCartesianProductExec { .. }

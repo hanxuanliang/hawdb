@@ -3,13 +3,14 @@ use super::super::{
     OptimizerCatalogStatistics, PlanPhaseKind,
 };
 use crate::{
-    Distribution, MemoryBudgetClass, OptimizerConfig, PhysicalPlanClass, PhysicalPlanKind,
-    ScanPruningSupport, VectorPrecision,
+    Distribution, MemoryBudgetClass, OptimizerConfig, OptimizerSearchDirective, PhysicalPlanClass,
+    PhysicalPlanKind, ScanPruningSupport, VectorPrecision,
 };
 use skein_core::Value;
 use skein_plan::{
-    LogicalPlan, PhysicalOperatorDomain, PhysicalPlan, PhysicalPlanChildren, PhysicalPlanDomainRef,
-    Predicate, Projection, ProjectionExpression, SortDirection, SortItem, SortKey,
+    AggregateFunction, AggregateTarget, Aggregation, LogicalPlan, PhysicalOperatorDomain,
+    PhysicalPlan, PhysicalPlanChildren, PhysicalPlanDomainRef, Predicate, Projection,
+    ProjectionExpression, SortDirection, SortItem, SortKey,
 };
 
 #[test]
@@ -214,6 +215,55 @@ fn exact_or_lookup_lowers_to_one_index_multiseek() {
         .rule_events
         .iter()
         .any(|event| { event.rule() == "transformation:simplify_filter_predicate" }));
+}
+
+#[test]
+fn unfiltered_node_count_uses_exact_count_store() {
+    let logical = LogicalPlan::Aggregate {
+        group_keys: Vec::new(),
+        items: vec![Aggregation {
+            function: AggregateFunction::Count,
+            target: AggregateTarget::All,
+            distinct: false,
+            name: "memory_count".to_string(),
+        }],
+        input: Box::new(LogicalPlan::NodeScan {
+            variable: "m".to_string(),
+            label: "Memory".to_string(),
+        }),
+    };
+
+    let (plan, trace) =
+        CascadesOptimizer::new(OptimizerConfig { max_groups: 16 }).optimize_with_trace(&logical);
+
+    assert_eq!(
+        plan,
+        PhysicalPlan::NodeCountExec {
+            label: "Memory".to_string(),
+            output: "memory_count".to_string(),
+        }
+    );
+    assert_eq!(trace.selected_plan_cost.estimated_rows, 1);
+    assert_eq!(
+        trace.selected_plan_operator_counts.get("NodeCountExec"),
+        Some(&1)
+    );
+    assert!(!trace
+        .selected_plan_operator_counts
+        .contains_key("SeqNodeScan"));
+    assert!(trace
+        .rule_events
+        .iter()
+        .any(|event| { event.rule() == "implementation:node_count_fast_path" }));
+
+    let direct = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+        .optimize_root_with_catalog_and_directive(
+            &LogicalPlanRoot::new(logical),
+            &OptimizerCatalog::default(),
+            OptimizerSearchDirective::DirectFallback,
+        )
+        .expect("direct fallback must preserve the exact count fast path");
+    assert_eq!(direct.plan(), &plan);
 }
 
 #[test]

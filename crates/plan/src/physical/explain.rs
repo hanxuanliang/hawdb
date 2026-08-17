@@ -441,6 +441,9 @@ impl PhysicalPlan {
                     legs.len()
                 )
             }
+            PhysicalPlan::NodeCountExec { label, output } => {
+                format!("{pad}NodeCountExec label={label} output={output}")
+            }
             PhysicalPlan::ThreadRepairStatsExec { label, .. } => {
                 format!("{pad}ThreadRepairStatsExec label={label}")
             }

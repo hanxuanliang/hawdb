@@ -126,7 +126,8 @@ impl PhysicalPlan {
             | PhysicalPlan::ShortestPathExec { .. } => {
                 PhysicalPlanDomainRef::Traversal(TraversalPhysicalPlanRef::new(self))
             }
-            PhysicalPlan::EmptyExec
+            PhysicalPlan::NodeCountExec { .. }
+            | PhysicalPlan::EmptyExec
             | PhysicalPlan::NodeCartesianProductExec { .. }
             | PhysicalPlan::FilterExec { .. }
             | PhysicalPlan::ProjectExec { .. }

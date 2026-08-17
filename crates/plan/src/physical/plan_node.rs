@@ -83,6 +83,7 @@ impl PhysicalPlan {
             PhysicalPlan::OptionalRelationshipCountSumExec { .. } => {
                 PhysicalPlanKind::OptionalRelationshipCountSumExec
             }
+            PhysicalPlan::NodeCountExec { .. } => PhysicalPlanKind::NodeCountExec,
             PhysicalPlan::ThreadRepairStatsExec { .. } => PhysicalPlanKind::ThreadRepairStatsExec,
             PhysicalPlan::ShortestPathExec { .. } => PhysicalPlanKind::ShortestPathExec,
             PhysicalPlan::FilterExec { .. } => PhysicalPlanKind::FilterExec,
@@ -158,6 +159,7 @@ impl PhysicalPlan {
             | PhysicalPlan::IndexNodeRangeSeek { .. }
             | PhysicalPlan::IndexNodeTextSeek { .. }
             | PhysicalPlan::OptionalRelationshipCountSumExec { .. }
+            | PhysicalPlan::NodeCountExec { .. }
             | PhysicalPlan::ThreadRepairStatsExec { .. }
             | PhysicalPlan::ShortestPathExec { .. } => PlanChildren::None,
         }

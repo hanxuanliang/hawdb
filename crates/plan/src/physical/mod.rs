@@ -355,6 +355,10 @@ pub enum PhysicalPlan {
         legs: Vec<RelationshipCountLeg>,
         output: String,
     },
+    NodeCountExec {
+        label: String,
+        output: String,
+    },
     ThreadRepairStatsExec {
         label: String,
         identity_label: String,
