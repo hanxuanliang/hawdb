@@ -1190,9 +1190,10 @@ fn columnar_numeric_fragment_matches_row_pipeline_and_reports_morsels() {
         batch_rows: NonZeroUsize::new(4).unwrap(),
         ..ExecutionMemoryConfig::default()
     };
-    let morsel_count = 513usize.div_ceil(4);
+    let morsel_rows = 4 * 16;
+    let morsel_count = 513usize.div_ceil(morsel_rows);
     let memory_workers = memory.query_memory_bytes.get()
-        / (memory.batch_payload_bytes.get() + 4 * std::mem::size_of::<&NodeRecord>());
+        / (memory.batch_payload_bytes.get() + morsel_rows * std::mem::size_of::<&NodeRecord>());
     let expected_workers = skein_executor::SharedExecutorPool::shared_default()
         .map(|pool| pool.worker_count())
         .unwrap_or(1)
@@ -1234,7 +1235,7 @@ fn columnar_numeric_fragment_matches_row_pipeline_and_reports_morsels() {
     assert!(report.columnar_input_rows >= report.columnar_selected_rows);
     assert_eq!(report.columnar_batches, report.morsel_count);
     assert_eq!(report.morsel_max_admitted_workers, expected_workers);
-    assert!((1..=expected_workers).contains(&report.morsel_peak_active_workers));
+    assert_eq!(report.morsel_peak_active_workers, 1);
     assert_eq!(row.profile.pipeline_memory_report.columnar_batches, 0);
 
     let columnar_scan_plan = match &columnar_plan {

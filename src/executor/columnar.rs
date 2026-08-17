@@ -21,6 +21,7 @@ use skein_executor::SharedExecutorPool;
 use std::borrow::Borrow;
 use std::sync::Arc;
 
+const DEFAULT_BATCHES_PER_MORSEL: usize = 16;
 const DEFAULT_MIN_MORSELS_PER_WORKER: usize = 4;
 const PREDICATE_VALUE_SLOT: SlotId = SlotId(0);
 const NODE_ID_SLOT: SlotId = SlotId(1);
@@ -200,9 +201,10 @@ impl<'a> NumericFragment<'a> {
         } else {
             memory.batch_rows.get()
         };
+        let morsel_rows = batch_rows.saturating_mul(DEFAULT_BATCHES_PER_MORSEL);
         let morsel_count = store
             .node_count_for_label(Some(label_id))
-            .div_ceil(batch_rows.max(1));
+            .div_ceil(morsel_rows.max(1));
         default_morsel_worker_count(morsel_count, MAX_MORSEL_PARALLELISM)
     }
 
@@ -244,7 +246,9 @@ impl<'a> NumericFragment<'a> {
             needs_node_ids,
         };
         let candidate_count = context.store.node_count_for_label(Some(label_id));
-        let morsel_rows = target_rows;
+        let morsel_rows =
+            NonZeroUsize::new(target_rows.get().saturating_mul(DEFAULT_BATCHES_PER_MORSEL))
+                .expect("morsel row target is non-zero");
         let columnar_schema = use_lending
             .then(|| numeric_columnar_schema(self, lending_scan.needs_node_ids))
             .transpose()?;
@@ -416,6 +420,19 @@ struct PreparedColumnarBatch {
     batch: ColumnarBatch,
 }
 
+#[derive(Debug)]
+struct PreparedColumnarMorsel {
+    batches: Vec<PreparedColumnarBatch>,
+}
+
+impl PreparedColumnarMorsel {
+    fn resident_bytes(&self) -> usize {
+        self.batches.iter().fold(0usize, |total, batch| {
+            total.saturating_add(batch.batch.estimated_memory_bytes())
+        })
+    }
+}
+
 #[derive(Clone, Copy)]
 struct NumericMorselPreparation<'plan, 'task> {
     fragment: NumericFragment<'plan>,
@@ -513,14 +530,17 @@ fn stream_parallel_borrowed_numeric_nodes(
                     preparation,
                     &wave[morsel.start_row..morsel.start_row + morsel.row_count],
                 )?;
-                let resident_bytes = output.batch.estimated_memory_bytes();
+                let resident_bytes = output.resident_bytes();
                 Ok(MorselOutput::new(output, resident_bytes))
             },
             |_morsel, output| {
                 context.observer.record_morsels(1);
-                stopped = batch_emitter.emit_columnar(output)? == BatchControl::Stop;
-                if batch_emitter.limit_reached() {
-                    stopped = true;
+                for batch in output.batches {
+                    stopped = batch_emitter.emit_columnar(batch)? == BatchControl::Stop;
+                    if stopped || batch_emitter.limit_reached() {
+                        stopped = true;
+                        break;
+                    }
                 }
                 Ok(if stopped {
                     MorselStreamControl::Stop
@@ -1080,7 +1100,7 @@ fn prepare_owned_columnar_batch(
 fn prepare_parallel_numeric_morsel(
     preparation: NumericMorselPreparation<'_, '_>,
     input: &[&NodeRecord],
-) -> Result<PreparedColumnarBatch> {
+) -> Result<PreparedColumnarMorsel> {
     prepare_lending_numeric_morsel(
         preparation.fragment,
         input,
@@ -1098,7 +1118,7 @@ fn prepare_lending_numeric_morsel(
     output_budget_bytes: usize,
     schema: &Arc<BindingSchema>,
     task_context: Option<&RuntimeTaskContext>,
-) -> Result<PreparedColumnarBatch> {
+) -> Result<PreparedColumnarMorsel> {
     if estimated_numeric_columnar_morsel_bytes(
         input.len(),
         scan.batch_rows,
@@ -1110,11 +1130,11 @@ fn prepare_lending_numeric_morsel(
             "columnar morsel cannot fit one typed batch within its {output_budget_bytes}-byte reservation"
         )));
     }
-    if input.len() > scan.batch_rows {
+    let max_morsel_rows = scan.batch_rows.saturating_mul(DEFAULT_BATCHES_PER_MORSEL);
+    if input.len() > max_morsel_rows {
         return Err(SkeinError::Execution(format!(
-            "columnar morsel has {} rows, exceeding its {}-row typed batch",
+            "columnar morsel has {} rows, exceeding its {max_morsel_rows}-row typed batch window",
             input.len(),
-            scan.batch_rows
         )));
     }
     if input.is_empty() {
@@ -1122,16 +1142,21 @@ fn prepare_lending_numeric_morsel(
             "columnar morsel input is empty".to_string(),
         ));
     }
-    runtime_checkpoint(task_context)?;
-    let batch =
-        prepare_owned_columnar_batch(fragment, input, scan.needs_node_ids, Arc::clone(schema))?;
-    let output_bytes = batch.batch.estimated_memory_bytes();
-    if output_bytes > output_budget_bytes {
-        return Err(SkeinError::Execution(format!(
-            "columnar morsel retained {output_bytes} bytes after admission reserved {output_budget_bytes}"
-        )));
+    let mut batches = Vec::with_capacity(input.len().div_ceil(scan.batch_rows));
+    let mut output_bytes = 0usize;
+    for rows in input.chunks(scan.batch_rows) {
+        runtime_checkpoint(task_context)?;
+        let batch =
+            prepare_owned_columnar_batch(fragment, rows, scan.needs_node_ids, Arc::clone(schema))?;
+        output_bytes = output_bytes.saturating_add(batch.batch.estimated_memory_bytes());
+        if output_bytes > output_budget_bytes {
+            return Err(SkeinError::Execution(format!(
+                "columnar morsel retained {output_bytes} bytes after admission reserved {output_budget_bytes}"
+            )));
+        }
+        batches.push(batch);
     }
-    Ok(batch)
+    Ok(PreparedColumnarMorsel { batches })
 }
 
 fn estimated_numeric_columnar_morsel_bytes(
@@ -1254,7 +1279,7 @@ mod tests {
             fragment,
             &rows,
             LendingNumericScan {
-                batch_rows: 8,
+                batch_rows: 4,
                 needs_node_ids: true,
             },
             4096,
@@ -1263,8 +1288,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(prepared.input_rows, 8);
-        assert_eq!(prepared.batch.selected_count(), 4);
+        assert_eq!(prepared.batches.len(), 2);
+        assert_eq!(prepared.batches[0].input_rows, 4);
+        assert_eq!(prepared.batches[0].batch.selected_count(), 0);
+        assert_eq!(prepared.batches[1].input_rows, 4);
+        assert_eq!(prepared.batches[1].batch.selected_count(), 4);
     }
 
     #[test]

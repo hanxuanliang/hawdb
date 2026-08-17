@@ -68,16 +68,17 @@ validity bitmap and selected-row buffers MUST be reused across batches. A
 completed projection MUST NOT retain hidden node bindings that are outside the
 projected result scope.
 
-An eligible parallel worker MUST place exactly one typed `ColumnarBatch` and its
-selection into the bounded ordinal stream for each production numeric morsel.
-It MUST NOT construct per-row `Binding` maps while the result is queued or
-waiting in the reorder window. The coordinator materializes selected bindings
-only when that ordinal reaches the consumer boundary. Before scheduling any
-worker, the fragment MUST use a conservative schema, validity, selection, and
-typed-column estimate to prove that one complete morsel fits the reserved output
-bytes. A projection that is not fully typed, or a typed output that cannot fit,
-MUST select the serial batch path before decoding or evaluating a morsel. A
-worker MUST NOT return a serial-fallback marker after doing parallel work.
+An eligible parallel worker MUST place a bounded sequence of typed
+`ColumnarBatch` values and their selections into the ordinal stream for each
+production numeric morsel. It MUST NOT construct per-row `Binding` maps while
+the result is queued or waiting in the reorder window. The coordinator
+materializes selected bindings only when that ordinal reaches the consumer
+boundary. Before scheduling any worker, the fragment MUST use a conservative
+schema, validity, selection, and typed-column estimate to prove that the whole
+morsel fits the reserved output bytes. A projection that is not fully typed, or
+a typed output that cannot fit, MUST select the serial batch path before
+decoding or evaluating a morsel. A worker MUST NOT return a serial-fallback
+marker after doing parallel work.
 
 ## Query Memory Ledger
 
@@ -116,11 +117,12 @@ failure or cancellation.
 
 ## Morsel Contract
 
-A morsel is a scheduling unit containing a bounded row range. The abstraction
-is distinct from the columnar batch representation, but the initial production
-numeric fragment deliberately maps one morsel to one typed batch so its output
-reservation is exact and no completed parallel work is discarded. Every morsel
-has a `PipelineId`, stable ordinal, start row, and row count.
+A morsel is a scheduling unit containing a bounded row range. It is distinct
+from the columnar batch representation. The initial production numeric fragment
+amortizes one scheduling decision over a fixed, bounded number of typed batches;
+their combined retained size is admitted as one output before worker execution,
+and no completed parallel work is discarded. Every morsel has a `PipelineId`,
+stable ordinal, start row, and row count.
 
 Admission MUST compute the worker upper bound as:
 
