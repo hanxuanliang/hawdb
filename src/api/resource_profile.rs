@@ -225,6 +225,18 @@ impl StorageResourceProfileReport {
             "query_memory_account_count".to_string(),
             pipeline.query_memory_account_count.into(),
         );
+        execution.insert(
+            "morsel_peak_buffered_outputs".to_string(),
+            pipeline.morsel_peak_buffered_outputs.into(),
+        );
+        execution.insert(
+            "morsel_peak_buffered_output_bytes".to_string(),
+            pipeline.morsel_peak_buffered_output_bytes.into(),
+        );
+        execution.insert(
+            "morsel_peak_reorder_entries".to_string(),
+            pipeline.morsel_peak_reorder_entries.into(),
+        );
         json
     }
 

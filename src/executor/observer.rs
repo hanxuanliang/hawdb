@@ -76,6 +76,22 @@ impl QueryExecutionObserver {
         report.morsel_peak_active_workers = report.morsel_peak_active_workers.max(active_workers);
     }
 
+    pub(super) fn record_morsel_buffering(
+        &self,
+        peak_outputs: usize,
+        peak_output_bytes: usize,
+        peak_reorder_entries: usize,
+    ) {
+        let mut reports = self.reports.borrow_mut();
+        let report = &mut reports.pipeline_memory;
+        report.morsel_peak_buffered_outputs = report.morsel_peak_buffered_outputs.max(peak_outputs);
+        report.morsel_peak_buffered_output_bytes = report
+            .morsel_peak_buffered_output_bytes
+            .max(peak_output_bytes);
+        report.morsel_peak_reorder_entries =
+            report.morsel_peak_reorder_entries.max(peak_reorder_entries);
+    }
+
     pub(super) fn current_vector_rerank_count(&self) -> usize {
         self.reports
             .borrow()

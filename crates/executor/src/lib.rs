@@ -52,7 +52,8 @@ pub use memory_ledger::{
 };
 pub use morsel::{
     admit_morsels, execute_morsels_ordered, Morsel, MorselAdmission, MorselAdmissionRequest,
-    MorselIter, MorselOrdinal, PipelineId, SequentialMorselScheduler, SharedPoolMorselScheduler,
+    MorselIter, MorselOrdinal, MorselOutput, MorselStreamControl, MorselStreamReport,
+    MorselStreamResources, PipelineId, SequentialMorselScheduler, SharedPoolMorselScheduler,
 };
 pub use profile::{
     BlockingOperatorMemoryReport, PipelineMemoryReport, ProfiledQueryRows, ProfiledQueryStream,

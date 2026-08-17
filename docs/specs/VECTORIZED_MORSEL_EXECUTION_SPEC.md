@@ -119,13 +119,32 @@ morsel count, and per-worker memory. Automatic parallel activation requires at
 least four morsels per worker so scheduler and merge overhead do not dominate
 small scans. Ungoverned low-level executor calls remain serial.
 
-Input references and worker output are retained for at most one worker wave.
-Workers MUST NOT call the host row consumer or mutate the query observer.
-Prepared batches merge by stable morsel ordinal on the coordinator before
-crossing the consumer boundary. A fragment with an early output limit no larger
-than one morsel, an out-of-core source, one admitted CPU slot, or insufficient
-worker memory MUST execute serially. CPU slots, memory, cancellation, result
-bytes, and storage I/O depth remain separate admission dimensions.
+Input references and worker output are retained for at most one admitted worker
+window. The shared-pool scheduler MUST use a bounded result channel and MUST NOT
+issue ordinal `n` while `n >= consumed_prefix + admitted_workers`. This sliding
+window reserves one completion opportunity for every issued predecessor and
+prevents a slow early morsel from turning the coordinator reorder map into an
+unbounded buffer. Workers MUST NOT call the host row consumer or mutate the
+query observer.
+
+Before constructing one worker result, the scheduler MUST reserve its maximum
+retained output bytes in a `MorselOutput` query-memory account. The lease remains
+live while the result is queued, reordered, and passed through the coordinator
+consumer; the consumer must transfer retained values to another query-owned
+account. Completed output merges by stable morsel ordinal before crossing the
+consumer boundary. Cancellation, consumer failure, and worker panic MUST close
+the issuance window, make blocked sends fail, join all shared-pool tasks, and
+release every output lease.
+
+A fragment with an early output limit no larger than one morsel, an out-of-core
+source, one admitted CPU slot, or insufficient worker memory MUST execute
+serially. CPU slots, memory, cancellation, result bytes, and storage I/O depth
+remain separate admission dimensions.
+
+[`../tla/SkeinBoundedMorselMerge.tla`](../tla/SkeinBoundedMorselMerge.tla)
+models the sliding issuance window, bounded channel and reorder states,
+deterministic prefix emission, and terminal cleanup after cancellation or a
+worker panic.
 
 ## Observability
 
@@ -136,6 +155,8 @@ Execution profiles MUST expose:
 - consumed morsel count;
 - maximum admitted workers;
 - peak active workers.
+- peak completed morsel outputs and their estimated resident bytes;
+- peak out-of-order reorder entries.
 
 These fields MUST be available in structured explain/resource output and in the
 printable explain-analyze root summary.

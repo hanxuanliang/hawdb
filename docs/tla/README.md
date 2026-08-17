@@ -157,6 +157,26 @@ accounts. TLC checks the root and local bounds plus the no-leak terminal-state
 invariant. The implementation records root budget, peak charge, completion
 charge, and account count in `PipelineMemoryReport`.
 
+## Bounded Morsel Merge
+
+`SkeinBoundedMorselMerge.tla` models the production shared-pool result path for
+parallel morsels. Issuance is limited to one capacity-sized window beyond the
+coordinator's consumed ordinal prefix. Completed outputs move through a bounded
+channel and an ordinal reorder set before emission; the window advances only
+after the expected output crosses the coordinator consumer boundary. This
+prevents a slow early morsel from allowing later workers to accumulate an
+unbounded reorder tail.
+
+The implementation refinement is
+`BoundedExecutor::try_for_each_index_ordered` together with
+`SharedPoolMorselScheduler::execute_accounted_ordered`. Worker results hold
+`MorselOutput` query-memory leases from before construction through ordered
+consumption. Cancellation, consumer error, and worker panic stop issuance,
+disconnect blocked sends, join the shared-pool tasks, and release every lease.
+TLC checks the admission window, channel and reorder bounds, emitted-prefix
+ordering, terminal cleanup, and eventual success or failure over the bounded
+instance.
+
 ## Generation Reclamation
 
 `SkeinGenerationReclamation.tla` models immutable checkpoint generations and the

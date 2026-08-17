@@ -12,7 +12,8 @@ use skein_executor::columnar::{
     select_int64_values_view, NumericLiteral, Selection, ValidityBuilder,
 };
 use skein_executor::morsel::{
-    MorselAdmission, MorselAdmissionRequest, PipelineId, SharedPoolMorselScheduler,
+    MorselAdmission, MorselAdmissionRequest, MorselOutput, MorselStreamControl,
+    MorselStreamResources, PipelineId, SharedPoolMorselScheduler,
 };
 use skein_executor::observer::ExecutionObserver;
 use skein_executor::SharedExecutorPool;
@@ -272,19 +273,13 @@ impl<'a> NumericFragment<'a> {
                 .saturating_add(input_reference_bytes),
         )
         .expect("batch payload budget is non-zero");
-        let memory_budget_bytes = NonZeroUsize::new(
-            bytes_per_worker
-                .get()
-                .saturating_mul(requested_parallelism.get()),
-        )
-        .expect("morsel memory budget is non-zero");
         let admission = MorselAdmission::try_new(MorselAdmissionRequest {
             pipeline_id: PipelineId(0),
             input_rows: candidate_count,
             target_rows: morsel_rows,
             requested_parallelism,
             bytes_per_worker,
-            memory_budget_bytes,
+            memory_budget_bytes: context.memory.query_memory_bytes,
         })?;
         let parallel = admission.max_workers() > 1
             && execution_limit
@@ -379,6 +374,19 @@ enum PreparedNumericMorsel {
     Serial,
 }
 
+impl PreparedNumericMorsel {
+    fn resident_bytes(&self) -> usize {
+        match self {
+            Self::Parallel(batches) => batches.iter().fold(0usize, |total, batch| {
+                total.saturating_add(batch.output.iter().fold(0usize, |total, binding| {
+                    total.saturating_add(binding_memory_bytes(binding))
+                }))
+            }),
+            Self::Serial => 0,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn stream_parallel_borrowed_numeric_nodes(
     fragment: NumericFragment<'_>,
@@ -403,13 +411,16 @@ fn stream_parallel_borrowed_numeric_nodes(
         ),
     )
     .expect("batch payload budget is non-zero");
-    let memory_budget_bytes = NonZeroUsize::new(
-        bytes_per_worker
-            .get()
-            .saturating_mul(requested_parallelism.get()),
-    )
-    .expect("parallel morsel memory budget is non-zero");
     let scheduler = SharedPoolMorselScheduler::new(pool);
+    let output_reservation_bytes = context.memory.batch_payload_bytes;
+    let output_account_budget =
+        NonZeroUsize::new(output_reservation_bytes.get().saturating_mul(max_workers))
+            .expect("parallel morsel output budget is non-zero");
+    let output_account = context.memory_ledger.account(
+        skein_executor::QueryMemoryClass::MorselOutput,
+        "columnar morsel output",
+        output_account_budget,
+    );
     let mut nodes = context.store.scan_nodes(Some(label_id));
     let mut wave = Vec::with_capacity(morsel_rows.get().saturating_mul(max_workers));
     let mut batch_emitter = NumericBatchEmitter::new(
@@ -433,61 +444,64 @@ fn stream_parallel_borrowed_numeric_nodes(
             target_rows: morsel_rows,
             requested_parallelism,
             bytes_per_worker,
-            memory_budget_bytes,
+            memory_budget_bytes: context.memory.query_memory_bytes,
         })?;
-        let outputs = if let Some(task_context) = context.task_context {
-            scheduler.execute_with_context(&admission, task_context, |morsel| {
-                prepare_parallel_numeric_morsel(
+        let stream_report = scheduler.execute_accounted_ordered(
+            &admission,
+            MorselStreamResources {
+                task_context: context.task_context,
+                output_account: &output_account,
+                output_reservation_bytes,
+            },
+            |morsel| {
+                let output = prepare_parallel_numeric_morsel(
                     fragment,
                     items,
                     &wave[morsel.start_row..morsel.start_row + morsel.row_count],
                     batch_rows.get(),
-                    context.memory.batch_payload_bytes.get(),
+                    output_reservation_bytes.get(),
                     lending_scan,
-                    Some(task_context),
-                )
-            })?
-        } else {
-            scheduler.execute(&admission, |morsel| {
-                prepare_parallel_numeric_morsel(
-                    fragment,
-                    items,
-                    &wave[morsel.start_row..morsel.start_row + morsel.row_count],
-                    batch_rows.get(),
-                    context.memory.batch_payload_bytes.get(),
-                    lending_scan,
-                    None,
-                )
-            })?
-        };
-        for (morsel, output) in admission.morsels().zip(outputs) {
-            context.observer.record_morsels(1);
-            match output {
-                PreparedNumericMorsel::Parallel(batches) => {
-                    for batch in batches {
-                        stopped = batch_emitter.emit_prepared(batch)? == BatchControl::Stop;
-                        if stopped || batch_emitter.limit_reached() {
-                            stopped = true;
-                            break;
+                    context.task_context,
+                )?;
+                let resident_bytes = output.resident_bytes();
+                Ok(MorselOutput::new(output, resident_bytes))
+            },
+            |morsel, output| {
+                context.observer.record_morsels(1);
+                match output {
+                    PreparedNumericMorsel::Parallel(batches) => {
+                        for batch in batches {
+                            stopped = batch_emitter.emit_prepared(batch)? == BatchControl::Stop;
+                            if stopped || batch_emitter.limit_reached() {
+                                stopped = true;
+                                break;
+                            }
+                        }
+                    }
+                    PreparedNumericMorsel::Serial => {
+                        let rows = &wave[morsel.start_row..morsel.start_row + morsel.row_count];
+                        for batch in rows.chunks(batch_rows.get()) {
+                            stopped = batch_emitter.emit_nodes_without_morsel(batch)?
+                                == BatchControl::Stop;
+                            if stopped || batch_emitter.limit_reached() {
+                                stopped = true;
+                                break;
+                            }
                         }
                     }
                 }
-                PreparedNumericMorsel::Serial => {
-                    let rows = &wave[morsel.start_row..morsel.start_row + morsel.row_count];
-                    for batch in rows.chunks(batch_rows.get()) {
-                        stopped =
-                            batch_emitter.emit_nodes_without_morsel(batch)? == BatchControl::Stop;
-                        if stopped || batch_emitter.limit_reached() {
-                            stopped = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if stopped {
-                break;
-            }
-        }
+                Ok(if stopped {
+                    MorselStreamControl::Stop
+                } else {
+                    MorselStreamControl::Continue
+                })
+            },
+        )?;
+        context.observer.record_morsel_buffering(
+            stream_report.peak_buffered_outputs,
+            stream_report.peak_buffered_output_bytes,
+            stream_report.peak_reorder_entries,
+        );
         if stopped || wave.len() < wave.capacity() {
             break;
         }

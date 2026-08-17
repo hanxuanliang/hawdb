@@ -1,9 +1,17 @@
-use skein_core::{RuntimeCancellationReason, RuntimeTaskContext};
+use skein_core::{
+    Result as SkeinResult, RuntimeCancellationReason, RuntimeTaskContext, SkeinError,
+};
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::num::NonZeroUsize;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::time::Duration;
+
+const ORDERED_STREAM_CHECK_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Clone)]
 pub struct SharedExecutorPool {
@@ -215,6 +223,260 @@ impl BoundedExecutor {
             .map(|output| output.expect("each bounded executor input must produce one output"))
             .collect())
     }
+
+    pub(crate) fn try_for_each_index_ordered<R, F, C>(
+        &self,
+        input_count: usize,
+        context: Option<&RuntimeTaskContext>,
+        operation: F,
+        mut consume: C,
+    ) -> SkeinResult<BoundedOrderedStreamReport>
+    where
+        R: Send,
+        F: Fn(usize) -> SkeinResult<R> + Sync,
+        C: FnMut(usize, R) -> SkeinResult<BoundedOrderedStreamControl>,
+    {
+        runtime_checkpoint(context)?;
+        if input_count == 0 {
+            return Ok(BoundedOrderedStreamReport::default());
+        }
+
+        let Some(pool) = &self.pool else {
+            return run_sequential_index_stream(input_count, context, &operation, &mut consume);
+        };
+        let worker_count = self
+            .max_parallelism()
+            .min(pool.worker_count())
+            .min(input_count);
+        if worker_count == 1 {
+            return run_sequential_index_stream(input_count, context, &operation, &mut consume);
+        }
+
+        let window = OrderedWorkWindow {
+            state: Mutex::new(OrderedWorkState {
+                next_index: 0,
+                consumed_prefix: 0,
+                stopped: false,
+            }),
+            changed: Condvar::new(),
+        };
+        let (sender, receiver) = mpsc::sync_channel(worker_count);
+        let mut reorder = BTreeMap::new();
+        let mut report = BoundedOrderedStreamReport::default();
+
+        let result = pool.inner.in_place_scope(|scope| {
+            for _ in 0..worker_count {
+                let sender = sender.clone();
+                let window = &window;
+                let operation = &operation;
+                scope.spawn(move |_| {
+                    while let Some(index) =
+                        claim_ordered_index(window, input_count, worker_count, context)
+                    {
+                    if let Err(reason) = context_checkpoint(context) {
+                        let _ = sender.send(OrderedWorkerMessage::Stopped(reason));
+                        break;
+                    }
+                    let output = catch_unwind(AssertUnwindSafe(|| operation(index)))
+                        .unwrap_or_else(|_| {
+                            Err(SkeinError::Execution(format!(
+                                "bounded executor worker panicked at input index {index}"
+                            )))
+                        });
+                    if sender
+                        .send(OrderedWorkerMessage::Output(index, output))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    }
+                });
+            }
+            drop(sender);
+
+            let mut next_expected = 0usize;
+            let result = 'receive: loop {
+                if let Err(reason) = context_checkpoint(context) {
+                    break Err(runtime_stopped_error(reason));
+                }
+                match receiver.recv_timeout(ORDERED_STREAM_CHECK_INTERVAL) {
+                    Ok(OrderedWorkerMessage::Output(index, output)) => {
+                        let output = match output {
+                            Ok(output) => output,
+                            Err(error) => break Err(error),
+                        };
+                        if reorder.insert(index, output).is_some() {
+                            break Err(SkeinError::Execution(format!(
+                                "bounded executor produced duplicate output index {index}"
+                            )));
+                        }
+                        report.peak_reorder_entries =
+                            report.peak_reorder_entries.max(reorder.len());
+
+                        while let Some(output) = reorder.remove(&next_expected) {
+                            let control = match catch_unwind(AssertUnwindSafe(|| {
+                                consume(next_expected, output)
+                            }))
+                            .unwrap_or_else(|_| {
+                                Err(SkeinError::Execution(format!(
+                                    "bounded executor consumer panicked at input index {next_expected}"
+                                )))
+                            }) {
+                                Ok(control) => control,
+                                Err(error) => break 'receive Err(error),
+                            };
+                            next_expected = next_expected.saturating_add(1);
+                            if control == BoundedOrderedStreamControl::Stop {
+                                report.stopped_early = true;
+                                break;
+                            }
+                            advance_ordered_prefix(&window, next_expected);
+                        }
+                        if report.stopped_early {
+                            break Ok(report);
+                        }
+                        if next_expected == input_count {
+                            break Ok(report);
+                        }
+                    }
+                    Ok(OrderedWorkerMessage::Stopped(reason)) => {
+                        break Err(runtime_stopped_error(reason));
+                    }
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => {
+                        break Err(SkeinError::Execution(format!(
+                            "bounded executor stopped after {next_expected} of {input_count} ordered outputs"
+                        )));
+                    }
+                }
+            };
+
+            stop_ordered_window(&window);
+            drop(receiver);
+            result
+        });
+        match result {
+            Ok(report) => {
+                runtime_checkpoint(context)?;
+                Ok(report)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BoundedOrderedStreamControl {
+    Continue,
+    Stop,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BoundedOrderedStreamReport {
+    pub(crate) peak_reorder_entries: usize,
+    pub(crate) stopped_early: bool,
+}
+
+struct OrderedWorkWindow {
+    state: Mutex<OrderedWorkState>,
+    changed: Condvar,
+}
+
+struct OrderedWorkState {
+    next_index: usize,
+    consumed_prefix: usize,
+    stopped: bool,
+}
+
+enum OrderedWorkerMessage<R> {
+    Output(usize, SkeinResult<R>),
+    Stopped(RuntimeCancellationReason),
+}
+
+fn run_sequential_index_stream<R, F, C>(
+    input_count: usize,
+    context: Option<&RuntimeTaskContext>,
+    operation: &F,
+    consume: &mut C,
+) -> SkeinResult<BoundedOrderedStreamReport>
+where
+    F: Fn(usize) -> SkeinResult<R> + Sync,
+    C: FnMut(usize, R) -> SkeinResult<BoundedOrderedStreamControl>,
+{
+    let mut report = BoundedOrderedStreamReport::default();
+    for index in 0..input_count {
+        runtime_checkpoint(context)?;
+        let output = operation(index)?;
+        report.peak_reorder_entries = 1;
+        if consume(index, output)? == BoundedOrderedStreamControl::Stop {
+            report.stopped_early = true;
+            break;
+        }
+    }
+    runtime_checkpoint(context)?;
+    Ok(report)
+}
+
+fn claim_ordered_index(
+    window: &OrderedWorkWindow,
+    input_count: usize,
+    worker_count: usize,
+    context: Option<&RuntimeTaskContext>,
+) -> Option<usize> {
+    let mut state = lock_recover(&window.state);
+    loop {
+        if state.stopped || context_checkpoint(context).is_err() {
+            state.stopped = true;
+            window.changed.notify_all();
+            return None;
+        }
+        let window_end = state.consumed_prefix.saturating_add(worker_count);
+        if state.next_index < input_count && state.next_index < window_end {
+            let index = state.next_index;
+            state.next_index = state.next_index.saturating_add(1);
+            return Some(index);
+        }
+        if state.next_index == input_count {
+            return None;
+        }
+        let (next_state, _) = window
+            .changed
+            .wait_timeout(state, ORDERED_STREAM_CHECK_INTERVAL)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state = next_state;
+    }
+}
+
+fn advance_ordered_prefix(window: &OrderedWorkWindow, consumed_prefix: usize) {
+    let mut state = lock_recover(&window.state);
+    state.consumed_prefix = state.consumed_prefix.max(consumed_prefix);
+    window.changed.notify_all();
+}
+
+fn stop_ordered_window(window: &OrderedWorkWindow) {
+    let mut state = lock_recover(&window.state);
+    state.stopped = true;
+    window.changed.notify_all();
+}
+
+fn context_checkpoint(
+    context: Option<&RuntimeTaskContext>,
+) -> Result<(), RuntimeCancellationReason> {
+    context.map_or(Ok(()), RuntimeTaskContext::checkpoint)
+}
+
+fn runtime_checkpoint(context: Option<&RuntimeTaskContext>) -> SkeinResult<()> {
+    context_checkpoint(context).map_err(runtime_stopped_error)
+}
+
+fn runtime_stopped_error(reason: RuntimeCancellationReason) -> SkeinError {
+    SkeinError::Execution(format!("runtime task stopped: {reason}"))
+}
+
+fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl Default for BoundedExecutor {

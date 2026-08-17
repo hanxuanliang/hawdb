@@ -44,6 +44,13 @@ pub struct PipelineMemoryReport {
     pub morsel_max_admitted_workers: usize,
     /// Highest worker count actually used by a morsel scheduler.
     pub morsel_peak_active_workers: usize,
+    /// Highest number of completed morsel outputs awaiting or crossing the
+    /// coordinator's ordered consumer boundary.
+    pub morsel_peak_buffered_outputs: usize,
+    /// Highest estimated resident bytes held by those completed outputs.
+    pub morsel_peak_buffered_output_bytes: usize,
+    /// Highest number of out-of-order outputs held by the ordinal merger.
+    pub morsel_peak_reorder_entries: usize,
     pub output_rows: usize,
     pub output_payload_bytes: usize,
     /// Resident memory before execution, when process sampling is supported.

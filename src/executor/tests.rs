@@ -1111,6 +1111,12 @@ fn columnar_numeric_fragment_matches_row_pipeline_and_reports_morsels() {
             .morsel_peak_active_workers,
         expected_workers
     );
+    let parallel_report = &parallel.profile.pipeline_memory_report;
+    if expected_workers > 1 {
+        assert!((1..=expected_workers).contains(&parallel_report.morsel_peak_buffered_outputs));
+        assert!(parallel_report.morsel_peak_buffered_output_bytes > 0);
+    }
+    assert!(parallel_report.morsel_peak_reorder_entries <= expected_workers);
 }
 
 #[test]

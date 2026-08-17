@@ -290,13 +290,16 @@ fn root_execution_info(profile: &ReadExecutionProfile) -> String {
     ];
     if pipeline.columnar_batches > 0 {
         fields.push(format!(
-            "columnar_batches={}, columnar_rows={}/{}, morsels={}, workers={}/{}",
+            "columnar_batches={}, columnar_rows={}/{}, morsels={}, workers={}/{}, buffered_morsels={}/{}, reorder={}",
             pipeline.columnar_batches,
             pipeline.columnar_selected_rows,
             pipeline.columnar_input_rows,
             pipeline.morsel_count,
             pipeline.morsel_peak_active_workers,
             pipeline.morsel_max_admitted_workers,
+            pipeline.morsel_peak_buffered_outputs,
+            format_bytes(pipeline.morsel_peak_buffered_output_bytes as u64),
+            pipeline.morsel_peak_reorder_entries,
         ));
     }
     if let Some(peak_resident_bytes) = pipeline.peak_resident_bytes {
