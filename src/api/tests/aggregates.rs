@@ -311,6 +311,63 @@ fn counts_relationship_expansion_matches() {
 }
 
 #[test]
+fn counts_unfiltered_relationship_types_from_the_exact_count_store() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 1})-[:MENTIONS]->(:Entity {id: 10})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 2})-[:MENTIONS]->(:Entity {id: 11})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 10})-[:RELATES_TO]->(:Entity {id: 11})")
+        .unwrap();
+
+    let output = db
+        .query("MATCH ()-[r:MENTIONS]->() RETURN count(r) AS total")
+        .unwrap();
+    assert_eq!(output.rows[0].get("total"), Some(&Value::Int(2)));
+
+    let explain = db
+        .explain_query("MATCH ()-[r:MENTIONS]->() RETURN count(r) AS total")
+        .unwrap();
+    assert!(explain
+        .trace
+        .selected_plan
+        .contains("RelationshipCountExec"));
+    assert!(!explain.trace.selected_plan.contains("AdjacencyExpandExec"));
+    assert!(!explain.trace.selected_plan.contains("AggregateExec"));
+}
+
+#[test]
+fn filtered_node_count_does_not_hydrate_unreferenced_payloads() {
+    let execution_memory = crate::executor::ExecutionMemoryConfig {
+        batch_payload_bytes: NonZeroUsize::new(512).unwrap(),
+        ..crate::executor::ExecutionMemoryConfig::default()
+    };
+    let mut db = Database::new_with_config(DatabaseConfig {
+        execution_memory,
+        ..DatabaseConfig::default()
+    });
+    db.query(&format!(
+        "CREATE (:Memory {{id: 'memory-1', content: '{}'}})",
+        "x".repeat(64 * 1024)
+    ))
+    .unwrap();
+    db.query("CREATE INDEX ON :Memory(id)").unwrap();
+    let cypher = "MATCH (m:Memory {id: $id}) RETURN count(m) AS total";
+    let parameters = BTreeMap::from([("id".to_string(), Value::String("memory-1".to_string()))]);
+
+    let explain = db.explain_query_with_params(cypher, &parameters).unwrap();
+    let physical_plan = explain.physical_plan.explain(0);
+    assert!(physical_plan.contains("AggregateExec"));
+    assert!(physical_plan.contains("NodeProjectionScanExec"));
+    assert!(physical_plan.contains("output=node_binding"));
+    assert!(physical_plan.contains("properties=[\"id\"]"));
+    assert!(!physical_plan.contains("content"));
+
+    let output = db.query_with_params(cypher, &parameters).unwrap();
+    assert_eq!(output.rows[0].get("total"), Some(&Value::Int(1)));
+}
+
+#[test]
 fn node_detail_neighbor_counts_use_distinct_neighbors_and_edges() {
     let mut db = Database::new();
     db.query("CREATE (:Entity {id: 'n1', name: 'One'})")

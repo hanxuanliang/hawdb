@@ -1342,6 +1342,16 @@ publishable, text, large, and mixed groups never enter published NDV or
 histogram state, and a fair complete scan eventually publishes its derived
 snapshot.
 
+`SkeinExactGraphCounts.tla` models the basic Count Store as part of canonical
+graph mutation application. A node may carry multiple labels, while each
+relationship has one type. Insert and delete actions update the canonical live
+record set, total counter, and every affected label or type counter in one
+transition. The model checks non-negative bounded counter state and proves that
+total, per-label, and per-type fast-count results equal a full canonical scan
+after every modeled mutation. WAL replay refines the same apply transition; WAL
+durability and snapshot publication remain owned by `SkeinStorageDurability`
+and `SkeinConcurrentSnapshots`.
+
 `SkeinIndexStatistics.tla` models the payload-free sample maintained for each
 explicit equality, range, or composite node index. A sample is one coherent
 prior index state; canonical key mutations advance both the source epoch and

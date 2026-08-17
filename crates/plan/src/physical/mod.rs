@@ -356,11 +356,12 @@ pub enum PhysicalPlan {
         variable: String,
         label: String,
     },
-    /// Fused node scan, local predicate, and scalar projection.
+    /// Fused required-property node scan, local predicate, and optional scalar projection.
     ///
-    /// The operator never exposes a partially hydrated node binding. Storage
-    /// may therefore decode only `required_properties` and the executor emits
-    /// scalar values directly.
+    /// Storage decodes only `required_properties`. A non-empty `items` list
+    /// emits scalar values directly; an empty list preserves the projected
+    /// node binding for a downstream aggregate that was proven to require no
+    /// other properties.
     NodeProjectionScanExec {
         variable: String,
         label: String,
@@ -461,6 +462,10 @@ pub enum PhysicalPlan {
     },
     NodeCountExec {
         label: String,
+        output: String,
+    },
+    RelationshipCountExec {
+        rel_type: String,
         output: String,
     },
     ThreadRepairStatsExec {

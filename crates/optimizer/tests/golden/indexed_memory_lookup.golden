@@ -54,7 +54,7 @@ Project {
 }
 
 [physical]
-NodeProjectionScanExec variable=m label=Memory access=IndexNodeSeek access_detail=PropertyValues { property: "id", values: [Int(7)] } properties=["id", "title"] predicate=None columns=[title]
+NodeProjectionScanExec variable=m label=Memory access=IndexNodeSeek access_detail=PropertyValues { property: "id", values: [Int(7)] } properties=["id", "title"] predicate=None output=projected_values columns=[title]
 
 [stage-trace]
 logical_rewrite order=fixed_point input=3 output=3 applied=0 skipped=0

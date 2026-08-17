@@ -130,6 +130,7 @@ impl PhysicalPlan {
                 PhysicalPlanDomainRef::Traversal(TraversalPhysicalPlanRef::new(self))
             }
             PhysicalPlan::NodeCountExec { .. }
+            | PhysicalPlan::RelationshipCountExec { .. }
             | PhysicalPlan::EmptyExec
             | PhysicalPlan::NodeCartesianProductExec { .. }
             | PhysicalPlan::FilterExec { .. }

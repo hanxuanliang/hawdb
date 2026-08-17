@@ -337,6 +337,126 @@ fn unfiltered_node_count_uses_exact_count_store() {
 }
 
 #[test]
+fn unfiltered_relationship_count_uses_exact_count_store() {
+    let logical = LogicalPlan::Aggregate {
+        group_keys: Vec::new(),
+        items: vec![Aggregation {
+            function: AggregateFunction::Count,
+            target: AggregateTarget::Variable("r".to_string()),
+            distinct: false,
+            name: "mention_count".to_string(),
+        }],
+        input: Box::new(LogicalPlan::Expand {
+            source_variable: "source".to_string(),
+            source_label: String::new(),
+            rel_variable: Some("r".to_string()),
+            rel_type: "MENTIONS".to_string(),
+            rel_properties: BTreeMap::new(),
+            direction: skein_cypher::RelationshipDirection::Outgoing,
+            target_variable: "target".to_string(),
+            target_label: String::new(),
+            min_hops: 1,
+            max_hops: 1,
+            optional: false,
+            input: Box::new(LogicalPlan::NodeScan {
+                variable: "source".to_string(),
+                label: String::new(),
+            }),
+        }),
+    };
+
+    let (plan, trace) =
+        CascadesOptimizer::new(OptimizerConfig { max_groups: 16 }).optimize_with_trace(&logical);
+
+    assert_eq!(
+        plan,
+        PhysicalPlan::RelationshipCountExec {
+            rel_type: "MENTIONS".to_string(),
+            output: "mention_count".to_string(),
+        }
+    );
+    assert_eq!(trace.selected_plan_cost.estimated_rows, 1);
+    assert_eq!(
+        trace
+            .selected_plan_operator_counts
+            .get("RelationshipCountExec"),
+        Some(&1)
+    );
+    assert!(!trace
+        .selected_plan_operator_counts
+        .contains_key("AdjacencyExpandExec"));
+    assert!(trace
+        .rule_events
+        .iter()
+        .any(|event| event.rule() == "implementation:relationship_count_fast_path"));
+}
+
+#[test]
+fn filtered_node_aggregate_decodes_only_predicate_and_argument_properties() {
+    let predicate = Predicate::PropertyEq {
+        variable: "m".to_string(),
+        property: "kind".to_string(),
+        value: Value::String("note".to_string()),
+    };
+    let logical = LogicalPlan::Aggregate {
+        group_keys: Vec::new(),
+        items: vec![Aggregation {
+            function: AggregateFunction::Count,
+            target: AggregateTarget::Property {
+                variable: "m".to_string(),
+                property: "updated_at".to_string(),
+            },
+            distinct: false,
+            name: "updated_count".to_string(),
+        }],
+        input: Box::new(LogicalPlan::Filter {
+            predicate: predicate.clone(),
+            input: Box::new(LogicalPlan::NodeScan {
+                variable: "m".to_string(),
+                label: "Memory".to_string(),
+            }),
+        }),
+    };
+    let catalog = OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([("Memory".to_string(), "kind".to_string())], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [("Memory".to_string(), 10_000)],
+            [],
+            [],
+            [],
+            [],
+            [(("Memory".to_string(), "kind".to_string()), 8)],
+            [],
+        ),
+    );
+
+    let (plan, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+        .optimize_with_catalog(&logical, &catalog);
+
+    assert!(matches!(
+        plan,
+        PhysicalPlan::AggregateExec { input, .. }
+            if matches!(
+                input.as_ref(),
+                PhysicalPlan::NodeProjectionScanExec {
+                    access: NodeProjectionAccess::PropertyValues { property, .. },
+                    required_properties,
+                    predicate: None,
+                    items,
+                    ..
+                } if property == "kind"
+                    && required_properties
+                        == &vec!["kind".to_string(), "updated_at".to_string()]
+                    && items.is_empty()
+            )
+    ));
+    assert!(trace.decisions.iter().any(|decision| {
+        decision.contains("selected implementation:node_aggregate_required_scan")
+            && decision.contains("decode 2 required properties")
+    }));
+}
+
+#[test]
 fn physical_cardinality_estimates_never_reach_zero() {
     use super::super::costing::{
         estimate_physical_plan_cost, estimate_physical_plan_cost_breakdown,

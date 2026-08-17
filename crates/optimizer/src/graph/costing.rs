@@ -168,10 +168,12 @@ pub(super) fn estimate_physical_plan_cost(
             estimated_rows: 1,
             cost: 0,
         },
-        PhysicalPlan::NodeCountExec { .. } => PlanCost {
-            estimated_rows: 1,
-            cost: 1,
-        },
+        PhysicalPlan::NodeCountExec { .. } | PhysicalPlan::RelationshipCountExec { .. } => {
+            PlanCost {
+                estimated_rows: 1,
+                cost: 1,
+            }
+        }
         PhysicalPlan::SeqNodeScan { label, .. } => {
             let rows = catalog.label_count(label);
             PlanCost {
@@ -184,6 +186,7 @@ pub(super) fn estimate_physical_plan_cost(
             label,
             access,
             predicate,
+            items,
             ..
         } => {
             let scan = PhysicalPlan::SeqNodeScan {
@@ -194,9 +197,14 @@ pub(super) fn estimate_physical_plan_cost(
             let rows = predicate.as_ref().map_or(input_rows, |predicate| {
                 estimate_filter_rows(predicate, &scan, input_rows, catalog).max(1)
             });
+            let cpu_rows = if !items.is_empty() || predicate.is_some() {
+                rows
+            } else {
+                0
+            };
             PlanCost {
                 estimated_rows: rows,
-                cost: access_cost.saturating_add(rows),
+                cost: access_cost.saturating_add(cpu_rows),
             }
         }
         PhysicalPlan::SourceSegmentScan { .. } => {
@@ -505,7 +513,9 @@ pub(super) fn estimate_physical_plan_cost_breakdown(
 ) -> PlanCostBreakdown {
     match plan {
         PhysicalPlan::EmptyExec => PlanCostBreakdown::new(1, 0, 0, 0, 0),
-        PhysicalPlan::NodeCountExec { .. } => PlanCostBreakdown::new(1, 1, 0, 0, 0),
+        PhysicalPlan::NodeCountExec { .. } | PhysicalPlan::RelationshipCountExec { .. } => {
+            PlanCostBreakdown::new(1, 1, 0, 0, 0)
+        }
         PhysicalPlan::SeqNodeScan { label, .. } => {
             let rows = catalog.label_count(label);
             PlanCostBreakdown::new(rows, 0, 0, estimate_node_full_scan_cost(rows), 0)
@@ -515,6 +525,7 @@ pub(super) fn estimate_physical_plan_cost_breakdown(
             label,
             access,
             predicate,
+            items,
             ..
         } => {
             let scan = PhysicalPlan::SeqNodeScan {
@@ -525,10 +536,15 @@ pub(super) fn estimate_physical_plan_cost_breakdown(
             let rows = predicate.as_ref().map_or(input_rows, |predicate| {
                 estimate_filter_rows(predicate, &scan, input_rows, catalog).max(1)
             });
-            if access.is_label_scan() {
-                PlanCostBreakdown::new(rows, rows, 0, access_cost, 0)
+            let cpu_rows = if !items.is_empty() || predicate.is_some() {
+                rows
             } else {
-                PlanCostBreakdown::new(rows, rows, access_cost, 0, 0)
+                0
+            };
+            if access.is_label_scan() {
+                PlanCostBreakdown::new(rows, cpu_rows, 0, access_cost, 0)
+            } else {
+                PlanCostBreakdown::new(rows, cpu_rows, access_cost, 0, 0)
             }
         }
         PhysicalPlan::SourceSegmentScan { .. } => {

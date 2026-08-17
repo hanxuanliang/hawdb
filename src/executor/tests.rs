@@ -88,6 +88,54 @@ fn node_count_exec_uses_label_count_without_scanning() {
 }
 
 #[test]
+fn relationship_count_exec_uses_type_count_without_expansion() {
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::in_memory();
+    let first = store
+        .create_node(&mut catalog, "Item", properties([]))
+        .unwrap();
+    let second = store
+        .create_node(&mut catalog, "Item", properties([]))
+        .unwrap();
+    let third = store
+        .create_node(&mut catalog, "Item", properties([]))
+        .unwrap();
+    store
+        .create_relationship(&mut catalog, first, second, "LINK", BTreeMap::new())
+        .unwrap();
+    store
+        .create_relationship(&mut catalog, second, third, "LINK", BTreeMap::new())
+        .unwrap();
+
+    let output = execute_with_row_limit_profile(
+        &PhysicalPlan::RelationshipCountExec {
+            rel_type: "LINK".to_string(),
+            output: "link_count".to_string(),
+        },
+        &mut catalog,
+        &mut store,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(
+        output.rows,
+        vec![BTreeMap::from([("link_count".to_string(), Value::Int(2))])]
+    );
+    assert_eq!(output.profile.scan_pruning_reports.len(), 1);
+    let count_report = &output.profile.scan_pruning_reports[0];
+    assert_eq!(
+        count_report.target_kind,
+        crate::store::ScanPruningTargetKind::Relationship
+    );
+    assert_eq!(count_report.strategy, ScanPruningStrategy::ExactCount);
+    assert!(count_report.pruned);
+    assert_eq!(count_report.candidate_count_before_pruning, 2);
+    assert_eq!(count_report.pruned_candidate_count, 2);
+    assert_eq!(count_report.output_count, 1);
+}
+
+#[test]
 fn node_projection_scan_omits_unrequested_large_properties() {
     let mut catalog = Catalog::default();
     let mut store = GraphStore::in_memory();

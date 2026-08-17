@@ -433,6 +433,13 @@ batches remain charged until synchronous emission. `DistinctExec` uses ordered
 spill runs followed by bounded merge deduplication. `NodeCartesianProductExec`
 partitions an oversized build side into bounded spill runs and replays those
 runs for each streamed probe row.
+Before a node scan feeds an aggregate, physical-plan finalization MUST restrict
+canonical decoding to predicate, group-key, aggregate-operand, and access-
+validation properties whenever those expressions depend on one node variable.
+Unreferenced large properties MUST remain unhydrated. The internal scan may
+retain node identity for `COUNT(node)` and `COUNT(DISTINCT node)`, but it MUST
+decline the optimization if a whole-node value could escape through grouping,
+collection, projection, or result construction.
 Sequential node scans and property, bounded property-union, composite equality,
 composite prefix-range, single-property range, and text index scans MUST
 admit each retained row to a query-rooted pipeline batch before insertion. The

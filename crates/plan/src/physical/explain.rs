@@ -313,8 +313,13 @@ impl PhysicalPlan {
                     .map(|item| item.name.as_str())
                     .collect::<Vec<_>>()
                     .join(", ");
+                let output = if items.is_empty() {
+                    "node_binding"
+                } else {
+                    "projected_values"
+                };
                 format!(
-                    "{pad}NodeProjectionScanExec variable={variable} label={label} access={} access_detail={access:?} properties={required_properties:?} predicate={predicate:?} columns=[{columns}]",
+                    "{pad}NodeProjectionScanExec variable={variable} label={label} access={} access_detail={access:?} properties={required_properties:?} predicate={predicate:?} output={output} columns=[{columns}]",
                     access.physical_operator_name()
                 )
             }
@@ -479,6 +484,9 @@ impl PhysicalPlan {
             }
             PhysicalPlan::NodeCountExec { label, output } => {
                 format!("{pad}NodeCountExec label={label} output={output}")
+            }
+            PhysicalPlan::RelationshipCountExec { rel_type, output } => {
+                format!("{pad}RelationshipCountExec rel_type={rel_type} output={output}")
             }
             PhysicalPlan::ThreadRepairStatsExec { label, .. } => {
                 format!("{pad}ThreadRepairStatsExec label={label}")

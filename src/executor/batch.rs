@@ -424,7 +424,8 @@ fn execute_binding_batches_inner(
             predicate,
             items,
         } => {
-            if access.is_label_scan()
+            if !items.is_empty()
+                && access.is_label_scan()
                 && let Some(result) = try_stream_columnar_node_projection_batches(
                     variable,
                     label,
@@ -966,6 +967,43 @@ fn execute_binding_batches_inner(
             let count = i64::try_from(count).map_err(|_| {
                 SkeinError::Execution(format!(
                     "node count for label '{label}' exceeds the supported i64 result range"
+                ))
+            })?;
+            emit(vec![Binding {
+                values: BTreeMap::from([(output.clone(), Value::Int(count))]),
+                nodes: BTreeMap::new(),
+                relationships: BTreeMap::new(),
+            }])
+        }
+        PhysicalPlan::RelationshipCountExec { rel_type, output } => {
+            let rel_type_id = (!rel_type.is_empty())
+                .then(|| catalog.rel_type_id(rel_type))
+                .flatten();
+            let count = if rel_type.is_empty() {
+                store.relationship_count_for_type(None)
+            } else if let Some(rel_type_id) = rel_type_id {
+                store.relationship_count_for_type(Some(rel_type_id))
+            } else {
+                0
+            };
+            context
+                .observer
+                .record_scan_pruning_report(ScanPruningReport {
+                    target_kind: ScanPruningTargetKind::Relationship,
+                    label_id: None,
+                    rel_type_id,
+                    strategy: ScanPruningStrategy::ExactCount,
+                    pruned: true,
+                    exact_empty: count == 0,
+                    candidate_count_before_pruning: count,
+                    pruned_candidate_count: count,
+                    candidate_count_before_filter: 0,
+                    output_count: 1,
+                    filtered_out_count: 0,
+                });
+            let count = i64::try_from(count).map_err(|_| {
+                SkeinError::Execution(format!(
+                    "relationship count for type '{rel_type}' exceeds the supported i64 result range"
                 ))
             })?;
             emit(vec![Binding {

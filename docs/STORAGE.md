@@ -695,6 +695,17 @@ directly in out-of-core mode deliberately persists only basic counts and marks
 advanced statistics incomplete instead of constructing an unbounded temporary
 distinct-value working set.
 
+These basic counters are also the semantic source for exact unfiltered global
+count plans. `NodeCountExec` answers total or per-label node counts, while
+`RelationshipCountExec` answers total or per-type relationship counts without
+decoding records or traversing adjacency. The optimizer selects the relationship
+path only for an unconstrained required one-hop pattern; any endpoint label,
+relationship property, optional expansion, variable-length expansion, filter,
+or distinct aggregate retains the normal execution path. For non-fast-path
+node aggregates, the physical scan decodes only predicate, group-key,
+aggregate-operand, and index-validation properties and preserves node identity
+for downstream aggregation. Large unrelated properties remain cold.
+
 The catalog also stores persistent property constraint descriptors.
 Node unique constraints use
 `CREATE CONSTRAINT ON :Label(property) ASSERT UNIQUE`. Relationship unique

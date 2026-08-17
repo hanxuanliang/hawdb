@@ -17,6 +17,7 @@ STORAGE_MODELS = [
     "SkeinContentThreadUpsert",
     "SkeinCowPagePublication",
     "SkeinCrdtReplication",
+    "SkeinExactGraphCounts",
     "SkeinGenerationReclamation",
     "SkeinGossipDelivery",
     "SkeinGraphIndexQualification",

@@ -105,6 +105,15 @@ residual-predicate properties, and access-validation properties. It MUST NOT
 decode an unrelated property merely because that property is present on the
 canonical row.
 
+The same required-property rule applies when a node access feeds a grouped or
+global aggregate. The decoded set is the union of group-key properties,
+aggregate-operand properties, residual-predicate properties, and access-
+validation properties. `COUNT(*)` and `COUNT(node)` require node identity but
+no user property. A plan MUST decline this representation when an aggregate or
+grouping expression requires the complete node value. The binding-preserving
+scan remains an internal physical operator; it MUST NOT expose a partial node
+map as a query result.
+
 A persistent index probe first obtains candidate node identities, then asks the
 canonical row reader for only that required-property set. Candidate validation
 MUST include all access properties before a row becomes visible. COW/WAL overlay
@@ -118,6 +127,16 @@ The final physical plan, fingerprint, `EXPLAIN`, and scan-pruning report MUST
 identify the retained access class. The optimizer trace MUST expose a distinct
 plan-finalization stage so qualification can distinguish logical rewriting,
 access-path selection, and required-data enforcement.
+
+An unfiltered, non-distinct global `COUNT` over every node, one label, every
+relationship, or one relationship type MAY use the exact basic Count Store.
+The relationship rewrite is valid only for a required one-hop pattern with no
+endpoint-label or relationship-property constraint. `COUNT(*)` and
+`COUNT(relationship)` are equivalent in that shape because a required expand
+always binds the relationship. The fast path MUST decline optional, variable-
+length, distinct, filtered, endpoint-constrained, or property-constrained
+patterns. Its result, fingerprint, `EXPLAIN`, and pruning report MUST identify
+the exact-count access rather than an adjacency expansion or aggregate scan.
 
 `IndexNodeUnionSeek` reads each equality branch through its declared index,
 deduplicates candidate node identities before hydration or output, and retains

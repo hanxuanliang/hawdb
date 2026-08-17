@@ -397,15 +397,20 @@ pub fn stream_node_projection_scan_batches(
         {
             return Ok(ScanControl::Continue);
         }
-        let mut values = BTreeMap::new();
-        for item in spec.items {
-            insert_projected_value(
-                &mut values,
-                &item.name,
-                project_value(item, context.catalog, &binding)?,
-            );
-        }
-        if batch.push(Binding::values(values), emit)? == BatchControl::Stop {
+        let output = if spec.items.is_empty() {
+            binding
+        } else {
+            let mut values = BTreeMap::new();
+            for item in spec.items {
+                insert_projected_value(
+                    &mut values,
+                    &item.name,
+                    project_value(item, context.catalog, &binding)?,
+                );
+            }
+            Binding::values(values)
+        };
+        if batch.push(output, emit)? == BatchControl::Stop {
             return Ok(ScanControl::Stop);
         }
         emitted = emitted.saturating_add(1);

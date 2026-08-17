@@ -477,6 +477,11 @@ fn physical_plan_node_label<'a>(plan: &'a PhysicalPlan, variable: &str) -> Optio
             label,
             ..
         }
+        | PhysicalPlan::NodeProjectionScanExec {
+            variable: plan_variable,
+            label,
+            ..
+        }
         | PhysicalPlan::NodeColumnLookupExec {
             variable: plan_variable,
             label,

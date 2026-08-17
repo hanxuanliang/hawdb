@@ -18,6 +18,7 @@ use crate::{
     StageTrace,
 };
 use skein_core::Value;
+use skein_cypher::RelationshipDirection;
 use skein_plan::{
     AggregateFunction, AggregateTarget, GraphExpansionBudget, LogicalPlan, NodeProjectionAccess,
     Predicate, Projection, ProjectionExpression, SortItem, SortKey,
@@ -367,7 +368,7 @@ impl GroupExpr {
         decisions: &mut Vec<String>,
         stage_events: &mut Vec<StageTrace>,
     ) -> PhysicalPlan {
-        if let Some(plan) = select_node_count_fast_path(&self.logical, decisions, stage_events) {
+        if let Some(plan) = select_exact_count_fast_path(&self.logical, decisions, stage_events) {
             return plan;
         }
         if let Some(plan) = simple::lower_simple_logical(&self.logical) {
@@ -810,7 +811,7 @@ fn logical_to_physical_direct(
     decisions: &mut Vec<String>,
     stage_events: &mut Vec<StageTrace>,
 ) -> PhysicalPlan {
-    if let Some(plan) = select_node_count_fast_path(logical, decisions, stage_events) {
+    if let Some(plan) = select_exact_count_fast_path(logical, decisions, stage_events) {
         return plan;
     }
     if let Some(plan) = simple::lower_simple_logical(logical) {
@@ -1032,6 +1033,17 @@ fn logical_to_physical_direct(
     }
 }
 
+fn select_exact_count_fast_path(
+    logical: &LogicalPlan,
+    decisions: &mut Vec<String>,
+    stage_events: &mut Vec<StageTrace>,
+) -> Option<PhysicalPlan> {
+    if let Some(plan) = select_node_count_fast_path(logical, decisions, stage_events) {
+        return Some(plan);
+    }
+    select_relationship_count_fast_path(logical, decisions, stage_events)
+}
+
 fn select_node_count_fast_path(
     logical: &LogicalPlan,
     decisions: &mut Vec<String>,
@@ -1073,6 +1085,77 @@ fn select_node_count_fast_path(
     })
 }
 
+fn select_relationship_count_fast_path(
+    logical: &LogicalPlan,
+    decisions: &mut Vec<String>,
+    stage_events: &mut Vec<StageTrace>,
+) -> Option<PhysicalPlan> {
+    let LogicalPlan::Aggregate {
+        group_keys,
+        items,
+        input,
+    } = logical
+    else {
+        return None;
+    };
+    let [item] = items.as_slice() else {
+        return None;
+    };
+    let LogicalPlan::Expand {
+        source_variable,
+        source_label,
+        rel_variable,
+        rel_type,
+        rel_properties,
+        direction,
+        target_label,
+        min_hops,
+        max_hops,
+        optional,
+        input,
+        ..
+    } = input.as_ref()
+    else {
+        return None;
+    };
+    let LogicalPlan::NodeScan { variable, label } = input.as_ref() else {
+        return None;
+    };
+    let exact_relationship_count = group_keys.is_empty()
+        && item.function == AggregateFunction::Count
+        && !item.distinct
+        && source_variable == variable
+        && source_label.is_empty()
+        && label.is_empty()
+        && target_label.is_empty()
+        && rel_properties.is_empty()
+        && *min_hops == 1
+        && *max_hops == 1
+        && !optional
+        && matches!(
+            direction,
+            RelationshipDirection::Outgoing | RelationshipDirection::Incoming
+        )
+        && match &item.target {
+            AggregateTarget::All => true,
+            AggregateTarget::Variable(target) => rel_variable.as_ref() == Some(target),
+            AggregateTarget::Property { .. } => false,
+        };
+    if !exact_relationship_count {
+        return None;
+    }
+
+    decisions.push(format!(
+        "selected implementation:relationship_count_fast_path: use exact relationship count for {rel_type}"
+    ));
+    stage_events
+        .push(ACCESS_PATH_SELECTION_STAGE.trace(StageStats::new(1, 1).with_rule_counts(1, 0)));
+    Some(PhysicalPlan::RelationshipCountExec {
+        rel_type: rel_type.clone(),
+        output: item.name.clone(),
+    })
+}
+
 fn finalize_physical_plan(
     plan: PhysicalPlan,
     decisions: &mut Vec<String>,
@@ -1098,6 +1181,26 @@ fn finalize_required_node_properties(
         PhysicalPlan::ProjectExec { items, input } => {
             select_node_projection_scan(&items, &input, decisions, stage_events)
                 .unwrap_or(PhysicalPlan::ProjectExec { items, input })
+        }
+        PhysicalPlan::AggregateExec {
+            group_keys,
+            items,
+            input,
+        } => {
+            let input = select_node_aggregate_required_scan(
+                &group_keys,
+                &items,
+                &input,
+                decisions,
+                stage_events,
+            )
+            .map(Box::new)
+            .unwrap_or(input);
+            PhysicalPlan::AggregateExec {
+                group_keys,
+                items,
+                input,
+            }
         }
         PhysicalPlan::LimitExec {
             offset,
@@ -1192,6 +1295,75 @@ fn select_node_projection_scan(
         predicate: predicate.cloned(),
         items: items.to_vec(),
     })
+}
+
+fn select_node_aggregate_required_scan(
+    group_keys: &[Projection],
+    items: &[skein_plan::Aggregation],
+    input: &PhysicalPlan,
+    decisions: &mut Vec<String>,
+    stage_events: &mut Vec<StageTrace>,
+) -> Option<PhysicalPlan> {
+    let (source, predicate) = match input {
+        PhysicalPlan::FilterExec { predicate, input } => (input.as_ref(), Some(predicate)),
+        source => (source, None),
+    };
+    let (variable, label, access) = node_projection_access(source)?;
+    let mut required_properties = BTreeSet::new();
+    if !group_keys.iter().all(|item| {
+        collect_projection_properties(&item.expression, variable, &mut required_properties)
+    }) || !items
+        .iter()
+        .all(|item| collect_aggregate_properties(item, variable, &mut required_properties))
+        || predicate.is_some_and(|predicate| {
+            !collect_predicate_properties(predicate, variable, &mut required_properties)
+        })
+    {
+        return None;
+    }
+    collect_access_properties(&access, &mut required_properties);
+
+    let required_properties = required_properties.into_iter().collect::<Vec<_>>();
+    decisions.push(format!(
+        "selected implementation:node_aggregate_required_scan: access={} decode {} required properties for {variable}:{label}",
+        access.kind_name(),
+        required_properties.len(),
+    ));
+    stage_events.push(PLAN_FINALIZATION_STAGE.trace(StageStats::new(1, 1).with_rule_counts(1, 0)));
+    Some(PhysicalPlan::NodeProjectionScanExec {
+        variable: variable.clone(),
+        label: label.clone(),
+        access,
+        required_properties,
+        predicate: predicate.cloned(),
+        items: Vec::new(),
+    })
+}
+
+fn collect_aggregate_properties(
+    item: &skein_plan::Aggregation,
+    variable: &str,
+    required: &mut BTreeSet<String>,
+) -> bool {
+    match (&item.function, &item.target) {
+        (AggregateFunction::Count, AggregateTarget::All) => true,
+        (AggregateFunction::Count, AggregateTarget::Variable(current)) => current == variable,
+        (
+            AggregateFunction::Count
+            | AggregateFunction::Min
+            | AggregateFunction::Max
+            | AggregateFunction::Avg
+            | AggregateFunction::Collect,
+            AggregateTarget::Property {
+                variable: current,
+                property,
+            },
+        ) if current == variable => {
+            required.insert(property.clone());
+            true
+        }
+        _ => false,
+    }
 }
 
 fn node_projection_access(plan: &PhysicalPlan) -> Option<(&String, &String, NodeProjectionAccess)> {

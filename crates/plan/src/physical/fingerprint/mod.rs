@@ -1032,6 +1032,16 @@ impl PhysicalPlan {
                 write_identifier(output, projection);
                 output.push(')');
             }
+            PhysicalPlan::RelationshipCountExec {
+                rel_type,
+                output: projection,
+            } => {
+                output.push_str("RelationshipCountExec(");
+                write_identifier(output, rel_type);
+                output.push_str(",output=");
+                write_identifier(output, projection);
+                output.push(')');
+            }
             PhysicalPlan::ThreadRepairStatsExec {
                 label,
                 identity_label,
