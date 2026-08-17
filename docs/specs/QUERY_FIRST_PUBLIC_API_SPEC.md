@@ -31,9 +31,10 @@ Memory, Source, Skill, Thread, Label, Community, or AugmentationJob CRUD batch
 methods. Release builds also MUST NOT expose `read_graph_*` route methods or
 their route response DTOs.
 
-The old adapters may remain compiled only for unit-test regression fixtures
-while their semantic coverage is migrated to direct query tests. They are not
-part of the release API and MUST NOT be used by host integration code.
+The old adapters and route response DTOs MUST NOT remain behind `cfg(test)`.
+Regression coverage MUST execute parameterized queries through the ordinary
+runtime. Route-evidence builders MAY retain private query fixtures, but neither
+their statements nor route-specific response shapes are public database APIs.
 
 ## Stable typed boundaries
 
@@ -68,9 +69,8 @@ the corresponding specification and formal model before release.
 
 ## Verification
 
-The release build MUST compile without the test-only business type modules.
-Unit tests MAY compile the legacy fixtures until equivalent parameterized query
-tests replace them. Required validation is:
+The release and test builds MUST compile without business type modules or
+`read_graph_*` methods. Required validation is:
 
 ```console
 cargo clippy --workspace --all-targets --all-features -- -D warnings

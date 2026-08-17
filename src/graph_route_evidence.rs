@@ -1,30 +1,7 @@
 use crate::{
     nowledge_mem_required_query_families_for_route, NowledgeMemGraph, NowledgeMemGraphMode,
     NowledgeMemQueryReportOptions, Result, SkeinError, Value,
-    NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_QUERY, NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_ROUTE,
-    NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_MEMORY_QUERY, NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE,
-    NOWLEDGE_MEM_GRAPH_COMMUNITY_RECENT_MEMORIES_QUERY,
-    NOWLEDGE_MEM_GRAPH_COMMUNITY_RECENT_MEMORIES_ROUTE,
-    NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_EDGE_QUERY,
-    NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_ENTITY_QUERY,
-    NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_ROUTE, NOWLEDGE_MEM_GRAPH_NODE_DETAILS_MEMORY_QUERY,
-    NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE, NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE,
-    NOWLEDGE_MEM_GRAPH_ORPHAN_ENTITIES_QUERY, NOWLEDGE_MEM_GRAPH_OVERVIEW_MEMORY_RANKING_QUERY,
-    NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE,
-    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ACTIVE_MEMORY_RELATION_COUNT_QUERY,
-    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_ENTITY_COUNT_QUERY,
-    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_ENTITY_RELATION_COUNT_QUERY,
-    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MEMORY_COUNT_QUERY,
-    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MEMORY_RELATION_COUNT_QUERY,
-    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MENTION_EDGE_COUNT_QUERY,
-    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ENTITY_COUNT_QUERY,
-    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ENTITY_RELATION_COUNT_QUERY,
-    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_GRAPH_META_QUERY,
-    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_MEMORY_COUNT_QUERY,
-    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_MENTION_EDGE_COUNT_QUERY,
-    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ROUTE, NOWLEDGE_MEM_GRAPH_SAMPLE_MEMORY_QUERY,
-    NOWLEDGE_MEM_GRAPH_SAMPLE_ROUTE, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
-    REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+    REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -35,6 +12,196 @@ const ROUTE_PARITY_EVIDENCE_SOURCE: &str = "route_parity_evidence";
 const ROUTE_QUERY_INVENTORY_EVIDENCE_SOURCE: &str = "route_query_inventory";
 const ROUTE_PARITY_FULL_MATCH_PER_MILLION: u64 = 1_000_000;
 
+const NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE: &str = "/graph/overview";
+const NOWLEDGE_MEM_GRAPH_OVERVIEW_MEMORY_RANKING_QUERY: &str = "\
+MATCH (m:Memory) \
+RETURN m.id AS memory_id, \
+id(m) AS node_id, \
+COALESCE(m.title, LEFT(m.content, 60)) AS label, \
+m.title AS title, \
+LEFT(COALESCE(m.content, ''), 200) AS content_preview, \
+COALESCE(m.pagerank_score, m.importance, 0.5) AS score, \
+m.community_id AS community_id, \
+m.space_id AS raw_space_id, \
+m.created_at AS created_at, \
+m.updated_at AS updated_at, \
+m.source AS source, \
+m.event_start AS event_start, \
+m.event_end AS event_end, \
+m.importance AS importance \
+ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC, m.id ASC \
+LIMIT $limit";
+const NOWLEDGE_MEM_GRAPH_SAMPLE_ROUTE: &str = "/graph/sample";
+const NOWLEDGE_MEM_GRAPH_SAMPLE_MEMORY_QUERY: &str = "\
+MATCH (m:Memory) \
+RETURN m.id AS memory_id, \
+id(m) AS node_id, \
+COALESCE(m.title, LEFT(m.content, 60)) AS label, \
+m.title AS title, \
+LEFT(COALESCE(m.content, ''), 200) AS content_preview, \
+COALESCE(m.pagerank_score, m.importance, 0.5) AS score, \
+m.community_id AS community_id, \
+m.space_id AS raw_space_id, \
+m.created_at AS created_at, \
+m.updated_at AS updated_at, \
+m.source AS source, \
+m.event_start AS event_start, \
+m.event_end AS event_end, \
+m.importance AS importance \
+ORDER BY m.id ASC \
+LIMIT $limit";
+const NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE: &str = "/graph/node-details/{node_id}";
+const NOWLEDGE_MEM_GRAPH_NODE_DETAILS_MEMORY_QUERY: &str = "\
+MATCH (m:Memory) \
+WHERE id(m) = $node_id \
+RETURN id(m) AS node_id, \
+m.id AS memory_id, \
+'Memory' AS node_kind, \
+COALESCE(m.title, LEFT(m.content, 60), m.id, 'Memory') AS label, \
+m.title AS title, \
+m.content AS content, \
+LEFT(COALESCE(m.content, ''), 500) AS content_preview, \
+m.summary AS summary, \
+m.source AS source, \
+m.space_id AS raw_space_id, \
+m.community_id AS community_id, \
+m.created_at AS created_at, \
+m.updated_at AS updated_at, \
+m.event_start AS event_start, \
+m.event_end AS event_end, \
+m.importance AS importance, \
+m.confidence AS confidence, \
+m.is_latest AS is_latest, \
+m.is_deleted AS is_deleted \
+LIMIT 1";
+const NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE: &str = "/graph/community-members/{community_id}";
+const NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_MEMORY_QUERY: &str = "\
+MATCH (m:Memory) \
+WHERE m.community_id = $community_id \
+RETURN m.id AS memory_id, \
+id(m) AS node_id, \
+COALESCE(m.title, LEFT(m.content, 60)) AS label, \
+m.title AS title, \
+LEFT(COALESCE(m.content, ''), 200) AS content_preview, \
+COALESCE(m.pagerank_score, m.importance, 0.5) AS score, \
+m.community_id AS community_id, \
+m.space_id AS raw_space_id, \
+m.created_at AS created_at, \
+m.updated_at AS updated_at, \
+m.source AS source, \
+m.event_start AS event_start, \
+m.event_end AS event_end, \
+m.importance AS importance \
+ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC, m.id ASC \
+LIMIT $limit";
+const NOWLEDGE_MEM_GRAPH_COMMUNITY_RECENT_MEMORIES_ROUTE: &str =
+    "/library/community/{community_id}/recent-memories";
+const NOWLEDGE_MEM_GRAPH_COMMUNITY_RECENT_MEMORIES_QUERY: &str = "\
+MATCH (m:Memory)-[:MENTIONS]->(e:Entity) \
+WHERE e.community_id = $community_id \
+WITH m.id AS memory_id, \
+id(m) AS node_id, \
+COALESCE(m.title, LEFT(m.content, 60)) AS label, \
+m.title AS title, \
+m.content AS content, \
+LEFT(COALESCE(m.content, ''), 200) AS content_preview, \
+m.importance AS importance, \
+m.created_at AS created_at, \
+m.updated_at AS updated_at, \
+m.is_crystal AS is_crystal, \
+COUNT(DISTINCT e) AS mention_breadth \
+ORDER BY created_at DESC \
+LIMIT $limit \
+RETURN memory_id AS memory_id, \
+node_id AS node_id, \
+label AS label, \
+title AS title, \
+content AS content, \
+content_preview AS content_preview, \
+importance AS importance, \
+created_at AS created_at, \
+updated_at AS updated_at, \
+is_crystal AS is_crystal, \
+mention_breadth AS mention_breadth";
+const NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_ROUTE: &str =
+    "/library/community/{community_id}/subgraph";
+const NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_ENTITY_QUERY: &str = "\
+MATCH (e:Entity) \
+WHERE e.community_id = $community_id \
+OPTIONAL MATCH (:Memory)-[r:MENTIONS]->(e) \
+RETURN e.id AS entity_id, \
+id(e) AS node_id, \
+COALESCE(e.name, e.id) AS label, \
+e.name AS name, \
+e.entity_type AS entity_type, \
+e.confidence AS confidence, \
+COUNT(r) AS mention_count \
+ORDER BY mention_count DESC, e.name ASC \
+LIMIT $max_entities";
+const NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_EDGE_QUERY: &str = "\
+MATCH (e1:Entity)-[r:RELATES_TO]-(e2:Entity) \
+WHERE e1.id IN $entity_ids \
+AND e2.id IN $entity_ids \
+AND e1.id < e2.id \
+RETURN e1.id AS source_entity_id, \
+e2.id AS target_entity_id, \
+id(r) AS relationship_id, \
+r.confidence AS confidence, \
+r.relation_type AS relation_type \
+LIMIT $max_edges";
+const NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_ROUTE: &str = "/graph/augmentation/state";
+const NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_QUERY: &str = "\
+MATCH (m:GraphMeta {meta_id: 'main'}) \
+RETURN m.community_detection_applied AS community_detection_applied, \
+m.pagerank_applied AS pagerank_applied, \
+m.community_algorithm AS community_algorithm, \
+m.community_resolution AS community_resolution, \
+m.community_count AS community_count, \
+m.pagerank_algorithm AS pagerank_algorithm, \
+m.pagerank_damping AS pagerank_damping, \
+m.pagerank_iterations AS pagerank_iterations, \
+m.last_augmentation_at AS last_augmentation_at, \
+m.schema_version AS schema_version, \
+m.community_detection_computed_at AS community_detection_computed_at, \
+m.pagerank_computed_at AS pagerank_computed_at \
+LIMIT 1";
+const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ROUTE: &str = "/graph/augmentation/pagerank/plan";
+const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_GRAPH_META_QUERY: &str = "\
+MATCH (m:GraphMeta {meta_id: 'main'}) \
+RETURN m.pagerank_applied AS pagerank_applied, \
+m.pagerank_computed_at AS pagerank_computed_at \
+LIMIT 1";
+const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_MEMORY_COUNT_QUERY: &str =
+    "MATCH (m:Memory) RETURN count(m) AS total";
+const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ENTITY_COUNT_QUERY: &str =
+    "MATCH (e:Entity) RETURN count(e) AS total";
+const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ENTITY_RELATION_COUNT_QUERY: &str =
+    "MATCH (:Entity)-[r:RELATES_TO]->(:Entity) RETURN count(r) AS total";
+const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_MENTION_EDGE_COUNT_QUERY: &str =
+    "MATCH (:Memory)-[r:MENTIONS]->(:Entity) RETURN count(r) AS total";
+const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ACTIVE_MEMORY_RELATION_COUNT_QUERY: &str = "MATCH (:Memory)-[r:MEMORY_RELATES_TO]->(:Memory) WHERE r.status = 'active' RETURN count(r) AS total";
+const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MEMORY_COUNT_QUERY: &str = "MATCH (m:Memory) WHERE m.created_at > $cutoff OR m.updated_at > $cutoff RETURN count(m) AS total";
+const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_ENTITY_COUNT_QUERY: &str = "MATCH (e:Entity) WHERE e.created_at > $cutoff OR e.updated_at > $cutoff RETURN count(e) AS total";
+const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MENTION_EDGE_COUNT_QUERY: &str = "MATCH (:Memory)-[r:MENTIONS]->(:Entity) WHERE r.created_at > $cutoff OR r.updated_at > $cutoff RETURN count(r) AS total";
+const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_ENTITY_RELATION_COUNT_QUERY: &str = "MATCH (:Entity)-[r:RELATES_TO]->(:Entity) WHERE r.created_at > $cutoff OR r.updated_at > $cutoff RETURN count(r) AS total";
+const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MEMORY_RELATION_COUNT_QUERY: &str = "MATCH (:Memory)-[r:MEMORY_RELATES_TO]->(:Memory) WHERE r.status = 'active' AND (r.created_at > $cutoff OR r.updated_at > $cutoff) RETURN count(r) AS total";
+const NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE: &str = "/graph/orphans";
+const NOWLEDGE_MEM_GRAPH_ORPHAN_ENTITIES_QUERY: &str = "\
+MATCH (e:Entity) \
+WHERE NOT (e)<-[:MENTIONS]-(:Memory) \
+AND NOT (e)-[:RELATES_TO]-() \
+AND NOT (e)-[:HAS_LABEL]-() \
+RETURN e.id AS entity_id, \
+id(e) AS node_id, \
+COALESCE(e.name, e.id) AS label, \
+e.name AS name, \
+e.entity_type AS entity_type, \
+e.description AS description, \
+e.community_id AS community_id, \
+e.confidence AS confidence, \
+e.pagerank_score AS pagerank_score \
+ORDER BY e.id ASC \
+LIMIT $limit";
 pub fn nowledge_graph_route_evidence_usage() -> String {
     "nowledge-graph-route-evidence requires [--require-ready] [--mode shadow_read_only|writable_cutover] [--capture-physical-plan] [--slow-log-threshold-micros <n>] [--route-parity-json <path>] <graph-db> <route-query-json>".to_string()
 }
