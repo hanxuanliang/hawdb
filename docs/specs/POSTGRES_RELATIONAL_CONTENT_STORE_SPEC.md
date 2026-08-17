@@ -266,6 +266,18 @@ retains one group state at a time; non-grouped aggregation retains one admitted
 incremental state. Large payload hydration remains after the blocking locator
 selection unless exact statement `DISTINCT` requires the projected value.
 
+Blocking relational rows MUST carry only positional primary-key locators. One
+immutable query-local locator layout owns the table, qualifier, schema, and
+primary-key type metadata for the base binding and every join binding; that
+metadata MUST NOT be cloned into each retained or spilled row. A present binding
+is encoded as its ordered primary-key scalar values, while `NULL` denotes only
+an absent optional-join binding. Replay decodes each scalar against the pinned
+layout, rejects binding-count, key-arity, and scalar-type drift, then performs
+late point hydration through the statement's pinned row view. Primary-key values
+are non-null and protected from overflow externalization, so either condition in
+a locator is storage corruption and MUST fail closed. This representation is an
+executor-local spill detail, not a durable storage format.
+
 `EXPLAIN SELECT` plans without opening a scan and returns TiDB-style `id`,
 `estRows`, `task`, `access object`, and `operator info` columns through the SQL
 query path. `EXPLAIN ANALYZE SELECT` executes the same runtime path and adds

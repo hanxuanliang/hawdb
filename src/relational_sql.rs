@@ -1997,6 +1997,16 @@ mod tests {
                 |_, _| Ok(()),
             )
             .expect("materialize spill fixture");
+        commit_sql(
+            &store,
+            "CREATE TABLE spill_labels (id BIGINT PRIMARY KEY, label TEXT NOT NULL)",
+            &[],
+        );
+        commit_sql(
+            &store,
+            "INSERT INTO spill_labels (id, label) VALUES ($1, $2)",
+            &[Value::Int(0), text("zero")],
+        );
         let snapshot = store.snapshot().expect("spill fixture snapshot");
         let mut limits = query_limits(256, 64 * 1024);
         limits.batch_rows = std::num::NonZeroUsize::new(8).expect("non-zero batch rows");
@@ -2032,6 +2042,28 @@ mod tests {
         .expect("spill-backed relational sort");
         assert_eq!(sorted.rows.len(), 256);
         assert!(sorted
+            .blocking_operator_memory_reports
+            .iter()
+            .any(|report| report.operator == "TopNExec" && report.spill_run_count > 0));
+
+        let joined = execute_relational_query_sql_with_runtime(
+            "SELECT r.id, l.label FROM spill_rows AS r LEFT JOIN spill_labels AS l ON l.id = r.id ORDER BY r.value ASC, r.id ASC",
+            &[],
+            snapshot.value(),
+            RelationalQueryReadModes::new(
+                RelationalIndexReadMode::Materialized,
+                RelationalRowReadMode::CanonicalMemory,
+            ),
+            limits,
+            &memory,
+            None,
+        )
+        .expect("spill-backed relational left join sort");
+        assert_eq!(joined.rows.len(), 256);
+        assert_eq!(joined.rows[0]["id"], Value::Int(0));
+        assert_eq!(joined.rows[0]["label"], text("zero"));
+        assert_eq!(joined.rows[1]["label"], Value::Null);
+        assert!(joined
             .blocking_operator_memory_reports
             .iter()
             .any(|report| report.operator == "TopNExec" && report.spill_run_count > 0));
