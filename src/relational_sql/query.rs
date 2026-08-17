@@ -7,6 +7,9 @@ use crate::relational_sql::row_access::{
     expression_contains_aggregate, plan_requested_fields, plan_scan_fields, RelationalReadRow,
     RelationalRowExecutionEvidence, RelationalRowReadMode, RelationalRowRuntime,
 };
+use crate::relational_sql::typed_sort::{
+    RelationalExternalOrder, RelationalRowLocator, RelationalSortKey,
+};
 use crate::sql::{
     SelectProjection, SelectStatement, SqlBound, SqlColumnRef, SqlComparisonOp, SqlExpression,
     SqlFunctionArgument, SqlJoinKind, SqlNullOrder, SqlOrderDirection, SqlPredicate, SqlStatement,
@@ -16,8 +19,7 @@ use crate::value::Value;
 use skein_core::Catalog;
 use skein_executor::binding::Binding as ExecutorBinding;
 use skein_executor::blocking::{
-    stream_distinct_batches, stream_sort_batches, stream_top_n_batches, BindingBatchSource,
-    BlockingExecutionContext,
+    stream_distinct_batches, stream_top_n_batches, BindingBatchSource, BlockingExecutionContext,
 };
 use skein_executor::kernel::{ensure_operator_item_fits, OperatorMemoryTracker};
 use skein_executor::observer::ExecutionObserver;
@@ -28,8 +30,8 @@ use skein_optimizer::{
 };
 use skein_plan::{PhysicalPlan, SortDirection, SortItem, SortKey};
 use skein_storage::{
-    relational_unique_index_name, RelationalHydrationBudget, RelationalKey, RelationalScalarType,
-    RelationalState, RelationalTableSchema, RelationalValue,
+    relational_unique_index_name, RelationalHydrationBudget, RelationalKey, RelationalState,
+    RelationalTableSchema, RelationalValue,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1554,7 +1556,6 @@ struct StreamingProjectionOutput {
     blocking_operator_memory_reports: Vec<BlockingOperatorMemoryReport>,
 }
 
-const RELATIONAL_LOCATOR_COLUMN: &str = "__skein_relational_locator";
 const RELATIONAL_SORT_COLUMN_PREFIX: &str = "__skein_relational_sort_";
 
 #[derive(Default)]
@@ -1565,123 +1566,6 @@ struct RelationalBlockingObserver {
 impl ExecutionObserver for RelationalBlockingObserver {
     fn record_blocking_memory_report(&self, report: BlockingOperatorMemoryReport) {
         self.reports.borrow_mut().push(report);
-    }
-}
-
-struct LocatorBatchSource<'a, 'pipeline> {
-    select: &'a SelectStatement,
-    parameters: &'a [Value],
-    state: &'a RelationalState,
-    base_schema: &'a RelationalTableSchema,
-    base_qualifier: &'a str,
-    base_access: &'a RelationalBaseAccess,
-    joins: &'a [PlannedJoin<'a>],
-    pipeline: &'pipeline mut RelationalPipelineState<'a>,
-    index_runtime: &'pipeline RelationalIndexRuntime<'a>,
-    row_runtime: &'pipeline RelationalRowRuntime<'a>,
-    batch_rows: usize,
-}
-
-struct GroupLocatorBatchSource<'a, 'pipeline> {
-    select: &'a SelectStatement,
-    parameters: &'a [Value],
-    state: &'a RelationalState,
-    base_schema: &'a RelationalTableSchema,
-    base_qualifier: &'a str,
-    base_access: &'a RelationalBaseAccess,
-    joins: &'a [PlannedJoin<'a>],
-    pipeline: &'pipeline mut RelationalPipelineState<'a>,
-    index_runtime: &'pipeline RelationalIndexRuntime<'a>,
-    row_runtime: &'pipeline RelationalRowRuntime<'a>,
-    batch_rows: usize,
-}
-
-impl BindingBatchSource for GroupLocatorBatchSource<'_, '_> {
-    fn execute(
-        &mut self,
-        _input: &PhysicalPlan,
-        _execution_limit: ExecutionLimit,
-        emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
-    ) -> Result<BatchControl> {
-        let mut batch = Vec::with_capacity(self.batch_rows);
-        let mut control = BatchControl::Continue;
-        visit_relational_rows(
-            self.select,
-            self.parameters,
-            self.state,
-            self.base_schema,
-            self.base_qualifier,
-            self.base_access,
-            self.joins,
-            self.pipeline,
-            self.index_runtime,
-            self.row_runtime,
-            &mut |row| {
-                let mut values =
-                    BTreeMap::from([(RELATIONAL_LOCATOR_COLUMN.to_string(), locator_value(&row))]);
-                for (ordinal, column) in self.select.group_by.iter().enumerate() {
-                    let value = relational_sort_value(resolve_column(&row, column)?)?;
-                    values.insert(
-                        relational_sort_column(ordinal),
-                        postgres_sort_key(
-                            value,
-                            SqlOrderDirection::Asc,
-                            SqlNullOrder::DialectDefault,
-                        ),
-                    );
-                }
-                batch.push(ExecutorBinding::values(values));
-                if batch.len() == self.batch_rows {
-                    control = emit(std::mem::replace(
-                        &mut batch,
-                        Vec::with_capacity(self.batch_rows),
-                    ))?;
-                }
-                Ok(control == BatchControl::Continue)
-            },
-        )?;
-        if control == BatchControl::Continue && !batch.is_empty() {
-            control = emit(batch)?;
-        }
-        Ok(control)
-    }
-}
-
-impl BindingBatchSource for LocatorBatchSource<'_, '_> {
-    fn execute(
-        &mut self,
-        _input: &PhysicalPlan,
-        _execution_limit: ExecutionLimit,
-        emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
-    ) -> Result<BatchControl> {
-        let mut batch = Vec::with_capacity(self.batch_rows);
-        let mut control = BatchControl::Continue;
-        visit_relational_rows(
-            self.select,
-            self.parameters,
-            self.state,
-            self.base_schema,
-            self.base_qualifier,
-            self.base_access,
-            self.joins,
-            self.pipeline,
-            self.index_runtime,
-            self.row_runtime,
-            &mut |row| {
-                batch.push(locator_sort_binding(&row, &self.select.order_by)?);
-                if batch.len() == self.batch_rows {
-                    control = emit(std::mem::replace(
-                        &mut batch,
-                        Vec::with_capacity(self.batch_rows),
-                    ))?;
-                }
-                Ok(control == BatchControl::Continue)
-            },
-        )?;
-        if control == BatchControl::Continue && !batch.is_empty() {
-            control = emit(batch)?;
-        }
-        Ok(control)
     }
 }
 
@@ -1894,6 +1778,13 @@ fn execute_blocking_projection<'a>(
     let mut output = Vec::with_capacity(detection_limit.min(limits.max_output_rows));
     let mut payload_bytes = 0usize;
 
+    if detection_limit == 0 {
+        return Ok(StreamingProjectionOutput {
+            rows: output,
+            blocking_operator_memory_reports: Vec::new(),
+        });
+    }
+
     if select.distinct {
         let mut projected = ProjectedBatchSource {
             select,
@@ -1979,7 +1870,15 @@ fn execute_blocking_projection<'a>(
             )?;
         }
     } else {
-        let mut locators = LocatorBatchSource {
+        let mut order = RelationalExternalOrder::new(
+            "TopNExec",
+            "relational-topn",
+            offset,
+            detection_limit,
+            memory,
+            task_context,
+        );
+        visit_relational_rows(
             select,
             parameters,
             state,
@@ -1990,31 +1889,36 @@ fn execute_blocking_projection<'a>(
             pipeline,
             index_runtime,
             row_runtime,
-            batch_rows: limits.batch_rows.get(),
-        };
-        execute_relational_order(
-            &input_plan,
-            &mut locators,
-            select,
-            offset,
-            detection_limit,
-            &catalog,
-            memory,
-            task_context,
-            &observer,
-            &mut |batch| {
-                consume_locator_batch(
-                    batch,
-                    select,
-                    state,
-                    row_runtime,
-                    &mut output,
-                    &mut payload_bytes,
-                    detection_limit,
-                    limits,
-                )
+            &mut |row| {
+                let sort_keys = select
+                    .order_by
+                    .iter()
+                    .map(|item| {
+                        RelationalSortKey::new(
+                            resolve_column(&row, &item.column)?.clone(),
+                            item.direction,
+                            item.nulls,
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                order.push(sort_keys, typed_locator(&row))?;
+                Ok(true)
             },
         )?;
+        let report = order.finish(|locator| {
+            let row = with_typed_locator_bound_row(
+                &locator,
+                select,
+                base_schema,
+                base_qualifier,
+                joins,
+                row_runtime,
+                |bound| project_bound_row(bound, &select.projection),
+            )?;
+            push_relational_output(row, &mut output, &mut payload_bytes, limits)?;
+            Ok(output.len() < detection_limit)
+        })?;
+        observer.record_blocking_memory_report(report);
     }
     Ok(StreamingProjectionOutput {
         rows: output,
@@ -2039,32 +1943,74 @@ fn consume_projected_batch(
     Ok(BatchControl::Continue)
 }
 
+fn typed_locator(row: &BoundRow<'_>) -> RelationalRowLocator {
+    RelationalRowLocator::new(
+        row.bindings
+            .iter()
+            .map(|binding| binding.primary_key().cloned())
+            .collect(),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
-fn consume_locator_batch(
-    batch: BindingBatch,
+fn with_typed_locator_bound_row<T>(
+    locator: &RelationalRowLocator,
     select: &SelectStatement,
-    state: &RelationalState,
+    base_schema: &RelationalTableSchema,
+    base_qualifier: &str,
+    joins: &[PlannedJoin<'_>],
     row_runtime: &RelationalRowRuntime<'_>,
-    output: &mut Vec<Row>,
-    payload_bytes: &mut usize,
-    detection_limit: usize,
-    limits: RelationalQueryLimits,
-) -> Result<BatchControl> {
-    for mut binding in batch {
-        if output.len() >= detection_limit {
-            return Ok(BatchControl::Stop);
-        }
-        strip_relational_sort_columns(&mut binding.values);
-        let locator = binding
-            .values
-            .remove(RELATIONAL_LOCATOR_COLUMN)
-            .ok_or_else(|| {
-                SkeinError::Execution("relational spill row is missing its locator".to_string())
-            })?;
-        let row = project_locator(&locator, select, state, row_runtime)?;
-        push_relational_output(row, output, payload_bytes, limits)?;
+    visit: impl FnOnce(&BoundRow<'_>) -> Result<T>,
+) -> Result<T> {
+    if locator.primary_keys().len() != joins.len().saturating_add(1) {
+        return Err(SkeinError::Execution(format!(
+            "typed relational locator has {} bindings, expected {}",
+            locator.primary_keys().len(),
+            joins.len().saturating_add(1)
+        )));
     }
-    Ok(BatchControl::Continue)
+    let base_key = locator.primary_keys()[0].as_ref().ok_or_else(|| {
+        SkeinError::Execution("typed relational locator is missing its base key".to_string())
+    })?;
+    let base_row = row_runtime
+        .read_output_point(&select.from.name, base_key)?
+        .ok_or_else(|| {
+            SkeinError::StorageIntegrity(format!(
+                "typed relational locator references a missing row in table {}",
+                select.from.name
+            ))
+        })?;
+    let mut bound = BoundRow {
+        bindings: Vec::with_capacity(locator.primary_keys().len()),
+    };
+    bound.bindings.push(Binding {
+        table: &select.from.name,
+        qualifier: base_qualifier,
+        schema: base_schema,
+        row: Some(base_row),
+    });
+    for (planned, primary_key) in joins.iter().zip(&locator.primary_keys()[1..]) {
+        let row = match primary_key {
+            Some(primary_key) => Some(
+                row_runtime
+                    .read_output_point(&planned.join.table.name, primary_key)?
+                    .ok_or_else(|| {
+                        SkeinError::StorageIntegrity(format!(
+                            "typed relational locator references a missing row in table {}",
+                            planned.join.table.name
+                        ))
+                    })?,
+            ),
+            None => None,
+        };
+        bound.bindings.push(Binding {
+            table: &planned.join.table.name,
+            qualifier: &planned.qualifier,
+            schema: planned.schema,
+            row,
+        });
+    }
+    visit(&bound)
 }
 
 fn push_relational_output(
@@ -2152,21 +2098,6 @@ fn strip_relational_sort_columns(row: &mut Row) {
     row.retain(|name, _| !name.starts_with(RELATIONAL_SORT_COLUMN_PREFIX));
 }
 
-fn locator_sort_binding(
-    row: &BoundRow<'_>,
-    order_by: &[crate::sql::SqlOrderItem],
-) -> Result<ExecutorBinding> {
-    let mut values = BTreeMap::from([(RELATIONAL_LOCATOR_COLUMN.to_string(), locator_value(row))]);
-    for (ordinal, item) in order_by.iter().enumerate() {
-        let value = relational_sort_value(resolve_column(row, &item.column)?)?;
-        values.insert(
-            relational_sort_column(ordinal),
-            postgres_sort_key(value, item.direction, item.nulls),
-        );
-    }
-    Ok(ExecutorBinding::values(values))
-}
-
 fn relational_sort_value(value: &RelationalValue) -> Result<Value> {
     match value {
         RelationalValue::Null => Ok(Value::Null),
@@ -2230,204 +2161,6 @@ fn projected_order_columns(
         .collect()
 }
 
-fn locator_value(row: &BoundRow<'_>) -> Value {
-    Value::List(
-        row.bindings
-            .iter()
-            .map(|binding| {
-                Value::Map(BTreeMap::from([
-                    (
-                        "table".to_string(),
-                        Value::String(binding.table.to_string()),
-                    ),
-                    (
-                        "qualifier".to_string(),
-                        Value::String(binding.qualifier.to_string()),
-                    ),
-                    (
-                        "key".to_string(),
-                        binding.primary_key().map_or(Value::Null, |key| {
-                            Value::List(key.0.iter().map(encode_locator_value).collect())
-                        }),
-                    ),
-                ]))
-            })
-            .collect(),
-    )
-}
-
-fn encode_locator_value(value: &RelationalValue) -> Value {
-    let (kind, value) = match value {
-        RelationalValue::Null => ("null", Value::Null),
-        RelationalValue::Boolean(value) => ("bool", Value::Bool(*value)),
-        RelationalValue::BigInt(value) => ("int", Value::Int(*value)),
-        RelationalValue::DoublePrecision(value) => ("float", Value::Float(*value)),
-        RelationalValue::Text(value) => ("text", Value::String(value.clone())),
-        RelationalValue::Bytea(value) => ("bytea", Value::String(hex_encode(value))),
-        RelationalValue::Overflow(reference) => (
-            "overflow",
-            Value::Map(BTreeMap::from([
-                (
-                    "digest".to_string(),
-                    Value::String(reference.digest.to_string()),
-                ),
-                (
-                    "scalar_type".to_string(),
-                    Value::String(
-                        match reference.scalar_type {
-                            RelationalScalarType::Text => "text",
-                            RelationalScalarType::Bytea => "bytea",
-                            RelationalScalarType::Boolean
-                            | RelationalScalarType::BigInt
-                            | RelationalScalarType::DoublePrecision => "invalid",
-                        }
-                        .to_string(),
-                    ),
-                ),
-                (
-                    "compressed_bytes".to_string(),
-                    Value::Int(i64::try_from(reference.compressed_bytes).unwrap_or(i64::MAX)),
-                ),
-                (
-                    "uncompressed_bytes".to_string(),
-                    Value::Int(i64::try_from(reference.uncompressed_bytes).unwrap_or(i64::MAX)),
-                ),
-            ])),
-        ),
-    };
-    Value::Map(BTreeMap::from([
-        ("kind".to_string(), Value::String(kind.to_string())),
-        ("value".to_string(), value),
-    ]))
-}
-
-struct OwnedLocatorBinding {
-    table: String,
-    qualifier: String,
-    key: Option<RelationalKey>,
-}
-
-fn project_locator(
-    locator: &Value,
-    select: &SelectStatement,
-    state: &RelationalState,
-    row_runtime: &RelationalRowRuntime<'_>,
-) -> Result<Row> {
-    with_locator_bound_row(locator, state, row_runtime, |bound| {
-        project_bound_row(bound, &select.projection)
-    })
-}
-
-fn with_locator_bound_row<T>(
-    locator: &Value,
-    state: &RelationalState,
-    row_runtime: &RelationalRowRuntime<'_>,
-    visit: impl FnOnce(&BoundRow<'_>) -> Result<T>,
-) -> Result<T> {
-    let bindings = decode_locator(locator)?;
-    let mut bound = BoundRow {
-        bindings: Vec::with_capacity(bindings.len()),
-    };
-    for binding in &bindings {
-        let schema = state.table_schema(&binding.table).ok_or_else(|| {
-            SkeinError::Storage(format!(
-                "relational spill locator references unknown table {}",
-                binding.table
-            ))
-        })?;
-        let row = match &binding.key {
-            Some(key) => row_runtime
-                .read_output_point(&binding.table, key)?
-                .map(Some)
-                .ok_or_else(|| {
-                    SkeinError::Storage(format!(
-                        "relational spill locator references a missing row in table {}",
-                        binding.table
-                    ))
-                })?,
-            None => None,
-        };
-        bound.bindings.push(Binding {
-            table: &binding.table,
-            qualifier: &binding.qualifier,
-            schema,
-            row,
-        });
-    }
-    visit(&bound)
-}
-
-fn decode_locator(value: &Value) -> Result<Vec<OwnedLocatorBinding>> {
-    let Value::List(bindings) = value else {
-        return Err(SkeinError::Execution(
-            "relational spill locator is not a list".to_string(),
-        ));
-    };
-    bindings
-        .iter()
-        .map(|binding| {
-            let Value::Map(binding) = binding else {
-                return Err(SkeinError::Execution(
-                    "relational spill binding locator is not a map".to_string(),
-                ));
-            };
-            let table = locator_string(binding, "table")?;
-            let qualifier = locator_string(binding, "qualifier")?;
-            let key = match binding.get("key") {
-                Some(Value::Null) => None,
-                Some(Value::List(values)) => Some(RelationalKey(
-                    values
-                        .iter()
-                        .map(decode_locator_value)
-                        .collect::<Result<Vec<_>>>()?,
-                )),
-                _ => {
-                    return Err(SkeinError::Execution(
-                        "relational spill locator has an invalid key".to_string(),
-                    ))
-                }
-            };
-            Ok(OwnedLocatorBinding {
-                table,
-                qualifier,
-                key,
-            })
-        })
-        .collect()
-}
-
-fn locator_string(values: &BTreeMap<String, Value>, name: &str) -> Result<String> {
-    match values.get(name) {
-        Some(Value::String(value)) => Ok(value.clone()),
-        _ => Err(SkeinError::Execution(format!(
-            "relational spill locator is missing string field {name}"
-        ))),
-    }
-}
-
-fn decode_locator_value(value: &Value) -> Result<RelationalValue> {
-    let Value::Map(fields) = value else {
-        return Err(SkeinError::Execution(
-            "relational spill key value is not a map".to_string(),
-        ));
-    };
-    let kind = locator_string(fields, "kind")?;
-    let value = fields.get("value").ok_or_else(|| {
-        SkeinError::Execution("relational spill key value is missing payload".to_string())
-    })?;
-    match (kind.as_str(), value) {
-        ("null", Value::Null) => Ok(RelationalValue::Null),
-        ("bool", Value::Bool(value)) => Ok(RelationalValue::Boolean(*value)),
-        ("int", Value::Int(value)) => Ok(RelationalValue::BigInt(*value)),
-        ("float", Value::Float(value)) => Ok(RelationalValue::DoublePrecision(*value)),
-        ("text", Value::String(value)) => Ok(RelationalValue::Text(value.clone())),
-        ("bytea", Value::String(value)) => Ok(RelationalValue::Bytea(hex_decode(value)?)),
-        _ => Err(SkeinError::Execution(format!(
-            "relational spill key has unsupported value kind {kind}"
-        ))),
-    }
-}
-
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len().saturating_mul(2));
@@ -2436,34 +2169,6 @@ fn hex_encode(bytes: &[u8]) -> String {
         output.push(HEX[(byte & 0x0f) as usize] as char);
     }
     output
-}
-
-fn hex_decode(value: &str) -> Result<Vec<u8>> {
-    if !value.len().is_multiple_of(2) {
-        return Err(SkeinError::Execution(
-            "relational spill byte string has an odd length".to_string(),
-        ));
-    }
-    value
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let high = hex_digit(pair[0])?;
-            let low = hex_digit(pair[1])?;
-            Ok((high << 4) | low)
-        })
-        .collect()
-}
-
-fn hex_digit(value: u8) -> Result<u8> {
-    match value {
-        b'0'..=b'9' => Ok(value - b'0'),
-        b'a'..=b'f' => Ok(value - b'a' + 10),
-        b'A'..=b'F' => Ok(value - b'A' + 10),
-        _ => Err(SkeinError::Execution(
-            "relational spill byte string contains invalid hex".to_string(),
-        )),
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2936,20 +2641,16 @@ fn execute_grouped_aggregate<'a>(
         .transpose()?
         .unwrap_or(usize::MAX);
     let detection_limit = requested.min(limits.max_output_rows.saturating_add(1));
-    let input_plan = relational_input_plan();
-    let items = select
-        .group_by
-        .iter()
-        .enumerate()
-        .map(|(ordinal, _)| SortItem {
-            key: SortKey::Column(relational_sort_column(ordinal)),
-            direction: SortDirection::Asc,
-        })
-        .collect::<Vec<_>>();
-    let catalog = Catalog::default();
-    let observer = RelationalBlockingObserver::default();
     let task_context = pipeline.task_context;
-    let mut source = GroupLocatorBatchSource {
+    let mut order = RelationalExternalOrder::new(
+        "SortExec",
+        "relational-group-sort",
+        0,
+        limits.max_intermediate_rows,
+        execution_memory,
+        task_context,
+    );
+    visit_relational_rows(
         select,
         parameters,
         state,
@@ -2960,8 +2661,22 @@ fn execute_grouped_aggregate<'a>(
         pipeline,
         index_runtime,
         row_runtime,
-        batch_rows: limits.batch_rows.get(),
-    };
+        &mut |row| {
+            let sort_keys = select
+                .group_by
+                .iter()
+                .map(|column| {
+                    RelationalSortKey::new(
+                        resolve_column(&row, column)?.clone(),
+                        SqlOrderDirection::Asc,
+                        SqlNullOrder::DialectDefault,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            order.push(sort_keys, typed_locator(&row))?;
+            Ok(true)
+        },
+    )?;
     let mut current_key = None::<Vec<RelationalValue>>;
     let mut current_group = None::<Vec<AggregateProjectionState>>;
     let mut tracker = OperatorMemoryTracker::new(limits.blocking_operator_bytes);
@@ -2969,74 +2684,59 @@ fn execute_grouped_aggregate<'a>(
     let mut output = Vec::new();
     let mut payload_bytes = 0usize;
     let mut stopped = false;
-    stream_sort_batches(
-        &input_plan,
-        &items,
-        &mut source,
-        BlockingExecutionContext {
-            catalog: &catalog,
-            memory: execution_memory,
-            task_context,
-            observer: &observer,
-        },
-        ExecutionLimit::unlimited(),
-        &mut |batch| {
-            for mut binding in batch {
-                input_rows = input_rows.saturating_add(1);
-                let locator = binding
-                    .values
-                    .remove(RELATIONAL_LOCATOR_COLUMN)
-                    .ok_or_else(|| {
-                        SkeinError::Execution(
-                            "relational aggregate spill row is missing its locator".to_string(),
-                        )
-                    })?;
-                let keep_going = with_locator_bound_row(&locator, state, row_runtime, |row| {
-                    let key = select
-                        .group_by
-                        .iter()
-                        .map(|column| resolve_column(row, column).cloned())
-                        .collect::<Result<Vec<_>>>()?;
-                    if current_key.as_ref() != Some(&key) {
-                        if let Some(group) = current_group.take()
-                            && !emit_aggregate_group(
-                                group,
-                                &mut offset,
-                                requested,
-                                detection_limit,
-                                limits,
-                                &mut payload_bytes,
-                                &mut output,
-                            )?
-                        {
-                            return Ok(false);
-                        }
-                        tracker.reset();
-                        charge_aggregate_memory(
-                            aggregate_group_base_memory_bytes(&key, &projection_template),
-                            &mut tracker,
-                        )?;
-                        current_key = Some(key);
-                        current_group = Some(projection_template.clone());
+    let sort_report = order.finish(|locator| {
+        input_rows = input_rows.saturating_add(1);
+        let keep_going = with_typed_locator_bound_row(
+            &locator,
+            select,
+            base_schema,
+            base_qualifier,
+            joins,
+            row_runtime,
+            |row| {
+                let key = select
+                    .group_by
+                    .iter()
+                    .map(|column| resolve_column(row, column).cloned())
+                    .collect::<Result<Vec<_>>>()?;
+                if current_key.as_ref() != Some(&key) {
+                    if let Some(group) = current_group.take()
+                        && !emit_aggregate_group(
+                            group,
+                            &mut offset,
+                            requested,
+                            detection_limit,
+                            limits,
+                            &mut payload_bytes,
+                            &mut output,
+                        )?
+                    {
+                        return Ok(false);
                     }
-                    let group = current_group
-                        .as_mut()
-                        .expect("grouped aggregate initialized current group");
-                    for projection in group {
-                        let delta = projection.update(row)?;
-                        tracker.release(delta.released_bytes);
-                        charge_aggregate_memory(delta.added_bytes, &mut tracker)?;
-                    }
-                    Ok(true)
-                })?;
-                if !keep_going {
-                    stopped = true;
-                    return Ok(BatchControl::Stop);
+                    tracker.reset();
+                    charge_aggregate_memory(
+                        aggregate_group_base_memory_bytes(&key, &projection_template),
+                        &mut tracker,
+                    )?;
+                    current_key = Some(key);
+                    current_group = Some(projection_template.clone());
                 }
-            }
-            Ok(BatchControl::Continue)
-        },
-    )?;
+                let group = current_group
+                    .as_mut()
+                    .expect("grouped aggregate initialized current group");
+                for projection in group {
+                    let delta = projection.update(row)?;
+                    tracker.release(delta.released_bytes);
+                    charge_aggregate_memory(delta.added_bytes, &mut tracker)?;
+                }
+                Ok(true)
+            },
+        )?;
+        if !keep_going {
+            stopped = true;
+        }
+        Ok(keep_going)
+    })?;
     if !stopped && let Some(group) = current_group.take() {
         emit_aggregate_group(
             group,
@@ -3049,7 +2749,7 @@ fn execute_grouped_aggregate<'a>(
         )?;
     }
     pipeline.finish()?;
-    let mut reports = observer.reports.into_inner();
+    let mut reports = vec![sort_report];
     reports.push(skein_executor::blocking::in_memory_report(
         "RelationalAggregateExec",
         &tracker,

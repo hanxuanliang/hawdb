@@ -98,6 +98,16 @@ impl SpillWriter {
         let mut payload = Vec::with_capacity(binding_payload_bytes(binding));
         write_u64(&mut payload, ordinal)?;
         write_binding(&mut payload, binding)?;
+        self.write_record_payload(&payload, spill_budget)
+    }
+
+    /// Writes one operator-owned spill payload with the shared length framing,
+    /// pool reservation, and statement spill budget.
+    pub fn write_record_payload(
+        &mut self,
+        payload: &[u8],
+        spill_budget: &mut SpillBudgetTracker,
+    ) -> Result<u64> {
         let payload_len = u64::try_from(payload.len()).map_err(|_| {
             SkeinError::Execution("spill record exceeds the supported size".to_string())
         })?;
@@ -105,7 +115,7 @@ impl SpillWriter {
         let reservation = spill_budget.reserve_write(record_bytes)?;
         self.writer
             .write_all(&payload_len.to_le_bytes())
-            .and_then(|_| self.writer.write_all(&payload))
+            .and_then(|_| self.writer.write_all(payload))
             .map_err(|error| {
                 SkeinError::Execution(format!("failed to write spill run: {error}"))
             })?;
@@ -129,6 +139,23 @@ pub struct SpillReader {
 
 impl SpillReader {
     pub fn read(&mut self, max_record_bytes: usize) -> Result<Option<(u64, Binding)>> {
+        let Some(payload) = self.read_record_payload(max_record_bytes)? else {
+            return Ok(None);
+        };
+        let mut cursor = Cursor::new(payload.as_slice());
+        let ordinal = read_u64(&mut cursor)?;
+        let binding = read_binding(&mut cursor)?;
+        if cursor.position() != payload.len() as u64 {
+            return Err(SkeinError::Execution(
+                "spill record contains trailing bytes".to_string(),
+            ));
+        }
+        Ok(Some((ordinal, binding)))
+    }
+
+    /// Reads one length-framed operator-owned payload under the same record
+    /// bound used by generic binding spill records.
+    pub fn read_record_payload(&mut self, max_record_bytes: usize) -> Result<Option<Vec<u8>>> {
         let mut encoded_len = [0u8; 8];
         let bytes_read = self.reader.read(&mut encoded_len).map_err(|error| {
             SkeinError::Execution(format!("failed to read spill record length: {error}"))
@@ -154,15 +181,7 @@ impl SpillReader {
         self.reader.read_exact(&mut payload).map_err(|error| {
             SkeinError::Execution(format!("truncated spill record payload: {error}"))
         })?;
-        let mut cursor = Cursor::new(payload.as_slice());
-        let ordinal = read_u64(&mut cursor)?;
-        let binding = read_binding(&mut cursor)?;
-        if cursor.position() != payload.len() as u64 {
-            return Err(SkeinError::Execution(
-                "spill record contains trailing bytes".to_string(),
-            ));
-        }
-        Ok(Some((ordinal, binding)))
+        Ok(Some(payload))
     }
 }
 
@@ -475,6 +494,28 @@ mod tests {
         let mut reader = run.reader().unwrap();
         assert_eq!(reader.read(usize::MAX).unwrap(), Some((42, binding)));
         assert_eq!(reader.read(usize::MAX).unwrap(), None);
+        drop(reader);
+        drop(run);
+        assert_eq!(memory.spill_pool_snapshot().unwrap().active_bytes, 0);
+        std::fs::remove_dir(&memory.spill_directory).unwrap();
+    }
+
+    #[test]
+    fn operator_owned_payload_uses_shared_spill_framing_and_budget() {
+        let memory = test_memory("raw-codec");
+        let mut spill_budget = SpillBudgetTracker::new("RawCodecTest", &memory);
+        let (run, mut writer) = spill_budget.create_run("raw-codec-test").unwrap();
+        writer
+            .write_record_payload(b"typed-row", &mut spill_budget)
+            .unwrap();
+        writer.finish().unwrap();
+
+        let mut reader = run.reader().unwrap();
+        assert_eq!(
+            reader.read_record_payload(9).unwrap(),
+            Some(b"typed-row".to_vec())
+        );
+        assert_eq!(reader.read_record_payload(9).unwrap(), None);
         drop(reader);
         drop(run);
         assert_eq!(memory.spill_pool_snapshot().unwrap().active_bytes, 0);
