@@ -1,5 +1,6 @@
 use crate::binding::{binding_memory_bytes, binding_payload_bytes, Binding};
 use crate::kernel::SpillBudgetTracker;
+use crate::QueryMemoryLease;
 use pool::{process_marker, RunLease, SPILL_FILE_PREFIX, SPILL_FILE_SUFFIX};
 use skein_core::{LabelId, RelTypeId, Result, SkeinError, Value};
 use skein_storage::{NodeId, NodeRecord, RelId, RelRecord};
@@ -116,6 +117,27 @@ impl SpillWriter {
         Ok(record_bytes)
     }
 
+    pub(crate) fn write_record_payload(
+        &mut self,
+        payload: &[u8],
+        spill_budget: &mut SpillBudgetTracker,
+    ) -> Result<u64> {
+        let payload_len = u64::try_from(payload.len()).map_err(|_| {
+            SkeinError::Execution("spill record exceeds the supported size".to_string())
+        })?;
+        let record_bytes = payload_len.saturating_add(8);
+        let reservation = spill_budget.reserve_write(record_bytes)?;
+        self.writer
+            .write_all(&payload_len.to_le_bytes())
+            .and_then(|_| self.writer.write_all(payload))
+            .map_err(|error| {
+                SkeinError::Execution(format!("failed to write spill run: {error}"))
+            })?;
+        reservation.commit(&self.lease);
+        spill_budget.commit_write(record_bytes);
+        Ok(record_bytes)
+    }
+
     pub fn finish(mut self) -> Result<()> {
         self.writer.flush().map_err(|error| {
             SkeinError::Execution(format!("failed to flush spill run: {error}"))
@@ -127,6 +149,17 @@ impl SpillWriter {
 
 pub struct SpillReader {
     reader: BufReader<File>,
+}
+
+pub(crate) struct SpillRecordPayload {
+    bytes: Vec<u8>,
+    _lease: Option<QueryMemoryLease>,
+}
+
+impl SpillRecordPayload {
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 impl SpillReader {
@@ -165,6 +198,43 @@ impl SpillReader {
             ));
         }
         Ok(Some((ordinal, binding)))
+    }
+
+    pub(crate) fn read_record_payload(
+        &mut self,
+        max_record_bytes: usize,
+        spill_budget: &SpillBudgetTracker,
+    ) -> Result<Option<SpillRecordPayload>> {
+        let mut encoded_len = [0u8; 8];
+        let bytes_read = self.reader.read(&mut encoded_len).map_err(|error| {
+            SkeinError::Execution(format!("failed to read spill record length: {error}"))
+        })?;
+        if bytes_read == 0 {
+            return Ok(None);
+        }
+        self.reader
+            .read_exact(&mut encoded_len[bytes_read..])
+            .map_err(|error| {
+                SkeinError::Execution(format!("truncated spill record length: {error}"))
+            })?;
+        let payload_len = usize::try_from(u64::from_le_bytes(encoded_len)).map_err(|_| {
+            SkeinError::Execution("spill record length does not fit in memory".to_string())
+        })?;
+        let safety_limit = MAX_SPILL_RECORD_BYTES.min(max_record_bytes);
+        if payload_len > safety_limit {
+            return Err(SkeinError::Execution(format!(
+                "spill record length {payload_len} exceeds the admitted limit {safety_limit}"
+            )));
+        }
+        let lease = spill_budget.reserve_staging(payload_len)?;
+        let mut bytes = vec![0; payload_len];
+        self.reader.read_exact(&mut bytes).map_err(|error| {
+            SkeinError::Execution(format!("truncated spill record payload: {error}"))
+        })?;
+        Ok(Some(SpillRecordPayload {
+            bytes,
+            _lease: lease,
+        }))
     }
 }
 

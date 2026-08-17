@@ -157,6 +157,15 @@ accounts. TLC checks the root and local bounds plus the no-leak terminal-state
 invariant. The implementation records root budget, peak charge, completion
 charge, and account count in `PipelineMemoryReport`.
 
+Relational ordering refines the blocking-state and spill-staging branches with
+`ExternalTopN<RelationalSortRecord>`. Retained state contains typed sort keys,
+layout-slot row locators, and an executor-owned stable ordinal rather than
+public `Binding` maps. Spill encoding reserves the complete framed payload
+before allocation; merge decoding keeps the encoded staging lease live until
+the decoded record has been admitted to the blocking account. Normal
+completion, early consumer stop, decode failure, cancellation, and unwinding
+drop both account leases.
+
 Typed adjacency expansion refines the zero-transient-state branch of this
 model: `AdjacencyPostingList` keeps live entries ordered in snapshot-owned
 storage, and `GraphStore::try_visit_ordered_adjacent_relationships_owned`

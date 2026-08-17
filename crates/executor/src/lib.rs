@@ -8,6 +8,8 @@ pub mod concurrent;
 pub mod expression;
 #[doc(hidden)]
 pub mod external;
+#[doc(hidden)]
+pub mod external_order;
 pub mod graph;
 #[doc(hidden)]
 pub mod kernel;

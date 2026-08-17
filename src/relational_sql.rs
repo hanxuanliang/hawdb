@@ -2041,6 +2041,20 @@ mod tests {
         )
         .expect("spill-backed relational sort");
         assert_eq!(sorted.rows.len(), 256);
+        let expected_order = (0..256)
+            .map(|id| (id % 17, id))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(|(_, id)| Value::Int(id))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sorted
+                .rows
+                .iter()
+                .map(|row| row["id"].clone())
+                .collect::<Vec<_>>(),
+            expected_order
+        );
         assert!(sorted
             .blocking_operator_memory_reports
             .iter()
@@ -2060,6 +2074,14 @@ mod tests {
         )
         .expect("spill-backed relational left join sort");
         assert_eq!(joined.rows.len(), 256);
+        assert_eq!(
+            joined
+                .rows
+                .iter()
+                .map(|row| row["id"].clone())
+                .collect::<Vec<_>>(),
+            expected_order
+        );
         assert_eq!(joined.rows[0]["id"], Value::Int(0));
         assert_eq!(joined.rows[0]["label"], text("zero"));
         assert_eq!(joined.rows[1]["label"], Value::Null);

@@ -256,27 +256,31 @@ join. Predicates that cannot prove a safe right-side key fall back to a direct,
 non-collecting table scan.
 
 Relational aggregate groups retain incremental `COUNT`, `SUM`, `MAX`, and
-`COALESCE` state instead of a second copy of every qualified binding. The
-executor sends typed binding batches through the shared `TopNExec`, `SortExec`,
-and `DistinctExec` implementations. High-cardinality statement `DISTINCT`,
-`COUNT(DISTINCT ...)`, ordering, and grouped aggregation therefore share the
-executor memory tracker, spill byte/run limits, cleanup rules, and cancellation
-checkpoints. Grouped aggregation externally sorts compact row locators and
-retains one group state at a time; non-grouped aggregation retains one admitted
-incremental state. Large payload hydration remains after the blocking locator
-selection unless exact statement `DISTINCT` requires the projected value.
+`COALESCE` state instead of a second copy of every qualified binding. Ordinary
+ordering and grouped aggregation send typed sort keys plus compact row locators
+through the executor-owned external-order implementation. Statement `DISTINCT`
+and `COUNT(DISTINCT ...)` continue to use the shared binding operators because
+their projected public values are the comparison state. Both paths share the
+query root ledger, operator memory limits, spill byte/run limits, cleanup rules,
+and cancellation checkpoints. Grouped aggregation retains one group state at a
+time; non-grouped aggregation retains one admitted incremental state. Large
+payload hydration remains after the blocking locator selection unless exact
+statement `DISTINCT` requires the projected value.
 
-Blocking relational rows MUST carry only positional primary-key locators. One
-immutable query-local locator layout owns the table, qualifier, schema, and
-primary-key type metadata for the base binding and every join binding; that
-metadata MUST NOT be cloned into each retained or spilled row. A present binding
-is encoded as its ordered primary-key scalar values, while `NULL` denotes only
-an absent optional-join binding. Replay decodes each scalar against the pinned
-layout, rejects binding-count, key-arity, and scalar-type drift, then performs
-late point hydration through the statement's pinned row view. Primary-key values
-are non-null and protected from overflow externalization, so either condition in
-a locator is storage corruption and MUST fail closed. This representation is an
-executor-local spill detail, not a durable storage format.
+Blocking relational rows MUST carry a typed `sort_keys + locator + stable
+ordinal` record and MUST NOT materialize an executor `Binding`, public `Value`,
+or `BTreeMap`. One immutable query-local locator layout owns the table,
+qualifier, schema, and primary-key type metadata for the base binding and every
+join binding; that metadata MUST NOT be cloned into each retained or spilled
+row. A present binding contains its layout slot id and ordered primary-key
+scalars, while an absent slot denotes only an optional-join miss. Replay decodes
+each scalar against the pinned layout, rejects slot-identity, binding-count,
+key-arity, and scalar-type drift, then performs late point hydration through the
+statement's pinned row view. Primary-key values are non-null and protected from
+overflow externalization, so either condition in a locator is storage
+corruption and MUST fail closed. The symmetric typed codec, executor-owned
+ordinal, spill staging reservation, and bounded merge are executor-local
+details, not a durable storage format.
 
 `EXPLAIN SELECT` plans without opening a scan and returns TiDB-style `id`,
 `estRows`, `task`, `access object`, and `operator info` columns through the SQL
