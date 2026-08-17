@@ -88,6 +88,8 @@ pub struct ProductionMorselRuntimeShape {
     pub effective_cpu_slots: usize,
     pub memory_budget_bytes: u64,
     pub result_budget_bytes: u64,
+    pub query_memory_budget_bytes: u64,
+    pub batch_payload_budget_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -99,9 +101,17 @@ pub struct ProductionMorselExecutionReport {
     pub output_payload_bytes: usize,
     pub intermediate_rows: usize,
     pub intermediate_payload_bytes: usize,
+    pub columnar_batches: usize,
     pub morsel_count: usize,
     pub morsel_max_admitted_workers: usize,
     pub morsel_peak_active_workers: usize,
+    pub morsel_peak_buffered_outputs: usize,
+    pub morsel_peak_buffered_output_bytes: usize,
+    pub morsel_peak_reorder_entries: usize,
+    pub query_memory_peak_bytes: usize,
+    pub query_memory_completion_bytes: usize,
+    pub spilled_bytes: u64,
+    pub spill_run_count: usize,
     pub steady_resident_bytes: Option<u64>,
     pub peak_resident_bytes: Option<u64>,
     pub total_page_faults: Option<u64>,
@@ -163,6 +173,16 @@ pub fn run_production_morsel_profile(
     config: ProductionMorselProfileConfig,
 ) -> Result<ProductionMorselProfileReport, ProductionGraphQualificationError> {
     config.validate()?;
+    let execution_memory = &config
+        .open_options
+        .database_config
+        .as_ref()
+        .expect("validated production profile has a database config")
+        .execution_memory;
+    let query_memory_budget_bytes =
+        u64::try_from(execution_memory.query_memory_bytes.get()).unwrap_or(u64::MAX);
+    let batch_payload_budget_bytes =
+        u64::try_from(execution_memory.batch_payload_bytes.get()).unwrap_or(u64::MAX);
     let query_identity = QueryIdentity::new("cypher", &config.statement.cypher);
     let parameter_digest = parameter_digest(&config.statement.parameters);
     let storage_io = IoConcurrencyBudget::desktop_bound_for_device(StorageDeviceProfile::detect(
@@ -224,6 +244,8 @@ pub fn run_production_morsel_profile(
         effective_cpu_slots: runtime_before.limits.effective_cpu_slots.get(),
         memory_budget_bytes: runtime_before.limits.memory_budget_bytes,
         result_budget_bytes: runtime_before.limits.result_budget_bytes,
+        query_memory_budget_bytes,
+        batch_payload_budget_bytes,
     };
     let execution = summarize_queries(config.warmup_runs, &queries, &durations);
     let runtime = runtime_report(runtime_before, runtime_after);
@@ -246,12 +268,12 @@ pub fn run_production_morsel_profile(
     {
         blocker_codes.push("query_output_cardinality_changed".to_string());
     }
-    if execution.morsel_max_admitted_workers != config.expected_workers {
-        blocker_codes.push("morsel_admitted_worker_count_mismatch".to_string());
-    }
-    if execution.morsel_peak_active_workers != config.expected_workers {
-        blocker_codes.push("morsel_active_worker_count_mismatch".to_string());
-    }
+    append_execution_shape_blockers(
+        &mut blocker_codes,
+        &execution,
+        runtime_shape,
+        config.expected_workers,
+    );
     if !cancellation.cancellation_observed {
         blocker_codes.push("cancellation_not_observed".to_string());
     }
@@ -403,6 +425,9 @@ fn summarize_queries(
         report.intermediate_payload_bytes = report
             .intermediate_payload_bytes
             .saturating_add(pipeline.intermediate_payload_bytes);
+        report.columnar_batches = report
+            .columnar_batches
+            .saturating_add(pipeline.columnar_batches);
         report.morsel_count = report.morsel_count.saturating_add(pipeline.morsel_count);
         report.morsel_max_admitted_workers = report
             .morsel_max_admitted_workers
@@ -410,6 +435,27 @@ fn summarize_queries(
         report.morsel_peak_active_workers = report
             .morsel_peak_active_workers
             .max(pipeline.morsel_peak_active_workers);
+        report.morsel_peak_buffered_outputs = report
+            .morsel_peak_buffered_outputs
+            .max(pipeline.morsel_peak_buffered_outputs);
+        report.morsel_peak_buffered_output_bytes = report
+            .morsel_peak_buffered_output_bytes
+            .max(pipeline.morsel_peak_buffered_output_bytes);
+        report.morsel_peak_reorder_entries = report
+            .morsel_peak_reorder_entries
+            .max(pipeline.morsel_peak_reorder_entries);
+        report.query_memory_peak_bytes = report
+            .query_memory_peak_bytes
+            .max(pipeline.query_memory_peak_bytes);
+        report.query_memory_completion_bytes = report
+            .query_memory_completion_bytes
+            .max(pipeline.query_memory_completion_bytes);
+        for operator in &query.execution_profile.blocking_operator_memory_reports {
+            report.spilled_bytes = report.spilled_bytes.saturating_add(operator.spilled_bytes);
+            report.spill_run_count = report
+                .spill_run_count
+                .saturating_add(operator.spill_run_count);
+        }
         report.steady_resident_bytes =
             max_option(report.steady_resident_bytes, pipeline.steady_resident_bytes);
         report.peak_resident_bytes =
@@ -433,6 +479,48 @@ fn summarize_queries(
     report
 }
 
+fn append_execution_shape_blockers(
+    blocker_codes: &mut Vec<String>,
+    execution: &ProductionMorselExecutionReport,
+    runtime_shape: ProductionMorselRuntimeShape,
+    expected_workers: usize,
+) {
+    if execution.columnar_batches == 0 || execution.morsel_count == 0 {
+        blocker_codes.push("columnar_morsel_fragment_not_observed".to_string());
+    }
+    if execution.morsel_max_admitted_workers != expected_workers {
+        blocker_codes.push("morsel_admitted_worker_count_mismatch".to_string());
+    }
+    if execution.morsel_peak_active_workers != expected_workers {
+        blocker_codes.push("morsel_active_worker_count_mismatch".to_string());
+    }
+    if execution.morsel_peak_buffered_outputs > expected_workers {
+        blocker_codes.push("morsel_output_window_exceeded".to_string());
+    }
+    if execution.morsel_peak_reorder_entries > expected_workers {
+        blocker_codes.push("morsel_reorder_window_exceeded".to_string());
+    }
+    let output_window_budget = runtime_shape
+        .batch_payload_budget_bytes
+        .saturating_mul(u64::try_from(expected_workers).unwrap_or(u64::MAX));
+    if u64::try_from(execution.morsel_peak_buffered_output_bytes).unwrap_or(u64::MAX)
+        > output_window_budget
+    {
+        blocker_codes.push("morsel_output_bytes_exceeded".to_string());
+    }
+    if u64::try_from(execution.query_memory_peak_bytes).unwrap_or(u64::MAX)
+        > runtime_shape.query_memory_budget_bytes
+    {
+        blocker_codes.push("query_memory_budget_exceeded".to_string());
+    }
+    if execution.query_memory_completion_bytes != 0 {
+        blocker_codes.push("query_memory_not_released".to_string());
+    }
+    if execution.spilled_bytes != 0 || execution.spill_run_count != 0 {
+        blocker_codes.push("morsel_pipeline_spilled".to_string());
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ProductionMorselMatrixPolicy {
     pub min_throughput_gain_per_million: u32,
@@ -448,6 +536,10 @@ pub struct ProductionMorselMatrixSample {
     pub p99_micros: u64,
     pub peak_resident_bytes: Option<u64>,
     pub cancellation_latency_micros: u64,
+    pub morsel_peak_buffered_outputs: usize,
+    pub morsel_peak_buffered_output_bytes: usize,
+    pub morsel_peak_reorder_entries: usize,
+    pub query_memory_peak_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -586,6 +678,10 @@ pub fn evaluate_production_morsel_matrix(
             p99_micros: report.execution.latency.p99_micros,
             peak_resident_bytes: report.execution.peak_resident_bytes,
             cancellation_latency_micros: report.cancellation.latency_micros,
+            morsel_peak_buffered_outputs: report.execution.morsel_peak_buffered_outputs,
+            morsel_peak_buffered_output_bytes: report.execution.morsel_peak_buffered_output_bytes,
+            morsel_peak_reorder_entries: report.execution.morsel_peak_reorder_entries,
+            query_memory_peak_bytes: report.execution.query_memory_peak_bytes,
         })
         .collect();
 
@@ -770,6 +866,44 @@ mod tests {
             .blocker_codes
             .iter()
             .any(|code| code == "worker_16_throughput_did_not_improve"));
+    }
+
+    #[test]
+    fn execution_shape_rejects_unbounded_or_replayed_morsel_evidence() {
+        let runtime_shape = ProductionMorselRuntimeShape {
+            query_memory_budget_bytes: 1_024,
+            batch_payload_budget_bytes: 100,
+            ..ProductionMorselRuntimeShape::default()
+        };
+        let execution = ProductionMorselExecutionReport {
+            columnar_batches: 1,
+            morsel_count: 1,
+            morsel_max_admitted_workers: 4,
+            morsel_peak_active_workers: 4,
+            morsel_peak_buffered_outputs: 5,
+            morsel_peak_buffered_output_bytes: 401,
+            morsel_peak_reorder_entries: 5,
+            query_memory_peak_bytes: 1_025,
+            query_memory_completion_bytes: 1,
+            spilled_bytes: 1,
+            spill_run_count: 1,
+            ..ProductionMorselExecutionReport::default()
+        };
+        let mut blockers = Vec::new();
+
+        append_execution_shape_blockers(&mut blockers, &execution, runtime_shape, 4);
+
+        assert_eq!(
+            blockers,
+            [
+                "morsel_output_window_exceeded",
+                "morsel_reorder_window_exceeded",
+                "morsel_output_bytes_exceeded",
+                "query_memory_budget_exceeded",
+                "query_memory_not_released",
+                "morsel_pipeline_spilled",
+            ]
+        );
     }
 
     #[test]
