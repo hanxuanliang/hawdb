@@ -138,6 +138,13 @@ impl GraphStore {
                     required_properties,
                     consumer,
                 ),
+            skein_plan::NodeProjectionAccess::CompositeRange { seek } => self
+                .visit_projected_nodes_by_composite_range_owned(
+                    label_id,
+                    seek,
+                    required_properties,
+                    consumer,
+                ),
             skein_plan::NodeProjectionAccess::PropertyRange {
                 property,
                 lower,
@@ -1319,6 +1326,183 @@ impl GraphStore {
                     == GraphScanControl::Stop
             {
                 return Ok(GraphScanControl::Stop);
+            }
+        }
+        Ok(GraphScanControl::Continue)
+    }
+
+    pub fn visit_nodes_by_composite_range_owned(
+        &self,
+        label_id: LabelId,
+        seek: &skein_plan::CompositeRangeSeek,
+        mut consumer: impl FnMut(NodeRecord) -> GraphScanControl,
+    ) -> Result<GraphScanControl> {
+        validate_composite_range_seek(seek)?;
+        if let (Some(reader), Some(projection)) = (
+            self.canonical_base.as_ref(),
+            self.persistent_property_projection.as_ref(),
+        ) && projection
+            .manifest()
+            .supports_composite_equality(label_id, &seek.index_properties)
+        {
+            let equality_values = seek
+                .equality_prefix
+                .iter()
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>();
+            let mut graph_control = GraphScanControl::Continue;
+            let (report, projection_control) = projection
+                .scan_composite_range_candidates(
+                    label_id,
+                    &seek.index_properties,
+                    &equality_values,
+                    seek.lower.as_ref(),
+                    seek.upper.as_ref(),
+                    |node_id| {
+                        if self.node_tombstones.contains(&node_id)
+                            || self.nodes.contains_key(&node_id)
+                        {
+                            return Ok(CanonicalScanControl::Continue);
+                        }
+                        let node = reader.get_node(node_id)?.ok_or_else(|| {
+                            PersistentPropertyProjectionError::Corrupt(format!(
+                                "composite range projection references missing canonical node {}",
+                                node_id.0
+                            ))
+                        })?;
+                        if !node.labels.contains(&label_id)
+                            || !node_matches_composite_range(&node, seek)
+                        {
+                            return Err(PersistentPropertyProjectionError::Corrupt(format!(
+                                "composite range projection candidate {} fails its canonical predicate",
+                                node_id.0
+                            )));
+                        }
+                        if consumer(node) == GraphScanControl::Stop {
+                            graph_control = GraphScanControl::Stop;
+                            return Ok(CanonicalScanControl::Stop);
+                        }
+                        Ok(CanonicalScanControl::Continue)
+                    },
+                )
+                .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+            self.graph_index_read_metrics
+                .record_property(PersistentGraphIndexClass::NodeCompositeEquality, report);
+            if projection_control == CanonicalScanControl::Stop {
+                return Ok(graph_control);
+            }
+            for node in self.nodes.values() {
+                if node.labels.contains(&label_id)
+                    && node_matches_composite_range(node, seek)
+                    && consumer(node.clone()) == GraphScanControl::Stop
+                {
+                    return Ok(GraphScanControl::Stop);
+                }
+            }
+            return Ok(GraphScanControl::Continue);
+        }
+
+        let (first_property, first_value) = seek
+            .equality_prefix
+            .first()
+            .expect("validated composite range equality prefix");
+        self.visit_nodes_by_property_owned(
+            label_id,
+            first_property,
+            std::slice::from_ref(first_value),
+            |node| {
+                if node_matches_composite_range(&node, seek) {
+                    consumer(node)
+                } else {
+                    GraphScanControl::Continue
+                }
+            },
+        )
+    }
+
+    fn visit_projected_nodes_by_composite_range_owned(
+        &self,
+        label_id: LabelId,
+        seek: &skein_plan::CompositeRangeSeek,
+        required_properties: &BTreeSet<String>,
+        mut consumer: impl FnMut(ProjectedNodeRecord) -> GraphScanControl,
+    ) -> Result<GraphScanControl> {
+        validate_composite_range_seek(seek)?;
+        let Some((reader, projection)) = self
+            .canonical_base
+            .as_ref()
+            .zip(self.persistent_property_projection.as_ref())
+            .filter(|(_, projection)| {
+                projection
+                    .manifest()
+                    .supports_composite_equality(label_id, &seek.index_properties)
+            })
+        else {
+            return self.visit_nodes_by_composite_range_owned(label_id, seek, |node| {
+                consumer(project_node_record(node, required_properties))
+            });
+        };
+
+        let mut decode_properties = required_properties.clone();
+        decode_properties.extend(
+            seek.equality_prefix
+                .iter()
+                .map(|(property, _)| property.clone()),
+        );
+        decode_properties.insert(seek.range_property.clone());
+        let equality_values = seek
+            .equality_prefix
+            .iter()
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+        let mut graph_control = GraphScanControl::Continue;
+        let (report, projection_control) = projection
+            .scan_composite_range_candidates(
+                label_id,
+                &seek.index_properties,
+                &equality_values,
+                seek.lower.as_ref(),
+                seek.upper.as_ref(),
+                |node_id| {
+                    if self.node_tombstones.contains(&node_id) || self.nodes.contains_key(&node_id)
+                    {
+                        return Ok(CanonicalScanControl::Continue);
+                    }
+                    let node = reader
+                        .get_projected_node(node_id, &decode_properties)?
+                        .ok_or_else(|| {
+                            PersistentPropertyProjectionError::Corrupt(format!(
+                                "composite range projection references missing canonical node {}",
+                                node_id.0
+                            ))
+                        })?;
+                    if !node.labels.contains(&label_id)
+                        || !projected_node_matches_composite_range(&node, seek)
+                    {
+                        return Err(PersistentPropertyProjectionError::Corrupt(format!(
+                            "composite range projection candidate {} fails its canonical predicate",
+                            node_id.0
+                        )));
+                    }
+                    if consumer(node) == GraphScanControl::Stop {
+                        graph_control = GraphScanControl::Stop;
+                        return Ok(CanonicalScanControl::Stop);
+                    }
+                    Ok(CanonicalScanControl::Continue)
+                },
+            )
+            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+        self.graph_index_read_metrics
+            .record_property(PersistentGraphIndexClass::NodeCompositeEquality, report);
+        if projection_control == CanonicalScanControl::Stop {
+            return Ok(graph_control);
+        }
+        for node in self.nodes.values() {
+            if node.labels.contains(&label_id) && node_matches_composite_range(node, seek) {
+                let node = project_node_record(node.clone(), &decode_properties);
+                if consumer(node) == GraphScanControl::Stop {
+                    return Ok(GraphScanControl::Stop);
+                }
             }
         }
         Ok(GraphScanControl::Continue)
@@ -3066,6 +3250,48 @@ fn project_node_record(
         labels: node.labels,
         properties,
     }
+}
+
+fn validate_composite_range_seek(seek: &skein_plan::CompositeRangeSeek) -> Result<()> {
+    let prefix_len = seek.equality_prefix.len();
+    if prefix_len == 0
+        || prefix_len >= seek.index_properties.len()
+        || seek
+            .equality_prefix
+            .iter()
+            .map(|(property, _)| property)
+            .ne(seek.index_properties.iter().take(prefix_len))
+        || seek.index_properties[prefix_len] != seek.range_property
+        || (seek.lower.is_none() && seek.upper.is_none())
+    {
+        return Err(SkeinError::Execution(
+            "invalid composite range seek shape".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn node_matches_composite_range(node: &NodeRecord, seek: &skein_plan::CompositeRangeSeek) -> bool {
+    properties_match_composite_range(&node.properties, seek)
+}
+
+fn projected_node_matches_composite_range(
+    node: &ProjectedNodeRecord,
+    seek: &skein_plan::CompositeRangeSeek,
+) -> bool {
+    properties_match_composite_range(&node.properties, seek)
+}
+
+fn properties_match_composite_range(
+    properties: &BTreeMap<String, Value>,
+    seek: &skein_plan::CompositeRangeSeek,
+) -> bool {
+    seek.equality_prefix
+        .iter()
+        .all(|(property, value)| properties.get(property) == Some(value))
+        && properties.get(&seek.range_property).is_some_and(|value| {
+            range_bounds_match(value, seek.lower.as_ref(), seek.upper.as_ref())
+        })
 }
 
 fn ordered_relationship_key(

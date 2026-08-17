@@ -1589,6 +1589,87 @@ fn composite_index_ddl_enables_composite_index_seek_plans() {
 }
 
 #[test]
+fn composite_index_uses_leading_equalities_and_next_column_range() {
+    let mut db = Database::new();
+    for created_at in 0..64 {
+        let kind = if created_at < 48 { "note" } else { "archive" };
+        db.query(&format!(
+            "CREATE (:Memory {{id: 'memory-{created_at}', kind: '{kind}', created_at: {created_at}, payload: '{}'}})",
+            "x".repeat(1024)
+        ))
+        .unwrap();
+    }
+    db.query("CREATE INDEX ON :Memory(kind, created_at)")
+        .unwrap();
+    let cypher = "MATCH (m:Memory) WHERE m.kind = 'note' AND m.created_at >= $lower AND m.created_at <= $upper RETURN m.created_at AS created_at ORDER BY created_at ASC";
+    let parameters = BTreeMap::from([
+        ("lower".to_string(), Value::Int(10)),
+        ("upper".to_string(), Value::Int(20)),
+    ]);
+
+    let explain = db.explain_query_with_params(cypher, &parameters).unwrap();
+    let physical_plan = explain.physical_plan.explain(0);
+    assert!(physical_plan.contains("IndexNodeCompositeRangeSeek"));
+    assert!(physical_plan.contains("NodeProjectionScanExec"));
+    assert!(!physical_plan.contains("payload"));
+    assert!(explain.trace.decisions.iter().any(|decision| {
+        decision.contains("choose IndexNodeCompositeRangeSeek")
+            && decision.contains("equality_prefix_len=1")
+    }));
+
+    let output = db.query_with_params(cypher, &parameters).unwrap();
+    assert_eq!(
+        output
+            .rows
+            .iter()
+            .map(|row| row.get("created_at").cloned().unwrap())
+            .collect::<Vec<_>>(),
+        (10..=20).map(Value::Int).collect::<Vec<_>>()
+    );
+
+    let rebound = db
+        .query_with_params(
+            cypher,
+            &BTreeMap::from([
+                ("lower".to_string(), Value::Int(30)),
+                ("upper".to_string(), Value::Int(31)),
+            ]),
+        )
+        .unwrap();
+    assert_eq!(
+        rebound
+            .rows
+            .iter()
+            .map(|row| row.get("created_at").cloned().unwrap())
+            .collect::<Vec<_>>(),
+        vec![Value::Int(30), Value::Int(31)]
+    );
+}
+
+#[test]
+fn composite_range_requires_a_leading_equality_prefix() {
+    let mut db = Database::new();
+    for created_at in 0..32 {
+        db.query(&format!(
+            "CREATE (:Memory {{kind: 'note', created_at: {created_at}}})"
+        ))
+        .unwrap();
+    }
+    db.query("CREATE INDEX ON :Memory(kind, created_at)")
+        .unwrap();
+
+    let explain = db
+        .explain_query(
+            "MATCH (m:Memory) WHERE m.created_at >= 10 RETURN m.created_at AS created_at",
+        )
+        .unwrap();
+    assert!(!explain
+        .physical_plan
+        .explain(0)
+        .contains("IndexNodeCompositeRangeSeek"));
+}
+
+#[test]
 fn full_text_index_ddl_enables_text_seek_plans() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 1, title: 'Graph foundations'})")

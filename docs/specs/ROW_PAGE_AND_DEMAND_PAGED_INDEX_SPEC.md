@@ -92,10 +92,15 @@ Physical-plan finalization MAY fuse a scalar `Project` with a node access path
 only when every projected expression and residual predicate can be evaluated
 from one node variable. The fused operator MUST retain the selected access
 class: label scan, equality/multi-seek, ordered composite equality, range, or
-full-text. Exact disjunctions over two or more indexed properties MAY retain a
-bounded equality-union access path. The optimizer MUST decline that path when
-any branch is not indexed or when the deduplicated lookup-value count exceeds
-64. Its required-property set is the union of projected properties,
+full-text. An ordered composite index MAY also serve a range seek only when the
+query binds a non-empty contiguous equality prefix and constrains the
+immediately following index property with at least one range bound. A missing
+leading property or a gap between the equality prefix and range property MUST
+decline the composite path. Trailing index properties are not required data.
+Exact disjunctions over two or more indexed properties MAY retain a bounded
+equality-union access path. The optimizer MUST decline that path when any
+branch is not indexed or when the deduplicated lookup-value count exceeds 64.
+Its required-property set is the union of projected properties,
 residual-predicate properties, and access-validation properties. It MUST NOT
 decode an unrelated property merely because that property is present on the
 canonical row.

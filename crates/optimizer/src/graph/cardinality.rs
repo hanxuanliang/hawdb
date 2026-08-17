@@ -224,6 +224,12 @@ fn estimate_node_property_filter_rows(
 ) -> Option<u64> {
     match predicate {
         Predicate::And(predicates) => {
+            if predicates
+                .iter()
+                .all(|predicate| exact_property_predicate_is_covered(predicate, input))
+            {
+                return Some(input_rows);
+            }
             let mut rows = input_rows;
             let mut matched = false;
             for predicate in predicates {
@@ -300,8 +306,15 @@ fn estimate_node_property_filter_rows(
             variable,
             property,
             values,
-        } => physical_plan_node_label(input, variable)
-            .map(|label| catalog.estimate_property_in_rows(label, property, values, input_rows)),
+        } => {
+            if physical_plan_access_path_covers_property(input, variable, property) {
+                None
+            } else {
+                physical_plan_node_label(input, variable).map(|label| {
+                    catalog.estimate_property_in_rows(label, property, values, input_rows)
+                })
+            }
+        }
         Predicate::PropertyContains {
             variable, property, ..
         } => {
@@ -341,6 +354,9 @@ fn exact_property_predicate_is_covered(predicate: &Predicate, input: &PhysicalPl
             variable, property, ..
         }
         | Predicate::PropertyIn {
+            variable, property, ..
+        }
+        | Predicate::PropertyCompare {
             variable, property, ..
         } => physical_plan_access_path_covers_property(input, variable, property),
         _ => false,
@@ -382,6 +398,18 @@ fn physical_plan_access_path_covers_property(
                 && predicates
                     .iter()
                     .any(|(plan_property, _)| plan_property == property)
+        }
+        PhysicalPlan::IndexNodeCompositeRangeSeek {
+            variable: plan_variable,
+            seek,
+            ..
+        } => {
+            plan_variable == variable
+                && (seek.range_property == property
+                    || seek
+                        .equality_prefix
+                        .iter()
+                        .any(|(plan_property, _)| plan_property == property))
         }
         PhysicalPlan::IndexNodeUnionSeek {
             variable: plan_variable,
@@ -430,6 +458,11 @@ fn physical_plan_node_label<'a>(plan: &'a PhysicalPlan, variable: &str) -> Optio
             ..
         }
         | PhysicalPlan::IndexNodeCompositeSeek {
+            variable: plan_variable,
+            label,
+            ..
+        }
+        | PhysicalPlan::IndexNodeCompositeRangeSeek {
             variable: plan_variable,
             label,
             ..

@@ -577,6 +577,162 @@ fn composite_projection_preserves_index_access_and_residual_validation() {
 }
 
 #[test]
+fn composite_range_projection_uses_a_contiguous_equality_prefix() {
+    let predicate = Predicate::And(vec![
+        Predicate::PropertyEq {
+            variable: "m".to_string(),
+            property: "space_id".to_string(),
+            value: Value::String("space:1".to_string()),
+        },
+        Predicate::PropertyCompare {
+            variable: "m".to_string(),
+            property: "created_at".to_string(),
+            op: skein_plan::ComparisonOp::Gte,
+            value: Value::Int(100),
+        },
+        Predicate::PropertyCompare {
+            variable: "m".to_string(),
+            property: "created_at".to_string(),
+            op: skein_plan::ComparisonOp::Lt,
+            value: Value::Int(200),
+        },
+    ]);
+    let logical = LogicalPlan::Project {
+        items: vec![Projection {
+            expression: ProjectionExpression::Property {
+                variable: "m".to_string(),
+                property: "title".to_string(),
+            },
+            name: "title".to_string(),
+        }],
+        input: Box::new(LogicalPlan::Filter {
+            predicate: predicate.clone(),
+            input: Box::new(LogicalPlan::NodeScan {
+                variable: "m".to_string(),
+                label: "Memory".to_string(),
+            }),
+        }),
+    };
+    let index_properties = vec![
+        "space_id".to_string(),
+        "created_at".to_string(),
+        "stable_id".to_string(),
+    ];
+    let catalog = OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new(
+            [],
+            [("Memory".to_string(), index_properties.clone())],
+            [],
+            [],
+        ),
+        OptimizerCatalogStatistics::new(
+            [("Memory".to_string(), 100_000)],
+            [],
+            [],
+            [],
+            [],
+            [(("Memory".to_string(), "space_id".to_string()), 1_000)],
+            [],
+        ),
+    );
+
+    let (plan, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+        .optimize_with_catalog(&logical, &catalog);
+
+    assert!(matches!(
+        plan,
+        PhysicalPlan::NodeProjectionScanExec {
+            access: NodeProjectionAccess::CompositeRange { seek },
+            required_properties,
+            predicate: Some(residual),
+            ..
+        } if seek.index_properties == index_properties
+            && seek.equality_prefix
+                == vec![(
+                    "space_id".to_string(),
+                    Value::String("space:1".to_string()),
+                )]
+            && seek.range_property == "created_at"
+            && seek.lower == Some((Value::Int(100), true))
+            && seek.upper == Some((Value::Int(200), false))
+            && required_properties
+                == vec![
+                    "created_at".to_string(),
+                    "space_id".to_string(),
+                    "title".to_string(),
+                ]
+            && residual == predicate
+    ));
+    assert!(trace
+        .rule_events
+        .iter()
+        .any(|event| event.rule() == "implementation:node_composite_range_seek"));
+}
+
+#[test]
+fn composite_range_projection_rejects_a_gap_in_the_index_prefix() {
+    let logical = LogicalPlan::Filter {
+        predicate: Predicate::And(vec![
+            Predicate::PropertyEq {
+                variable: "m".to_string(),
+                property: "space_id".to_string(),
+                value: Value::String("space:1".to_string()),
+            },
+            Predicate::PropertyCompare {
+                variable: "m".to_string(),
+                property: "created_at".to_string(),
+                op: skein_plan::ComparisonOp::Gte,
+                value: Value::Int(100),
+            },
+        ]),
+        input: Box::new(LogicalPlan::NodeScan {
+            variable: "m".to_string(),
+            label: "Memory".to_string(),
+        }),
+    };
+    let catalog = OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new(
+            [],
+            [(
+                "Memory".to_string(),
+                vec![
+                    "space_id".to_string(),
+                    "kind".to_string(),
+                    "created_at".to_string(),
+                ],
+            )],
+            [],
+            [],
+        ),
+        OptimizerCatalogStatistics::new(
+            [("Memory".to_string(), 100_000)],
+            [],
+            [],
+            [],
+            [],
+            [(("Memory".to_string(), "space_id".to_string()), 1_000)],
+            [],
+        ),
+    );
+
+    let (plan, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+        .optimize_with_catalog(&logical, &catalog);
+
+    assert!(!matches!(
+        plan,
+        PhysicalPlan::IndexNodeCompositeRangeSeek { .. }
+            | PhysicalPlan::NodeProjectionScanExec {
+                access: NodeProjectionAccess::CompositeRange { .. },
+                ..
+            }
+    ));
+    assert!(!trace
+        .rule_events
+        .iter()
+        .any(|event| event.rule() == "implementation:node_composite_range_seek"));
+}
+
+#[test]
 fn optimizer_trace_reports_physical_plan_operator_and_class_counts() {
     let logical = LogicalPlan::Project {
         items: vec![Projection {

@@ -649,12 +649,18 @@ canonical records after checkpoint load or WAL replay. The optimizer can choose
 equality index descriptor exists, `IndexNodeUnionSeek` for bounded exact `OR`
 predicates only when every property branch has an equality descriptor,
 `IndexNodeCompositeSeek` for conjunctions
-that bind every property in a composite equality descriptor, `IndexNodeTextSeek`
+that bind every property in a composite equality descriptor,
+`IndexNodeCompositeRangeSeek` for a non-empty contiguous equality prefix plus
+a range on the immediately following composite property, `IndexNodeTextSeek`
 for `CONTAINS` predicates backed by a full-text descriptor, and
 `IndexNodeRangeSeek` for single-bound and conjunctive bounded range predicates
 when a range index descriptor exists. Text seeks use the ngram index only as a
 candidate source and retain a residual `FilterExec` so exact string containment
-semantics remain authoritative. Composite and full-text execution projections
+semantics remain authoritative. Composite range scans prune immutable
+projection blocks by ordered tuple bounds, validate every candidate against the
+canonical row, and merge the COW/WAL overlay before output. A gap in the index
+prefix declines this access path rather than reading a misleading partial
+projection. Composite and full-text execution projections
 can be rebuilt through `Database::rebuild_bounded_property_index_projections`,
 which applies complete descriptor rebuilds that fit a caller-supplied operation
 budget and reports estimated operations plus indexed entry counts without

@@ -92,6 +92,118 @@ pub(super) fn exact_union_index_seek_candidate(
     ))
 }
 
+pub(super) fn composite_range_index_seek_candidate(
+    predicates: &[Predicate],
+    full_predicate: &Predicate,
+    scan_variable: &str,
+    label: &str,
+    catalog: &OptimizerCatalog,
+) -> Option<(PhysicalPlan, String)> {
+    let mut equality_values = BTreeMap::<String, Value>::new();
+    let mut ranges = BTreeMap::<String, ValueRangeBounds>::new();
+    for predicate in predicates {
+        match predicate {
+            Predicate::PropertyEq {
+                variable,
+                property,
+                value,
+            } if variable == scan_variable => {
+                equality_values.insert(property.clone(), value.clone());
+            }
+            Predicate::PropertyCompare {
+                variable,
+                property,
+                op,
+                value,
+            } if variable == scan_variable => {
+                let (candidate_lower, candidate_upper) =
+                    range_bounds_for_comparison(*op, value.clone());
+                let (lower, upper) = ranges.entry(property.clone()).or_default();
+                merge_lower_bound(lower, candidate_lower);
+                merge_upper_bound(upper, candidate_upper);
+            }
+            _ => {}
+        }
+    }
+
+    let label_count = catalog.label_count(label);
+    let scan_cost = estimate_node_full_scan_cost(label_count);
+    let mut best: Option<(u64, PhysicalPlan, String)> = None;
+    for index_properties in catalog.composite_property_indexes_for_label(label) {
+        if index_properties.len() < 2
+            || !catalog.has_composite_property_index(label, &index_properties)
+        {
+            continue;
+        }
+        let equality_prefix = index_properties
+            .iter()
+            .take_while(|property| equality_values.contains_key(*property))
+            .map(|property| {
+                (
+                    property.clone(),
+                    equality_values
+                        .get(property)
+                        .expect("checked equality prefix")
+                        .clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if equality_prefix.is_empty() || equality_prefix.len() == index_properties.len() {
+            continue;
+        }
+        let range_property = &index_properties[equality_prefix.len()];
+        let Some((lower, upper)) = ranges.get(range_property) else {
+            continue;
+        };
+        let equality_properties = equality_prefix
+            .iter()
+            .map(|(property, _)| property.clone())
+            .collect::<Vec<_>>();
+        let estimated_rows = catalog.estimate_composite_prefix_range_rows(
+            label,
+            &index_properties,
+            &equality_properties,
+            range_property,
+            lower.as_ref(),
+            upper.as_ref(),
+        );
+        let seek_cost = estimate_node_index_seek_cost(
+            estimated_rows,
+            equality_prefix.len().saturating_add(1) as u64,
+        );
+        if !node_index_seek_is_cheaper(label_count, seek_cost) {
+            continue;
+        }
+        let seek = CompositeRangeSeek {
+            index_properties: index_properties.clone(),
+            equality_prefix,
+            range_property: range_property.clone(),
+            lower: lower.clone(),
+            upper: upper.clone(),
+        };
+        let decision = format!(
+            "choose IndexNodeCompositeRangeSeek for {label}.{:?}: seek_cost={seek_cost} scan_cost={scan_cost} label_count={label_count} estimated_rows={estimated_rows} equality_prefix_len={}",
+            index_properties,
+            seek.equality_prefix.len(),
+        );
+        let plan = PhysicalPlan::FilterExec {
+            predicate: full_predicate.clone(),
+            input: Box::new(PhysicalPlan::IndexNodeCompositeRangeSeek {
+                variable: scan_variable.to_string(),
+                label: label.to_string(),
+                seek,
+            }),
+        };
+        if best
+            .as_ref()
+            .is_none_or(|(best_cost, _, _)| seek_cost < *best_cost)
+        {
+            best = Some((seek_cost, plan, decision));
+        }
+    }
+    best.map(|(_, plan, decision)| (plan, decision))
+}
+
 pub(super) fn index_seek_from_conjunction(
     predicates: &[Predicate],
     full_predicate: &Predicate,
@@ -101,6 +213,17 @@ pub(super) fn index_seek_from_conjunction(
     decisions: &mut Vec<String>,
     stage_events: &mut Vec<StageTrace>,
 ) -> Option<PhysicalPlan> {
+    if let Some(plan) = composite_range_index_seek_from_conjunction(
+        predicates,
+        full_predicate,
+        scan_variable,
+        label,
+        catalog,
+        decisions,
+        stage_events,
+    ) {
+        return Some(plan);
+    }
     if let Some(plan) = equality_index_seek_from_conjunction(
         predicates,
         full_predicate,
@@ -121,6 +244,41 @@ pub(super) fn index_seek_from_conjunction(
         decisions,
         stage_events,
     )
+}
+
+fn composite_range_index_seek_from_conjunction(
+    predicates: &[Predicate],
+    full_predicate: &Predicate,
+    scan_variable: &str,
+    label: &str,
+    catalog: &OptimizerCatalog,
+    decisions: &mut Vec<String>,
+    stage_events: &mut Vec<StageTrace>,
+) -> Option<PhysicalPlan> {
+    let logical_scan = LogicalPlan::NodeScan {
+        variable: scan_variable.to_string(),
+        label: label.to_string(),
+    };
+    if let Some(plan) = composite_range_index_seek_from_rule(
+        full_predicate,
+        &logical_scan,
+        catalog,
+        decisions,
+        stage_events,
+    ) {
+        return Some(plan);
+    }
+    if let Some((plan, decision)) = composite_range_index_seek_candidate(
+        predicates,
+        full_predicate,
+        scan_variable,
+        label,
+        catalog,
+    ) {
+        decisions.push(decision);
+        return Some(plan);
+    }
+    None
 }
 
 fn equality_index_seek_from_conjunction(

@@ -511,6 +511,18 @@ fn execute_binding_batches_inner(
                 store.visit_nodes_by_composite_property_owned(label_id, predicates, consumer)
             })
         }
+        PhysicalPlan::IndexNodeCompositeRangeSeek {
+            variable,
+            label,
+            seek,
+        } => {
+            let Some(label_id) = catalog.label_id(label) else {
+                return Ok(BatchControl::Continue);
+            };
+            stream_visited_node_batches(variable, context, execution_limit, emit, |consumer| {
+                store.visit_nodes_by_composite_range_owned(label_id, seek, consumer)
+            })
+        }
         PhysicalPlan::IndexNodeRangeSeek {
             variable,
             label,

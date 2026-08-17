@@ -379,6 +379,15 @@ impl PhysicalPlan {
                     "{pad}IndexNodeCompositeSeek variable={variable} label={label} predicates={predicates:?}"
                 )
             }
+            PhysicalPlan::IndexNodeCompositeRangeSeek {
+                variable,
+                label,
+                seek,
+            } => {
+                format!(
+                    "{pad}IndexNodeCompositeRangeSeek variable={variable} label={label} seek={seek:?}"
+                )
+            }
             PhysicalPlan::IndexNodeRangeSeek {
                 variable,
                 label,

@@ -433,8 +433,8 @@ batches remain charged until synchronous emission. `DistinctExec` uses ordered
 spill runs followed by bounded merge deduplication. `NodeCartesianProductExec`
 partitions an oversized build side into bounded spill runs and replays those
 runs for each streamed probe row.
-Sequential node scans and property, bounded property-union, composite, range,
-and text index scans MUST
+Sequential node scans and property, bounded property-union, composite equality,
+composite prefix-range, single-property range, and text index scans MUST
 admit each retained row to a query-rooted pipeline batch before insertion. The
 batch MUST flush at the first row-count or resident-byte boundary and MUST keep
 the stable `batch_payload_bytes` rejection for a single oversized row. A

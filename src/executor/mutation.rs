@@ -888,6 +888,7 @@ pub fn mutation_command(plan: &PhysicalPlan) -> Result<Option<GraphMutation>> {
         | PhysicalPlan::IndexNodeMultiSeek { .. }
         | PhysicalPlan::IndexNodeUnionSeek { .. }
         | PhysicalPlan::IndexNodeCompositeSeek { .. }
+        | PhysicalPlan::IndexNodeCompositeRangeSeek { .. }
         | PhysicalPlan::IndexNodeRangeSeek { .. }
         | PhysicalPlan::IndexNodeTextSeek { .. }
         | PhysicalPlan::AdjacencyExpandExec { .. }

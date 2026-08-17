@@ -78,6 +78,9 @@ impl PhysicalPlan {
             PhysicalPlan::IndexNodeMultiSeek { .. } => PhysicalPlanKind::IndexNodeMultiSeek,
             PhysicalPlan::IndexNodeUnionSeek { .. } => PhysicalPlanKind::IndexNodeUnionSeek,
             PhysicalPlan::IndexNodeCompositeSeek { .. } => PhysicalPlanKind::IndexNodeCompositeSeek,
+            PhysicalPlan::IndexNodeCompositeRangeSeek { .. } => {
+                PhysicalPlanKind::IndexNodeCompositeRangeSeek
+            }
             PhysicalPlan::IndexNodeRangeSeek { .. } => PhysicalPlanKind::IndexNodeRangeSeek,
             PhysicalPlan::IndexNodeTextSeek { .. } => PhysicalPlanKind::IndexNodeTextSeek,
             PhysicalPlan::AdjacencyExpandExec { .. } => PhysicalPlanKind::AdjacencyExpandExec,
@@ -160,6 +163,7 @@ impl PhysicalPlan {
             | PhysicalPlan::IndexNodeMultiSeek { .. }
             | PhysicalPlan::IndexNodeUnionSeek { .. }
             | PhysicalPlan::IndexNodeCompositeSeek { .. }
+            | PhysicalPlan::IndexNodeCompositeRangeSeek { .. }
             | PhysicalPlan::IndexNodeRangeSeek { .. }
             | PhysicalPlan::IndexNodeTextSeek { .. }
             | PhysicalPlan::OptionalRelationshipCountSumExec { .. }

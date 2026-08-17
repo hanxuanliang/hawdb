@@ -113,6 +113,22 @@ pub(super) fn selected_plan_properties(plan: &PhysicalPlan) -> PhysicalPropertie
             memory_budget: MemoryBudgetClass::RowLinear,
             ..PhysicalProperties::default()
         },
+        PhysicalPlan::IndexNodeCompositeRangeSeek { label, seek, .. } => PhysicalProperties {
+            distribution: Distribution::Single,
+            covering_fields: seek
+                .equality_prefix
+                .iter()
+                .map(|(property, _)| plan_property_key(label, property))
+                .chain(std::iter::once(plan_property_key(
+                    label,
+                    &seek.range_property,
+                )))
+                .collect(),
+            scan_pruning: ScanPruningSupport::Index,
+            vector_precision: VectorPrecision::NotVector,
+            memory_budget: MemoryBudgetClass::RowLinear,
+            ..PhysicalProperties::default()
+        },
         PhysicalPlan::IndexNodeUnionSeek {
             label, branches, ..
         } => PhysicalProperties {

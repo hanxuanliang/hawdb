@@ -34,6 +34,16 @@ pub struct ExactPropertySeekBranch {
     pub values: Vec<Value>,
 }
 
+/// Leading equalities followed by one bounded range on an ordered composite index.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompositeRangeSeek {
+    pub index_properties: Vec<String>,
+    pub equality_prefix: Vec<(String, Value)>,
+    pub range_property: String,
+    pub lower: Option<(Value, bool)>,
+    pub upper: Option<(Value, bool)>,
+}
+
 /// Candidate source used by a fused scalar node projection.
 ///
 /// Keeping the access path beside the required-property set lets storage
@@ -51,6 +61,9 @@ pub enum NodeProjectionAccess {
     },
     CompositeEquality {
         predicates: Vec<(String, Value)>,
+    },
+    CompositeRange {
+        seek: CompositeRangeSeek,
     },
     PropertyRange {
         property: String,
@@ -74,6 +87,7 @@ impl NodeProjectionAccess {
             Self::PropertyValues { .. } => "property_values",
             Self::PropertyUnion { .. } => "property_union",
             Self::CompositeEquality { .. } => "composite_equality",
+            Self::CompositeRange { .. } => "composite_range",
             Self::PropertyRange { .. } => "property_range",
             Self::FullText { .. } => "full_text",
         }
@@ -87,6 +101,7 @@ impl NodeProjectionAccess {
             Self::PropertyValues { .. } => "IndexNodeMultiSeek",
             Self::PropertyUnion { .. } => "IndexNodeUnionSeek",
             Self::CompositeEquality { .. } => "IndexNodeCompositeSeek",
+            Self::CompositeRange { .. } => "IndexNodeCompositeRangeSeek",
             Self::PropertyRange { .. } => "IndexNodeRangeSeek",
             Self::FullText { .. } => "IndexNodeTextSeek",
         }
@@ -393,6 +408,11 @@ pub enum PhysicalPlan {
         variable: String,
         label: String,
         predicates: Vec<(String, Value)>,
+    },
+    IndexNodeCompositeRangeSeek {
+        variable: String,
+        label: String,
+        seek: CompositeRangeSeek,
     },
     IndexNodeRangeSeek {
         variable: String,

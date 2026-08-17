@@ -10557,6 +10557,10 @@ fn scan_pruning_strategy_json(strategy: &ScanPruningStrategy) -> serde_json::Val
         ScanPruningStrategy::CompositePropertyEq { properties } => {
             serde_json::json!({"kind": "composite_property_eq", "properties": properties})
         }
+        ScanPruningStrategy::CompositePropertyRange { properties } => serde_json::json!({
+            "kind": "composite_property_range",
+            "properties": properties,
+        }),
         ScanPruningStrategy::PropertyRange { property } => {
             serde_json::json!({"kind": "property_range", "property": property})
         }

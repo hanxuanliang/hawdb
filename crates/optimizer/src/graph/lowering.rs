@@ -1247,6 +1247,15 @@ fn node_projection_access(plan: &PhysicalPlan) -> Option<(&String, &String, Node
                 predicates: predicates.clone(),
             },
         )),
+        PhysicalPlan::IndexNodeCompositeRangeSeek {
+            variable,
+            label,
+            seek,
+        } => Some((
+            variable,
+            label,
+            NodeProjectionAccess::CompositeRange { seek: seek.clone() },
+        )),
         PhysicalPlan::IndexNodeRangeSeek {
             variable,
             label,
@@ -1289,6 +1298,14 @@ fn collect_access_properties(access: &NodeProjectionAccess, required: &mut BTree
         }
         NodeProjectionAccess::CompositeEquality { predicates } => {
             required.extend(predicates.iter().map(|(property, _)| property.clone()));
+        }
+        NodeProjectionAccess::CompositeRange { seek } => {
+            required.extend(
+                seek.equality_prefix
+                    .iter()
+                    .map(|(property, _)| property.clone()),
+            );
+            required.insert(seek.range_property.clone());
         }
         NodeProjectionAccess::PropertyUnion { branches } => {
             required.extend(branches.iter().map(|branch| branch.property.clone()));

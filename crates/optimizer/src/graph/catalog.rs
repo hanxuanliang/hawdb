@@ -345,6 +345,33 @@ impl OptimizerCatalog {
             })
     }
 
+    pub(super) fn estimate_composite_prefix_range_rows(
+        &self,
+        label: &str,
+        index_properties: &[String],
+        equality_properties: &[String],
+        range_property: &str,
+        lower: Option<&ValueRangeBound>,
+        upper: Option<&ValueRangeBound>,
+    ) -> u64 {
+        let label_count = self.label_count(label);
+        let equality_distinct = equality_properties
+            .iter()
+            .map(|property| self.distinct_count(label, property).max(1))
+            .fold(1u64, u64::saturating_mul);
+        let equality_rows = label_count.div_ceil(equality_distinct).max(1);
+        let range_rows = self.estimate_range_bounds_rows(label, range_property, lower, upper);
+        let estimated = equality_rows
+            .saturating_mul(range_rows)
+            .div_ceil(label_count)
+            .max(1);
+        self.composite_index_statistics
+            .get(&(label.to_string(), index_properties.to_vec()))
+            .map_or(estimated, |statistics| {
+                estimated.min(statistics.index_size.max(1))
+            })
+    }
+
     pub(super) fn known_distinct_count(&self, label: &str, property: &str) -> Option<u64> {
         self.property_index_statistics
             .get(&(label.to_string(), property.to_string()))

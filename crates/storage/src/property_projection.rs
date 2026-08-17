@@ -1920,6 +1920,51 @@ impl PersistentPropertyProjectionReader {
         )
     }
 
+    pub fn scan_composite_range_candidates(
+        &self,
+        label_id: LabelId,
+        index_properties: &[String],
+        equality_values: &[&Value],
+        lower: Option<&(Value, bool)>,
+        upper: Option<&(Value, bool)>,
+        mut consumer: impl FnMut(
+            NodeId,
+        )
+            -> Result<CanonicalScanControl, PersistentPropertyProjectionError>,
+    ) -> Result<
+        (PersistentPropertyProjectionReadReport, CanonicalScanControl),
+        PersistentPropertyProjectionError,
+    > {
+        if equality_values.is_empty() || equality_values.len() >= index_properties.len() {
+            return Err(PersistentPropertyProjectionError::Source(
+                "composite range projection requires a non-empty leading equality prefix"
+                    .to_string(),
+            ));
+        }
+        if lower.is_none() && upper.is_none() {
+            return Err(PersistentPropertyProjectionError::Source(
+                "composite range projection requires at least one range bound".to_string(),
+            ));
+        }
+        let identity = persistent_composite_property_identity(index_properties)?;
+        self.scan_candidates(
+            label_id,
+            &identity,
+            PersistentPropertyProjectionKind::CompositeEquality,
+            |candidate| composite_range_key_matches(candidate, equality_values, lower, upper),
+            |block| {
+                composite_range_block_might_match(
+                    &block.min_key,
+                    &block.max_key,
+                    equality_values,
+                    lower,
+                    upper,
+                )
+            },
+            &mut consumer,
+        )
+    }
+
     pub fn scan_relationship_equality_candidates(
         &self,
         rel_type: RelTypeId,
@@ -2679,6 +2724,71 @@ fn composite_key_ordering(value: &Value, expected: &[&Value]) -> Option<std::cmp
         }
     }
     Some(values.len().cmp(&expected.len()))
+}
+
+fn composite_range_key_matches(
+    value: &Value,
+    equality_values: &[&Value],
+    lower: Option<&(Value, bool)>,
+    upper: Option<&(Value, bool)>,
+) -> bool {
+    let Value::List(values) = value else {
+        return false;
+    };
+    if values.len() <= equality_values.len()
+        || !values
+            .iter()
+            .zip(equality_values)
+            .all(|(candidate, expected)| candidate == *expected)
+    {
+        return false;
+    }
+    range_bounds_match(&values[equality_values.len()], lower, upper)
+}
+
+fn composite_range_block_might_match(
+    min_key: &Value,
+    max_key: &Value,
+    equality_values: &[&Value],
+    lower: Option<&(Value, bool)>,
+    upper: Option<&(Value, bool)>,
+) -> bool {
+    let (Value::List(min_values), Value::List(max_values)) = (min_key, max_key) else {
+        return false;
+    };
+    let prefix_len = equality_values.len();
+    if min_values.len() <= prefix_len || max_values.len() <= prefix_len {
+        return false;
+    }
+    let Some(min_order) = composite_prefix_ordering(min_values, equality_values) else {
+        return false;
+    };
+    let Some(max_order) = composite_prefix_ordering(max_values, equality_values) else {
+        return false;
+    };
+    if max_order.is_lt() || min_order.is_gt() {
+        return false;
+    }
+    if max_order.is_eq() && !range_bounds_match(&max_values[prefix_len], lower, None) {
+        return false;
+    }
+    if min_order.is_eq() && !range_bounds_match(&min_values[prefix_len], None, upper) {
+        return false;
+    }
+    true
+}
+
+fn composite_prefix_ordering(values: &[Value], expected: &[&Value]) -> Option<std::cmp::Ordering> {
+    if values.len() < expected.len() {
+        return None;
+    }
+    for (candidate, expected) in values.iter().zip(expected) {
+        let ordering = candidate.cmp(expected);
+        if !ordering.is_eq() {
+            return Some(ordering);
+        }
+    }
+    Some(std::cmp::Ordering::Equal)
 }
 
 fn range_bounds_match(
@@ -3545,6 +3655,111 @@ mod tests {
         let error =
             decode_composite_property_identity("skein-composite-property-v1:zz:61").unwrap_err();
         assert!(error.to_string().contains("invalid hexadecimal data"));
+    }
+
+    #[test]
+    fn composite_range_projection_prunes_blocks_and_preserves_bound_semantics() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "skein-composite-range-projection-{}-{nonce}",
+            std::process::id(),
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("projection.skein");
+        let descriptor_paths = test_descriptor_paths(&root, "projection");
+        let properties = vec!["rank".to_string(), "text".to_string()];
+        let definition = PersistentPropertyProjectionDefinition {
+            label_id: LabelId(1),
+            property: persistent_composite_property_identity(&properties).unwrap(),
+            kind: PersistentPropertyProjectionKind::CompositeEquality,
+            complete: false,
+        };
+        let output = PersistentPropertyProjectionWriter::new(PersistentPropertyProjectionConfig {
+            memory_budget_bytes: NonZeroU64::new(512).unwrap(),
+            max_merge_fan_in: NonZeroUsize::new(2).unwrap(),
+            target_block_bytes: NonZeroU64::new(128).unwrap(),
+            ..PersistentPropertyProjectionConfig::default()
+        })
+        .write_fallible(
+            &path,
+            ManifestGeneration(9),
+            31,
+            vec![definition],
+            (0..96).map(|index| {
+                Ok(PersistentPropertyProjectionRecord::Node(node(
+                    index + 1,
+                    (index / 32) as i64,
+                    &format!("item-{index:03}"),
+                )))
+            }),
+            PersistentPropertyProjectionDescriptorTree::new(
+                descriptor_paths.clone(),
+                GraphDescriptorTreeBuildConfig::default(),
+            ),
+        )
+        .unwrap();
+        assert!(output.manifest.block_count > 8);
+
+        let reader = PersistentPropertyProjectionReader::open(
+            &path,
+            output.manifest,
+            PersistentPropertyProjectionDescriptorTree::new(
+                descriptor_paths,
+                GraphDescriptorTreeBuildConfig::default(),
+            ),
+            Arc::new(SegmentCache::new(1024 * 1024)),
+            StoreId(23),
+            NonZeroU64::new(1024 * 1024).unwrap(),
+        )
+        .unwrap();
+        let lower = (Value::String("item-040".to_string()), false);
+        let upper = (Value::String("item-048".to_string()), false);
+        let mut candidates = Vec::new();
+        let (report, _) = reader
+            .scan_composite_range_candidates(
+                LabelId(1),
+                &properties,
+                &[&Value::Int(1)],
+                Some(&lower),
+                Some(&upper),
+                |id| {
+                    candidates.push(id.0);
+                    Ok(CanonicalScanControl::Continue)
+                },
+            )
+            .unwrap();
+
+        assert_eq!(candidates, (42..=48).collect::<Vec<_>>());
+        assert!(report.blocks_pruned > 0);
+        assert!(report.blocks_read < report.blocks_considered);
+        assert_eq!(report.candidates_returned, 7);
+
+        let no_prefix = reader
+            .scan_composite_range_candidates(
+                LabelId(1),
+                &properties,
+                &[],
+                Some(&lower),
+                None,
+                |_| Ok(CanonicalScanControl::Continue),
+            )
+            .unwrap_err();
+        assert!(no_prefix.to_string().contains("leading equality prefix"));
+        let no_bound = reader
+            .scan_composite_range_candidates(
+                LabelId(1),
+                &properties,
+                &[&Value::Int(1)],
+                None,
+                None,
+                |_| Ok(CanonicalScanControl::Continue),
+            )
+            .unwrap_err();
+        assert!(no_bound.to_string().contains("at least one range bound"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

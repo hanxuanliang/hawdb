@@ -1,12 +1,13 @@
 ---------------- MODULE SkeinCompositePropertyProjection ----------------
-EXTENDS FiniteSets
+EXTENDS FiniteSets, Integers
 
 (***************************************************************************)
-(* A checkpoint-bound composite-property projection supplies provisional  *)
-(* base candidates for one ordered tuple. Canonical rows validate those    *)
-(* candidates, while the post-checkpoint COW/WAL overlay shadows changed   *)
-(* base rows and contributes current matches. Corrupt selected blocks fail *)
-(* the lookup and poison the handle instead of falling back.               *)
+(* A checkpoint-bound composite-property projection supplies provisional   *)
+(* base candidates for one ordered tuple or one equality-prefix plus the    *)
+(* immediately following range. Canonical rows validate those candidates,   *)
+(* while the post-checkpoint COW/WAL overlay shadows changed base rows and   *)
+(* contributes current matches. Corrupt selected blocks fail the lookup and *)
+(* poison the handle instead of falling back.                               *)
 (***************************************************************************)
 
 BaseNodes == {"base-match"}
@@ -14,6 +15,49 @@ DeltaNodes == {"delta-insert"}
 Nodes == BaseNodes \union DeltaNodes
 ProjectionCandidates == BaseNodes
 QueryStates == {"idle", "reading-base", "reading-overlay", "succeeded", "failed"}
+
+(***************************************************************************)
+(* A finite ordered-key witness for persistent composite prefix-range      *)
+(* pruning. Prefix 1 is bound by equality and the following integer is     *)
+(* constrained to [12, 25). Blocks 1 and 3 are outside that interval.      *)
+(***************************************************************************)
+
+CompositeKeys == {<<0, 100>>, <<1, 5>>, <<1, 10>>, <<1, 20>>, <<1, 30>>, <<2, 15>>}
+Blocks == {1, 2, 3}
+BlockKeys ==
+    [block \in Blocks |->
+        CASE block = 1 -> {<<0, 100>>, <<1, 5>>, <<1, 10>>}
+          [] block = 2 -> {<<1, 20>>, <<1, 30>>}
+          [] OTHER -> {<<2, 15>>}]
+BlockMin == [block \in Blocks |->
+    CASE block = 1 -> <<0, 100>>
+      [] block = 2 -> <<1, 20>>
+      [] OTHER -> <<2, 15>>]
+BlockMax == [block \in Blocks |->
+    CASE block = 1 -> <<1, 10>>
+      [] block = 2 -> <<1, 30>>
+      [] OTHER -> <<2, 15>>]
+EqualityPrefix == 1
+LowerBound == 12
+UpperBound == 25
+
+CompositeRangeMatches(key) ==
+    /\ key[1] = EqualityPrefix
+    /\ key[2] >= LowerBound
+    /\ key[2] < UpperBound
+
+RangeBlockMightMatch(block) ==
+    /\ BlockMax[block][1] >= EqualityPrefix
+    /\ BlockMin[block][1] <= EqualityPrefix
+    /\ (BlockMax[block][1] # EqualityPrefix \/ BlockMax[block][2] >= LowerBound)
+    /\ (BlockMin[block][1] # EqualityPrefix \/ BlockMin[block][2] < UpperBound)
+
+FullScanRangeResult == {key \in CompositeKeys: CompositeRangeMatches(key)}
+ProjectionRangeResult ==
+    {key \in UNION {
+        IF RangeBlockMightMatch(block) THEN BlockKeys[block] ELSE {}:
+            block \in Blocks
+    }: CompositeRangeMatches(key)}
 
 VARIABLES
     overlayShadowed,
@@ -174,5 +218,13 @@ FailedLookupPoisonsHandle ==
 
 PoisonedHandleCannotStartLookup ==
     poisoned => queryState # "idle"
+
+CompositeRangeBlockPruningIsSound ==
+    \A block \in Blocks:
+        \A key \in BlockKeys[block]:
+            CompositeRangeMatches(key) => RangeBlockMightMatch(block)
+
+CompositeRangeProjectionMatchesFullScan ==
+    ProjectionRangeResult = FullScanRangeResult
 
 =============================================================================

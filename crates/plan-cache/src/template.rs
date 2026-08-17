@@ -573,6 +573,9 @@ fn bind_physical_plan(plan: &mut PhysicalPlan, parameters: &BTreeMap<String, Val
                 bind_value(value, parameters)?;
             }
         }
+        PhysicalPlan::IndexNodeCompositeRangeSeek { seek, .. } => {
+            bind_composite_range_seek(seek, parameters)?;
+        }
         PhysicalPlan::IndexNodeRangeSeek { lower, upper, .. } => {
             for (value, _) in lower.iter_mut().chain(upper.iter_mut()) {
                 bind_value(value, parameters)?;
@@ -667,6 +670,9 @@ fn bind_node_projection_access(
             }
             Ok(())
         }
+        skein_plan::NodeProjectionAccess::CompositeRange { seek } => {
+            bind_composite_range_seek(seek, parameters)
+        }
         skein_plan::NodeProjectionAccess::PropertyRange { lower, upper, .. } => {
             for (value, _) in lower.iter_mut().chain(upper.iter_mut()) {
                 bind_value(value, parameters)?;
@@ -675,6 +681,19 @@ fn bind_node_projection_access(
         }
         skein_plan::NodeProjectionAccess::FullText { .. } => Ok(()),
     }
+}
+
+fn bind_composite_range_seek(
+    seek: &mut skein_plan::CompositeRangeSeek,
+    parameters: &BTreeMap<String, Value>,
+) -> Result<()> {
+    for (_, value) in &mut seek.equality_prefix {
+        bind_value(value, parameters)?;
+    }
+    for (value, _) in seek.lower.iter_mut().chain(seek.upper.iter_mut()) {
+        bind_value(value, parameters)?;
+    }
+    Ok(())
 }
 
 fn bind_logical_plan(plan: &mut LogicalPlan, parameters: &BTreeMap<String, Value>) -> Result<()> {
@@ -957,7 +976,8 @@ mod tests {
     use skein_cypher as cypher;
     use skein_optimizer::{CascadesOptimizer, OptimizerCatalog};
     use skein_plan::{
-        ExactPropertySeekBranch, LogicalPlanRoot, NodeProjectionAccess, PhysicalPlan,
+        CompositeRangeSeek, ExactPropertySeekBranch, LogicalPlanRoot, NodeProjectionAccess,
+        PhysicalPlan,
     };
     use std::collections::BTreeMap;
 
@@ -1063,6 +1083,61 @@ mod tests {
         assert!(branches
             .iter()
             .all(|branch| { branch.values == vec![Value::String("second".to_string())] }));
+    }
+
+    #[test]
+    fn projected_composite_range_rebinds_prefix_and_bounds() {
+        let template = PhysicalPlan::NodeProjectionScanExec {
+            variable: "m".to_string(),
+            label: "Memory".to_string(),
+            access: NodeProjectionAccess::CompositeRange {
+                seek: CompositeRangeSeek {
+                    index_properties: vec!["space_id".to_string(), "created_at".to_string()],
+                    equality_prefix: vec![(
+                        "space_id".to_string(),
+                        parameter_marker(
+                            "space_id",
+                            &Value::String("space:first".to_string()),
+                            &[],
+                        ),
+                    )],
+                    range_property: "created_at".to_string(),
+                    lower: Some((parameter_marker("lower", &Value::Int(10), &[]), true)),
+                    upper: Some((parameter_marker("upper", &Value::Int(20), &[]), false)),
+                },
+            },
+            required_properties: vec!["space_id".to_string(), "created_at".to_string()],
+            predicate: None,
+            items: Vec::new(),
+        };
+
+        let rebound = bind_physical_plan_parameters(
+            &template,
+            &BTreeMap::from([
+                (
+                    "space_id".to_string(),
+                    Value::String("space:second".to_string()),
+                ),
+                ("lower".to_string(), Value::Int(30)),
+                ("upper".to_string(), Value::Int(40)),
+            ]),
+            true,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            rebound,
+            PhysicalPlan::NodeProjectionScanExec {
+                access: NodeProjectionAccess::CompositeRange { seek },
+                ..
+            } if seek.equality_prefix
+                == vec![(
+                    "space_id".to_string(),
+                    Value::String("space:second".to_string()),
+                )]
+                && seek.lower == Some((Value::Int(30), true))
+                && seek.upper == Some((Value::Int(40), false))
+        ));
     }
 
     #[test]

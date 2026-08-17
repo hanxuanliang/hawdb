@@ -266,6 +266,9 @@ fn access_object(plan: &PhysicalPlan) -> String {
                 .collect::<Vec<_>>()
                 .join(",")
         ),
+        PhysicalPlan::IndexNodeCompositeRangeSeek { label, seek, .. } => {
+            format!("label:{label}, index:{}", seek.index_properties.join(","))
+        }
         PhysicalPlan::AdjacencyExpandExec { rel_type, .. }
         | PhysicalPlan::OptionalDegreeExec { rel_type, .. }
         | PhysicalPlan::ShortestPathExec { rel_type, .. } => format!("rel:{rel_type}"),

@@ -40,6 +40,7 @@ pub enum ScanPruningStrategy {
     PropertyDefaultIfNullNotEq { property: String },
     PropertyIn { property: String },
     CompositePropertyEq { properties: Vec<String> },
+    CompositePropertyRange { properties: Vec<String> },
     PropertyRange { property: String },
     FullText { property: String },
     OrUnion,

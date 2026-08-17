@@ -5186,6 +5186,12 @@ fn scan_pruning_strategy_json(strategy: &skein::store::ScanPruningStrategy) -> s
         skein::store::ScanPruningStrategy::CompositePropertyEq { properties } => {
             serde_json::json!({"kind": "composite_property_eq", "properties": properties})
         }
+        skein::store::ScanPruningStrategy::CompositePropertyRange { properties } => {
+            serde_json::json!({
+                "kind": "composite_property_range",
+                "properties": properties,
+            })
+        }
         skein::store::ScanPruningStrategy::PropertyRange { property } => {
             serde_json::json!({"kind": "property_range", "property": property})
         }

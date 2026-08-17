@@ -118,6 +118,7 @@ impl PhysicalPlan {
             | PhysicalPlan::IndexNodeMultiSeek { .. }
             | PhysicalPlan::IndexNodeUnionSeek { .. }
             | PhysicalPlan::IndexNodeCompositeSeek { .. }
+            | PhysicalPlan::IndexNodeCompositeRangeSeek { .. }
             | PhysicalPlan::IndexNodeRangeSeek { .. }
             | PhysicalPlan::IndexNodeTextSeek { .. } => {
                 PhysicalPlanDomainRef::Access(AccessPhysicalPlanRef::new(self))

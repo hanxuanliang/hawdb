@@ -5,7 +5,9 @@ use super::cardinality::{
 use super::{OptimizerCatalog, PhysicalPlan, PlanCost, PlanCostBreakdown};
 use skein_core::Value;
 use skein_cypher::RelationshipDirection;
-use skein_plan::{ExactPropertySeekBranch, NodeProjectionAccess, RelationshipCountLeg};
+use skein_plan::{
+    CompositeRangeSeek, ExactPropertySeekBranch, NodeProjectionAccess, RelationshipCountLeg,
+};
 use std::collections::BTreeMap;
 
 pub(super) const NODE_INDEX_EQ_STARTUP_COST: u64 = 1;
@@ -80,6 +82,7 @@ fn projected_access_cost(
                 estimate_node_index_seek_cost(rows, predicates.len().max(1) as u64),
             )
         }
+        NodeProjectionAccess::CompositeRange { seek } => composite_range_cost(seek, label, catalog),
         NodeProjectionAccess::PropertyRange {
             property,
             lower,
@@ -101,6 +104,30 @@ fn projected_access_cost(
             )
         }
     }
+}
+
+fn composite_range_cost(
+    seek: &CompositeRangeSeek,
+    label: &str,
+    catalog: &OptimizerCatalog,
+) -> (u64, u64) {
+    let equality_properties = seek
+        .equality_prefix
+        .iter()
+        .map(|(property, _)| property.clone())
+        .collect::<Vec<_>>();
+    let rows = catalog.estimate_composite_prefix_range_rows(
+        label,
+        &seek.index_properties,
+        &equality_properties,
+        &seek.range_property,
+        seek.lower.as_ref(),
+        seek.upper.as_ref(),
+    );
+    (
+        rows,
+        estimate_node_index_seek_cost(rows, seek.equality_prefix.len().saturating_add(1) as u64),
+    )
 }
 
 fn exact_property_union_cost(
@@ -245,6 +272,13 @@ pub(super) fn estimate_physical_plan_cost(
             PlanCost {
                 estimated_rows: rows,
                 cost: estimate_node_index_seek_cost(rows, predicates.len() as u64),
+            }
+        }
+        PhysicalPlan::IndexNodeCompositeRangeSeek { label, seek, .. } => {
+            let (rows, cost) = composite_range_cost(seek, label, catalog);
+            PlanCost {
+                estimated_rows: rows,
+                cost,
             }
         }
         PhysicalPlan::IndexNodeRangeSeek {
@@ -572,6 +606,10 @@ pub(super) fn estimate_physical_plan_cost_breakdown(
                 0,
                 0,
             )
+        }
+        PhysicalPlan::IndexNodeCompositeRangeSeek { label, seek, .. } => {
+            let (rows, cost) = composite_range_cost(seek, label, catalog);
+            PlanCostBreakdown::new(rows, 0, cost, 0, 0)
         }
         PhysicalPlan::IndexNodeRangeSeek {
             label,

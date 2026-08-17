@@ -844,6 +844,34 @@ impl PhysicalPlan {
                 }
                 output.push(')');
             }
+            PhysicalPlan::IndexNodeCompositeRangeSeek {
+                variable,
+                label,
+                seek,
+            } => {
+                output.push_str("IndexNodeCompositeRangeSeek(");
+                write_identifier(output, variable);
+                output.push(':');
+                write_identifier(output, label);
+                output.push_str("(index=");
+                write_identifier_list(output, &seek.index_properties);
+                output.push_str(",prefix=");
+                for (index, (property, value)) in seek.equality_prefix.iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    write_identifier(output, property);
+                    output.push('=');
+                    write_value(output, value);
+                }
+                output.push_str(",range=");
+                write_identifier(output, &seek.range_property);
+                output.push_str(",lower=");
+                write_optional_range_bound(output, seek.lower.as_ref());
+                output.push_str(",upper=");
+                write_optional_range_bound(output, seek.upper.as_ref());
+                output.push_str("))");
+            }
             PhysicalPlan::IndexNodeRangeSeek {
                 variable,
                 label,
@@ -1204,6 +1232,26 @@ fn write_node_projection_access(output: &mut String, access: &NodeProjectionAcce
             }
             output.push(')');
         }
+        NodeProjectionAccess::CompositeRange { seek } => {
+            output.push_str("composite_range(index=");
+            write_identifier_list(output, &seek.index_properties);
+            output.push_str(",prefix=");
+            for (index, (property, value)) in seek.equality_prefix.iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                write_identifier(output, property);
+                output.push('=');
+                write_value(output, value);
+            }
+            output.push_str(",range=");
+            write_identifier(output, &seek.range_property);
+            output.push(',');
+            write_optional_range_bound(output, seek.lower.as_ref());
+            output.push(',');
+            write_optional_range_bound(output, seek.upper.as_ref());
+            output.push(')');
+        }
         NodeProjectionAccess::PropertyRange {
             property,
             lower,
@@ -1297,6 +1345,41 @@ mod tests {
         assert_ne!(
             first.instance_fingerprint(),
             label_scan.instance_fingerprint()
+        );
+    }
+
+    #[test]
+    fn composite_range_instance_fingerprint_identifies_the_selected_index() {
+        let projected = |index_properties| PhysicalPlan::NodeProjectionScanExec {
+            variable: "m".to_string(),
+            label: "Memory".to_string(),
+            access: NodeProjectionAccess::CompositeRange {
+                seek: super::super::CompositeRangeSeek {
+                    index_properties,
+                    equality_prefix: vec![(
+                        "space_id".to_string(),
+                        Value::String("space:1".to_string()),
+                    )],
+                    range_property: "created_at".to_string(),
+                    lower: Some((Value::Int(10), true)),
+                    upper: None,
+                },
+            },
+            required_properties: vec!["created_at".to_string()],
+            predicate: None,
+            items: Vec::new(),
+        };
+        let narrow = projected(vec!["space_id".to_string(), "created_at".to_string()]);
+        let covering = projected(vec![
+            "space_id".to_string(),
+            "created_at".to_string(),
+            "stable_id".to_string(),
+        ]);
+
+        assert_eq!(narrow.fingerprint(), covering.fingerprint());
+        assert_ne!(
+            narrow.instance_fingerprint(),
+            covering.instance_fingerprint()
         );
     }
 }

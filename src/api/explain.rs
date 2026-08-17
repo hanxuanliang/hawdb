@@ -634,6 +634,16 @@ fn scan_pruning_strategy_value(strategy: &ScanPruningStrategy) -> Value {
                 Value::List(properties.iter().cloned().map(Value::String).collect()),
             ),
         ])),
+        ScanPruningStrategy::CompositePropertyRange { properties } => Value::Map(BTreeMap::from([
+            (
+                "kind".to_string(),
+                Value::String("composite_property_range".to_string()),
+            ),
+            (
+                "properties".to_string(),
+                Value::List(properties.iter().cloned().map(Value::String).collect()),
+            ),
+        ])),
         ScanPruningStrategy::PropertyRange { property } => {
             scan_pruning_property_strategy_value("property_range", property)
         }
@@ -869,6 +879,7 @@ fn explain_chosen_indexes_value(optimized: &OptimizedQueryPlan) -> Value {
         ("IndexNodeMultiSeek", "node_multi_seek"),
         ("IndexNodeUnionSeek", "node_union_seek"),
         ("IndexNodeCompositeSeek", "node_composite_seek"),
+        ("IndexNodeCompositeRangeSeek", "node_composite_range_seek"),
         ("IndexNodeRangeSeek", "node_range_seek"),
         ("IndexNodeTextSeek", "node_text_seek"),
     ];
