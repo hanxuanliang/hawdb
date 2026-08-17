@@ -17,7 +17,6 @@ use skein_storage::{
 mod index_access;
 mod query;
 mod row_access;
-mod typed_sort;
 
 pub(crate) use index_access::RelationalIndexReadMode;
 pub(crate) use query::{
