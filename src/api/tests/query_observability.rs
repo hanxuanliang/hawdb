@@ -19,7 +19,10 @@ fn explains_query_with_optimizer_trace() {
         .unwrap();
 
     assert!(output.trace.groups >= 3);
-    assert!(output.trace.selected_plan.contains("ProjectExec"));
+    assert!(output
+        .trace
+        .selected_plan
+        .contains("NodeProjectionScanExec"));
     assert!(output.trace.selected_plan.contains("IndexNodeSeek"));
     assert!(!output.trace.selected_plan.contains("FilterExec"));
     assert_eq!(
@@ -684,7 +687,9 @@ fn cypher_explain_returns_structured_plan_row() {
         row.get("statement_kind"),
         Some(&Value::String("match_return".to_string()))
     );
-    assert!(matches!(row.get("plan"), Some(Value::String(plan)) if plan.contains("ProjectExec")));
+    assert!(
+        matches!(row.get("plan"), Some(Value::String(plan)) if plan.contains("NodeProjectionScanExec"))
+    );
     assert!(matches!(
         row.get("selected_plan_fingerprint"),
         Some(Value::String(fingerprint)) if fingerprint.contains("IndexNodeSeek")

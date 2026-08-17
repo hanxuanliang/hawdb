@@ -10554,8 +10554,14 @@ fn scan_pruning_strategy_json(strategy: &ScanPruningStrategy) -> serde_json::Val
         ScanPruningStrategy::PropertyIn { property } => {
             serde_json::json!({"kind": "property_in", "property": property})
         }
+        ScanPruningStrategy::CompositePropertyEq { properties } => {
+            serde_json::json!({"kind": "composite_property_eq", "properties": properties})
+        }
         ScanPruningStrategy::PropertyRange { property } => {
             serde_json::json!({"kind": "property_range", "property": property})
+        }
+        ScanPruningStrategy::FullText { property } => {
+            serde_json::json!({"kind": "full_text", "property": property})
         }
         ScanPruningStrategy::OrUnion => serde_json::json!({"kind": "or_union"}),
     }

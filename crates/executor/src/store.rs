@@ -1,6 +1,7 @@
 //! Storage-neutral graph read contract used by execution operators.
 
 use skein_core::{Catalog, LabelId, RelTypeId, Result};
+use skein_plan::NodeProjectionAccess;
 use skein_storage::{
     AdjacencyDirection, NodeId, NodeRecord, ProjectedNodeRecord, PropertyFilter, RelRecord,
     ScanPruningReport,
@@ -79,6 +80,14 @@ pub trait GraphExecutionRead {
             })
         })
     }
+
+    fn visit_projected_nodes_by_access_owned(
+        &self,
+        label_id: LabelId,
+        access: &NodeProjectionAccess,
+        required_properties: &BTreeSet<String>,
+        consumer: &mut dyn FnMut(ProjectedNodeRecord) -> Result<ScanControl>,
+    ) -> Result<ScanControl>;
 
     fn visit_nodes_by_property_owned(
         &self,

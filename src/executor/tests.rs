@@ -107,6 +107,7 @@ fn node_projection_scan_omits_unrequested_large_properties() {
     let plan = PhysicalPlan::NodeProjectionScanExec {
         variable: "m".to_string(),
         label: "Memory".to_string(),
+        access: skein_plan::NodeProjectionAccess::LabelScan,
         required_properties: vec!["rank".to_string(), "title".to_string()],
         predicate: Some(Predicate::PropertyCompare {
             variable: "m".to_string(),
@@ -148,6 +149,89 @@ fn node_projection_scan_omits_unrequested_large_properties() {
         )])]
     );
     assert_eq!(output.profile.pipeline_memory_report.output_rows, 1);
+}
+
+#[test]
+fn indexed_node_projection_keeps_large_properties_out_of_pipeline_batches() {
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::in_memory();
+    for rank in 0..2 {
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                properties([
+                    ("stable_id", Value::String(format!("memory:{rank}"))),
+                    ("title", Value::String(format!("memory-{rank}"))),
+                    ("content", Value::String("x".repeat(128 * 1024))),
+                ]),
+            )
+            .unwrap();
+    }
+    store
+        .create_property_index(&mut catalog, "Memory", "stable_id")
+        .unwrap();
+    let plan = PhysicalPlan::NodeProjectionScanExec {
+        variable: "m".to_string(),
+        label: "Memory".to_string(),
+        access: skein_plan::NodeProjectionAccess::PropertyValues {
+            property: "stable_id".to_string(),
+            values: vec![Value::String("memory:1".to_string())],
+        },
+        required_properties: vec!["stable_id".to_string(), "title".to_string()],
+        predicate: Some(Predicate::PropertyEq {
+            variable: "m".to_string(),
+            property: "stable_id".to_string(),
+            value: Value::String("memory:1".to_string()),
+        }),
+        items: vec![Projection {
+            expression: ProjectionExpression::Property {
+                variable: "m".to_string(),
+                property: "title".to_string(),
+            },
+            name: "title".to_string(),
+        }],
+    };
+    let memory = ExecutionMemoryConfig {
+        batch_payload_bytes: NonZeroUsize::new(4 * 1024).unwrap(),
+        blocking_operator_bytes: NonZeroUsize::new(4 * 1024).unwrap(),
+        ..ExecutionMemoryConfig::default()
+    };
+    let mut external = NoExternalReadOperator;
+
+    let output = execute_with_row_limit_profile_and_external_and_memory(
+        &plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &memory,
+    )
+    .unwrap();
+
+    assert_eq!(
+        output.rows,
+        vec![BTreeMap::from([(
+            "title".to_string(),
+            Value::String("memory-1".to_string()),
+        )])]
+    );
+    let report = output
+        .profile
+        .scan_pruning_reports
+        .iter()
+        .find(|report| {
+            report.strategy
+                == ScanPruningStrategy::PropertyEq {
+                    property: "stable_id".to_string(),
+                }
+        })
+        .expect("projected index seek should report property pruning");
+    assert!(report.pruned);
+    assert_eq!(report.candidate_count_before_pruning, 2);
+    assert_eq!(report.candidate_count_before_filter, 1);
+    assert_eq!(report.output_count, 1);
 }
 
 #[test]

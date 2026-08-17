@@ -108,29 +108,68 @@ impl GraphStore {
         self.visit_selected_nodes_owned(label_id, Some(required_properties), consumer)
     }
 
+    pub fn visit_projected_nodes_by_access_owned(
+        &self,
+        label_id: LabelId,
+        access: &skein_plan::NodeProjectionAccess,
+        required_properties: &BTreeSet<String>,
+        consumer: impl FnMut(ProjectedNodeRecord) -> GraphScanControl,
+    ) -> Result<GraphScanControl> {
+        match access {
+            skein_plan::NodeProjectionAccess::LabelScan => {
+                self.visit_projected_nodes_owned(Some(label_id), required_properties, consumer)
+            }
+            skein_plan::NodeProjectionAccess::PropertyValues { property, values } => self
+                .visit_projected_nodes_by_property_owned(
+                    label_id,
+                    property,
+                    values,
+                    required_properties,
+                    consumer,
+                ),
+            skein_plan::NodeProjectionAccess::CompositeEquality { predicates } => self
+                .visit_projected_nodes_by_composite_property_owned(
+                    label_id,
+                    predicates,
+                    required_properties,
+                    consumer,
+                ),
+            skein_plan::NodeProjectionAccess::PropertyRange {
+                property,
+                lower,
+                upper,
+            } => self.visit_projected_nodes_by_property_range_owned(
+                label_id,
+                property,
+                lower.as_ref(),
+                upper.as_ref(),
+                required_properties,
+                consumer,
+            ),
+            skein_plan::NodeProjectionAccess::FullText { property, query } => self
+                .visit_projected_nodes_by_full_text_property_owned(
+                    label_id,
+                    property,
+                    query,
+                    required_properties,
+                    consumer,
+                ),
+        }
+    }
+
     fn visit_selected_nodes_owned(
         &self,
         label_id: Option<LabelId>,
         required_properties: Option<&BTreeSet<String>>,
         mut consumer: impl FnMut(ProjectedNodeRecord) -> GraphScanControl,
     ) -> Result<GraphScanControl> {
-        let project_delta = |node: &NodeRecord| ProjectedNodeRecord {
-            id: node.id,
-            labels: node.labels.clone(),
-            properties: required_properties.map_or_else(
-                || node.properties.clone(),
-                |required| {
-                    required
-                        .iter()
-                        .filter_map(|property| {
-                            node.properties
-                                .get(property)
-                                .cloned()
-                                .map(|value| (property.clone(), value))
-                        })
-                        .collect()
-                },
-            ),
+        let project_delta = |node: &NodeRecord| match required_properties {
+            Some(required) => project_node_record(node.clone(), required),
+            None => ProjectedNodeRecord {
+                id: node.id,
+                labels: node.labels.clone(),
+                properties: node.properties.clone(),
+            },
         };
         let Some(reader) = &self.canonical_base else {
             for node in self.nodes.values() {
@@ -1004,6 +1043,92 @@ impl GraphStore {
         Ok(GraphScanControl::Continue)
     }
 
+    fn visit_projected_nodes_by_property_owned(
+        &self,
+        label_id: LabelId,
+        property: &str,
+        values: &[Value],
+        required_properties: &BTreeSet<String>,
+        mut consumer: impl FnMut(ProjectedNodeRecord) -> GraphScanControl,
+    ) -> Result<GraphScanControl> {
+        let Some(reader) = &self.canonical_base else {
+            return self.visit_nodes_by_property_owned(label_id, property, values, |node| {
+                consumer(project_node_record(node, required_properties))
+            });
+        };
+        let Some(projection) = self
+            .persistent_property_projection
+            .as_ref()
+            .filter(|projection| {
+                projection.manifest().supports(
+                    label_id,
+                    property,
+                    PersistentPropertyProjectionKind::Equality,
+                )
+            })
+        else {
+            return self.visit_nodes_by_property_owned(label_id, property, values, |node| {
+                consumer(project_node_record(node, required_properties))
+            });
+        };
+
+        let mut decode_properties = required_properties.clone();
+        decode_properties.insert(property.to_string());
+        let mut seen = BTreeSet::new();
+        for value in values {
+            let mut graph_control = GraphScanControl::Continue;
+            let (report, projection_control) = projection
+                .scan_equality_candidates(label_id, property, value, |node_id| {
+                    if self.node_tombstones.contains(&node_id)
+                        || self.nodes.contains_key(&node_id)
+                        || !seen.insert(node_id)
+                    {
+                        return Ok(CanonicalScanControl::Continue);
+                    }
+                    let node = reader
+                        .get_projected_node(node_id, &decode_properties)?
+                        .ok_or_else(|| {
+                            PersistentPropertyProjectionError::Corrupt(format!(
+                                "property projection references missing canonical node {}",
+                                node_id.0
+                            ))
+                        })?;
+                    if !node.labels.contains(&label_id)
+                        || node.properties.get(property) != Some(value)
+                    {
+                        return Err(PersistentPropertyProjectionError::Corrupt(format!(
+                            "property projection candidate {} fails its canonical equality predicate",
+                            node_id.0
+                        )));
+                    }
+                    if consumer(node) == GraphScanControl::Stop {
+                        graph_control = GraphScanControl::Stop;
+                        return Ok(CanonicalScanControl::Stop);
+                    }
+                    Ok(CanonicalScanControl::Continue)
+                })
+                .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+            self.graph_index_read_metrics
+                .record_property(PersistentGraphIndexClass::NodeEquality, report);
+            if projection_control == CanonicalScanControl::Stop {
+                return Ok(graph_control);
+            }
+        }
+        for node in self.nodes.values() {
+            if node.labels.contains(&label_id)
+                && node
+                    .properties
+                    .get(property)
+                    .is_some_and(|candidate| values.iter().any(|value| candidate == value))
+                && consumer(project_node_record(node.clone(), &decode_properties))
+                    == GraphScanControl::Stop
+            {
+                return Ok(GraphScanControl::Stop);
+            }
+        }
+        Ok(GraphScanControl::Continue)
+    }
+
     pub fn seek_nodes_by_composite_property<'a>(
         &'a self,
         label_id: LabelId,
@@ -1111,6 +1236,88 @@ impl GraphStore {
                 }
             },
         )
+    }
+
+    fn visit_projected_nodes_by_composite_property_owned(
+        &self,
+        label_id: LabelId,
+        predicates: &[(String, Value)],
+        required_properties: &BTreeSet<String>,
+        mut consumer: impl FnMut(ProjectedNodeRecord) -> GraphScanControl,
+    ) -> Result<GraphScanControl> {
+        let properties = predicates
+            .iter()
+            .map(|(property, _)| property.clone())
+            .collect::<Vec<_>>();
+        let Some((reader, projection)) = self
+            .canonical_base
+            .as_ref()
+            .zip(self.persistent_property_projection.as_ref())
+            .filter(|(_, projection)| {
+                projection
+                    .manifest()
+                    .supports_composite_equality(label_id, &properties)
+            })
+        else {
+            return self.visit_nodes_by_composite_property_owned(label_id, predicates, |node| {
+                consumer(project_node_record(node, required_properties))
+            });
+        };
+
+        let mut decode_properties = required_properties.clone();
+        decode_properties.extend(properties.iter().cloned());
+        let values = predicates
+            .iter()
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+        let mut graph_control = GraphScanControl::Continue;
+        let (report, projection_control) = projection
+            .scan_composite_equality_candidates(label_id, &properties, &values, |node_id| {
+                if self.node_tombstones.contains(&node_id) || self.nodes.contains_key(&node_id) {
+                    return Ok(CanonicalScanControl::Continue);
+                }
+                let node = reader
+                    .get_projected_node(node_id, &decode_properties)?
+                    .ok_or_else(|| {
+                        PersistentPropertyProjectionError::Corrupt(format!(
+                            "composite property projection references missing canonical node {}",
+                            node_id.0
+                        ))
+                    })?;
+                if !node.labels.contains(&label_id)
+                    || !predicates
+                        .iter()
+                        .all(|(property, value)| node.properties.get(property) == Some(value))
+                {
+                    return Err(PersistentPropertyProjectionError::Corrupt(format!(
+                        "composite property projection candidate {} fails its canonical predicate",
+                        node_id.0
+                    )));
+                }
+                if consumer(node) == GraphScanControl::Stop {
+                    graph_control = GraphScanControl::Stop;
+                    return Ok(CanonicalScanControl::Stop);
+                }
+                Ok(CanonicalScanControl::Continue)
+            })
+            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+        self.graph_index_read_metrics
+            .record_property(PersistentGraphIndexClass::NodeCompositeEquality, report);
+        if projection_control == CanonicalScanControl::Stop {
+            return Ok(graph_control);
+        }
+        for node in self.nodes.values() {
+            if node.labels.contains(&label_id)
+                && predicates
+                    .iter()
+                    .all(|(property, value)| node.properties.get(property) == Some(value))
+                && consumer(project_node_record(node.clone(), &decode_properties))
+                    == GraphScanControl::Stop
+            {
+                return Ok(GraphScanControl::Stop);
+            }
+        }
+        Ok(GraphScanControl::Continue)
     }
 
     pub fn seek_nodes_by_property_range<'a>(
@@ -1229,6 +1436,93 @@ impl GraphStore {
                     .get(property)
                     .is_some_and(|value| range_bounds_match(value, lower, upper))
                 && consumer(node.clone()) == GraphScanControl::Stop
+            {
+                return Ok(GraphScanControl::Stop);
+            }
+        }
+        Ok(GraphScanControl::Continue)
+    }
+
+    fn visit_projected_nodes_by_property_range_owned(
+        &self,
+        label_id: LabelId,
+        property: &str,
+        lower: Option<&(Value, bool)>,
+        upper: Option<&(Value, bool)>,
+        required_properties: &BTreeSet<String>,
+        mut consumer: impl FnMut(ProjectedNodeRecord) -> GraphScanControl,
+    ) -> Result<GraphScanControl> {
+        let Some((reader, projection)) = self
+            .canonical_base
+            .as_ref()
+            .zip(self.persistent_property_projection.as_ref())
+            .filter(|(_, projection)| {
+                projection.manifest().supports(
+                    label_id,
+                    property,
+                    PersistentPropertyProjectionKind::Range,
+                )
+            })
+        else {
+            return self.visit_nodes_by_property_range_owned(
+                label_id,
+                property,
+                lower,
+                upper,
+                |node| consumer(project_node_record(node, required_properties)),
+            );
+        };
+
+        let mut decode_properties = required_properties.clone();
+        decode_properties.insert(property.to_string());
+        let mut graph_control = GraphScanControl::Continue;
+        let (report, projection_control) = projection
+            .scan_range_candidates(label_id, property, lower, upper, |node_id| {
+                if self.node_tombstones.contains(&node_id) || self.nodes.contains_key(&node_id) {
+                    return Ok(CanonicalScanControl::Continue);
+                }
+                let node = reader
+                    .get_projected_node(node_id, &decode_properties)?
+                    .ok_or_else(|| {
+                        PersistentPropertyProjectionError::Corrupt(format!(
+                            "property projection references missing canonical node {}",
+                            node_id.0
+                        ))
+                    })?;
+                if !node.labels.contains(&label_id)
+                    || !node
+                        .properties
+                        .get(property)
+                        .is_some_and(|value| range_bounds_match(value, lower, upper))
+                {
+                    return Err(PersistentPropertyProjectionError::Corrupt(format!(
+                        "property projection candidate {} fails its canonical range predicate",
+                        node_id.0
+                    )));
+                }
+                if consumer(node) == GraphScanControl::Stop {
+                    graph_control = GraphScanControl::Stop;
+                    return Ok(CanonicalScanControl::Stop);
+                }
+                Ok(CanonicalScanControl::Continue)
+            })
+            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+        self.graph_index_read_metrics
+            .record_property(PersistentGraphIndexClass::NodeRange, report);
+        if projection_control == CanonicalScanControl::Stop {
+            return Ok(graph_control);
+        }
+        for node in self.nodes.values() {
+            if self.node_tombstones.contains(&node.id) {
+                continue;
+            }
+            if node.labels.contains(&label_id)
+                && node
+                    .properties
+                    .get(property)
+                    .is_some_and(|value| range_bounds_match(value, lower, upper))
+                && consumer(project_node_record(node.clone(), &decode_properties))
+                    == GraphScanControl::Stop
             {
                 return Ok(GraphScanControl::Stop);
             }
@@ -1367,6 +1661,109 @@ impl GraphStore {
             if node.labels.contains(&label_id)
                 && matches_query(node)
                 && consumer(node.clone()) == GraphScanControl::Stop
+            {
+                return Ok(GraphScanControl::Stop);
+            }
+        }
+        Ok(GraphScanControl::Continue)
+    }
+
+    fn visit_projected_nodes_by_full_text_property_owned(
+        &self,
+        label_id: LabelId,
+        property: &str,
+        query: &str,
+        required_properties: &BTreeSet<String>,
+        mut consumer: impl FnMut(ProjectedNodeRecord) -> GraphScanControl,
+    ) -> Result<GraphScanControl> {
+        let query_tokens = full_text_query_tokens(query);
+        if query_tokens.is_empty() {
+            return Ok(GraphScanControl::Continue);
+        }
+        let Some((reader, projection)) = self
+            .canonical_base
+            .as_ref()
+            .zip(self.persistent_property_projection.as_ref())
+            .filter(|(_, projection)| {
+                projection.manifest().supports(
+                    label_id,
+                    property,
+                    PersistentPropertyProjectionKind::FullText,
+                )
+            })
+        else {
+            return self.visit_nodes_by_full_text_property_owned(
+                label_id,
+                property,
+                query,
+                |node| consumer(project_node_record(node, required_properties)),
+            );
+        };
+
+        let mut decode_properties = required_properties.clone();
+        decode_properties.insert(property.to_string());
+        let matches_query = |properties: &BTreeMap<String, Value>| match properties.get(property) {
+            Some(Value::String(value)) => {
+                let tokens = full_text_index_tokens(value);
+                query_tokens.iter().all(|token| tokens.contains(token))
+            }
+            _ => false,
+        };
+        let mut seed_token = None;
+        let mut estimate_report = skein_storage::PersistentPropertyProjectionReadReport::default();
+        for token in &query_tokens {
+            let (estimated_entries, report) = projection
+                .estimate_full_text_token_entries(label_id, property, token)
+                .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+            accumulate_property_projection_report(&mut estimate_report, report);
+            if seed_token
+                .as_ref()
+                .is_none_or(|(_, current_entries)| estimated_entries < *current_entries)
+            {
+                seed_token = Some((token, estimated_entries));
+            }
+        }
+        let seed_token = seed_token
+            .map(|(token, _)| token)
+            .expect("non-empty full-text query has a seed token");
+        let mut graph_control = GraphScanControl::Continue;
+        let (report, projection_control) = projection
+            .scan_full_text_token_candidates(label_id, property, seed_token, |node_id| {
+                if self.node_tombstones.contains(&node_id) || self.nodes.contains_key(&node_id) {
+                    return Ok(CanonicalScanControl::Continue);
+                }
+                let node = reader
+                    .get_projected_node(node_id, &decode_properties)?
+                    .ok_or_else(|| {
+                        PersistentPropertyProjectionError::Corrupt(format!(
+                            "property projection references missing canonical node {}",
+                            node_id.0
+                        ))
+                    })?;
+                if !node.labels.contains(&label_id) || !matches_query(&node.properties) {
+                    return Ok(CanonicalScanControl::Continue);
+                }
+                if consumer(node) == GraphScanControl::Stop {
+                    graph_control = GraphScanControl::Stop;
+                    return Ok(CanonicalScanControl::Stop);
+                }
+                Ok(CanonicalScanControl::Continue)
+            })
+            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+        accumulate_property_projection_report(&mut estimate_report, report);
+        self.graph_index_read_metrics
+            .record_property(PersistentGraphIndexClass::NodeFullText, estimate_report);
+        if projection_control == CanonicalScanControl::Stop {
+            return Ok(graph_control);
+        }
+        for node in self.nodes.values() {
+            if self.node_tombstones.contains(&node.id) {
+                continue;
+            }
+            if node.labels.contains(&label_id)
+                && matches_query(&node.properties)
+                && consumer(project_node_record(node.clone(), &decode_properties))
+                    == GraphScanControl::Stop
             {
                 return Ok(GraphScanControl::Stop);
             }
@@ -2644,6 +3041,26 @@ impl GraphStore {
             AdjacencyDirection::Outgoing => self.outgoing.get(&(node_id, rel_type)),
             AdjacencyDirection::Incoming => self.incoming.get(&(node_id, rel_type)),
         }
+    }
+}
+
+fn project_node_record(
+    node: NodeRecord,
+    required_properties: &BTreeSet<String>,
+) -> ProjectedNodeRecord {
+    let properties = required_properties
+        .iter()
+        .filter_map(|property| {
+            node.properties
+                .get(property)
+                .cloned()
+                .map(|value| (property.clone(), value))
+        })
+        .collect();
+    ProjectedNodeRecord {
+        id: node.id,
+        labels: node.labels,
+        properties,
     }
 }
 

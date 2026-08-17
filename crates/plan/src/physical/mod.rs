@@ -27,6 +27,60 @@ pub struct GraphExpansionBudget {
     pub payload_byte_limit: usize,
 }
 
+/// Candidate source used by a fused scalar node projection.
+///
+/// Keeping the access path beside the required-property set lets storage
+/// decode only fields needed by the residual predicate and output projection,
+/// without giving up an index seek selected earlier by the optimizer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NodeProjectionAccess {
+    LabelScan,
+    PropertyValues {
+        property: String,
+        values: Vec<Value>,
+    },
+    CompositeEquality {
+        predicates: Vec<(String, Value)>,
+    },
+    PropertyRange {
+        property: String,
+        lower: Option<(Value, bool)>,
+        upper: Option<(Value, bool)>,
+    },
+    FullText {
+        property: String,
+        query: String,
+    },
+}
+
+impl NodeProjectionAccess {
+    pub fn is_label_scan(&self) -> bool {
+        matches!(self, Self::LabelScan)
+    }
+
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::LabelScan => "label_scan",
+            Self::PropertyValues { .. } => "property_values",
+            Self::CompositeEquality { .. } => "composite_equality",
+            Self::PropertyRange { .. } => "property_range",
+            Self::FullText { .. } => "full_text",
+        }
+    }
+
+    /// Returns the access operator represented inside the fused projection.
+    pub fn physical_operator_name(&self) -> &'static str {
+        match self {
+            Self::LabelScan => "SeqNodeScan",
+            Self::PropertyValues { values, .. } if values.len() == 1 => "IndexNodeSeek",
+            Self::PropertyValues { .. } => "IndexNodeMultiSeek",
+            Self::CompositeEquality { .. } => "IndexNodeCompositeSeek",
+            Self::PropertyRange { .. } => "IndexNodeRangeSeek",
+            Self::FullText { .. } => "IndexNodeTextSeek",
+        }
+    }
+}
+
 /// Compatibility plan exchanged by the public planner and executor facades.
 ///
 /// New storage-independent analysis should target the decomposed internal plan
@@ -283,6 +337,7 @@ pub enum PhysicalPlan {
     NodeProjectionScanExec {
         variable: String,
         label: String,
+        access: NodeProjectionAccess,
         required_properties: Vec<String>,
         predicate: Option<Predicate>,
         items: Vec<Projection>,

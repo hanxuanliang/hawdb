@@ -4,6 +4,7 @@ use crate::optimizer::{Distribution, PhysicalProperties, PlanCost, PlanCostBreak
 use crate::qos::WorkRequest;
 use crate::store::{ScanPruningReport, ScanPruningStrategy};
 use crate::value::Value;
+use skein_plan::{visit_plan, NodeProjectionAccess, PhysicalPlan};
 use std::collections::BTreeMap;
 
 pub(super) fn explain_output_row(
@@ -626,8 +627,18 @@ fn scan_pruning_strategy_value(strategy: &ScanPruningStrategy) -> Value {
         ScanPruningStrategy::PropertyIn { property } => {
             scan_pruning_property_strategy_value("property_in", property)
         }
+        ScanPruningStrategy::CompositePropertyEq { properties } => Value::Map(BTreeMap::from([
+            kind_value_pair("composite_property_eq"),
+            (
+                "properties".to_string(),
+                Value::List(properties.iter().cloned().map(Value::String).collect()),
+            ),
+        ])),
         ScanPruningStrategy::PropertyRange { property } => {
             scan_pruning_property_strategy_value("property_range", property)
+        }
+        ScanPruningStrategy::FullText { property } => {
+            scan_pruning_property_strategy_value("full_text", property)
         }
         ScanPruningStrategy::OrUnion => Value::Map(BTreeMap::from([kind_value_pair("or_union")])),
     }
@@ -775,6 +786,29 @@ fn explain_fast_path_value(optimized: &OptimizedQueryPlan) -> Value {
 }
 
 fn explain_fast_path_reason(optimized: &OptimizedQueryPlan) -> Option<&'static str> {
+    let mut fused_reason = None;
+    visit_plan(&optimized.physical_plan, &mut |plan| {
+        let PhysicalPlan::NodeProjectionScanExec {
+            access,
+            predicate: None,
+            ..
+        } = plan
+        else {
+            return;
+        };
+        fused_reason = match access {
+            NodeProjectionAccess::PropertyValues { values, .. } if values.len() == 1 => {
+                Some("index_node_seek_without_residual_filter")
+            }
+            NodeProjectionAccess::PropertyValues { .. } => {
+                Some("index_node_multi_seek_without_residual_filter")
+            }
+            _ => fused_reason,
+        };
+    });
+    if fused_reason.is_some() {
+        return fused_reason;
+    }
     if optimized
         .trace
         .selected_plan_operator_counts
@@ -830,24 +864,41 @@ fn explain_optimizer_budget_value(optimized: &OptimizedQueryPlan) -> Value {
 
 fn explain_chosen_indexes_value(optimized: &OptimizedQueryPlan) -> Value {
     let counts = &optimized.trace.selected_plan_operator_counts;
-    let index_operator_counts = [
+    let index_operators = [
         ("IndexNodeSeek", "node_seek"),
         ("IndexNodeMultiSeek", "node_multi_seek"),
+        ("IndexNodeCompositeSeek", "node_composite_seek"),
         ("IndexNodeRangeSeek", "node_range_seek"),
         ("IndexNodeTextSeek", "node_text_seek"),
-    ]
-    .into_iter()
-    .filter_map(|(operator, kind)| {
-        counts.get(operator).map(|count| {
-            Value::Map(BTreeMap::from([
-                ("operator".to_string(), Value::String(operator.to_string())),
-                ("kind".to_string(), Value::String(kind.to_string())),
-                ("count".to_string(), usize_value(*count)),
-            ]))
-        })
-    })
-    .collect::<Vec<_>>();
-    Value::List(index_operator_counts)
+    ];
+    let mut selected = BTreeMap::<&'static str, usize>::new();
+    for (operator, _) in index_operators {
+        if let Some(count) = counts.get(operator) {
+            selected.insert(operator, *count);
+        }
+    }
+    visit_plan(&optimized.physical_plan, &mut |plan| {
+        let PhysicalPlan::NodeProjectionScanExec { access, .. } = plan else {
+            return;
+        };
+        if !access.is_label_scan() {
+            *selected.entry(access.physical_operator_name()).or_default() += 1;
+        }
+    });
+    Value::List(
+        index_operators
+            .into_iter()
+            .filter_map(|(operator, kind)| {
+                selected.get(operator).map(|count| {
+                    Value::Map(BTreeMap::from([
+                        ("operator".to_string(), Value::String(operator.to_string())),
+                        ("kind".to_string(), Value::String(kind.to_string())),
+                        ("count".to_string(), usize_value(*count)),
+                    ]))
+                })
+            })
+            .collect(),
+    )
 }
 
 fn explain_work_request_value(work_request: &WorkRequest) -> Value {

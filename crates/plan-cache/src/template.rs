@@ -543,8 +543,12 @@ fn bind_physical_plan(plan: &mut PhysicalPlan, parameters: &BTreeMap<String, Val
             bind_predicate(predicate, parameters)?;
         }
         PhysicalPlan::NodeProjectionScanExec {
-            predicate, items, ..
+            access,
+            predicate,
+            items,
+            ..
         } => {
+            bind_node_projection_access(access, parameters)?;
             bind_optional_predicate(predicate, parameters)?;
             bind_projections(items, parameters)?;
         }
@@ -635,6 +639,31 @@ fn bind_physical_plan(plan: &mut PhysicalPlan, parameters: &BTreeMap<String, Val
         }
     }
     Ok(())
+}
+
+fn bind_node_projection_access(
+    access: &mut skein_plan::NodeProjectionAccess,
+    parameters: &BTreeMap<String, Value>,
+) -> Result<()> {
+    match access {
+        skein_plan::NodeProjectionAccess::LabelScan => Ok(()),
+        skein_plan::NodeProjectionAccess::PropertyValues { values, .. } => {
+            bind_values(values, parameters)
+        }
+        skein_plan::NodeProjectionAccess::CompositeEquality { predicates } => {
+            for (_, value) in predicates {
+                bind_value(value, parameters)?;
+            }
+            Ok(())
+        }
+        skein_plan::NodeProjectionAccess::PropertyRange { lower, upper, .. } => {
+            for (value, _) in lower.iter_mut().chain(upper.iter_mut()) {
+                bind_value(value, parameters)?;
+            }
+            Ok(())
+        }
+        skein_plan::NodeProjectionAccess::FullText { .. } => Ok(()),
+    }
 }
 
 fn bind_logical_plan(plan: &mut LogicalPlan, parameters: &BTreeMap<String, Value>) -> Result<()> {
@@ -910,13 +939,13 @@ fn bind_value(value: &mut Value, parameters: &BTreeMap<String, Value>) -> Result
 #[cfg(test)]
 mod tests {
     use super::{
-        bind_physical_plan_parameters, parameterize_logical_plan, ParameterCacheValue,
-        PARAMETER_SLOT_NAME_KEY, PARAMETER_SLOT_PATH_KEY,
+        bind_physical_plan_parameters, parameter_marker, parameterize_logical_plan,
+        ParameterCacheValue, PARAMETER_SLOT_NAME_KEY, PARAMETER_SLOT_PATH_KEY,
     };
     use skein_core::Value;
     use skein_cypher as cypher;
     use skein_optimizer::{CascadesOptimizer, OptimizerCatalog};
-    use skein_plan::LogicalPlanRoot;
+    use skein_plan::{LogicalPlanRoot, NodeProjectionAccess, PhysicalPlan};
     use std::collections::BTreeMap;
 
     #[test]
@@ -945,6 +974,40 @@ mod tests {
 
         assert!(rebound.explain(0).contains("second"));
         assert!(!rebound.explain(0).contains("skein_parameter_slot"));
+    }
+
+    #[test]
+    fn projected_index_access_rebinds_parameter_slots() {
+        let template = PhysicalPlan::NodeProjectionScanExec {
+            variable: "m".to_string(),
+            label: "Memory".to_string(),
+            access: NodeProjectionAccess::PropertyValues {
+                property: "stable_id".to_string(),
+                values: vec![parameter_marker(
+                    "id",
+                    &Value::String("first".to_string()),
+                    &[],
+                )],
+            },
+            required_properties: vec!["stable_id".to_string()],
+            predicate: None,
+            items: Vec::new(),
+        };
+
+        let rebound = bind_physical_plan_parameters(
+            &template,
+            &BTreeMap::from([("id".to_string(), Value::String("second".to_string()))]),
+            true,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            rebound,
+            PhysicalPlan::NodeProjectionScanExec {
+                access: NodeProjectionAccess::PropertyValues { values, .. },
+                ..
+            } if values == vec![Value::String("second".to_string())]
+        ));
     }
 
     #[test]

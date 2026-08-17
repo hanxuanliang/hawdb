@@ -8,9 +8,9 @@ use crate::{
 };
 use skein_core::Value;
 use skein_plan::{
-    AggregateFunction, AggregateTarget, Aggregation, LogicalPlan, PhysicalOperatorDomain,
-    PhysicalPlan, PhysicalPlanChildren, PhysicalPlanDomainRef, Predicate, Projection,
-    ProjectionExpression, SortDirection, SortItem, SortKey,
+    AggregateFunction, AggregateTarget, Aggregation, LogicalPlan, NodeProjectionAccess,
+    PhysicalOperatorDomain, PhysicalPlan, PhysicalPlanChildren, PhysicalPlanDomainRef, Predicate,
+    Projection, ProjectionExpression, SortDirection, SortItem, SortKey,
 };
 use std::collections::BTreeMap;
 
@@ -346,6 +346,7 @@ fn scalar_node_projection_decodes_only_required_properties() {
     assert!(matches!(
         plan,
         PhysicalPlan::NodeProjectionScanExec {
+            access: NodeProjectionAccess::LabelScan,
             ref required_properties,
             ..
         } if required_properties == &["rank".to_string(), "title".to_string()]
@@ -358,6 +359,152 @@ fn scalar_node_projection_decodes_only_required_properties() {
         .rule_events
         .iter()
         .any(|event| event.rule() == "implementation:node_projection_scan"));
+    assert!(trace
+        .stage_events
+        .iter()
+        .any(|event| event.name() == "plan_finalization"));
+}
+
+#[test]
+fn multiseek_projection_preserves_index_access_and_required_properties() {
+    let logical = LogicalPlan::Project {
+        items: vec![Projection {
+            expression: ProjectionExpression::Property {
+                variable: "m".to_string(),
+                property: "title".to_string(),
+            },
+            name: "title".to_string(),
+        }],
+        input: Box::new(LogicalPlan::Filter {
+            predicate: Predicate::Or(vec![
+                Predicate::PropertyEq {
+                    variable: "m".to_string(),
+                    property: "stable_id".to_string(),
+                    value: Value::String("memory:1".to_string()),
+                },
+                Predicate::PropertyEq {
+                    variable: "m".to_string(),
+                    property: "stable_id".to_string(),
+                    value: Value::String("memory:2".to_string()),
+                },
+            ]),
+            input: Box::new(LogicalPlan::NodeScan {
+                variable: "m".to_string(),
+                label: "Memory".to_string(),
+            }),
+        }),
+    };
+    let catalog = OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new(
+            [("Memory".to_string(), "stable_id".to_string())],
+            [],
+            [],
+            [],
+        ),
+        OptimizerCatalogStatistics::new(
+            [("Memory".to_string(), 10_000)],
+            [],
+            [],
+            [],
+            [],
+            [(("Memory".to_string(), "stable_id".to_string()), 10_000)],
+            [],
+        ),
+    );
+
+    let (plan, _) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+        .optimize_with_catalog(&logical, &catalog);
+
+    assert!(matches!(
+        plan,
+        PhysicalPlan::NodeProjectionScanExec {
+            access: NodeProjectionAccess::PropertyValues { property, values },
+            required_properties,
+            predicate: None,
+            ..
+        } if property == "stable_id"
+            && values
+                == vec![
+                    Value::String("memory:1".to_string()),
+                    Value::String("memory:2".to_string()),
+                ]
+            && required_properties == vec!["stable_id".to_string(), "title".to_string()]
+    ));
+}
+
+#[test]
+fn composite_projection_preserves_index_access_and_residual_validation() {
+    let predicate = Predicate::And(vec![
+        Predicate::PropertyEq {
+            variable: "m".to_string(),
+            property: "space_id".to_string(),
+            value: Value::String("space:1".to_string()),
+        },
+        Predicate::PropertyEq {
+            variable: "m".to_string(),
+            property: "kind".to_string(),
+            value: Value::String("note".to_string()),
+        },
+    ]);
+    let logical = LogicalPlan::Project {
+        items: vec![Projection {
+            expression: ProjectionExpression::Property {
+                variable: "m".to_string(),
+                property: "title".to_string(),
+            },
+            name: "title".to_string(),
+        }],
+        input: Box::new(LogicalPlan::Filter {
+            predicate: predicate.clone(),
+            input: Box::new(LogicalPlan::NodeScan {
+                variable: "m".to_string(),
+                label: "Memory".to_string(),
+            }),
+        }),
+    };
+    let catalog = OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new(
+            [],
+            [(
+                "Memory".to_string(),
+                vec!["space_id".to_string(), "kind".to_string()],
+            )],
+            [],
+            [],
+        ),
+        OptimizerCatalogStatistics::new(
+            [("Memory".to_string(), 10_000)],
+            [],
+            [],
+            [],
+            [],
+            [
+                (("Memory".to_string(), "space_id".to_string()), 100),
+                (("Memory".to_string(), "kind".to_string()), 10),
+            ],
+            [],
+        ),
+    );
+
+    let (plan, _) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+        .optimize_with_catalog(&logical, &catalog);
+
+    assert!(matches!(
+        plan,
+        PhysicalPlan::NodeProjectionScanExec {
+            access: NodeProjectionAccess::CompositeEquality { predicates },
+            required_properties,
+            predicate: Some(residual),
+            ..
+        } if predicates
+            == vec![
+                ("space_id".to_string(), Value::String("space:1".to_string())),
+                ("kind".to_string(), Value::String("note".to_string())),
+            ]
+            && required_properties
+                == vec!["kind".to_string(), "space_id".to_string(), "title".to_string()]
+            && residual == predicate
+    ));
 }
 
 #[test]
@@ -398,16 +545,26 @@ fn optimizer_trace_reports_physical_plan_operator_and_class_counts() {
     let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
         .optimize_with_catalog(&logical, &catalog);
     assert_eq!(
-        trace.selected_plan_operator_counts.get("ProjectExec"),
+        trace
+            .selected_plan_operator_counts
+            .get("NodeProjectionScanExec"),
         Some(&1)
     );
+    assert_eq!(trace.selected_plan_operator_counts.get("ProjectExec"), None);
     assert_eq!(
         trace.selected_plan_operator_counts.get("IndexNodeSeek"),
-        Some(&1)
+        None
     );
     assert_eq!(trace.selected_plan_operator_counts.get("FilterExec"), None);
-    assert_eq!(trace.selected_plan_class_counts.get("relational"), Some(&1));
     assert_eq!(trace.selected_plan_class_counts.get("access"), Some(&1));
+    assert_eq!(
+        trace.selected_plan_properties.scan_pruning,
+        ScanPruningSupport::Index
+    );
+    assert_eq!(
+        trace.selected_plan_properties.covering_fields,
+        ["Memory.id".to_string(), "Memory.title".to_string()]
+    );
     assert_eq!(
         trace.selected_plan_cost_breakdown.as_plan_cost(),
         trace.selected_plan_cost
@@ -421,18 +578,20 @@ fn optimizer_trace_reports_physical_plan_operator_and_class_counts() {
     assert_eq!(
         fallback_trace
             .selected_plan_operator_counts
-            .get("ProjectExec"),
+            .get("NodeProjectionScanExec"),
         Some(&1)
     );
     assert_eq!(
         fallback_trace
             .selected_plan_operator_counts
-            .get("IndexNodeSeek"),
-        Some(&1)
+            .get("ProjectExec"),
+        None
     );
     assert_eq!(
-        fallback_trace.selected_plan_class_counts.get("relational"),
-        Some(&1)
+        fallback_trace
+            .selected_plan_operator_counts
+            .get("IndexNodeSeek"),
+        None
     );
     assert_eq!(
         fallback_trace.selected_plan_class_counts.get("access"),

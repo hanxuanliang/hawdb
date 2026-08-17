@@ -61,11 +61,14 @@ pub(super) fn supports_parallel_morsel_execution(plan: &PhysicalPlan, catalog: &
         PhysicalPlan::NodeProjectionScanExec {
             variable,
             label,
+            access,
             predicate: Some(predicate),
             items,
             ..
-        } => NumericFragment::try_prepare_parts(items, variable, label, predicate, catalog)
-            .is_some_and(|fragment| fragment.supports_lending_projection(items)),
+        } if access.is_label_scan() => {
+            NumericFragment::try_prepare_parts(items, variable, label, predicate, catalog)
+                .is_some_and(|fragment| fragment.supports_lending_projection(items))
+        }
         _ => match plan.children() {
             PlanChildren::None => false,
             PlanChildren::Unary(input) => supports_parallel_morsel_execution(input, catalog),
@@ -96,14 +99,17 @@ pub(super) fn default_morsel_parallelism(
         PhysicalPlan::NodeProjectionScanExec {
             variable,
             label,
+            access,
             predicate: Some(predicate),
             items,
             ..
-        } => NumericFragment::try_prepare_parts(items, variable, label, predicate, catalog)
-            .filter(|fragment| fragment.supports_lending_projection(items))
-            .map_or(1, |fragment| {
-                fragment.default_parallelism(items, catalog, store, memory)
-            }),
+        } if access.is_label_scan() => {
+            NumericFragment::try_prepare_parts(items, variable, label, predicate, catalog)
+                .filter(|fragment| fragment.supports_lending_projection(items))
+                .map_or(1, |fragment| {
+                    fragment.default_parallelism(items, catalog, store, memory)
+                })
+        }
         _ => match plan.children() {
             PlanChildren::None => 1,
             PlanChildren::Unary(input) => default_morsel_parallelism(input, catalog, store, memory),

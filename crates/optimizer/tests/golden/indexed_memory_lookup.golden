@@ -54,18 +54,18 @@ Project {
 }
 
 [physical]
-ProjectExec columns=[title]
-  IndexNodeSeek variable=m label=Memory property=id value=Int(7)
+NodeProjectionScanExec variable=m label=Memory access=IndexNodeSeek access_detail=PropertyValues { property: "id", values: [Int(7)] } properties=["id", "title"] predicate=None columns=[title]
 
 [stage-trace]
 logical_rewrite order=fixed_point input=3 output=3 applied=0 skipped=0
 logical_grouping order=once input=1 output=3 applied=0 skipped=0
 access_path_selection order=bottom_up input=1 output=1 applied=1 skipped=0
-physical_search order=bottom_up input=3 output=1 applied=1 skipped=0
+plan_finalization order=top_down input=1 output=1 applied=1 skipped=0
+physical_search order=bottom_up input=3 output=1 applied=2 skipped=0
 selected_plan_costing order=once input=1 output=1 applied=0 skipped=0
 
 [cost]
 estimated_rows=1 total=4 cpu=1 random_io=3 sequential_io=0 output_rows=0
 
 [properties]
-distribution=single ordering=[] covering_fields=["Memory.id"] scan_pruning=index vector_precision=not_vector memory_budget=row_linear
+distribution=single ordering=[] covering_fields=["Memory.id", "Memory.title"] scan_pruning=index vector_precision=not_vector memory_budget=row_linear

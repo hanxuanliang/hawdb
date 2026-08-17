@@ -303,6 +303,7 @@ impl PhysicalPlan {
             PhysicalPlan::NodeProjectionScanExec {
                 variable,
                 label,
+                access,
                 required_properties,
                 predicate,
                 items,
@@ -313,7 +314,8 @@ impl PhysicalPlan {
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(
-                    "{pad}NodeProjectionScanExec variable={variable} label={label} properties={required_properties:?} predicate={predicate:?} columns=[{columns}]"
+                    "{pad}NodeProjectionScanExec variable={variable} label={label} access={} access_detail={access:?} properties={required_properties:?} predicate={predicate:?} columns=[{columns}]",
+                    access.physical_operator_name()
                 )
             }
             PhysicalPlan::SourceSegmentScan { variable, predicate } => {

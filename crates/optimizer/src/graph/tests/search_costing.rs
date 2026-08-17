@@ -56,7 +56,10 @@ fn optimizer_budget_uses_direct_fallback_with_trace_warning() {
         .warnings
         .iter()
         .any(|warning| warning.contains("optimizer memo budget exceeded")));
-    assert!(budgeted_trace.selected_plan.contains("IndexNodeSeek"));
+    assert!(budgeted_trace
+        .selected_plan
+        .contains("NodeProjectionScanExec"));
+    assert!(budgeted_trace.selected_plan.contains("PropertyValues"));
     assert!(budgeted_trace
         .decisions
         .iter()

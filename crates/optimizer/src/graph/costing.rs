@@ -5,7 +5,7 @@ use super::cardinality::{
 use super::{OptimizerCatalog, PhysicalPlan, PlanCost, PlanCostBreakdown};
 use skein_core::Value;
 use skein_cypher::RelationshipDirection;
-use skein_plan::RelationshipCountLeg;
+use skein_plan::{NodeProjectionAccess, RelationshipCountLeg};
 use std::collections::BTreeMap;
 
 pub(super) const NODE_INDEX_EQ_STARTUP_COST: u64 = 1;
@@ -42,6 +42,64 @@ pub(super) fn estimate_node_index_seek_cost(estimated_rows: u64, startup_cost: u
         .saturating_add(startup_cost)
 }
 
+fn projected_access_cost(
+    access: &NodeProjectionAccess,
+    label: &str,
+    catalog: &OptimizerCatalog,
+) -> (u64, u64) {
+    match access {
+        NodeProjectionAccess::LabelScan => {
+            let rows = catalog.label_count(label).max(1);
+            (rows, estimate_node_full_scan_cost(rows))
+        }
+        NodeProjectionAccess::PropertyValues { property, values } => {
+            let rows = if values.len() == 1 {
+                catalog.estimate_property_index_eq_rows(label, property)
+            } else {
+                catalog.estimate_property_index_in_rows(label, property, values.len() as u64)
+            }
+            .max(1);
+            (
+                rows,
+                estimate_node_index_seek_cost(rows, values.len().max(1) as u64),
+            )
+        }
+        NodeProjectionAccess::CompositeEquality { predicates } => {
+            let properties = predicates
+                .iter()
+                .map(|(property, _)| property.clone())
+                .collect::<Vec<_>>();
+            let rows = catalog
+                .estimate_composite_property_index_rows(label, &properties)
+                .max(1);
+            (
+                rows,
+                estimate_node_index_seek_cost(rows, predicates.len().max(1) as u64),
+            )
+        }
+        NodeProjectionAccess::PropertyRange {
+            property,
+            lower,
+            upper,
+        } => {
+            let rows = catalog
+                .estimate_range_bounds_rows(label, property, lower.as_ref(), upper.as_ref())
+                .max(1);
+            (
+                rows,
+                estimate_node_index_seek_cost(rows, NODE_INDEX_RANGE_STARTUP_COST),
+            )
+        }
+        NodeProjectionAccess::FullText { .. } => {
+            let rows = catalog.label_count(label).div_ceil(10).max(1);
+            (
+                rows,
+                estimate_node_index_seek_cost(rows, NODE_INDEX_TEXT_STARTUP_COST),
+            )
+        }
+    }
+}
+
 pub(super) fn node_index_seek_is_cheaper(label_count: u64, seek_cost: u64) -> bool {
     label_count > NODE_INDEX_SMALL_LABEL_SCAN_THRESHOLD
         && seek_cost <= estimate_node_full_scan_cost(label_count)
@@ -72,6 +130,7 @@ pub(super) fn estimate_physical_plan_cost(
         PhysicalPlan::NodeProjectionScanExec {
             variable,
             label,
+            access,
             predicate,
             ..
         } => {
@@ -79,13 +138,13 @@ pub(super) fn estimate_physical_plan_cost(
                 variable: variable.clone(),
                 label: label.clone(),
             };
-            let input_rows = catalog.label_count(label).max(1);
+            let (input_rows, access_cost) = projected_access_cost(access, label, catalog);
             let rows = predicate.as_ref().map_or(input_rows, |predicate| {
                 estimate_filter_rows(predicate, &scan, input_rows, catalog).max(1)
             });
             PlanCost {
                 estimated_rows: rows,
-                cost: estimate_node_full_scan_cost(input_rows).saturating_add(rows),
+                cost: access_cost.saturating_add(rows),
             }
         }
         PhysicalPlan::SourceSegmentScan { .. } => {
@@ -386,6 +445,7 @@ pub(super) fn estimate_physical_plan_cost_breakdown(
         PhysicalPlan::NodeProjectionScanExec {
             variable,
             label,
+            access,
             predicate,
             ..
         } => {
@@ -393,11 +453,15 @@ pub(super) fn estimate_physical_plan_cost_breakdown(
                 variable: variable.clone(),
                 label: label.clone(),
             };
-            let input_rows = catalog.label_count(label).max(1);
+            let (input_rows, access_cost) = projected_access_cost(access, label, catalog);
             let rows = predicate.as_ref().map_or(input_rows, |predicate| {
                 estimate_filter_rows(predicate, &scan, input_rows, catalog).max(1)
             });
-            PlanCostBreakdown::new(rows, rows, 0, estimate_node_full_scan_cost(input_rows), 0)
+            if access.is_label_scan() {
+                PlanCostBreakdown::new(rows, rows, 0, access_cost, 0)
+            } else {
+                PlanCostBreakdown::new(rows, rows, access_cost, 0, 0)
+            }
         }
         PhysicalPlan::SourceSegmentScan { .. } => {
             let rows = catalog.label_count("Source");

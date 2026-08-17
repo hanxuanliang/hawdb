@@ -5183,8 +5183,14 @@ fn scan_pruning_strategy_json(strategy: &skein::store::ScanPruningStrategy) -> s
         skein::store::ScanPruningStrategy::PropertyIn { property } => {
             serde_json::json!({"kind": "property_in", "property": property})
         }
+        skein::store::ScanPruningStrategy::CompositePropertyEq { properties } => {
+            serde_json::json!({"kind": "composite_property_eq", "properties": properties})
+        }
         skein::store::ScanPruningStrategy::PropertyRange { property } => {
             serde_json::json!({"kind": "property_range", "property": property})
+        }
+        skein::store::ScanPruningStrategy::FullText { property } => {
+            serde_json::json!({"kind": "full_text", "property": property})
         }
         skein::store::ScanPruningStrategy::OrUnion => serde_json::json!({"kind": "or_union"}),
     }

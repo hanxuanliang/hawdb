@@ -1353,7 +1353,9 @@ fn indexed_property_in_parameter_list_keeps_residual_filters() {
     let explain = db.explain_query_with_params(cypher, &parameters).unwrap();
     let physical_plan = explain.physical_plan.explain(0);
     assert!(physical_plan.contains("IndexNodeMultiSeek"));
-    assert!(physical_plan.contains("FilterExec"));
+    assert!(physical_plan.contains("NodeProjectionScanExec"));
+    assert!(physical_plan.contains("predicate=Some"));
+    assert!(!physical_plan.contains("FilterExec"));
     assert!(explain
         .trace
         .decisions
@@ -1810,10 +1812,12 @@ fn and_range_predicates_use_bounded_range_index_with_residual_filter() {
         )
         .unwrap();
     let physical_plan = explain.physical_plan.explain(0);
-    assert!(physical_plan.contains("FilterExec"));
+    assert!(physical_plan.contains("NodeProjectionScanExec"));
+    assert!(physical_plan.contains("predicate=Some"));
+    assert!(!physical_plan.contains("FilterExec"));
     assert!(physical_plan.contains("IndexNodeRangeSeek"));
-    assert!(physical_plan.contains("lower=Some((Int(10), true))"));
-    assert!(physical_plan.contains("upper=Some((Int(20), false))"));
+    assert!(physical_plan.contains("lower: Some((Int(10), true))"));
+    assert!(physical_plan.contains("upper: Some((Int(20), false))"));
     assert!(explain.trace.decisions.iter().any(|decision| {
         decision.contains("choose IndexNodeRangeSeek") && decision.contains("in conjunction")
     }));

@@ -44,10 +44,31 @@ pub(super) fn selected_plan_properties(plan: &PhysicalPlan) -> PhysicalPropertie
             properties.memory_budget = MemoryBudgetClass::Blocking;
             properties
         }
-        PhysicalPlan::SeqNodeScan { .. } | PhysicalPlan::NodeProjectionScanExec { .. } => {
+        PhysicalPlan::SeqNodeScan { .. } => PhysicalProperties {
+            distribution: Distribution::Single,
+            scan_pruning: ScanPruningSupport::Label,
+            vector_precision: VectorPrecision::NotVector,
+            memory_budget: MemoryBudgetClass::RowLinear,
+            ..PhysicalProperties::default()
+        },
+        PhysicalPlan::NodeProjectionScanExec {
+            label,
+            access,
+            required_properties,
+            ..
+        } => {
+            let scan_pruning = if access.is_label_scan() {
+                ScanPruningSupport::Label
+            } else {
+                ScanPruningSupport::Index
+            };
             PhysicalProperties {
                 distribution: Distribution::Single,
-                scan_pruning: ScanPruningSupport::Label,
+                covering_fields: required_properties
+                    .iter()
+                    .map(|property| plan_property_key(label, property))
+                    .collect(),
+                scan_pruning,
                 vector_precision: VectorPrecision::NotVector,
                 memory_budget: MemoryBudgetClass::RowLinear,
                 ..PhysicalProperties::default()

@@ -1,4 +1,4 @@
-use super::{PhysicalPlan, PlanChildren};
+use super::{NodeProjectionAccess, PhysicalPlan, PlanChildren};
 use crate::{
     AggregateFunction, AggregateTarget, Aggregation, ComparisonOp, GraphAlgorithmKind, Predicate,
     Projection, ProjectionExpression, RelationshipCountFilter, RelationshipCountLeg,
@@ -37,6 +37,11 @@ impl PhysicalPlan {
 
     fn write_shape_fingerprint(&self, output: &mut String) {
         output.push_str(self.kind().as_str());
+        if let PhysicalPlan::NodeProjectionScanExec { access, .. } = self {
+            output.push('[');
+            output.push_str(access.physical_operator_name());
+            output.push(']');
+        }
         match self.children() {
             PlanChildren::None => {}
             PlanChildren::Unary(input) => {
@@ -695,6 +700,7 @@ impl PhysicalPlan {
             PhysicalPlan::NodeProjectionScanExec {
                 variable,
                 label,
+                access,
                 required_properties,
                 predicate,
                 items,
@@ -703,6 +709,8 @@ impl PhysicalPlan {
                 write_identifier(output, variable);
                 output.push(':');
                 write_identifier(output, label);
+                output.push_str(",access=");
+                write_node_projection_access(output, access);
                 output.push_str(",properties=");
                 for property in required_properties {
                     write_identifier(output, property);
@@ -1126,6 +1134,56 @@ impl PhysicalPlan {
     }
 }
 
+fn write_node_projection_access(output: &mut String, access: &NodeProjectionAccess) {
+    match access {
+        NodeProjectionAccess::LabelScan => output.push_str("label_scan"),
+        NodeProjectionAccess::PropertyValues { property, values } => {
+            output.push_str("property_values(");
+            write_identifier(output, property);
+            output.push('=');
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                write_value(output, value);
+            }
+            output.push(')');
+        }
+        NodeProjectionAccess::CompositeEquality { predicates } => {
+            output.push_str("composite_equality(");
+            for (index, (property, value)) in predicates.iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                write_identifier(output, property);
+                output.push('=');
+                write_value(output, value);
+            }
+            output.push(')');
+        }
+        NodeProjectionAccess::PropertyRange {
+            property,
+            lower,
+            upper,
+        } => {
+            output.push_str("property_range(");
+            write_identifier(output, property);
+            output.push(',');
+            write_optional_range_bound(output, lower.as_ref());
+            output.push(',');
+            write_optional_range_bound(output, upper.as_ref());
+            output.push(')');
+        }
+        NodeProjectionAccess::FullText { property, query } => {
+            output.push_str("full_text(");
+            write_identifier(output, property);
+            output.push('=');
+            write_identifier(output, query);
+            output.push(')');
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1162,6 +1220,40 @@ mod tests {
         assert_eq!(
             plan.fingerprint(),
             "NodeCartesianProductExec(IndexNodeSeek,SeqNodeScan)"
+        );
+    }
+
+    #[test]
+    fn projected_access_is_part_of_the_instance_fingerprint() {
+        let projected = |access| PhysicalPlan::NodeProjectionScanExec {
+            variable: "m".to_string(),
+            label: "Memory".to_string(),
+            access,
+            required_properties: vec!["title".to_string()],
+            predicate: None,
+            items: Vec::new(),
+        };
+        let first = projected(NodeProjectionAccess::PropertyValues {
+            property: "stable_id".to_string(),
+            values: vec![Value::String("memory:1".to_string())],
+        });
+        let second = projected(NodeProjectionAccess::PropertyValues {
+            property: "stable_id".to_string(),
+            values: vec![Value::String("memory:2".to_string())],
+        });
+        let label_scan = projected(NodeProjectionAccess::LabelScan);
+
+        assert_eq!(first.fingerprint(), "NodeProjectionScanExec[IndexNodeSeek]");
+        assert_eq!(first.fingerprint(), second.fingerprint());
+        assert_eq!(
+            label_scan.fingerprint(),
+            "NodeProjectionScanExec[SeqNodeScan]"
+        );
+        assert_ne!(first.fingerprint(), label_scan.fingerprint());
+        assert_ne!(first.instance_fingerprint(), second.instance_fingerprint());
+        assert_ne!(
+            first.instance_fingerprint(),
+            label_scan.instance_fingerprint()
         );
     }
 }

@@ -8,7 +8,7 @@ use super::{
     selected_trace::selected_plan_trace,
     stages::{
         ACCESS_PATH_SELECTION_STAGE, DIRECT_PHYSICAL_FALLBACK_STAGE, LOGICAL_GROUPING_STAGE,
-        PHYSICAL_SEARCH_STAGE, SELECTED_PLAN_COSTING_STAGE,
+        PHYSICAL_SEARCH_STAGE, PLAN_FINALIZATION_STAGE, SELECTED_PLAN_COSTING_STAGE,
     },
     LogicalPlanRoot, OptimizationSearchReport, OptimizedLogicalPlanRoot, OptimizerCatalog,
     OptimizerConfig, OptimizerTrace, PhysicalPlan, PhysicalPlanRoot, StageStats,
@@ -19,8 +19,8 @@ use crate::{
 };
 use skein_core::Value;
 use skein_plan::{
-    AggregateFunction, AggregateTarget, GraphExpansionBudget, LogicalPlan, Predicate, Projection,
-    ProjectionExpression, SortItem, SortKey,
+    AggregateFunction, AggregateTarget, GraphExpansionBudget, LogicalPlan, NodeProjectionAccess,
+    Predicate, Projection, ProjectionExpression, SortItem, SortKey,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -149,7 +149,7 @@ impl CascadesOptimizer {
             let mut stage_events = Vec::new();
             let plan =
                 logical_to_physical_direct(logical, catalog, &mut decisions, &mut stage_events);
-            let plan = fuse_output_node_projection_scan(plan, &mut decisions, &mut stage_events);
+            let plan = finalize_physical_plan(plan, &mut decisions, &mut stage_events);
             let mut report = if directive == OptimizerSearchDirective::DirectFallback {
                 OptimizationSearchReport::forced_direct_fallback(required_groups)
             } else {
@@ -176,7 +176,7 @@ impl CascadesOptimizer {
         let mut decisions = Vec::new();
         let mut stage_events = Vec::new();
         let plan = best_physical(&memo, root, catalog, &mut decisions, &mut stage_events);
-        let plan = fuse_output_node_projection_scan(plan, &mut decisions, &mut stage_events);
+        let plan = finalize_physical_plan(plan, &mut decisions, &mut stage_events);
         let mut report = OptimizationSearchReport::memo(memo.group_count());
         record_logical_rewrite(&mut report, &rewrite);
         report
@@ -1073,7 +1073,23 @@ fn select_node_count_fast_path(
     })
 }
 
-fn fuse_output_node_projection_scan(
+fn finalize_physical_plan(
+    plan: PhysicalPlan,
+    decisions: &mut Vec<String>,
+    stage_events: &mut Vec<StageTrace>,
+) -> PhysicalPlan {
+    let event_count_before = stage_events.len();
+    let finalized = finalize_required_node_properties(plan, decisions, stage_events);
+    if !stage_events[event_count_before..]
+        .iter()
+        .any(|event| event.name() == PLAN_FINALIZATION_STAGE.name())
+    {
+        stage_events.push(PLAN_FINALIZATION_STAGE.trace(StageStats::new(1, 1)));
+    }
+    finalized
+}
+
+fn finalize_required_node_properties(
     plan: PhysicalPlan,
     decisions: &mut Vec<String>,
     stage_events: &mut Vec<StageTrace>,
@@ -1090,14 +1106,14 @@ fn fuse_output_node_projection_scan(
         } => PhysicalPlan::LimitExec {
             offset,
             limit,
-            input: Box::new(fuse_output_node_projection_scan(
+            input: Box::new(finalize_required_node_properties(
                 *input,
                 decisions,
                 stage_events,
             )),
         },
         PhysicalPlan::DistinctExec { input } => PhysicalPlan::DistinctExec {
-            input: Box::new(fuse_output_node_projection_scan(
+            input: Box::new(finalize_required_node_properties(
                 *input,
                 decisions,
                 stage_events,
@@ -1108,7 +1124,7 @@ fn fuse_output_node_projection_scan(
         {
             PhysicalPlan::SortExec {
                 items,
-                input: Box::new(fuse_output_node_projection_scan(
+                input: Box::new(finalize_required_node_properties(
                     *input,
                     decisions,
                     stage_events,
@@ -1124,7 +1140,7 @@ fn fuse_output_node_projection_scan(
             items,
             offset,
             limit,
-            input: Box::new(fuse_output_node_projection_scan(
+            input: Box::new(finalize_required_node_properties(
                 *input,
                 decisions,
                 stage_events,
@@ -1146,16 +1162,11 @@ fn select_node_projection_scan(
     decisions: &mut Vec<String>,
     stage_events: &mut Vec<StageTrace>,
 ) -> Option<PhysicalPlan> {
-    let (variable, label, predicate) = match input {
-        PhysicalPlan::SeqNodeScan { variable, label } => (variable, label, None),
-        PhysicalPlan::FilterExec { predicate, input } => {
-            let PhysicalPlan::SeqNodeScan { variable, label } = input.as_ref() else {
-                return None;
-            };
-            (variable, label, Some(predicate))
-        }
-        _ => return None,
+    let (source, predicate) = match input {
+        PhysicalPlan::FilterExec { predicate, input } => (input.as_ref(), Some(predicate)),
+        source => (source, None),
     };
+    let (variable, label, access) = node_projection_access(source)?;
     let mut required_properties = BTreeSet::new();
     if !items.iter().all(|item| {
         collect_projection_properties(&item.expression, variable, &mut required_properties)
@@ -1164,21 +1175,111 @@ fn select_node_projection_scan(
     }) {
         return None;
     }
+    collect_access_properties(&access, &mut required_properties);
 
     let required_properties = required_properties.into_iter().collect::<Vec<_>>();
     decisions.push(format!(
-        "selected implementation:node_projection_scan: decode {} required properties for {variable}:{label}",
-        required_properties.len()
+        "selected implementation:node_projection_scan: access={} decode {} required properties for {variable}:{label}",
+        access.kind_name(),
+        required_properties.len(),
     ));
-    stage_events
-        .push(ACCESS_PATH_SELECTION_STAGE.trace(StageStats::new(1, 1).with_rule_counts(1, 0)));
+    stage_events.push(PLAN_FINALIZATION_STAGE.trace(StageStats::new(1, 1).with_rule_counts(1, 0)));
     Some(PhysicalPlan::NodeProjectionScanExec {
         variable: variable.clone(),
         label: label.clone(),
+        access,
         required_properties,
         predicate: predicate.cloned(),
         items: items.to_vec(),
     })
+}
+
+fn node_projection_access(plan: &PhysicalPlan) -> Option<(&String, &String, NodeProjectionAccess)> {
+    match plan {
+        PhysicalPlan::SeqNodeScan { variable, label } => {
+            Some((variable, label, NodeProjectionAccess::LabelScan))
+        }
+        PhysicalPlan::IndexNodeSeek {
+            variable,
+            label,
+            property,
+            value,
+        } => Some((
+            variable,
+            label,
+            NodeProjectionAccess::PropertyValues {
+                property: property.clone(),
+                values: vec![value.clone()],
+            },
+        )),
+        PhysicalPlan::IndexNodeMultiSeek {
+            variable,
+            label,
+            property,
+            values,
+        } => Some((
+            variable,
+            label,
+            NodeProjectionAccess::PropertyValues {
+                property: property.clone(),
+                values: values.clone(),
+            },
+        )),
+        PhysicalPlan::IndexNodeCompositeSeek {
+            variable,
+            label,
+            predicates,
+        } => Some((
+            variable,
+            label,
+            NodeProjectionAccess::CompositeEquality {
+                predicates: predicates.clone(),
+            },
+        )),
+        PhysicalPlan::IndexNodeRangeSeek {
+            variable,
+            label,
+            property,
+            lower,
+            upper,
+        } => Some((
+            variable,
+            label,
+            NodeProjectionAccess::PropertyRange {
+                property: property.clone(),
+                lower: lower.clone(),
+                upper: upper.clone(),
+            },
+        )),
+        PhysicalPlan::IndexNodeTextSeek {
+            variable,
+            label,
+            property,
+            query,
+        } => Some((
+            variable,
+            label,
+            NodeProjectionAccess::FullText {
+                property: property.clone(),
+                query: query.clone(),
+            },
+        )),
+        _ => None,
+    }
+}
+
+fn collect_access_properties(access: &NodeProjectionAccess, required: &mut BTreeSet<String>) {
+    match access {
+        NodeProjectionAccess::LabelScan => {}
+        NodeProjectionAccess::PropertyValues { property, .. }
+        | NodeProjectionAccess::PropertyRange { property, .. }
+        | NodeProjectionAccess::FullText { property, .. } => {
+            required.insert(property.clone());
+        }
+        NodeProjectionAccess::CompositeEquality { predicates } => {
+            required.extend(predicates.iter().map(|(property, _)| property.clone()));
+        }
+    }
 }
 
 fn collect_predicate_properties(

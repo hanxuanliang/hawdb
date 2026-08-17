@@ -8,6 +8,7 @@ use skein_executor::store::{
     AdjacencyReadMemory, GraphExecutionRead, PrunedNodeScan, PrunedRelationshipScan, ScanControl,
 };
 use skein_executor::QueryMemoryLease;
+use skein_plan::NodeProjectionAccess;
 use skein_storage::{
     AdjacencyDirection, NodeId, NodeRecord, ProjectedNodeRecord, PropertyFilter, RelId, RelRecord,
 };
@@ -72,6 +73,33 @@ impl GraphExecutionRead for GraphStore {
                     }
                 }
             })?;
+        match consumer_error {
+            Some(error) => Err(error),
+            None => Ok(to_execution_control(control)),
+        }
+    }
+
+    fn visit_projected_nodes_by_access_owned(
+        &self,
+        label_id: LabelId,
+        access: &NodeProjectionAccess,
+        required_properties: &BTreeSet<String>,
+        consumer: &mut dyn FnMut(ProjectedNodeRecord) -> Result<ScanControl>,
+    ) -> Result<ScanControl> {
+        let mut consumer_error = None;
+        let control = GraphStore::visit_projected_nodes_by_access_owned(
+            self,
+            label_id,
+            access,
+            required_properties,
+            |node| match consumer(node) {
+                Ok(control) => to_store_control(control),
+                Err(error) => {
+                    consumer_error = Some(error);
+                    GraphScanControl::Stop
+                }
+            },
+        )?;
         match consumer_error {
             Some(error) => Err(error),
             None => Ok(to_execution_control(control)),

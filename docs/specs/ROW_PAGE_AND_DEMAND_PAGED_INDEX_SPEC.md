@@ -86,6 +86,31 @@ blocks. It is a rebuildable query index, not the uniqueness oracle. Missing or
 incomplete projection coverage uses the canonical bounded scan; corruption in
 a selected block fails closed.
 
+### Required-property graph reads
+
+Physical-plan finalization MAY fuse a scalar `Project` with a node access path
+only when every projected expression and residual predicate can be evaluated
+from one node variable. The fused operator MUST retain the selected access
+class: label scan, equality/multi-seek, ordered composite equality, range, or
+full-text. Its required-property set is the union of projected properties,
+residual-predicate properties, and access-validation properties. It MUST NOT
+decode an unrelated property merely because that property is present on the
+canonical row.
+
+A persistent index probe first obtains candidate node identities, then asks the
+canonical row reader for only that required-property set. Candidate validation
+MUST include all access properties before a row becomes visible. COW/WAL overlay
+rows retain authority over matching base identities and are projected to the
+same field set before entering an executor batch. If a persistent projection is
+not selected, the canonical fallback MAY decode a full row, but it MUST preserve
+the same result semantics. Corruption after index selection fails closed; it
+MUST NOT retry through a less selective path.
+
+The final physical plan, fingerprint, `EXPLAIN`, and scan-pruning report MUST
+identify the retained access class. The optimizer trace MUST expose a distinct
+plan-finalization stage so qualification can distinguish logical rewriting,
+access-path selection, and required-data enforcement.
+
 Composite equality indexes reuse that artifact and serving contract. The
 ordered property-name list is encoded into an unambiguous internal projection
 identity, and the ordered property values form one bounded list key. A lookup

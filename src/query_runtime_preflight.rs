@@ -491,7 +491,7 @@ mod tests {
             1
         );
         assert_eq!(
-            report["probes"][0]["selected_plan_operator_counts"]["IndexNodeSeek"],
+            report["probes"][0]["selected_plan_operator_counts"]["NodeProjectionScanExec"],
             1
         );
         assert_eq!(

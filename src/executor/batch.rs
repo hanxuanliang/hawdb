@@ -419,25 +419,29 @@ fn execute_binding_batches_inner(
         PhysicalPlan::NodeProjectionScanExec {
             variable,
             label,
+            access,
             required_properties,
             predicate,
             items,
         } => {
-            if let Some(result) = try_stream_columnar_node_projection_batches(
-                variable,
-                label,
-                predicate.as_ref(),
-                items,
-                context,
-                execution_limit,
-                emit,
-            ) {
+            if access.is_label_scan()
+                && let Some(result) = try_stream_columnar_node_projection_batches(
+                    variable,
+                    label,
+                    predicate.as_ref(),
+                    items,
+                    context,
+                    execution_limit,
+                    emit,
+                )
+            {
                 return result;
             }
             stream_node_projection_scan_batches(
                 NodeProjectionScanSpec {
                     variable,
                     label,
+                    access,
                     required_properties,
                     predicate: predicate.as_ref(),
                     items,

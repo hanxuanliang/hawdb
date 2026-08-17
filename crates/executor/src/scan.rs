@@ -21,7 +21,7 @@ use skein_core::{
     Catalog, LabelId, RelTypeId, RelationshipDirection, Result, RuntimeTaskContext, SkeinError,
     Value,
 };
-use skein_plan::{ComparisonOp, Predicate, Projection};
+use skein_plan::{ComparisonOp, NodeProjectionAccess, Predicate, Projection};
 use skein_storage::{
     NodeId, NodeRecord, ProjectedNodeRecord, PropertyFilter, RangeBound, ScanPredicate,
     ScanPruningReport, ScanPruningStrategy, ScanPruningTargetKind,
@@ -40,6 +40,7 @@ pub struct NodeScanSpec<'a> {
 pub struct NodeProjectionScanSpec<'a> {
     pub variable: &'a str,
     pub label: &'a str,
+    pub access: &'a NodeProjectionAccess,
     pub required_properties: &'a [String],
     pub predicate: Option<&'a Predicate>,
     pub items: &'a [Projection],
@@ -364,8 +365,10 @@ pub fn stream_node_projection_scan_batches(
         .collect::<BTreeSet<_>>();
     let mut batch = context.output_batch("NodeProjectionScanExec");
     let mut emitted = 0usize;
+    let mut visited = 0usize;
     let mut visit = |node: ProjectedNodeRecord| {
         runtime_checkpoint(context.task_context)?;
+        visited = visited.saturating_add(1);
         let node = NodeRecord {
             id: node.id,
             labels: node.labels,
@@ -414,7 +417,8 @@ pub fn stream_node_projection_scan_batches(
     let property_filter = spec
         .predicate
         .and_then(|predicate| property_filter_from_predicate(predicate).ok());
-    if !context.store.is_out_of_core()
+    if spec.access.is_label_scan()
+        && !context.store.is_out_of_core()
         && let Some(label_id) = exact_label
         && context
             .store
@@ -457,24 +461,34 @@ pub fn stream_node_projection_scan_batches(
             BatchControl::Continue
         });
     }
-    let control = context.store.visit_projected_nodes_owned(
-        exact_label_id,
-        &required_properties,
-        &mut visit,
-    )?;
+    let control = match (exact_label_id, spec.access) {
+        (_, NodeProjectionAccess::LabelScan) => context.store.visit_projected_nodes_owned(
+            exact_label_id,
+            &required_properties,
+            &mut visit,
+        )?,
+        (Some(label_id), access) => context.store.visit_projected_nodes_by_access_owned(
+            label_id,
+            access,
+            &required_properties,
+            &mut visit,
+        )?,
+        (None, _) => ScanControl::Continue,
+    };
     let candidate_count = context.store.node_count_for_label(exact_label_id);
+    let pruned = !spec.access.is_label_scan();
     observer.record_scan_pruning_report(ScanPruningReport {
         target_kind: ScanPruningTargetKind::Node,
         label_id: exact_label_id,
         rel_type_id: None,
-        strategy: ScanPruningStrategy::FullLabelScan,
-        pruned: false,
-        exact_empty: candidate_count == 0,
+        strategy: node_projection_access_strategy(spec.access),
+        pruned,
+        exact_empty: visited == 0,
         candidate_count_before_pruning: candidate_count,
-        pruned_candidate_count: 0,
-        candidate_count_before_filter: candidate_count,
+        pruned_candidate_count: candidate_count.saturating_sub(visited),
+        candidate_count_before_filter: visited,
         output_count: emitted,
-        filtered_out_count: candidate_count.saturating_sub(emitted),
+        filtered_out_count: visited.saturating_sub(emitted),
     });
     if batch.emit(emit)? == BatchControl::Stop {
         return Ok(BatchControl::Stop);
@@ -484,6 +498,36 @@ pub fn stream_node_projection_scan_batches(
     } else {
         BatchControl::Continue
     })
+}
+
+fn node_projection_access_strategy(access: &NodeProjectionAccess) -> ScanPruningStrategy {
+    match access {
+        NodeProjectionAccess::LabelScan => ScanPruningStrategy::FullLabelScan,
+        NodeProjectionAccess::PropertyValues { property, values } if values.len() == 1 => {
+            ScanPruningStrategy::PropertyEq {
+                property: property.clone(),
+            }
+        }
+        NodeProjectionAccess::PropertyValues { property, .. } => ScanPruningStrategy::PropertyIn {
+            property: property.clone(),
+        },
+        NodeProjectionAccess::CompositeEquality { predicates } => {
+            ScanPruningStrategy::CompositePropertyEq {
+                properties: predicates
+                    .iter()
+                    .map(|(property, _)| property.clone())
+                    .collect(),
+            }
+        }
+        NodeProjectionAccess::PropertyRange { property, .. } => {
+            ScanPruningStrategy::PropertyRange {
+                property: property.clone(),
+            }
+        }
+        NodeProjectionAccess::FullText { property, .. } => ScanPruningStrategy::FullText {
+            property: property.clone(),
+        },
+    }
 }
 
 pub fn execute_node_scan(
@@ -1010,6 +1054,16 @@ mod tests {
             _consumer: &mut dyn FnMut(NodeRecord) -> Result<ScanControl>,
         ) -> Result<ScanControl> {
             panic!("property scans are not used by adjacency expansion tests")
+        }
+
+        fn visit_projected_nodes_by_access_owned(
+            &self,
+            _label_id: LabelId,
+            _access: &NodeProjectionAccess,
+            _required_properties: &BTreeSet<String>,
+            _consumer: &mut dyn FnMut(ProjectedNodeRecord) -> Result<ScanControl>,
+        ) -> Result<ScanControl> {
+            panic!("projected scans are not used by adjacency expansion tests")
         }
 
         fn visit_adjacent_relationships_owned(

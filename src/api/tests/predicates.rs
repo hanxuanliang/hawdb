@@ -565,7 +565,9 @@ fn normalized_space_case_predicates_cover_thread_move_selection() {
         .unwrap();
     let physical_plan = explain.physical_plan.explain(0);
     assert!(physical_plan.contains("IndexNodeMultiSeek"));
-    assert!(physical_plan.contains("FilterExec"));
+    assert!(physical_plan.contains("NodeProjectionScanExec"));
+    assert!(physical_plan.contains("predicate=Some"));
+    assert!(!physical_plan.contains("FilterExec"));
     assert!(explain
         .trace
         .decisions
