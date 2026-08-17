@@ -54,6 +54,20 @@ while 8 to 16 workers showed only a small throughput increase on this 18-core
 host. This supports the existing CPU and work admission caps rather than a
 larger unconditional default.
 
+### Typed reorder-window spot check
+
+After moving eligible parallel output from per-row `Binding` maps to typed
+`ColumnarBatch` values, the morsel mode was rerun on 2026-08-17 with the default
+four-worker, 262,144-row workload. Three paired samples reported a 9.092 ms
+serial P50 and 5.948 ms parallel P50, or 44.07 million parallel rows/s and a
+1.53x speedup. The bounded stream observed four active workers, four buffered
+outputs, four reorder entries, and 133,440 peak buffered output bytes. The
+checksums matched and the run remained explicitly non-production evidence.
+
+This spot check demonstrates that the compact transport preserves a positive
+end-to-end direction while making its retained queue bytes observable. It does
+not replace the process-isolated 4/8/16 qualification matrix below.
+
 Production admission remains open until `run_production_morsel_profile` records
 at least three warmups and 100 measurements for each of 4, 8, and 16 workers on
 the same representative read-only replica and query. The three artifacts must

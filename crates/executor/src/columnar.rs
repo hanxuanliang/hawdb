@@ -144,6 +144,16 @@ impl ValidityView<'_> {
             Self::Bitmap { len, words } => count_bitmap_rows(words, len),
         }
     }
+
+    pub fn to_owned(self) -> Validity {
+        match self {
+            Self::All { len } => Validity::All { len },
+            Self::Bitmap { len, words } => Validity::Bitmap {
+                len,
+                words: words.to_vec().into(),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -239,6 +249,14 @@ pub enum ColumnVector {
 }
 
 impl ColumnVector {
+    pub fn boolean(values: Vec<bool>, validity: Validity) -> Result<Self> {
+        ensure_column_len("Bool", values.len(), validity.len())?;
+        Ok(Self::Bool {
+            values: values.into_iter().map(u8::from).collect::<Vec<_>>().into(),
+            validity,
+        })
+    }
+
     pub fn int64(values: Vec<i64>, validity: Validity) -> Result<Self> {
         ensure_column_len("Int64", values.len(), validity.len())?;
         Ok(Self::Int64 {
@@ -253,6 +271,10 @@ impl ColumnVector {
             values: values.into(),
             validity,
         })
+    }
+
+    pub fn node_ids(values: Vec<u64>) -> Self {
+        Self::NodeId(values.into())
     }
 
     pub fn len(&self) -> usize {
@@ -278,6 +300,17 @@ impl ColumnVector {
             Self::Utf8 { .. } => LogicalType::Utf8,
             Self::NodeId(_) => LogicalType::NodeId,
             Self::Dynamic(_) => LogicalType::Dynamic,
+        }
+    }
+
+    pub fn is_valid(&self, row: usize) -> bool {
+        match self {
+            Self::Bool { validity, .. }
+            | Self::Int64 { validity, .. }
+            | Self::Float64 { validity, .. }
+            | Self::Utf8 { validity, .. } => validity.is_valid(row),
+            Self::NodeId(values) => row < values.len(),
+            Self::Dynamic(values) => values.get(row).is_some_and(|value| *value != Value::Null),
         }
     }
 
@@ -387,6 +420,22 @@ impl Selection {
         SelectionIter {
             selection: self,
             cursor: 0,
+        }
+    }
+
+    pub fn limit(&self, offset: usize, max_rows: usize) -> Self {
+        let mut output = SelectionBuilder::new(self.len());
+        for row in self.iter().skip(offset).take(max_rows) {
+            output.select(row);
+        }
+        output.finish()
+    }
+
+    pub fn estimated_memory_bytes(&self) -> usize {
+        match self {
+            Self::All { .. } => 0,
+            Self::Bitmap { words, .. } => words.len() * std::mem::size_of::<u64>(),
+            Self::Indices { rows, .. } => rows.len() * std::mem::size_of::<u32>(),
         }
     }
 }
@@ -585,10 +634,84 @@ impl ColumnarBatch {
         })
     }
 
+    pub fn filter_numeric(
+        &self,
+        slot: SlotId,
+        op: ComparisonOp,
+        expected: NumericLiteral,
+    ) -> Result<Self> {
+        let column = self.column(slot).ok_or_else(|| {
+            SkeinError::Execution(format!("unknown columnar filter slot {}", slot.0))
+        })?;
+        let selection = filter_numeric_column(column, &self.selection, op, expected)?;
+        self.clone().with_selection(selection)
+    }
+
+    pub fn filter_boolean(&self, slot: SlotId, expected: bool) -> Result<Self> {
+        let column = self.column(slot).ok_or_else(|| {
+            SkeinError::Execution(format!("unknown columnar filter slot {}", slot.0))
+        })?;
+        let selection = filter_boolean_column(column, &self.selection, expected)?;
+        self.clone().with_selection(selection)
+    }
+
+    pub fn limit(&self, offset: usize, max_rows: usize) -> Self {
+        Self {
+            schema: Arc::clone(&self.schema),
+            columns: self.columns.clone(),
+            selection: self.selection.limit(offset, max_rows),
+            row_count: self.row_count,
+        }
+    }
+
+    pub fn count_selected(&self) -> usize {
+        self.selection.selected_count()
+    }
+
+    pub fn count_valid(&self, slot: SlotId) -> Result<usize> {
+        let column = self.column(slot).ok_or_else(|| {
+            SkeinError::Execution(format!("unknown columnar aggregate slot {}", slot.0))
+        })?;
+        Ok(self
+            .selection
+            .iter()
+            .filter(|row| column.is_valid(*row))
+            .count())
+    }
+
+    pub fn sum_int64(&self, slot: SlotId) -> Result<Option<i64>> {
+        let column = self.column(slot).ok_or_else(|| {
+            SkeinError::Execution(format!("unknown columnar aggregate slot {}", slot.0))
+        })?;
+        let ColumnVector::Int64 { values, validity } = column.as_ref() else {
+            return Err(SkeinError::Execution(format!(
+                "columnar SUM requires Int64, got {:?}",
+                column.logical_type()
+            )));
+        };
+        let mut sum = None::<i64>;
+        for row in self.selection.iter() {
+            if validity.is_valid(row) {
+                sum =
+                    Some(sum.unwrap_or(0).checked_add(values[row]).ok_or_else(|| {
+                        SkeinError::Execution("columnar Int64 SUM overflow".into())
+                    })?);
+            }
+        }
+        Ok(sum)
+    }
+
     pub fn estimated_memory_bytes(&self) -> usize {
-        self.columns.iter().fold(0usize, |total, column| {
-            total.saturating_add(column.estimated_memory_bytes())
-        })
+        let schema_bytes = self.schema.slots().iter().fold(
+            self.schema.len() * std::mem::size_of::<SlotDescriptor>(),
+            |total, slot| total.saturating_add(slot.name.len()),
+        );
+        self.columns
+            .iter()
+            .fold(schema_bytes, |total, column| {
+                total.saturating_add(column.estimated_memory_bytes())
+            })
+            .saturating_add(self.selection.estimated_memory_bytes())
     }
 }
 
@@ -633,6 +756,34 @@ pub fn filter_numeric_column(
             other.logical_type()
         ))),
     }
+}
+
+pub fn filter_boolean_column(
+    column: &ColumnVector,
+    input: &Selection,
+    expected: bool,
+) -> Result<Selection> {
+    if column.len() != input.len() {
+        return Err(SkeinError::Execution(format!(
+            "boolean filter column has {} rows but input selection has {}",
+            column.len(),
+            input.len()
+        )));
+    }
+    let ColumnVector::Bool { values, validity } = column else {
+        return Err(SkeinError::Execution(format!(
+            "boolean filter requires Bool, got {:?}",
+            column.logical_type()
+        )));
+    };
+    let expected = u8::from(expected);
+    let mut output = SelectionBuilder::new(input.len());
+    for row in input.iter() {
+        if validity.is_valid(row) && values[row] == expected {
+            output.select(row);
+        }
+    }
+    Ok(output.finish())
 }
 
 pub fn filter_int64_values(
@@ -956,5 +1107,93 @@ mod tests {
         let projected = batch.project(&[SlotId(0)]).unwrap();
 
         assert!(Arc::ptr_eq(projected.column(SlotId(0)).unwrap(), &column));
+    }
+
+    #[test]
+    fn boolean_filter_limit_and_projection_share_storage() {
+        let schema = Arc::new(
+            BindingSchema::try_new(vec![
+                SlotDescriptor {
+                    id: SlotId(0),
+                    name: "visible".to_string(),
+                    logical_type: LogicalType::Bool,
+                },
+                SlotDescriptor {
+                    id: SlotId(1),
+                    name: "id".to_string(),
+                    logical_type: LogicalType::NodeId,
+                },
+            ])
+            .unwrap(),
+        );
+        let visible = Arc::new(
+            ColumnVector::boolean(
+                vec![true, false, true, true, false],
+                Validity::Bitmap {
+                    len: 5,
+                    words: Arc::from([0b1_1011]),
+                },
+            )
+            .unwrap(),
+        );
+        let ids = Arc::new(ColumnVector::node_ids(vec![10, 11, 12, 13, 14]));
+        let batch = ColumnarBatch::try_new(schema, vec![Arc::clone(&visible), Arc::clone(&ids)])
+            .unwrap()
+            .filter_boolean(SlotId(0), true)
+            .unwrap()
+            .limit(1, 1)
+            .project(&[SlotId(1)])
+            .unwrap();
+
+        assert_eq!(batch.selection().iter().collect::<Vec<_>>(), vec![3]);
+        assert!(Arc::ptr_eq(batch.column(SlotId(0)).unwrap(), &ids));
+    }
+
+    #[test]
+    fn count_and_sum_follow_selection_and_validity() {
+        let schema = Arc::new(
+            BindingSchema::try_new(vec![SlotDescriptor {
+                id: SlotId(0),
+                name: "token_count".to_string(),
+                logical_type: LogicalType::Int64,
+            }])
+            .unwrap(),
+        );
+        let values = Arc::new(
+            ColumnVector::int64(
+                vec![4, 8, 16, 32],
+                Validity::Bitmap {
+                    len: 4,
+                    words: Arc::from([0b1101]),
+                },
+            )
+            .unwrap(),
+        );
+        let batch = ColumnarBatch::try_new(schema, vec![values])
+            .unwrap()
+            .filter_numeric(SlotId(0), ComparisonOp::Gte, NumericLiteral::Int(4))
+            .unwrap()
+            .limit(1, 2);
+
+        assert_eq!(batch.count_selected(), 2);
+        assert_eq!(batch.count_valid(SlotId(0)).unwrap(), 2);
+        assert_eq!(batch.sum_int64(SlotId(0)).unwrap(), Some(48));
+    }
+
+    #[test]
+    fn int64_sum_fails_closed_on_overflow() {
+        let schema = Arc::new(
+            BindingSchema::try_new(vec![SlotDescriptor {
+                id: SlotId(0),
+                name: "value".to_string(),
+                logical_type: LogicalType::Int64,
+            }])
+            .unwrap(),
+        );
+        let values = Arc::new(ColumnVector::int64(vec![i64::MAX, 1], Validity::all(2)).unwrap());
+        let batch = ColumnarBatch::try_new(schema, vec![values]).unwrap();
+
+        let error = batch.sum_int64(SlotId(0)).unwrap_err();
+        assert!(error.to_string().contains("SUM overflow"));
     }
 }

@@ -22,7 +22,9 @@ durable representation.
 - typed `ColumnVector` values with explicit validity;
 - `Selection::All`, dense bitmap, and sparse index representations;
 - zero-copy projection by sharing immutable column storage;
-- typed integer and floating-point comparison kernels.
+- typed integer, floating-point, and boolean filter kernels;
+- selection-preserving offset/limit;
+- validity-aware `COUNT` and checked `BIGINT` `SUM` kernels.
 
 All-valid columns MUST NOT allocate a validity bitmap. Selection kernels MUST
 build the final sparse-index or dense-bitmap representation adaptively rather
@@ -33,6 +35,9 @@ allocation after each emission.
 Missing and `NULL` values MUST be invalid in the comparison column and MUST NOT
 pass a range predicate. Integer-to-float comparison and floating-point ordering
 MUST match the row executor, including `f64::total_cmp` behavior for NaN.
+`COUNT(column)` MUST ignore invalid rows, while `COUNT(*)` counts selected rows.
+`BIGINT` `SUM` MUST ignore invalid rows, return `NULL` for an empty input, and
+fail closed on overflow rather than wrap.
 
 The initial production fragment is:
 
@@ -62,6 +67,16 @@ worst-case validity bitmap and selected-row index scratch in admission. The
 validity bitmap and selected-row buffers MUST be reused across batches. A
 completed projection MUST NOT retain hidden node bindings that are outside the
 projected result scope.
+
+An eligible parallel worker MUST place a typed `ColumnarBatch` and its
+selection into the bounded ordinal stream. It MUST NOT construct per-row
+`Binding` maps while the result is queued or waiting in the reorder window.
+The coordinator materializes selected bindings only when that ordinal reaches
+the consumer boundary. Before constructing a retained columnar morsel, the
+worker MUST use a conservative schema, validity, selection, and typed-column
+estimate to prove that it fits the reserved output bytes. If it cannot fit, the
+fragment MAY choose the serial batch path, but that choice MUST happen before
+the worker decodes or evaluates the morsel.
 
 ## Query Memory Ledger
 
@@ -183,8 +198,10 @@ pipeline.
 fragment with `SKEIN_MORSEL_BENCH_WORKERS` set to 4, 8, or 16. An optional
 `SKEIN_MORSEL_BENCH_ROWS` selects one common dataset size, but the benchmark
 MUST reject a size that cannot activate the requested workers under default
-admission. Local benchmark output MUST identify itself as non-production
-evidence. The reproducible workload and directional result are recorded in
+admission. The report MUST include peak queued output count and bytes plus the
+peak reorder-entry count so throughput cannot hide a residency regression.
+Local benchmark output MUST identify itself as non-production evidence. The
+reproducible workload and directional result are recorded in
 [`../EXECUTOR_MORSEL_BENCHMARK.md`](../EXECUTOR_MORSEL_BENCHMARK.md).
 
 CI MUST check compilation, semantics, and deterministic resource bounds. A
