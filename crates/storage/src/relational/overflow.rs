@@ -165,6 +165,17 @@ pub(super) fn hydrate_projected_row(
     budget: &mut RelationalHydrationBudget,
     task_context: Option<&skein_core::RuntimeTaskContext>,
 ) -> Result<(), RelationalError> {
+    hydrate_projected_row_fields(state, table, row, None, budget, task_context)
+}
+
+pub(super) fn hydrate_projected_row_fields(
+    state: &RelationalState,
+    table: &str,
+    row: &mut RelationalProjectedRow,
+    required_fields: Option<&[usize]>,
+    budget: &mut RelationalHydrationBudget,
+    task_context: Option<&skein_core::RuntimeTaskContext>,
+) -> Result<(), RelationalError> {
     if !row
         .fields
         .iter()
@@ -188,23 +199,28 @@ pub(super) fn hydrate_projected_row(
         ))
     })?;
     let mut staged_budget = *budget;
-    if staged_budget.hydrated_rows >= staged_budget.max_rows {
-        return Err(RelationalError::Admission(format!(
-            "relational hydration exceeds max_rows {}",
-            staged_budget.max_rows
-        )));
-    }
-    staged_budget.hydrated_rows += 1;
+    let mut hydrated_row = false;
     for field in &mut row.fields {
         let RelationalValue::Overflow(reference) = &field.value else {
             continue;
         };
-        let _column = schema.columns.get(field.ordinal).ok_or_else(|| {
+        let column = schema.columns.get(field.ordinal).ok_or_else(|| {
             RelationalError::Corruption(format!(
                 "projected field {} is outside the canonical row shape for table {table}",
                 field.ordinal
             ))
         })?;
+        if column.scalar_type != reference.scalar_type
+            || !matches!(
+                column.scalar_type,
+                RelationalScalarType::Text | RelationalScalarType::Bytea
+            )
+        {
+            return Err(RelationalError::Corruption(format!(
+                "projected overflow reference at field {} has type {:?}, expected {:?} in table {table}",
+                field.ordinal, reference.scalar_type, column.scalar_type
+            )));
+        }
         if let Some(canonical) = canonical {
             let canonical_value = canonical.values().get(field.ordinal).ok_or_else(|| {
                 RelationalError::Corruption(format!(
@@ -228,6 +244,19 @@ pub(super) fn hydrate_projected_row(
                     reference.digest
                 ))
             })?;
+        if required_fields.is_some_and(|fields| !fields.contains(&field.ordinal)) {
+            continue;
+        }
+        if !hydrated_row {
+            if staged_budget.hydrated_rows >= staged_budget.max_rows {
+                return Err(RelationalError::Admission(format!(
+                    "relational hydration exceeds max_rows {}",
+                    staged_budget.max_rows
+                )));
+            }
+            staged_budget.hydrated_rows += 1;
+            hydrated_row = true;
+        }
         runtime_checkpoint(task_context)?;
         let envelope = segment.read()?;
         field.value =

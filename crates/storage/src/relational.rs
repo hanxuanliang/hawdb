@@ -88,7 +88,8 @@ pub use row_page::{
     RelationalRowPageGenerationRequest, RelationalRowPageId, RelationalRowPageIdAllocator,
     RelationalRowPageLimits, RelationalRowPageLiveError, RelationalRowPageMutationError,
     RelationalRowPageMutationPlan, RelationalRowPageMutationPlanner,
-    RelationalRowPageProjectedRange, RelationalRowPagePublicationConfig,
+    RelationalRowPageProjectedFields, RelationalRowPageProjectedRange,
+    RelationalRowPageProjectedRangeFields, RelationalRowPagePublicationConfig,
     RelationalRowPagePublicationError, RelationalRowPagePublicationPhase,
     RelationalRowPagePublicationReport, RelationalRowPagePublisher, RelationalRowPageReadView,
     RelationalRowPageReadViewIdentity, RelationalRowPageRecoveredValue,
@@ -3265,6 +3266,31 @@ impl RelationalState {
         task_context: Option<&skein_core::RuntimeTaskContext>,
     ) -> Result<(), RelationalError> {
         overflow::hydrate_projected_row(self, table, row, budget, task_context)
+    }
+
+    /// Resolves only the listed projected fields while preserving other
+    /// overflow values as validated metadata references.
+    ///
+    /// This supports operators such as `OCTET_LENGTH` that can answer from the
+    /// reference metadata without reading or decompressing the payload. Every
+    /// retained reference is still checked against the schema, canonical row,
+    /// and reachable overflow closure.
+    pub fn hydrate_projected_row_fields_with_context(
+        &self,
+        table: &str,
+        row: &mut RelationalProjectedRow,
+        required_fields: &[usize],
+        budget: &mut RelationalHydrationBudget,
+        task_context: Option<&skein_core::RuntimeTaskContext>,
+    ) -> Result<(), RelationalError> {
+        overflow::hydrate_projected_row_fields(
+            self,
+            table,
+            row,
+            Some(required_fields),
+            budget,
+            task_context,
+        )
     }
 
     pub fn overflow_segment_count(&self) -> usize {

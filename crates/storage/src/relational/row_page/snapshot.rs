@@ -8,8 +8,9 @@ use super::{
     RelationalProjectedField, RelationalProjectedRow, RelationalRowDeltaError,
     RelationalRowDeltaReadReport, RelationalRowPageDemandReadError,
     RelationalRowPageDemandReadLimits, RelationalRowPageDemandReadReport,
-    RelationalRowPageDemandReader, RelationalRowPageProjectedRange, RelationalRowPageReadView,
-    RelationalRowPageReadViewIdentity, RelationalRowPageRecoveredValue,
+    RelationalRowPageDemandReader, RelationalRowPageProjectedFields,
+    RelationalRowPageProjectedRange, RelationalRowPageProjectedRangeFields,
+    RelationalRowPageReadView, RelationalRowPageReadViewIdentity, RelationalRowPageRecoveredValue,
 };
 use crate::relational::{
     RelationalHydrationBudget, RelationalKey, RelationalOverflowRootReader, RelationalRowPageError,
@@ -81,7 +82,17 @@ struct ProjectedRangeVisitContext<'a> {
     limits: RelationalRowPageSnapshotReadLimits,
     hydration: &'a mut RelationalHydrationBudget,
     task: &'a RuntimeTaskContext,
-    hydrate_overflow: bool,
+    hydration_fields: Option<&'a [usize]>,
+}
+
+struct ProjectedPointReadRequest<'a> {
+    table: &'a str,
+    primary_key: &'a RelationalKey,
+    requested_fields: &'a [usize],
+    limits: RelationalRowPageSnapshotReadLimits,
+    hydration: &'a mut RelationalHydrationBudget,
+    task: &'a RuntimeTaskContext,
+    hydration_fields: Option<&'a [usize]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,6 +202,10 @@ impl RelationalRowPageSnapshotReader {
                 .is_some_and(|delta| delta.is_poisoned())
     }
 
+    pub fn has_overlay_overflow_root(&self) -> bool {
+        self.overlay_overflow.is_some()
+    }
+
     pub fn point_projected(
         &self,
         table: &str,
@@ -206,6 +221,96 @@ impl RelationalRowPageSnapshotReader {
         ),
         RelationalRowPageSnapshotReadError,
     > {
+        self.point_projected_with_hydration_mode(ProjectedPointReadRequest {
+            table,
+            primary_key,
+            requested_fields,
+            limits,
+            hydration,
+            task,
+            hydration_fields: Some(requested_fields),
+        })
+    }
+
+    /// Reads one projected snapshot row while hydrating only the listed field
+    /// ordinals. Retained overflow references are validated against the root
+    /// bound to their snapshot source.
+    pub fn point_projected_fields(
+        &self,
+        table: &str,
+        primary_key: &RelationalKey,
+        fields: RelationalRowPageProjectedFields<'_>,
+        limits: RelationalRowPageSnapshotReadLimits,
+        hydration: &mut RelationalHydrationBudget,
+        task: &RuntimeTaskContext,
+    ) -> Result<
+        (
+            Option<RelationalProjectedRow>,
+            RelationalRowPageSnapshotPointReport,
+        ),
+        RelationalRowPageSnapshotReadError,
+    > {
+        let RelationalRowPageProjectedFields {
+            requested_fields,
+            hydration_fields,
+        } = fields;
+        self.point_projected_with_hydration_mode(ProjectedPointReadRequest {
+            table,
+            primary_key,
+            requested_fields,
+            limits,
+            hydration,
+            task,
+            hydration_fields: Some(hydration_fields),
+        })
+    }
+
+    /// Reads one projected snapshot row without loading overflow payloads.
+    pub fn point_projected_unhydrated(
+        &self,
+        table: &str,
+        primary_key: &RelationalKey,
+        requested_fields: &[usize],
+        limits: RelationalRowPageSnapshotReadLimits,
+        task: &RuntimeTaskContext,
+    ) -> Result<
+        (
+            Option<RelationalProjectedRow>,
+            RelationalRowPageSnapshotPointReport,
+        ),
+        RelationalRowPageSnapshotReadError,
+    > {
+        let mut hydration = RelationalHydrationBudget::default();
+        self.point_projected_with_hydration_mode(ProjectedPointReadRequest {
+            table,
+            primary_key,
+            requested_fields,
+            limits,
+            hydration: &mut hydration,
+            task,
+            hydration_fields: None,
+        })
+    }
+
+    fn point_projected_with_hydration_mode(
+        &self,
+        request: ProjectedPointReadRequest<'_>,
+    ) -> Result<
+        (
+            Option<RelationalProjectedRow>,
+            RelationalRowPageSnapshotPointReport,
+        ),
+        RelationalRowPageSnapshotReadError,
+    > {
+        let ProjectedPointReadRequest {
+            table,
+            primary_key,
+            requested_fields,
+            limits,
+            hydration,
+            task,
+            hydration_fields,
+        } = request;
         self.checkpoint(task)?;
         let (overlay, recovery, live_batches_examined, selected_live) = self
             .view
@@ -238,7 +343,11 @@ impl RelationalRowPageSnapshotReader {
                         limits.max_overlay_bytes
                     )));
                 }
-                let value = project_overlay_value(&value, requested_fields);
+                let value = project_overlay_value(
+                    &value,
+                    requested_fields,
+                    !selected_live && self.overlay_overflow.is_some(),
+                );
                 let (row, demand) = self
                     .demand
                     .point_projected_overlay(
@@ -251,6 +360,7 @@ impl RelationalRowPageSnapshotReader {
                         limits.demand,
                         hydration,
                         task,
+                        hydration_fields,
                     )
                     .map_err(|error| self.map_demand_error(error))?;
                 let source = if deleted {
@@ -263,17 +373,28 @@ impl RelationalRowPageSnapshotReader {
                 (row, demand, source, overlay_resident_bytes)
             }
             None => {
-                let (row, demand) = self
-                    .demand
-                    .point_projected(
+                let (row, demand) = if let Some(hydration_fields) = hydration_fields {
+                    self.demand.point_projected_fields(
                         table,
                         primary_key,
-                        requested_fields,
+                        RelationalRowPageProjectedFields {
+                            requested_fields,
+                            hydration_fields,
+                        },
                         limits.demand,
                         hydration,
                         task,
                     )
-                    .map_err(|error| self.map_demand_error(error))?;
+                } else {
+                    self.demand.point_projected_unhydrated(
+                        table,
+                        primary_key,
+                        requested_fields,
+                        limits.demand,
+                        task,
+                    )
+                }
+                .map_err(|error| self.map_demand_error(error))?;
                 let source = if row.is_some() {
                     RelationalRowPageSnapshotRowSource::Checkpoint
                 } else {
@@ -321,6 +442,35 @@ impl RelationalRowPageSnapshotReader {
         limits: RelationalRowPageSnapshotReadLimits,
         hydration: &mut RelationalHydrationBudget,
         task: &RuntimeTaskContext,
+        resolve: impl FnMut(
+            &mut RelationalProjectedRow,
+            &mut RelationalHydrationBudget,
+            &RuntimeTaskContext,
+        ) -> Result<(), RelationalRowPageDemandReadError>,
+        visit: impl FnMut(RelationalProjectedRow, &mut RelationalHydrationBudget) -> bool,
+    ) -> Result<RelationalRowPageSnapshotRangeReport, RelationalRowPageSnapshotReadError> {
+        self.visit_projected_range_fields_resolving(
+            RelationalRowPageProjectedRangeFields {
+                range,
+                hydration_fields: range.requested_fields,
+            },
+            limits,
+            hydration,
+            task,
+            resolve,
+            visit,
+        )
+    }
+
+    /// Visits a projected range while hydrating only the listed field
+    /// ordinals. The resolver is invoked only for live values that are not
+    /// bound to an immutable overflow root.
+    pub fn visit_projected_range_fields_resolving(
+        &self,
+        projected: RelationalRowPageProjectedRangeFields<'_>,
+        limits: RelationalRowPageSnapshotReadLimits,
+        hydration: &mut RelationalHydrationBudget,
+        task: &RuntimeTaskContext,
         mut resolve: impl FnMut(
             &mut RelationalProjectedRow,
             &mut RelationalHydrationBudget,
@@ -328,13 +478,17 @@ impl RelationalRowPageSnapshotReader {
         ) -> Result<(), RelationalRowPageDemandReadError>,
         visit: impl FnMut(RelationalProjectedRow, &mut RelationalHydrationBudget) -> bool,
     ) -> Result<RelationalRowPageSnapshotRangeReport, RelationalRowPageSnapshotReadError> {
+        let RelationalRowPageProjectedRangeFields {
+            range,
+            hydration_fields,
+        } = projected;
         self.visit_projected_range_with_hydration_mode(
             ProjectedRangeVisitContext {
                 range,
                 limits,
                 hydration,
                 task,
-                hydrate_overflow: true,
+                hydration_fields: Some(hydration_fields),
             },
             &mut resolve,
             visit,
@@ -362,7 +516,7 @@ impl RelationalRowPageSnapshotReader {
                 limits,
                 hydration: &mut hydration,
                 task,
-                hydrate_overflow: false,
+                hydration_fields: None,
             },
             &mut resolve,
             |row, _| visit(row),
@@ -384,7 +538,7 @@ impl RelationalRowPageSnapshotReader {
             limits,
             hydration,
             task,
-            hydrate_overflow,
+            hydration_fields,
         } = context;
         self.checkpoint(task)?;
         let (overlay, overlay_report) = self.collect_overlay(range, limits, task)?;
@@ -402,7 +556,7 @@ impl RelationalRowPageSnapshotReader {
                 },
                 hydration,
                 task,
-                hydrate_overflow,
+                hydration_fields,
                 resolve,
                 visit,
             )
@@ -444,6 +598,11 @@ impl RelationalRowPageSnapshotReader {
         .map_err(|error| self.map_row_error(error))?;
         let mut collector = OverlayCollector::new(
             self.identity(),
+            self.overlay_overflow.as_ref().and_then(|_| {
+                self.view
+                    .recovery_delta()
+                    .map(|delta| delta.manifest().visible_commit_epoch)
+            }),
             column_count,
             range.requested_fields,
             limits,
@@ -571,6 +730,7 @@ struct OverlayCollector<'a> {
     resident_bytes: usize,
     replacements: usize,
     identity: RelationalRowPageReadViewIdentity,
+    recovery_visible_epoch: Option<u64>,
     column_count: usize,
     requested_fields: &'a [usize],
     limits: RelationalRowPageSnapshotReadLimits,
@@ -579,6 +739,7 @@ struct OverlayCollector<'a> {
 impl<'a> OverlayCollector<'a> {
     fn new(
         identity: RelationalRowPageReadViewIdentity,
+        recovery_visible_epoch: Option<u64>,
         column_count: usize,
         requested_fields: &'a [usize],
         limits: RelationalRowPageSnapshotReadLimits,
@@ -588,6 +749,7 @@ impl<'a> OverlayCollector<'a> {
             resident_bytes: 0,
             replacements: 0,
             identity,
+            recovery_visible_epoch,
             column_count,
             requested_fields,
             limits,
@@ -634,7 +796,12 @@ impl<'a> OverlayCollector<'a> {
                     self.limits.max_overlay_bytes
                 )));
             }
-            let value = project_overlay_value(value, self.requested_fields);
+            let value = project_overlay_value(
+                value,
+                self.requested_fields,
+                self.recovery_visible_epoch
+                    .is_some_and(|recovery_epoch| epoch <= recovery_epoch),
+            );
             current.epoch = epoch;
             current.value = value;
             current.value_resident_bytes = value_resident_bytes;
@@ -681,7 +848,12 @@ impl<'a> OverlayCollector<'a> {
                 self.limits.max_overlay_bytes
             )));
         }
-        let value = project_overlay_value(value, self.requested_fields);
+        let value = project_overlay_value(
+            value,
+            self.requested_fields,
+            self.recovery_visible_epoch
+                .is_some_and(|recovery_epoch| epoch <= recovery_epoch),
+        );
         self.rows.insert(
             key.clone(),
             OverlayVersion {
@@ -768,12 +940,13 @@ fn projected_overlay_resident_bytes(
 fn project_overlay_value(
     value: &RelationalRowPageRecoveredValue,
     requested_fields: &[usize],
+    binds_overlay_overflow: bool,
 ) -> RelationalRowPageProjectedOverlayValue {
     let RelationalRowPageRecoveredValue::Present(row) = value else {
         return RelationalRowPageProjectedOverlayValue::Deleted;
     };
-    RelationalRowPageProjectedOverlayValue::Present(
-        requested_fields
+    RelationalRowPageProjectedOverlayValue::Present {
+        fields: requested_fields
             .iter()
             .map(|ordinal| RelationalProjectedField {
                 ordinal: *ordinal,
@@ -781,7 +954,8 @@ fn project_overlay_value(
             })
             .collect::<Vec<_>>()
             .into_boxed_slice(),
-    )
+        binds_overlay_overflow,
+    }
 }
 
 fn overlay_point_resident_bytes(

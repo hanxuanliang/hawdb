@@ -1,7 +1,7 @@
 use super::{expression_name, resolve_column, BoundRow};
 use crate::error::{Result, SkeinError};
 use crate::sql::{
-    SelectProjection, SelectStatement, SqlColumnRef, SqlExpression, SqlFunctionArgument,
+    SelectProjection, SelectStatement, SqlColumnRef, SqlExpression, SqlFunctionArgument, SqlValue,
 };
 use crate::value::Value;
 use skein_executor::{
@@ -25,12 +25,14 @@ struct ColumnarAggregateProjection {
     output_name: String,
     kind: ColumnarAggregateKind,
     accumulator: ColumnarAggregateAccumulator,
+    null_fallback: Option<Value>,
 }
 
 enum ColumnarAggregateKind {
     CountAll,
     CountColumn(SqlColumnRef),
     SumInt64(SqlColumnRef),
+    SumOctetLength(SqlColumnRef),
 }
 
 enum ColumnarAggregateAccumulator {
@@ -85,7 +87,8 @@ impl ColumnarAggregateExecutor {
                         ColumnarAggregateKind::CountAll | ColumnarAggregateKind::CountColumn(_) => {
                             LogicalType::Bool
                         }
-                        ColumnarAggregateKind::SumInt64(_) => LogicalType::Int64,
+                        ColumnarAggregateKind::SumInt64(_)
+                        | ColumnarAggregateKind::SumOctetLength(_) => LogicalType::Int64,
                     },
                 })
                 .collect(),
@@ -133,7 +136,8 @@ impl ColumnarAggregateExecutor {
                     .saturating_add(match &projection.kind {
                         ColumnarAggregateKind::CountAll => 0,
                         ColumnarAggregateKind::CountColumn(column)
-                        | ColumnarAggregateKind::SumInt64(column) => {
+                        | ColumnarAggregateKind::SumInt64(column)
+                        | ColumnarAggregateKind::SumOctetLength(column) => {
                             column.name.capacity()
                                 + column
                                     .qualifier
@@ -141,6 +145,9 @@ impl ColumnarAggregateExecutor {
                                     .map_or(0, |qualifier| qualifier.capacity())
                         }
                     })
+                    .saturating_add(projection.null_fallback.as_ref().map_or(0, |value| {
+                        skein_executor::binding::value_memory_bytes(value)
+                    }))
             },
         )
     }
@@ -180,6 +187,33 @@ impl ColumnarAggregateExecutor {
                         ));
                     }
                 },
+                (
+                    ColumnarAggregateKind::SumOctetLength(column),
+                    ColumnBuffer::Int64 { values, validity },
+                ) => match resolve_column(row, column)? {
+                    RelationalValue::Null => {
+                        values.push(0);
+                        validity.push(false);
+                    }
+                    RelationalValue::Text(value) => {
+                        values.push(i64::try_from(value.len()).unwrap_or(i64::MAX));
+                        validity.push(true);
+                    }
+                    RelationalValue::Bytea(value) => {
+                        values.push(i64::try_from(value.len()).unwrap_or(i64::MAX));
+                        validity.push(true);
+                    }
+                    RelationalValue::Overflow(reference) => {
+                        values
+                            .push(i64::try_from(reference.uncompressed_bytes).unwrap_or(i64::MAX));
+                        validity.push(true);
+                    }
+                    _ => {
+                        return Err(SkeinError::Semantic(
+                            "OCTET_LENGTH requires TEXT or BYTEA input".to_string(),
+                        ));
+                    }
+                },
                 _ => unreachable!("columnar aggregate schema and buffers are aligned"),
             }
         }
@@ -195,7 +229,7 @@ impl ColumnarAggregateExecutor {
         self.projections
             .into_iter()
             .map(|projection| {
-                let value = match projection.accumulator {
+                let mut value = match projection.accumulator {
                     ColumnarAggregateAccumulator::Count(count) => {
                         Value::Int(i64::try_from(count).unwrap_or(i64::MAX))
                     }
@@ -203,6 +237,9 @@ impl ColumnarAggregateExecutor {
                         sum.map_or(Value::Null, Value::Int)
                     }
                 };
+                if value == Value::Null {
+                    value = projection.null_fallback.unwrap_or(Value::Null);
+                }
                 Ok((projection.output_name, value))
             })
             .collect()
@@ -239,7 +276,7 @@ impl ColumnarAggregateExecutor {
                     *count = count.saturating_add(batch.count_valid(slot)?);
                 }
                 (
-                    ColumnarAggregateKind::SumInt64(_),
+                    ColumnarAggregateKind::SumInt64(_) | ColumnarAggregateKind::SumOctetLength(_),
                     ColumnarAggregateAccumulator::SumInt64(sum),
                 ) => {
                     let partial = batch.sum_int64(slot).map_err(|error| {
@@ -274,6 +311,8 @@ fn prepare_projection(
     let SelectProjection::Expression { expression, alias } = projection else {
         return None;
     };
+    let outer_expression = expression;
+    let (expression, null_fallback) = unwrap_coalesce(outer_expression)?;
     let SqlExpression::Function {
         name,
         arguments,
@@ -282,7 +321,9 @@ fn prepare_projection(
     else {
         return None;
     };
-    let output_name = alias.clone().unwrap_or_else(|| expression_name(expression));
+    let output_name = alias
+        .clone()
+        .unwrap_or_else(|| expression_name(outer_expression));
     let (kind, accumulator) = match (name.as_str(), arguments.as_slice()) {
         ("count", [SqlFunctionArgument::Wildcard]) => (
             ColumnarAggregateKind::CountAll,
@@ -307,13 +348,80 @@ fn prepare_projection(
                 ColumnarAggregateAccumulator::SumInt64(None),
             )
         }
+        ("sum", [SqlFunctionArgument::Expression(expression)])
+            if octet_length_column(expression).is_some_and(|column| {
+                base_column_position(column, base_schema, base_table, base_qualifier).is_some_and(
+                    |position| {
+                        matches!(
+                            base_schema.columns[position].scalar_type,
+                            RelationalScalarType::Text | RelationalScalarType::Bytea
+                        )
+                    },
+                )
+            }) =>
+        {
+            (
+                ColumnarAggregateKind::SumOctetLength(
+                    octet_length_column(expression)
+                        .expect("OCTET_LENGTH column shape was checked above")
+                        .clone(),
+                ),
+                ColumnarAggregateAccumulator::SumInt64(None),
+            )
+        }
         _ => return None,
     };
     Some(ColumnarAggregateProjection {
         output_name,
         kind,
         accumulator,
+        null_fallback,
     })
+}
+
+fn octet_length_column(expression: &SqlExpression) -> Option<&SqlColumnRef> {
+    let SqlExpression::Function {
+        name,
+        arguments,
+        distinct: false,
+    } = expression
+    else {
+        return None;
+    };
+    let [SqlFunctionArgument::Expression(SqlExpression::Column(column))] = arguments.as_slice()
+    else {
+        return None;
+    };
+    (name == "octet_length").then_some(column)
+}
+
+fn unwrap_coalesce(expression: &SqlExpression) -> Option<(&SqlExpression, Option<Value>)> {
+    let SqlExpression::Function {
+        name,
+        arguments,
+        distinct: false,
+    } = expression
+    else {
+        return Some((expression, None));
+    };
+    if name != "coalesce" {
+        return Some((expression, None));
+    }
+    let [SqlFunctionArgument::Expression(aggregate), fallback @ ..] = arguments.as_slice() else {
+        return None;
+    };
+    let mut null_fallback = None;
+    for argument in fallback {
+        let SqlFunctionArgument::Expression(SqlExpression::Value(SqlValue::Literal(value))) =
+            argument
+        else {
+            return None;
+        };
+        if null_fallback.is_none() && value != &Value::Null {
+            null_fallback = Some(value.clone());
+        }
+    }
+    Some((aggregate, null_fallback))
 }
 
 fn base_column_position(
@@ -383,13 +491,15 @@ fn estimated_batch_bytes(
         |total, projection| {
             let values = match projection.kind {
                 ColumnarAggregateKind::CountAll | ColumnarAggregateKind::CountColumn(_) => rows,
-                ColumnarAggregateKind::SumInt64(_) => {
+                ColumnarAggregateKind::SumInt64(_) | ColumnarAggregateKind::SumOctetLength(_) => {
                     rows.saturating_mul(std::mem::size_of::<i64>())
                 }
             };
             let validity = match projection.kind {
                 ColumnarAggregateKind::CountAll => 0,
-                ColumnarAggregateKind::CountColumn(_) | ColumnarAggregateKind::SumInt64(_) => rows
+                ColumnarAggregateKind::CountColumn(_)
+                | ColumnarAggregateKind::SumInt64(_)
+                | ColumnarAggregateKind::SumOctetLength(_) => rows
                     .div_ceil(u64::BITS as usize)
                     .saturating_mul(std::mem::size_of::<u64>()),
             };
@@ -411,10 +521,69 @@ fn create_buffers(projections: &[ColumnarAggregateProjection], rows: usize) -> V
                     validity: ValidityBuilder::with_capacity(rows),
                 }
             }
-            ColumnarAggregateKind::SumInt64(_) => ColumnBuffer::Int64 {
-                values: Vec::with_capacity(rows),
-                validity: ValidityBuilder::with_capacity(rows),
-            },
+            ColumnarAggregateKind::SumInt64(_) | ColumnarAggregateKind::SumOctetLength(_) => {
+                ColumnBuffer::Int64 {
+                    values: Vec::with_capacity(rows),
+                    validity: ValidityBuilder::with_capacity(rows),
+                }
+            }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use skein_storage::RelationalColumnSchema;
+
+    #[test]
+    fn recognizes_coalesced_sum_octet_length_as_columnar_aggregate() {
+        let crate::sql::SqlStatement::Select(select) = skein_sql::parse_postgres_sql(
+            "SELECT COALESCE(SUM(OCTET_LENGTH(body)), 0) AS body_bytes FROM documents",
+        )
+        .expect("parse length aggregate") else {
+            panic!("expected SELECT statement")
+        };
+        let schema = RelationalTableSchema {
+            name: "documents".to_string(),
+            columns: vec![
+                RelationalColumnSchema {
+                    name: "id".to_string(),
+                    scalar_type: RelationalScalarType::Text,
+                    nullable: false,
+                    default: None,
+                },
+                RelationalColumnSchema {
+                    name: "body".to_string(),
+                    scalar_type: RelationalScalarType::Text,
+                    nullable: false,
+                    default: None,
+                },
+            ],
+            primary_key: vec!["id".to_string()],
+            unique_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+            indexes: Vec::new(),
+        };
+        let ledger =
+            QueryMemoryLedger::new(NonZeroUsize::new(64 * 1024).expect("non-zero query memory"));
+        let executor = ColumnarAggregateExecutor::try_new(
+            &select,
+            &schema,
+            "documents",
+            "documents",
+            true,
+            64,
+            NonZeroUsize::new(16 * 1024).expect("non-zero batch bytes"),
+            &ledger,
+        )
+        .expect("plan columnar aggregate")
+        .expect("length aggregate must use the columnar path");
+
+        assert!(matches!(
+            executor.projections[0].kind,
+            ColumnarAggregateKind::SumOctetLength(_)
+        ));
+        assert_eq!(executor.projections[0].null_fallback, Some(Value::Int(0)));
+    }
 }

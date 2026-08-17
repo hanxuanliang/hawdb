@@ -42,6 +42,18 @@ pub struct RelationalRowPageProjectedRange<'a> {
     pub requested_fields: &'a [usize],
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RelationalRowPageProjectedFields<'a> {
+    pub requested_fields: &'a [usize],
+    pub hydration_fields: &'a [usize],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RelationalRowPageProjectedRangeFields<'a> {
+    pub range: RelationalRowPageProjectedRange<'a>,
+    pub hydration_fields: &'a [usize],
+}
+
 pub(super) struct RelationalRowPageOverlayPoint<'a> {
     pub table: &'a str,
     pub primary_key: RelationalKey,
@@ -60,6 +72,16 @@ pub(super) struct RelationalRowPageOverlayRead<'a> {
     pub overlay: RelationalRowPageOverlayRange<'a>,
 }
 
+struct ProjectedPointReadRequest<'a> {
+    table: &'a str,
+    primary_key: &'a RelationalKey,
+    requested_fields: &'a [usize],
+    limits: RelationalRowPageDemandReadLimits,
+    hydration: &'a mut RelationalHydrationBudget,
+    task: &'a RuntimeTaskContext,
+    hydration_fields: Option<&'a [usize]>,
+}
+
 type ProjectedRowResolver<'a> = dyn FnMut(
         &mut RelationalProjectedRow,
         &mut RelationalHydrationBudget,
@@ -69,7 +91,10 @@ type ProjectedRowResolver<'a> = dyn FnMut(
 
 #[derive(Debug)]
 pub(super) enum RelationalRowPageProjectedOverlayValue {
-    Present(Box<[RelationalProjectedField]>),
+    Present {
+        fields: Box<[RelationalProjectedField]>,
+        binds_overlay_overflow: bool,
+    },
     Deleted,
 }
 
@@ -236,6 +261,97 @@ impl RelationalRowPageDemandReader {
         ),
         RelationalRowPageDemandReadError,
     > {
+        self.point_projected_with_hydration_mode(ProjectedPointReadRequest {
+            table,
+            primary_key,
+            requested_fields,
+            limits,
+            hydration,
+            task,
+            hydration_fields: Some(requested_fields),
+        })
+    }
+
+    /// Reads one projected row while hydrating only the listed field ordinals.
+    ///
+    /// Overflow references retained in the result are still validated against
+    /// the generation-pinned overflow root.
+    pub fn point_projected_fields(
+        &self,
+        table: &str,
+        primary_key: &RelationalKey,
+        fields: RelationalRowPageProjectedFields<'_>,
+        limits: RelationalRowPageDemandReadLimits,
+        hydration: &mut RelationalHydrationBudget,
+        task: &RuntimeTaskContext,
+    ) -> Result<
+        (
+            Option<RelationalProjectedRow>,
+            RelationalRowPageDemandReadReport,
+        ),
+        RelationalRowPageDemandReadError,
+    > {
+        let RelationalRowPageProjectedFields {
+            requested_fields,
+            hydration_fields,
+        } = fields;
+        self.point_projected_with_hydration_mode(ProjectedPointReadRequest {
+            table,
+            primary_key,
+            requested_fields,
+            limits,
+            hydration,
+            task,
+            hydration_fields: Some(hydration_fields),
+        })
+    }
+
+    /// Reads one projected row while retaining overflow fields as references.
+    pub fn point_projected_unhydrated(
+        &self,
+        table: &str,
+        primary_key: &RelationalKey,
+        requested_fields: &[usize],
+        limits: RelationalRowPageDemandReadLimits,
+        task: &RuntimeTaskContext,
+    ) -> Result<
+        (
+            Option<RelationalProjectedRow>,
+            RelationalRowPageDemandReadReport,
+        ),
+        RelationalRowPageDemandReadError,
+    > {
+        let mut hydration = RelationalHydrationBudget::default();
+        self.point_projected_with_hydration_mode(ProjectedPointReadRequest {
+            table,
+            primary_key,
+            requested_fields,
+            limits,
+            hydration: &mut hydration,
+            task,
+            hydration_fields: None,
+        })
+    }
+
+    fn point_projected_with_hydration_mode(
+        &self,
+        request: ProjectedPointReadRequest<'_>,
+    ) -> Result<
+        (
+            Option<RelationalProjectedRow>,
+            RelationalRowPageDemandReadReport,
+        ),
+        RelationalRowPageDemandReadError,
+    > {
+        let ProjectedPointReadRequest {
+            table,
+            primary_key,
+            requested_fields,
+            limits,
+            hydration,
+            task,
+            hydration_fields,
+        } = request;
         let mut context = DemandReadContext::new(self, limits, hydration, task)?;
         let table_root = context.table_root(table)?;
         context
@@ -270,7 +386,9 @@ impl RelationalRowPageDemandReader {
         };
         context.checkpoint()?;
         context.admit_row()?;
-        context.hydrate_projected_row(&mut row)?;
+        if let Some(hydration_fields) = hydration_fields {
+            context.resolve_projected_row(&mut row, hydration_fields)?;
+        }
         context.report.rows_decoded += 1;
         context.report.rows_emitted += 1;
         Ok((Some(row), context.finish()))
@@ -282,6 +400,7 @@ impl RelationalRowPageDemandReader {
         limits: RelationalRowPageDemandReadLimits,
         hydration: &mut RelationalHydrationBudget,
         task: &RuntimeTaskContext,
+        hydration_fields: Option<&[usize]>,
     ) -> Result<
         (
             Option<RelationalProjectedRow>,
@@ -306,7 +425,7 @@ impl RelationalRowPageDemandReader {
             primary_key,
             value,
             overflow_root,
-            true,
+            hydration_fields,
             &mut resolve,
             &mut |row, _| {
                 output = Some(row);
@@ -343,7 +462,7 @@ impl RelationalRowPageDemandReader {
             },
             hydration,
             task,
-            true,
+            Some(range.requested_fields),
             &mut resolve,
             |row, _| visit(row),
         )
@@ -354,7 +473,7 @@ impl RelationalRowPageDemandReader {
         read: RelationalRowPageOverlayRead<'_>,
         hydration: &mut RelationalHydrationBudget,
         task: &RuntimeTaskContext,
-        hydrate_overflow: bool,
+        hydration_fields: Option<&[usize]>,
         resolve: &mut ProjectedRowResolver<'_>,
         mut visit: impl FnMut(RelationalProjectedRow, &mut RelationalHydrationBudget) -> bool,
     ) -> Result<RelationalRowPageDemandReadReport, RelationalRowPageDemandReadError> {
@@ -385,7 +504,7 @@ impl RelationalRowPageDemandReader {
                 &mut context,
                 &mut overlay,
                 overlay_overflow,
-                hydrate_overflow,
+                hydration_fields,
                 resolve,
                 &mut visit,
             )?;
@@ -406,7 +525,7 @@ impl RelationalRowPageDemandReader {
                         &mut context,
                         &mut overlay,
                         overlay_overflow,
-                        hydrate_overflow,
+                        hydration_fields,
                         resolve,
                         &mut visit,
                     )? {
@@ -477,7 +596,7 @@ impl RelationalRowPageDemandReader {
                         &mut context,
                         &mut overlay,
                         overlay_overflow,
-                        hydrate_overflow,
+                        hydration_fields,
                         resolve,
                         &mut visit,
                     )? {
@@ -490,10 +609,9 @@ impl RelationalRowPageDemandReader {
                     let mut row = view
                         .decode_projected_row(row_ordinal, requested_fields)
                         .map_err(|error| context.map_page_error(error))?;
-                    if hydrate_overflow {
-                        context.hydrate_projected_row(&mut row)?;
+                    if let Some(hydration_fields) = hydration_fields {
+                        context.resolve_projected_row(&mut row, hydration_fields)?;
                     }
-                    resolve(&mut row, context.hydration, context.task)?;
                     context.report.rows_decoded += 1;
                     context.report.rows_emitted += 1;
                     if !visit(row, context.hydration) {
@@ -512,7 +630,7 @@ impl RelationalRowPageDemandReader {
                     &mut overlay,
                     &primary_key,
                     overlay_overflow,
-                    hydrate_overflow,
+                    hydration_fields,
                     resolve,
                     &mut visit,
                 )? {
@@ -530,7 +648,7 @@ impl RelationalRowPageDemandReader {
                         overlay_key,
                         overlay_value,
                         overlay_overflow,
-                        hydrate_overflow,
+                        hydration_fields,
                         resolve,
                         &mut visit,
                     )? {
@@ -543,10 +661,9 @@ impl RelationalRowPageDemandReader {
                 let mut row = view
                     .decode_projected_row(row_ordinal, requested_fields)
                     .map_err(|error| context.map_page_error(error))?;
-                if hydrate_overflow {
-                    context.hydrate_projected_row(&mut row)?;
+                if let Some(hydration_fields) = hydration_fields {
+                    context.resolve_projected_row(&mut row, hydration_fields)?;
                 }
-                resolve(&mut row, context.hydration, context.task)?;
                 context.report.rows_decoded += 1;
                 context.report.rows_emitted += 1;
                 if !visit(row, context.hydration) {
@@ -564,7 +681,7 @@ impl RelationalRowPageDemandReader {
             &mut context,
             &mut overlay,
             overlay_overflow,
-            hydrate_overflow,
+            hydration_fields,
             resolve,
             &mut visit,
         )? {
@@ -764,23 +881,28 @@ impl<'a> DemandReadContext<'a> {
         Ok(())
     }
 
-    fn hydrate_projected_row(
+    fn resolve_projected_row(
         &mut self,
         row: &mut RelationalProjectedRow,
+        hydration_fields: &[usize],
     ) -> Result<(), RelationalRowPageDemandReadError> {
         let overflow = Arc::clone(&self.reader.overflow);
-        self.hydrate_projected_row_from(row, &overflow)
+        self.resolve_projected_row_from(row, &overflow, hydration_fields)
     }
 
-    fn hydrate_projected_row_from(
+    fn resolve_projected_row_from(
         &mut self,
         row: &mut RelationalProjectedRow,
         overflow: &RelationalOverflowRootReader,
+        hydration_fields: &[usize],
     ) -> Result<(), RelationalRowPageDemandReadError> {
         let hydration_count = row
             .fields
             .iter()
-            .filter(|field| matches!(field.value, RelationalValue::Overflow(_)))
+            .filter(|field| {
+                hydration_fields.contains(&field.ordinal)
+                    && matches!(field.value, RelationalValue::Overflow(_))
+            })
             .count();
         let next_hydrated_values = self
             .report
@@ -806,6 +928,17 @@ impl<'a> DemandReadContext<'a> {
                 continue;
             };
             self.checkpoint()?;
+            if !hydration_fields.contains(&field.ordinal) {
+                overflow
+                    .find_descriptor(reference)
+                    .map_err(|error| self.map_overflow_error(error))?
+                    .ok_or_else(|| {
+                        self.map_overflow_error(RelationalOverflowPublicationError::MissingExtent(
+                            reference.digest,
+                        ))
+                    })?;
+                continue;
+            }
             let hydrated = match overflow.hydrate(reference, &mut staged_budget, Some(self.task)) {
                 Ok(value) => value,
                 Err(error) => {
@@ -920,7 +1053,7 @@ fn emit_overlay_before(
     overlay: &mut OverlayIterator,
     base_key: &RelationalKey,
     overflow_root: Option<&RelationalOverflowRootReader>,
-    hydrate_overflow: bool,
+    hydration_fields: Option<&[usize]>,
     resolve: &mut ProjectedRowResolver<'_>,
     visit: &mut impl FnMut(RelationalProjectedRow, &mut RelationalHydrationBudget) -> bool,
 ) -> Result<bool, RelationalRowPageDemandReadError> {
@@ -934,7 +1067,7 @@ fn emit_overlay_before(
             key,
             value,
             overflow_root,
-            hydrate_overflow,
+            hydration_fields,
             resolve,
             visit,
         )? {
@@ -948,7 +1081,7 @@ fn emit_remaining_overlay(
     context: &mut DemandReadContext<'_>,
     overlay: &mut OverlayIterator,
     overflow_root: Option<&RelationalOverflowRootReader>,
-    hydrate_overflow: bool,
+    hydration_fields: Option<&[usize]>,
     resolve: &mut ProjectedRowResolver<'_>,
     visit: &mut impl FnMut(RelationalProjectedRow, &mut RelationalHydrationBudget) -> bool,
 ) -> Result<bool, RelationalRowPageDemandReadError> {
@@ -958,7 +1091,7 @@ fn emit_remaining_overlay(
             key,
             value,
             overflow_root,
-            hydrate_overflow,
+            hydration_fields,
             resolve,
             visit,
         )? {
@@ -973,11 +1106,15 @@ fn emit_overlay_row(
     primary_key: RelationalKey,
     value: RelationalRowPageProjectedOverlayValue,
     overflow_root: Option<&RelationalOverflowRootReader>,
-    hydrate_overflow: bool,
+    hydration_fields: Option<&[usize]>,
     resolve: &mut ProjectedRowResolver<'_>,
     visit: &mut impl FnMut(RelationalProjectedRow, &mut RelationalHydrationBudget) -> bool,
 ) -> Result<bool, RelationalRowPageDemandReadError> {
-    let RelationalRowPageProjectedOverlayValue::Present(fields) = value else {
+    let RelationalRowPageProjectedOverlayValue::Present {
+        fields,
+        binds_overlay_overflow,
+    } = value
+    else {
         return Ok(true);
     };
     context.checkpoint()?;
@@ -986,10 +1123,22 @@ fn emit_overlay_row(
         primary_key,
         fields: fields.into_vec(),
     };
-    if hydrate_overflow && let Some(overflow_root) = overflow_root {
-        context.hydrate_projected_row_from(&mut row, overflow_root)?;
+    if let Some(hydration_fields) = hydration_fields {
+        let has_overflow = row
+            .fields
+            .iter()
+            .any(|field| matches!(field.value, RelationalValue::Overflow(_)));
+        if binds_overlay_overflow && has_overflow {
+            let overflow_root = overflow_root.ok_or_else(|| {
+                RelationalRowPageDemandReadError::Corrupt(
+                    "recovery overlay row has no bound overflow root".to_string(),
+                )
+            })?;
+            context.resolve_projected_row_from(&mut row, overflow_root, hydration_fields)?;
+        } else if !binds_overlay_overflow {
+            resolve(&mut row, context.hydration, context.task)?;
+        }
     }
-    resolve(&mut row, context.hydration, context.task)?;
     context.report.rows_decoded += 1;
     context.report.rows_emitted += 1;
     Ok(visit(row, context.hydration))

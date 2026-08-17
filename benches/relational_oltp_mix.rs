@@ -231,7 +231,9 @@ fn benchmark_thread_read_suite(db: &Database) -> serde_json::Value {
         let started = Instant::now();
         let summary = read
             .query_sql_with_params_options_profiled(
-                "SELECT COUNT(*) AS message_count, SUM(token_count) AS token_count \
+                "SELECT COUNT(*) AS message_count, \
+                 COALESCE(SUM(OCTET_LENGTH(content)), 0) AS size_bytes, \
+                 SUM(token_count) AS token_count \
                  FROM thread_messages WHERE thread_storage_id = $1",
                 std::slice::from_ref(&thread_id),
                 QueryStreamOptions {
@@ -248,6 +250,10 @@ fn benchmark_thread_read_suite(db: &Database) -> serde_json::Value {
         assert_eq!(
             summary.output.rows[0]["token_count"],
             Value::Int((MESSAGES_PER_THREAD * 48) as i64)
+        );
+        assert_eq!(
+            summary.output.rows[0]["size_bytes"],
+            Value::Int((MESSAGES_PER_THREAD * MESSAGE_CONTENT_BYTES) as i64)
         );
         assert_eq!(summary.profile.intermediate_rows, MESSAGES_PER_THREAD);
         assert_eq!(summary.profile.hydrated_rows, 0);
@@ -318,7 +324,7 @@ fn benchmark_thread_read_suite(db: &Database) -> serde_json::Value {
             "latency": summarize(&mut lookup_samples),
             "profile": lookup_profile.expect("lookup profile recorded"),
         },
-        "count_sum": {
+        "count_sum_length": {
             "latency": summarize(&mut summary_samples),
             "profile": summary_profile.expect("summary profile recorded"),
         },

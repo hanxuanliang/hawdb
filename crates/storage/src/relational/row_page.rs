@@ -31,7 +31,8 @@ pub use delta::{
 pub use demand::{
     RelationalRowPageDemandReadError, RelationalRowPageDemandReadLimits,
     RelationalRowPageDemandReadReport, RelationalRowPageDemandReader,
-    RelationalRowPageProjectedRange, DEFAULT_RELATIONAL_ROW_PAGE_READ_BYTES,
+    RelationalRowPageProjectedFields, RelationalRowPageProjectedRange,
+    RelationalRowPageProjectedRangeFields, DEFAULT_RELATIONAL_ROW_PAGE_READ_BYTES,
     DEFAULT_RELATIONAL_ROW_PAGE_READ_PAGES, DEFAULT_RELATIONAL_ROW_PAGE_READ_PINS,
     DEFAULT_RELATIONAL_ROW_PAGE_READ_ROWS, DEFAULT_RELATIONAL_ROW_PAGE_READ_TREE_HEIGHT,
 };

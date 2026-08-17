@@ -237,6 +237,20 @@ offset, and limit run as a pull-through visitor pipeline. The pipeline checks
 the runtime cancellation token after every admitted batch and never constructs
 a complete intermediate `Vec` of qualified rows.
 
+Planning separates fields required to decode a scan from fields whose payloads
+must be hydrated. An aggregate-only `OCTET_LENGTH(TEXT|BYTEA)` operand or
+non-distinct `COUNT(column)` retains an overflow value as a compact reference;
+length reads its validated `uncompressed_bytes`, while count only tests
+nullability. Neither case may read, decompress, clone, or retain the payload.
+The reference still has to match the pinned row schema and its source binding:
+checkpoint and recovery values are validated against their immutable overflow
+root, while live values are validated against the pinned canonical row. In all
+cases the reference must belong to the reachable overflow closure. If the same
+field also participates
+in a predicate, join, grouping key, ordering key, raw projection, distinct
+aggregate, or another value-sensitive expression, normal hydration remains
+mandatory.
+
 The qualification access-path selector supports complete composite primary
 keys and the longest bound leading equality prefix of composite unique and
 secondary indexes. It constructs explicit descriptors and applies Skyline
@@ -274,12 +288,16 @@ payload hydration remains after the blocking locator selection unless exact
 statement `DISTINCT` requires the projected value.
 
 An ungrouped, non-distinct, single-table aggregate consisting only of
-`COUNT(*)`, `COUNT(column)`, and `SUM(BIGINT column)` MUST lower qualified rows
-into a typed Bool/Int64 `ColumnarBatch`. Batch-local `count_selected`,
-`count_valid`, and checked Int64 sum kernels merge into one admitted aggregate
-state. The batch is conservatively sized before allocation against both
-`batch_rows` and `batch_payload_bytes`, and its pipeline reservation shares the
-query root ledger with the aggregate state. Null and overflow semantics MUST
+`COUNT(*)`, `COUNT(column)`, `SUM(BIGINT column)`, or
+`SUM(OCTET_LENGTH(TEXT|BYTEA column))` MUST lower qualified rows into a typed
+Bool/Int64 `ColumnarBatch`. A literal-only `COALESCE` around one of those
+aggregates remains in the same path and applies its first non-null fallback only
+after the aggregate finishes. Batch-local `count_selected`, `count_valid`, and
+checked Int64 sum kernels merge into one admitted aggregate state. Length input
+uses inline byte length or overflow-reference `uncompressed_bytes` without
+payload hydration. The batch is conservatively sized before allocation against
+both `batch_rows` and `batch_payload_bytes`, and its pipeline reservation shares
+the query root ledger with the aggregate state. Null and overflow semantics MUST
 match the row executor. Any expression outside this proven fragment uses the
 row implementation for the entire aggregate; it MUST NOT switch paths after
 consuming input, and the row path remains the differential oracle.

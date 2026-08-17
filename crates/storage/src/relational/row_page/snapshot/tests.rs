@@ -202,10 +202,15 @@ fn overlay_projection_drops_unrequested_large_values_before_residency() {
     validate_overlay_row(&value, 3).unwrap();
     let resident_bytes = projected_overlay_resident_bytes(&value, &[1]).unwrap();
     assert!(resident_bytes < 1024);
-    let projected = project_overlay_value(&value, &[1]);
-    let RelationalRowPageProjectedOverlayValue::Present(fields) = projected else {
+    let projected = project_overlay_value(&value, &[1], true);
+    let RelationalRowPageProjectedOverlayValue::Present {
+        fields,
+        binds_overlay_overflow,
+    } = projected
+    else {
         panic!("present overlay row must remain present");
     };
+    assert!(binds_overlay_overflow);
     assert_eq!(fields.len(), 1);
     assert_eq!(fields[0].ordinal, 1);
     assert_eq!(

@@ -979,12 +979,45 @@ mod tests {
                 hydration_limited_config,
             )
             .expect("reopen demand-index database with a hydration budget");
-            let error = database
+            let aggregate = database
                 .query_sql(
                     "SELECT COALESCE(SUM(OCTET_LENGTH(body)), 0) AS body_bytes FROM documents",
                 )
-                .expect_err("large aggregate inputs must honor the hydration budget");
+                .expect("length aggregate must use overflow metadata without hydration");
+            assert!(
+                matches!(aggregate.rows[0]["body_bytes"], Value::Int(value) if value > 96 * 1024)
+            );
+            let filtered = database
+                .query_sql(
+                    "SELECT COALESCE(SUM(OCTET_LENGTH(body)), 0) AS body_bytes FROM documents WHERE owner = 'owner-large'",
+                )
+                .expect("indexed length aggregate must retain metadata-only point reads");
+            assert_eq!(filtered.rows[0]["body_bytes"], Value::Int(96 * 1024));
+            let analyzed = database
+                .query_sql(
+                    "EXPLAIN ANALYZE SELECT COALESCE(SUM(OCTET_LENGTH(body)), 0) AS body_bytes FROM documents WHERE owner = 'owner-large'",
+                )
+                .expect("explain metadata-only length aggregation");
+            assert!(relational_explain_execution_info(&analyzed).contains("hydrated_rows=0"));
+            let counted = database
+                .query_sql("EXPLAIN ANALYZE SELECT COUNT(body) AS body_count FROM documents")
+                .expect("COUNT only needs overflow nullability metadata");
+            assert!(relational_explain_execution_info(&counted).contains("hydrated_rows=0"));
+            let error = database
+                .query_sql("SELECT body FROM documents WHERE owner = 'owner-large'")
+                .expect_err("projecting the large value must still honor the hydration budget");
             assert!(error.to_string().contains("overflow hydration"));
+            let predicate_error = database
+                .query_sql_with_params(
+                    "SELECT SUM(OCTET_LENGTH(body)) AS body_bytes FROM documents WHERE body = $1",
+                    &[Value::String("x".repeat(96 * 1024))],
+                )
+                .expect_err("a value-sensitive predicate must still hydrate its operand");
+            assert!(predicate_error.to_string().contains("overflow hydration"));
+            let distinct_error = database
+                .query_sql("SELECT COUNT(DISTINCT body) AS body_count FROM documents")
+                .expect_err("COUNT DISTINCT must hydrate the compared values");
+            assert!(distinct_error.to_string().contains("overflow hydration"));
         }
         {
             use std::io::{Read, Seek, SeekFrom, Write};

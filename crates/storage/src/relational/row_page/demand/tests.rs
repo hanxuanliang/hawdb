@@ -81,6 +81,33 @@ fn point_projection_hydrates_only_selected_overflow_and_reuses_cache() {
     assert_eq!(overflow_budget.hydrated_rows, 1);
     assert_eq!(fixture.cache.snapshot().pinned_bytes, 0);
 
+    let mut selective_budget = RelationalHydrationBudget::default();
+    let (selective, selective_report) = fixture
+        .reader
+        .point_projected_fields(
+            "documents",
+            &key(1),
+            RelationalRowPageProjectedFields {
+                requested_fields: &[1, 2],
+                hydration_fields: &[2],
+            },
+            RelationalRowPageDemandReadLimits::default(),
+            &mut selective_budget,
+            &task,
+        )
+        .expect("selective overflow hydration");
+    let selective = selective.expect("row one exists");
+    assert!(matches!(
+        selective.fields[0].value,
+        RelationalValue::Overflow(reference) if reference == fixture.alpha
+    ));
+    assert_eq!(
+        selective.fields[1].value,
+        RelationalValue::Bytea(b"beta overflow payload".to_vec())
+    );
+    assert_eq!(selective_report.hydrated_values, 1);
+    assert_eq!(selective_budget.hydrated_rows, 1);
+
     let initial = RelationalHydrationBudget {
         max_decompressed_bytes: fixture.alpha.uncompressed_bytes as usize,
         ..RelationalHydrationBudget::default()

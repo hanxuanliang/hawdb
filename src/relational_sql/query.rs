@@ -4,7 +4,8 @@ use crate::relational_sql::index_access::{
     RelationalIndexExecutionEvidence, RelationalIndexReadMode, RelationalIndexRuntime,
 };
 use crate::relational_sql::row_access::{
-    expression_contains_aggregate, plan_requested_fields, plan_scan_fields, RelationalReadRow,
+    expression_contains_aggregate, plan_requested_fields, plan_scan_fields,
+    plan_scan_hydration_fields, RelationalFieldPlan, RelationalReadRow,
     RelationalRowExecutionEvidence, RelationalRowReadMode, RelationalRowRuntime,
 };
 use crate::sql::{
@@ -457,17 +458,18 @@ fn execute_select<'state>(
     let row_task = task_context.unwrap_or(&default_task);
     let output_fields = plan_requested_fields(select, state)?;
     let scan_fields = if (!select.order_by.is_empty() && !select.distinct && !has_aggregate)
+        || has_aggregate
         || !select.group_by.is_empty()
     {
         plan_scan_fields(select, state)?
     } else {
         output_fields.clone()
     };
+    let scan_hydration_fields = plan_scan_hydration_fields(select, state, &scan_fields)?;
     let row_runtime = RelationalRowRuntime::new(
         state,
         row_read_mode,
-        scan_fields,
-        output_fields,
+        RelationalFieldPlan::new(scan_fields, scan_hydration_fields, output_fields),
         limits.row_read,
         limits.hydration,
         row_task,

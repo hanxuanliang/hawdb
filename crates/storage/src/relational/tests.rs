@@ -1713,6 +1713,37 @@ fn large_payload_is_externalized_and_hydrated_with_explicit_budgets() {
     assert_eq!(projected_budget.hydrated_rows, 1);
     assert_eq!(projected_budget.decompressed_bytes, payload.len());
 
+    let mut metadata_only = RelationalProjectedRow {
+        primary_key: key.clone(),
+        fields: vec![RelationalProjectedField {
+            ordinal: 1,
+            value: RelationalValue::Overflow(reference),
+        }],
+    };
+    let mut metadata_budget = RelationalHydrationBudget {
+        max_rows: 0,
+        max_compressed_bytes: 0,
+        max_decompressed_bytes: 0,
+        max_memory_bytes: 0,
+        ..RelationalHydrationBudget::default()
+    };
+    snapshot
+        .value()
+        .hydrate_projected_row_fields_with_context(
+            "messages",
+            &mut metadata_only,
+            &[],
+            &mut metadata_budget,
+            None,
+        )
+        .expect("validate metadata-only overflow without hydration");
+    assert_eq!(
+        metadata_only.fields[0].value,
+        RelationalValue::Overflow(reference)
+    );
+    assert_eq!(metadata_budget.hydrated_rows, 0);
+    assert_eq!(metadata_budget.decompressed_bytes, 0);
+
     let mut mismatched = RelationalProjectedRow {
         primary_key: key.clone(),
         fields: vec![RelationalProjectedField {
@@ -1735,6 +1766,22 @@ fn large_payload_is_externalized_and_hydrated_with_explicit_budgets() {
         Err(RelationalError::Corruption(_))
     ));
     assert_eq!(mismatch_budget, initial_mismatch_budget);
+
+    let mut metadata_mismatch_budget = RelationalHydrationBudget::default();
+    assert!(matches!(
+        snapshot.value().hydrate_projected_row_fields_with_context(
+            "messages",
+            &mut mismatched,
+            &[],
+            &mut metadata_mismatch_budget,
+            None,
+        ),
+        Err(RelationalError::Corruption(_))
+    ));
+    assert_eq!(
+        metadata_mismatch_budget,
+        RelationalHydrationBudget::default()
+    );
 
     let mut rejected_budget = RelationalHydrationBudget {
         max_decompressed_bytes: payload.len() - 1,
