@@ -12,6 +12,7 @@ use skein_plan::{
     PhysicalPlan, PhysicalPlanChildren, PhysicalPlanDomainRef, Predicate, Projection,
     ProjectionExpression, SortDirection, SortItem, SortKey,
 };
+use std::collections::BTreeMap;
 
 #[test]
 fn physical_plan_metadata_describes_kind_class_and_children() {
@@ -264,6 +265,55 @@ fn unfiltered_node_count_uses_exact_count_store() {
         )
         .expect("direct fallback must preserve the exact count fast path");
     assert_eq!(direct.plan(), &plan);
+}
+
+#[test]
+fn physical_cardinality_estimates_never_reach_zero() {
+    use super::super::costing::{
+        estimate_physical_plan_cost, estimate_physical_plan_cost_breakdown,
+    };
+
+    let catalog = OptimizerCatalog::new(
+        OptimizerCatalogIndexes::default(),
+        OptimizerCatalogStatistics {
+            label_counts: BTreeMap::from([("Memory".to_string(), 0)]),
+            ..OptimizerCatalogStatistics::default()
+        },
+    );
+    let scan = PhysicalPlan::SeqNodeScan {
+        variable: "m".to_string(),
+        label: "Memory".to_string(),
+    };
+    let plans = [
+        scan.clone(),
+        PhysicalPlan::FilterExec {
+            predicate: Predicate::ConstantBool(false),
+            input: Box::new(scan.clone()),
+        },
+        PhysicalPlan::TopNExec {
+            items: vec![SortItem {
+                key: SortKey::Property {
+                    variable: "m".to_string(),
+                    property: "id".to_string(),
+                },
+                direction: SortDirection::Asc,
+            }],
+            offset: 1,
+            limit: 0,
+            input: Box::new(scan),
+        },
+    ];
+
+    for plan in plans {
+        assert_eq!(
+            estimate_physical_plan_cost(&plan, &catalog).estimated_rows,
+            1
+        );
+        assert_eq!(
+            estimate_physical_plan_cost_breakdown(&plan, &catalog).estimated_rows,
+            1
+        );
+    }
 }
 
 #[test]

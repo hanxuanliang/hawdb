@@ -13,6 +13,7 @@ pub(super) fn estimate_filter_rows(
     estimate_relationship_filter_rows(predicate, input, input_rows, catalog)
         .or_else(|| estimate_node_property_filter_rows(predicate, input, input_rows, catalog))
         .unwrap_or_else(|| input_rows.div_ceil(2).max(1))
+        .max(1)
 }
 
 pub(super) fn estimate_aggregate_rows(

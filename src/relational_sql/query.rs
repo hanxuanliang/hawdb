@@ -733,7 +733,7 @@ fn format_relational_explain(
             ),
             (
                 "estRows".to_string(),
-                optional_usize_explain_value(node.estimated_rows),
+                optional_estimated_rows_explain_value(node.estimated_rows),
             ),
             ("task".to_string(), Value::String("root".to_string())),
             (
@@ -814,6 +814,10 @@ fn optional_usize_explain_value(value: Option<usize>) -> Value {
     value
         .map(|value| Value::Int(i64::try_from(value).unwrap_or(i64::MAX)))
         .unwrap_or(Value::Null)
+}
+
+fn optional_estimated_rows_explain_value(value: Option<usize>) -> Value {
+    optional_usize_explain_value(value.map(|value| value.max(1)))
 }
 
 fn explain_access_object(table: &str, descriptor: &RelationalAccessPathDescriptor) -> String {
@@ -1031,13 +1035,13 @@ fn choose_base_access(
             unique_point: false,
             covering: false,
             requires_row_fetch: false,
-            estimated_rows: row_count.min(cardinality_limit),
+            estimated_rows: row_count.min(cardinality_limit).max(1),
         },
         access: RelationalBaseAccess::FullScan,
     }];
 
     if let Some(key) = complete_key(&schema.primary_key, &bound) {
-        let estimated_rows = usize::from(state.row(table, &key).is_some());
+        let estimated_rows = usize::from(state.row(table, &key).is_some()).max(1);
         candidates.push(RelationalAccessCandidate {
             descriptor: RelationalAccessPathDescriptor {
                 kind: RelationalAccessPathKind::PrimaryKey,
@@ -1164,7 +1168,8 @@ fn index_access_candidate(
                     "relational index {name} on table {table} is not materialized"
                 )));
             }
-        };
+        }
+        .max(1);
     Ok(Some(RelationalAccessCandidate {
         descriptor: RelationalAccessPathDescriptor {
             kind: RelationalAccessPathKind::Index,
@@ -1292,7 +1297,7 @@ fn choose_join_access(
             unique_point: false,
             covering: false,
             requires_row_fetch: false,
-            estimated_rows: row_count,
+            estimated_rows: row_count.max(1),
         },
         access: RelationalJoinAccess::FullScan,
     }];
@@ -1309,7 +1314,7 @@ fn choose_join_access(
                 unique_point: true,
                 covering: false,
                 requires_row_fetch: false,
-                estimated_rows: usize::from(row_count != 0),
+                estimated_rows: usize::from(row_count != 0).max(1),
             },
             access: RelationalJoinAccess::PrimaryKey(columns),
         });
@@ -1446,7 +1451,8 @@ fn join_index_access_candidate(
                 usize::from(row_count != 0)
             } else {
                 row_count
-            },
+            }
+            .max(1),
         },
         access: RelationalJoinAccess::Index {
             name,
@@ -3814,4 +3820,20 @@ fn reject_non_public_schema(schema: Option<&str>) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod estimate_tests {
+    use super::{optional_estimated_rows_explain_value, optional_usize_explain_value};
+    use crate::Value;
+
+    #[test]
+    fn explain_estimated_rows_never_render_zero() {
+        assert_eq!(
+            optional_estimated_rows_explain_value(Some(0)),
+            Value::Int(1)
+        );
+        assert_eq!(optional_estimated_rows_explain_value(None), Value::Null);
+        assert_eq!(optional_usize_explain_value(Some(0)), Value::Int(0));
+    }
 }

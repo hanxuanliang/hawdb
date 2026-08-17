@@ -682,6 +682,31 @@ mod tests {
     }
 
     #[test]
+    fn relational_explain_keeps_estimated_rows_non_zero_for_empty_results() {
+        let mut database = Database::new();
+        database
+            .query_sql("CREATE TABLE messages (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
+            .expect("create empty relational table");
+
+        let explain = database
+            .query_sql("EXPLAIN SELECT id FROM messages LIMIT 0")
+            .expect("explain empty relational query");
+        assert!(explain
+            .rows
+            .iter()
+            .all(|row| { matches!(row.get("estRows"), Some(Value::Int(rows)) if *rows >= 1) }));
+
+        let analyze = database
+            .query_sql("EXPLAIN ANALYZE SELECT id FROM messages LIMIT 0")
+            .expect("analyze empty relational query");
+        assert_eq!(analyze.rows[0]["actRows"], Value::Int(0));
+        assert!(analyze
+            .rows
+            .iter()
+            .all(|row| { matches!(row.get("estRows"), Some(Value::Int(rows)) if *rows >= 1) }));
+    }
+
+    #[test]
     fn database_sql_uses_bounded_pinned_relational_indexes_with_observable_fallback() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

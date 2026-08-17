@@ -248,6 +248,12 @@ different non-superset predicate column sets remain incomparable. The selected
 path and its properties are part of the typed query result so qualification can
 assert the actual decision.
 
+Relational access-path candidates normalize `estimated_rows` to a minimum of
+one before Skyline dominance and final costing. `EXPLAIN` applies the same
+floor after `LIMIT` and `OFFSET` arithmetic, including `LIMIT 0`. Empty tables,
+missing point keys, and empty result sets still report zero measured `actRows`;
+the estimate floor affects plan comparison and diagnostics only.
+
 Qualified conjunctive equality joins derive right-side composite primary-key or
 leading index-prefix access. Primary-key joins perform one point lookup per
 left row; index-prefix joins visit posting rows without first collecting the

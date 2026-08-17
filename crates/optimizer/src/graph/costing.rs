@@ -51,7 +51,7 @@ pub(super) fn estimate_physical_plan_cost(
     plan: &PhysicalPlan,
     catalog: &OptimizerCatalog,
 ) -> PlanCost {
-    match plan {
+    let estimate = match plan {
         PhysicalPlan::EmptyExec => PlanCost {
             // Optimizer cardinalities retain a lower bound of one so an
             // exact-empty branch cannot annihilate parent cost estimates.
@@ -368,7 +368,8 @@ pub(super) fn estimate_physical_plan_cost(
             estimated_rows: 1,
             cost: 1,
         },
-    }
+    };
+    estimate.with_cardinality_floor()
 }
 
 pub(super) fn estimate_physical_plan_cost_breakdown(

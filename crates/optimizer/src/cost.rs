@@ -4,6 +4,15 @@ pub struct PlanCost {
     pub cost: u64,
 }
 
+impl PlanCost {
+    pub fn with_cardinality_floor(self) -> Self {
+        Self {
+            estimated_rows: self.estimated_rows.max(1),
+            ..self
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlanCostBreakdown {
     pub estimated_rows: u64,
@@ -15,6 +24,13 @@ pub struct PlanCostBreakdown {
 }
 
 impl PlanCostBreakdown {
+    pub fn with_cardinality_floor(self) -> Self {
+        Self {
+            estimated_rows: self.estimated_rows.max(1),
+            ..self
+        }
+    }
+
     pub fn new(
         estimated_rows: u64,
         cpu: u64,
@@ -33,6 +49,7 @@ impl PlanCostBreakdown {
             sequential_io,
             output_rows,
         }
+        .with_cardinality_floor()
     }
 
     pub fn from_scalar(cost: PlanCost) -> Self {
@@ -82,6 +99,7 @@ impl PlanCostBreakdown {
             estimated_rows: self.estimated_rows,
             cost: self.cost,
         }
+        .with_cardinality_floor()
     }
 }
 
@@ -117,5 +135,25 @@ mod tests {
         assert_eq!(combined.sequential_io, 30);
         assert_eq!(combined.output_rows, 77);
         assert_eq!(combined.cost, 182);
+    }
+
+    #[test]
+    fn cost_breakdown_preserves_a_non_zero_cardinality_floor() {
+        let cost = PlanCostBreakdown::new(0, 0, 0, 0, 0);
+
+        assert_eq!(cost.estimated_rows, 1);
+        assert_eq!(cost.as_plan_cost().estimated_rows, 1);
+    }
+
+    #[test]
+    fn scalar_cost_preserves_a_non_zero_cardinality_floor() {
+        let cost = PlanCost {
+            estimated_rows: 0,
+            cost: 7,
+        }
+        .with_cardinality_floor();
+
+        assert_eq!(cost.estimated_rows, 1);
+        assert_eq!(cost.cost, 7);
     }
 }

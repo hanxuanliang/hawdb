@@ -155,6 +155,7 @@ impl OptimizationSearchReport {
     }
 
     pub fn record_selected_plan_cost(&mut self, cost: PlanCost) {
+        let cost = cost.with_cardinality_floor();
         self.push_decision(format!(
             "selected physical plan cost: estimated_rows={} cost={}",
             cost.estimated_rows, cost.cost
@@ -168,8 +169,8 @@ impl OptimizationSearchReport {
             query_digest: selected.query_digest,
             selected_plan: selected.explain,
             selected_plan_fingerprint: selected.fingerprint,
-            selected_plan_cost: selected.cost,
-            selected_plan_cost_breakdown: selected.cost_breakdown,
+            selected_plan_cost: selected.cost.with_cardinality_floor(),
+            selected_plan_cost_breakdown: selected.cost_breakdown.with_cardinality_floor(),
             selected_plan_properties: selected.properties,
             selected_plan_operator_counts: selected.operator_counts,
             selected_plan_class_counts: selected.class_counts,

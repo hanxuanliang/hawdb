@@ -161,11 +161,15 @@ impl OptimizerCatalog {
     }
 
     pub(super) fn label_count(&self, label: &str) -> u64 {
-        self.label_counts.get(label).copied().unwrap_or(1)
+        self.label_counts.get(label).copied().unwrap_or(1).max(1)
     }
 
     pub(super) fn relationship_count(&self, rel_type: &str) -> u64 {
-        self.rel_type_counts.get(rel_type).copied().unwrap_or(1)
+        self.rel_type_counts
+            .get(rel_type)
+            .copied()
+            .unwrap_or(1)
+            .max(1)
     }
 
     pub(super) fn path_source_distinct_count(

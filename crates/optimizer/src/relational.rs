@@ -87,7 +87,8 @@ pub fn skyline_prune_relational_access_paths(
     candidates: impl IntoIterator<Item = RelationalAccessPathDescriptor>,
 ) -> Result<Vec<RelationalAccessPathDescriptor>, &'static str> {
     let mut frontier = Vec::<RelationalAccessPathDescriptor>::new();
-    for candidate in candidates {
+    for mut candidate in candidates {
+        candidate.estimated_rows = candidate.estimated_rows.max(1);
         candidate.validate()?;
         if frontier
             .iter()
@@ -209,5 +210,14 @@ mod tests {
             candidate.validate(),
             Err("relational order prefix exceeds remaining index columns")
         );
+    }
+
+    #[test]
+    fn zero_row_estimates_are_normalized_before_skyline_comparison() {
+        let frontier =
+            skyline_prune_relational_access_paths([path("idx_empty", &["id"], 1, true, 0)])
+                .unwrap();
+
+        assert_eq!(frontier[0].estimated_rows, 1);
     }
 }

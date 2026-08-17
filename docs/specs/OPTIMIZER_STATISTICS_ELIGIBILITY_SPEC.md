@@ -102,6 +102,20 @@ property group counts separately from excluded group counts. `generated_facts`
 does not include ineligible values because they never enter the fact stream.
 Peak buffer accounting includes the bounded exclusion set.
 
+## Cardinality floor
+
+Optimizer cardinality is a planning weight, not an assertion that a row exists.
+Every graph plan cost, cost breakdown, access-path estimate, and emitted
+`estRows` value MUST therefore be at least one. Exact catalog counters may
+remain zero, predicates may be proven false, and `LIMIT 0` may produce no rows;
+those facts MUST remain visible through exact-empty metadata and measured
+`actRows`, not by propagating a zero planning estimate.
+
+The floor is applied after selectivity, offset, and limit arithmetic. It MUST
+NOT turn `EmptyExec` into an executable scan, change query results, or add work
+to the empty executor. It prevents a zero child estimate from annihilating join,
+expand, aggregate, and parent cost comparisons.
+
 ## Verification
 
 Required regressions cover:
