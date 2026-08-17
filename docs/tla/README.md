@@ -234,11 +234,16 @@ The implementation refinement is
 `BoundedExecutor::try_for_each_index_ordered` together with
 `SharedPoolMorselScheduler::execute_accounted_ordered`. Worker results hold
 `MorselOutput` query-memory leases from before construction through ordered
-consumption. Cancellation, consumer error, and worker panic stop issuance,
-disconnect blocked sends, join the shared-pool tasks, and release every lease.
-TLC checks the admission window, channel and reorder bounds, emitted-prefix
-ordering, terminal cleanup, and eventual success or failure over the bounded
-instance.
+consumption. The production numeric path maps each modeled morsel output to
+exactly one typed `ColumnarBatch`; it selects a serial path before scheduling
+when the projection is not fully typed or that batch cannot fit, so there is no
+post-computation serial replay transition. Its input-reference wave is reserved
+in a query-rooted pipeline account before allocation, while the model abstracts
+that already-admitted immutable input state. Cancellation, consumer error, and
+worker panic stop issuance, disconnect blocked sends, join the shared-pool
+tasks, and release every lease. TLC checks the admission window, channel and
+reorder bounds, emitted-prefix ordering, terminal cleanup, and eventual success
+or failure over the bounded instance.
 
 ## Generation Reclamation
 

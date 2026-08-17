@@ -1155,9 +1155,9 @@ fn columnar_numeric_fragment_matches_row_pipeline_and_reports_morsels() {
         Projection {
             expression: ProjectionExpression::Property {
                 variable: "n".to_string(),
-                property: "name".to_string(),
+                property: "score".to_string(),
             },
-            name: "name".to_string(),
+            name: "score".to_string(),
         },
     ];
     let scan = PhysicalPlan::SeqNodeScan {
@@ -1190,11 +1190,14 @@ fn columnar_numeric_fragment_matches_row_pipeline_and_reports_morsels() {
         batch_rows: NonZeroUsize::new(4).unwrap(),
         ..ExecutionMemoryConfig::default()
     };
-    let morsel_count = 513usize.div_ceil(4 * 16);
-    let expected_workers = std::thread::available_parallelism()
-        .unwrap_or(NonZeroUsize::MIN)
-        .get()
+    let morsel_count = 513usize.div_ceil(4);
+    let memory_workers = memory.query_memory_bytes.get()
+        / (memory.batch_payload_bytes.get() + 4 * std::mem::size_of::<&NodeRecord>());
+    let expected_workers = skein_executor::SharedExecutorPool::shared_default()
+        .map(|pool| pool.worker_count())
+        .unwrap_or(1)
         .min(MAX_MORSEL_PARALLELISM)
+        .min(memory_workers)
         .min(morsel_count / 4)
         .max(1);
     let task_context = RuntimeTaskContext::default().with_admitted_parallelism(
@@ -1231,7 +1234,7 @@ fn columnar_numeric_fragment_matches_row_pipeline_and_reports_morsels() {
     assert!(report.columnar_input_rows >= report.columnar_selected_rows);
     assert_eq!(report.columnar_batches, report.morsel_count);
     assert_eq!(report.morsel_max_admitted_workers, expected_workers);
-    assert_eq!(report.morsel_peak_active_workers, 1);
+    assert!((1..=expected_workers).contains(&report.morsel_peak_active_workers));
     assert_eq!(row.profile.pipeline_memory_report.columnar_batches, 0);
 
     let columnar_scan_plan = match &columnar_plan {

@@ -21,7 +21,6 @@ use skein_executor::SharedExecutorPool;
 use std::borrow::Borrow;
 use std::sync::Arc;
 
-const DEFAULT_BATCHES_PER_MORSEL: usize = 16;
 const DEFAULT_MIN_MORSELS_PER_WORKER: usize = 4;
 const PREDICATE_VALUE_SLOT: SlotId = SlotId(0);
 const NODE_ID_SLOT: SlotId = SlotId(1);
@@ -54,10 +53,9 @@ struct NumericBatchEmitter<'plan, 'task, 'observer, 'emit> {
 
 pub(super) fn supports_parallel_morsel_execution(plan: &PhysicalPlan, catalog: &Catalog) -> bool {
     match plan {
-        PhysicalPlan::ProjectExec { items, input }
-            if NumericFragment::try_prepare(items, input, catalog).is_some() =>
-        {
-            true
+        PhysicalPlan::ProjectExec { items, input } => {
+            NumericFragment::try_prepare(items, input, catalog)
+                .is_some_and(|fragment| fragment.supports_lending_projection(items))
         }
         _ => match plan.children() {
             PlanChildren::None => false,
@@ -79,6 +77,9 @@ pub(super) fn default_morsel_parallelism(
     match plan {
         PhysicalPlan::ProjectExec { items, input } => {
             if let Some(fragment) = NumericFragment::try_prepare(items, input, catalog) {
+                if !fragment.supports_lending_projection(items) {
+                    return 1;
+                }
                 return fragment.default_parallelism(items, catalog, store, memory);
             }
             default_morsel_parallelism(input, catalog, store, memory)
@@ -199,10 +200,9 @@ impl<'a> NumericFragment<'a> {
         } else {
             memory.batch_rows.get()
         };
-        let morsel_rows = batch_rows.saturating_mul(DEFAULT_BATCHES_PER_MORSEL);
         let morsel_count = store
             .node_count_for_label(Some(label_id))
-            .div_ceil(morsel_rows.max(1));
+            .div_ceil(batch_rows.max(1));
         default_morsel_worker_count(morsel_count, MAX_MORSEL_PARALLELISM)
     }
 
@@ -244,9 +244,18 @@ impl<'a> NumericFragment<'a> {
             needs_node_ids,
         };
         let candidate_count = context.store.node_count_for_label(Some(label_id));
-        let morsel_rows =
-            NonZeroUsize::new(target_rows.get().saturating_mul(DEFAULT_BATCHES_PER_MORSEL))
-                .expect("morsel row target is non-zero");
+        let morsel_rows = target_rows;
+        let columnar_schema = use_lending
+            .then(|| numeric_columnar_schema(self, lending_scan.needs_node_ids))
+            .transpose()?;
+        let typed_batch_fits = columnar_schema.as_ref().is_some_and(|schema| {
+            estimated_numeric_columnar_morsel_bytes(
+                morsel_rows.get(),
+                target_rows.get(),
+                lending_scan.needs_node_ids,
+                schema,
+            ) <= context.memory.batch_payload_bytes.get()
+        });
         let pool = (!context.store.is_out_of_core())
             .then(SharedExecutorPool::shared_default)
             .transpose()
@@ -261,10 +270,13 @@ impl<'a> NumericFragment<'a> {
             .map(|task_context| task_context.admitted_parallelism().get())
             .unwrap_or(1);
         let morsel_count = candidate_count.div_ceil(morsel_rows.get());
-        let requested_parallelism = NonZeroUsize::new(
+        let parallel_eligible = use_lending && typed_batch_fits && pool.is_some();
+        let requested_parallelism = NonZeroUsize::new(if parallel_eligible {
             default_morsel_worker_count(morsel_count, pool_parallelism.min(admitted_parallelism))
-                .max(1),
-        )
+                .max(1)
+        } else {
+            1
+        })
         .expect("morsel parallelism is non-zero");
         let input_reference_bytes = morsel_rows
             .get()
@@ -285,7 +297,8 @@ impl<'a> NumericFragment<'a> {
             bytes_per_worker,
             memory_budget_bytes: context.memory.query_memory_bytes,
         })?;
-        let parallel = admission.max_workers() > 1
+        let parallel = parallel_eligible
+            && admission.max_workers() > 1
             && execution_limit
                 .output_rows
                 .is_none_or(|limit| limit > morsel_rows.get())
@@ -316,9 +329,9 @@ impl<'a> NumericFragment<'a> {
                 self,
                 items,
                 label_id,
-                target_rows,
                 morsel_rows,
-                use_lending.then_some(lending_scan),
+                lending_scan,
+                columnar_schema.expect("parallel typed scan has a columnar schema"),
                 admission.max_workers(),
                 pool.expect("parallel morsel execution requires a shared pool"),
                 context,
@@ -397,6 +410,7 @@ struct PreparedNumericBatch {
     output: BindingBatch,
 }
 
+#[derive(Debug)]
 struct PreparedColumnarBatch {
     input_rows: usize,
     batch: ColumnarBatch,
@@ -405,34 +419,10 @@ struct PreparedColumnarBatch {
 #[derive(Clone, Copy)]
 struct NumericMorselPreparation<'plan, 'task> {
     fragment: NumericFragment<'plan>,
-    items: &'plan [Projection],
-    batch_rows: usize,
+    scan: LendingNumericScan,
     output_budget_bytes: usize,
-    lending_scan: Option<LendingNumericScan>,
-    columnar_schema: Option<&'plan Arc<BindingSchema>>,
+    columnar_schema: &'plan Arc<BindingSchema>,
     task_context: Option<&'task RuntimeTaskContext>,
-}
-
-enum PreparedNumericMorsel {
-    Columnar(Vec<PreparedColumnarBatch>),
-    Rows(Vec<PreparedNumericBatch>),
-    Serial,
-}
-
-impl PreparedNumericMorsel {
-    fn resident_bytes(&self) -> usize {
-        match self {
-            Self::Columnar(batches) => batches.iter().fold(0usize, |total, batch| {
-                total.saturating_add(batch.batch.estimated_memory_bytes())
-            }),
-            Self::Rows(batches) => batches.iter().fold(0usize, |total, batch| {
-                total.saturating_add(batch.output.iter().fold(0usize, |total, binding| {
-                    total.saturating_add(binding_memory_bytes(binding))
-                }))
-            }),
-            Self::Serial => 0,
-        }
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -440,9 +430,9 @@ fn stream_parallel_borrowed_numeric_nodes(
     fragment: NumericFragment<'_>,
     items: &[Projection],
     label_id: crate::schema::LabelId,
-    batch_rows: NonZeroUsize,
     morsel_rows: NonZeroUsize,
-    lending_scan: Option<LendingNumericScan>,
+    lending_scan: LendingNumericScan,
+    columnar_schema: Arc<BindingSchema>,
     max_workers: usize,
     pool: SharedExecutorPool,
     context: BatchReadContext<'_>,
@@ -469,11 +459,18 @@ fn stream_parallel_borrowed_numeric_nodes(
         "columnar morsel output",
         output_account_budget,
     );
-    let columnar_schema = lending_scan
-        .map(|scan| numeric_columnar_schema(fragment, scan.needs_node_ids))
-        .transpose()?;
+    let wave_capacity = morsel_rows.get().saturating_mul(max_workers);
+    let wave_bytes = wave_capacity.saturating_mul(std::mem::size_of::<&NodeRecord>());
+    let wave_budget = NonZeroUsize::new(wave_bytes)
+        .ok_or_else(|| SkeinError::Execution("parallel morsel wave has no capacity".to_string()))?;
+    let wave_account = context.memory_ledger.account(
+        skein_executor::QueryMemoryClass::PipelineBatch,
+        "columnar morsel input wave",
+        wave_budget,
+    );
+    let _wave_lease = wave_account.reserve(wave_bytes)?;
     let mut nodes = context.store.scan_nodes(Some(label_id));
-    let mut wave = Vec::with_capacity(morsel_rows.get().saturating_mul(max_workers));
+    let mut wave = Vec::with_capacity(wave_capacity);
     let mut batch_emitter = NumericBatchEmitter::new(
         fragment,
         items,
@@ -484,11 +481,9 @@ fn stream_parallel_borrowed_numeric_nodes(
     );
     let preparation = NumericMorselPreparation {
         fragment,
-        items,
-        batch_rows: batch_rows.get(),
+        scan: lending_scan,
         output_budget_bytes: output_reservation_bytes.get(),
-        lending_scan,
-        columnar_schema: columnar_schema.as_ref(),
+        columnar_schema: &columnar_schema,
         task_context: context.task_context,
     };
     let mut stopped = false;
@@ -518,41 +513,14 @@ fn stream_parallel_borrowed_numeric_nodes(
                     preparation,
                     &wave[morsel.start_row..morsel.start_row + morsel.row_count],
                 )?;
-                let resident_bytes = output.resident_bytes();
+                let resident_bytes = output.batch.estimated_memory_bytes();
                 Ok(MorselOutput::new(output, resident_bytes))
             },
-            |morsel, output| {
+            |_morsel, output| {
                 context.observer.record_morsels(1);
-                match output {
-                    PreparedNumericMorsel::Columnar(batches) => {
-                        for batch in batches {
-                            stopped = batch_emitter.emit_columnar(batch)? == BatchControl::Stop;
-                            if stopped || batch_emitter.limit_reached() {
-                                stopped = true;
-                                break;
-                            }
-                        }
-                    }
-                    PreparedNumericMorsel::Rows(batches) => {
-                        for batch in batches {
-                            stopped = batch_emitter.emit_prepared(batch)? == BatchControl::Stop;
-                            if stopped || batch_emitter.limit_reached() {
-                                stopped = true;
-                                break;
-                            }
-                        }
-                    }
-                    PreparedNumericMorsel::Serial => {
-                        let rows = &wave[morsel.start_row..morsel.start_row + morsel.row_count];
-                        for batch in rows.chunks(batch_rows.get()) {
-                            stopped = batch_emitter.emit_nodes_without_morsel(batch)?
-                                == BatchControl::Stop;
-                            if stopped || batch_emitter.limit_reached() {
-                                stopped = true;
-                                break;
-                            }
-                        }
-                    }
+                stopped = batch_emitter.emit_columnar(output)? == BatchControl::Stop;
+                if batch_emitter.limit_reached() {
+                    stopped = true;
                 }
                 Ok(if stopped {
                     MorselStreamControl::Stop
@@ -1045,22 +1013,58 @@ fn prepare_numeric_batch<N: Borrow<NodeRecord>>(
 
 fn prepare_owned_columnar_batch(
     fragment: NumericFragment<'_>,
-    input: NumericNodeBatch<'_>,
+    input: &[&NodeRecord],
+    needs_node_ids: bool,
     schema: Arc<BindingSchema>,
 ) -> Result<PreparedColumnarBatch> {
-    let property = match input.values {
-        lending::NumericBatchValues::Int(values) => Arc::new(ColumnVector::int64(
-            values.to_vec(),
-            input.validity.to_owned(),
-        )?),
-        lending::NumericBatchValues::Float(values) => Arc::new(ColumnVector::float64(
-            values.to_vec(),
-            input.validity.to_owned(),
-        )?),
+    let mut validity = ValidityBuilder::with_capacity(input.len());
+    let mut node_ids = needs_node_ids.then(|| Vec::with_capacity(input.len()));
+    let property = match fragment.property_type {
+        crate::schema::PropertyType::Int => {
+            let mut values = Vec::with_capacity(input.len());
+            for node in input {
+                if let Some(node_ids) = &mut node_ids {
+                    node_ids.push(node.id.0);
+                }
+                match node.properties.get(fragment.property) {
+                    Some(Value::Int(value)) => {
+                        values.push(*value);
+                        validity.push(true);
+                    }
+                    Some(Value::Null) | None => {
+                        values.push(0);
+                        validity.push(false);
+                    }
+                    Some(value) => return Err(schema_value_mismatch(fragment, value)),
+                }
+            }
+            Arc::new(ColumnVector::int64(values, validity.finish())?)
+        }
+        crate::schema::PropertyType::Float => {
+            let mut values = Vec::with_capacity(input.len());
+            for node in input {
+                if let Some(node_ids) = &mut node_ids {
+                    node_ids.push(node.id.0);
+                }
+                match node.properties.get(fragment.property) {
+                    Some(Value::Float(value)) => {
+                        values.push(*value);
+                        validity.push(true);
+                    }
+                    Some(Value::Null) | None => {
+                        values.push(0.0);
+                        validity.push(false);
+                    }
+                    Some(value) => return Err(schema_value_mismatch(fragment, value)),
+                }
+            }
+            Arc::new(ColumnVector::float64(values, validity.finish())?)
+        }
+        _ => unreachable!("numeric fragment eligibility checks the property type"),
     };
     let mut columns = vec![property];
-    if let Some(node_ids) = input.node_ids {
-        columns.push(Arc::new(ColumnVector::node_ids(node_ids.to_vec())));
+    if let Some(node_ids) = node_ids {
+        columns.push(Arc::new(ColumnVector::node_ids(node_ids)));
     }
     let batch = ColumnarBatch::try_new(schema, columns)?.filter_numeric(
         PREDICATE_VALUE_SLOT,
@@ -1068,7 +1072,7 @@ fn prepare_owned_columnar_batch(
         fragment.expected,
     )?;
     Ok(PreparedColumnarBatch {
-        input_rows: input.input_rows,
+        input_rows: input.len(),
         batch,
     })
 }
@@ -1076,25 +1080,13 @@ fn prepare_owned_columnar_batch(
 fn prepare_parallel_numeric_morsel(
     preparation: NumericMorselPreparation<'_, '_>,
     input: &[&NodeRecord],
-) -> Result<PreparedNumericMorsel> {
-    if let Some(scan) = preparation.lending_scan {
-        return prepare_lending_numeric_morsel(
-            preparation.fragment,
-            input,
-            scan,
-            preparation.output_budget_bytes,
-            preparation
-                .columnar_schema
-                .expect("lending morsels have a columnar schema"),
-            preparation.task_context,
-        );
-    }
-    prepare_numeric_morsel(
+) -> Result<PreparedColumnarBatch> {
+    prepare_lending_numeric_morsel(
         preparation.fragment,
-        preparation.items,
         input,
-        preparation.batch_rows,
+        preparation.scan,
         preparation.output_budget_bytes,
+        preparation.columnar_schema,
         preparation.task_context,
     )
 }
@@ -1106,7 +1098,7 @@ fn prepare_lending_numeric_morsel(
     output_budget_bytes: usize,
     schema: &Arc<BindingSchema>,
     task_context: Option<&RuntimeTaskContext>,
-) -> Result<PreparedNumericMorsel> {
+) -> Result<PreparedColumnarBatch> {
     if estimated_numeric_columnar_morsel_bytes(
         input.len(),
         scan.batch_rows,
@@ -1114,29 +1106,32 @@ fn prepare_lending_numeric_morsel(
         schema,
     ) > output_budget_bytes
     {
-        return Ok(PreparedNumericMorsel::Serial);
+        return Err(SkeinError::Execution(format!(
+            "columnar morsel cannot fit one typed batch within its {output_budget_bytes}-byte reservation"
+        )));
     }
-    let mut cursor = NumericNodeBatchCursor::new(
-        input.iter().copied(),
-        fragment,
-        scan.batch_rows,
-        scan.needs_node_ids,
-    );
-    let mut output_bytes = 0usize;
-    let mut batches = Vec::with_capacity(input.len().div_ceil(scan.batch_rows));
-    while let Some(input) = cursor.next_batch()? {
-        runtime_checkpoint(task_context)?;
-        let batch = prepare_owned_columnar_batch(fragment, input, Arc::clone(schema))?;
-        let batch_bytes = batch.batch.estimated_memory_bytes();
-        output_bytes = output_bytes.saturating_add(batch_bytes);
-        if output_bytes > output_budget_bytes {
-            return Err(SkeinError::Execution(format!(
-                "columnar morsel retained {output_bytes} bytes after admission reserved {output_budget_bytes}"
-            )));
-        }
-        batches.push(batch);
+    if input.len() > scan.batch_rows {
+        return Err(SkeinError::Execution(format!(
+            "columnar morsel has {} rows, exceeding its {}-row typed batch",
+            input.len(),
+            scan.batch_rows
+        )));
     }
-    Ok(PreparedNumericMorsel::Columnar(batches))
+    if input.is_empty() {
+        return Err(SkeinError::Execution(
+            "columnar morsel input is empty".to_string(),
+        ));
+    }
+    runtime_checkpoint(task_context)?;
+    let batch =
+        prepare_owned_columnar_batch(fragment, input, scan.needs_node_ids, Arc::clone(schema))?;
+    let output_bytes = batch.batch.estimated_memory_bytes();
+    if output_bytes > output_budget_bytes {
+        return Err(SkeinError::Execution(format!(
+            "columnar morsel retained {output_bytes} bytes after admission reserved {output_budget_bytes}"
+        )));
+    }
+    Ok(batch)
 }
 
 fn estimated_numeric_columnar_morsel_bytes(
@@ -1174,30 +1169,6 @@ fn estimated_numeric_columnar_morsel_bytes(
     total
 }
 
-fn prepare_numeric_morsel<N: Borrow<NodeRecord>>(
-    fragment: NumericFragment<'_>,
-    items: &[Projection],
-    input: &[N],
-    batch_rows: usize,
-    output_budget_bytes: usize,
-    task_context: Option<&RuntimeTaskContext>,
-) -> Result<PreparedNumericMorsel> {
-    let mut output_bytes = 0usize;
-    let mut batches = Vec::with_capacity(input.len().div_ceil(batch_rows));
-    for rows in input.chunks(batch_rows) {
-        let batch = prepare_numeric_batch(fragment, items, rows, task_context)?;
-        let batch_bytes = batch.output.iter().fold(0usize, |total, binding| {
-            total.saturating_add(binding_memory_bytes(binding))
-        });
-        output_bytes = output_bytes.saturating_add(batch_bytes);
-        if output_bytes > output_budget_bytes {
-            return Ok(PreparedNumericMorsel::Serial);
-        }
-        batches.push(batch);
-    }
-    Ok(PreparedNumericMorsel::Rows(batches))
-}
-
 fn schema_value_mismatch(fragment: NumericFragment<'_>, value: &Value) -> SkeinError {
     SkeinError::Execution(format!(
         "columnar scan found value {value:?} that violates {:?} schema for {}.{}",
@@ -1209,9 +1180,10 @@ fn schema_value_mismatch(fragment: NumericFragment<'_>, value: &Value) -> SkeinE
 mod tests {
     use super::{
         default_morsel_worker_count, numeric_columnar_schema, prepare_lending_numeric_morsel,
-        LendingNumericScan, NumericFragment, PreparedNumericMorsel,
+        LendingNumericScan, NumericFragment,
     };
     use crate::planner::ComparisonOp;
+    use crate::planner::{Projection, ProjectionExpression};
     use crate::schema::PropertyType;
     use crate::store::{NodeId, NodeRecord};
     use crate::Value;
@@ -1229,6 +1201,34 @@ mod tests {
         assert_eq!(default_morsel_worker_count(64, 16), 16);
         assert_eq!(default_morsel_worker_count(128, 16), 16);
         assert_eq!(default_morsel_worker_count(64, 2), 2);
+    }
+
+    #[test]
+    fn parallel_morsels_require_a_fully_typed_projection() {
+        let fragment = NumericFragment {
+            label: "Item",
+            property: "score",
+            property_type: PropertyType::Int,
+            op: ComparisonOp::Gte,
+            expected: NumericLiteral::Int(0),
+        };
+        let typed = vec![Projection {
+            expression: ProjectionExpression::Property {
+                variable: "n".to_string(),
+                property: "score".to_string(),
+            },
+            name: "score".to_string(),
+        }];
+        let wide = vec![Projection {
+            expression: ProjectionExpression::Property {
+                variable: "n".to_string(),
+                property: "name".to_string(),
+            },
+            name: "name".to_string(),
+        }];
+
+        assert!(fragment.supports_lending_projection(&typed));
+        assert!(!fragment.supports_lending_projection(&wide));
     }
 
     #[test]
@@ -1254,7 +1254,7 @@ mod tests {
             fragment,
             &rows,
             LendingNumericScan {
-                batch_rows: 4,
+                batch_rows: 8,
                 needs_node_ids: true,
             },
             4096,
@@ -1263,16 +1263,12 @@ mod tests {
         )
         .unwrap();
 
-        let PreparedNumericMorsel::Columnar(batches) = prepared else {
-            panic!("admitted typed morsel must remain columnar until consumption");
-        };
-        assert_eq!(batches.len(), 2);
-        assert_eq!(batches[0].batch.selected_count(), 0);
-        assert_eq!(batches[1].batch.selected_count(), 4);
+        assert_eq!(prepared.input_rows, 8);
+        assert_eq!(prepared.batch.selected_count(), 4);
     }
 
     #[test]
-    fn columnar_morsel_falls_back_before_decoding_when_reservation_cannot_fit() {
+    fn columnar_morsel_rejects_before_decoding_when_reservation_cannot_fit() {
         let node = NodeRecord {
             id: NodeId(1),
             labels: BTreeSet::new(),
@@ -1290,7 +1286,7 @@ mod tests {
         };
         let schema = numeric_columnar_schema(fragment, true).unwrap();
 
-        let prepared = prepare_lending_numeric_morsel(
+        let error = prepare_lending_numeric_morsel(
             fragment,
             &[&node],
             LendingNumericScan {
@@ -1301,8 +1297,8 @@ mod tests {
             &schema,
             None,
         )
-        .unwrap();
+        .unwrap_err();
 
-        assert!(matches!(prepared, PreparedNumericMorsel::Serial));
+        assert!(error.to_string().contains("cannot fit one typed batch"));
     }
 }

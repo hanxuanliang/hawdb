@@ -68,15 +68,16 @@ validity bitmap and selected-row buffers MUST be reused across batches. A
 completed projection MUST NOT retain hidden node bindings that are outside the
 projected result scope.
 
-An eligible parallel worker MUST place a typed `ColumnarBatch` and its
-selection into the bounded ordinal stream. It MUST NOT construct per-row
-`Binding` maps while the result is queued or waiting in the reorder window.
-The coordinator materializes selected bindings only when that ordinal reaches
-the consumer boundary. Before constructing a retained columnar morsel, the
-worker MUST use a conservative schema, validity, selection, and typed-column
-estimate to prove that it fits the reserved output bytes. If it cannot fit, the
-fragment MAY choose the serial batch path, but that choice MUST happen before
-the worker decodes or evaluates the morsel.
+An eligible parallel worker MUST place exactly one typed `ColumnarBatch` and its
+selection into the bounded ordinal stream for each production numeric morsel.
+It MUST NOT construct per-row `Binding` maps while the result is queued or
+waiting in the reorder window. The coordinator materializes selected bindings
+only when that ordinal reaches the consumer boundary. Before scheduling any
+worker, the fragment MUST use a conservative schema, validity, selection, and
+typed-column estimate to prove that one complete morsel fits the reserved output
+bytes. A projection that is not fully typed, or a typed output that cannot fit,
+MUST select the serial batch path before decoding or evaluating a morsel. A
+worker MUST NOT return a serial-fallback marker after doing parallel work.
 
 ## Query Memory Ledger
 
@@ -115,9 +116,11 @@ failure or cancellation.
 
 ## Morsel Contract
 
-A morsel is a scheduling unit containing a bounded row range. It is distinct
-from the columnar batch representation. Every morsel has a `PipelineId`, stable
-ordinal, start row, and row count.
+A morsel is a scheduling unit containing a bounded row range. The abstraction
+is distinct from the columnar batch representation, but the initial production
+numeric fragment deliberately maps one morsel to one typed batch so its output
+reservation is exact and no completed parallel work is discarded. Every morsel
+has a `PipelineId`, stable ordinal, start row, and row count.
 
 Admission MUST compute the worker upper bound as:
 
@@ -142,12 +145,13 @@ least four morsels per worker so scheduler and merge overhead do not dominate
 small scans. Ungoverned low-level executor calls remain serial.
 
 Input references and worker output are retained for at most one admitted worker
-window. The shared-pool scheduler MUST use a bounded result channel and MUST NOT
-issue ordinal `n` while `n >= consumed_prefix + admitted_workers`. This sliding
-window reserves one completion opportunity for every issued predecessor and
-prevents a slow early morsel from turning the coordinator reorder map into an
-unbounded buffer. Workers MUST NOT call the host row consumer or mutate the
-query observer.
+window. The complete input-reference wave MUST be reserved in a root-ledger
+pipeline-batch account before allocating its pointer vector. The shared-pool
+scheduler MUST use a bounded result channel and MUST NOT issue ordinal `n` while
+`n >= consumed_prefix + admitted_workers`. This sliding window reserves one
+completion opportunity for every issued predecessor and prevents a slow early
+morsel from turning the coordinator reorder map into an unbounded buffer.
+Workers MUST NOT call the host row consumer or mutate the query observer.
 
 Before constructing one worker result, the scheduler MUST reserve its maximum
 retained output bytes in a `MorselOutput` query-memory account. The lease remains
