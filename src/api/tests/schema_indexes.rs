@@ -1874,7 +1874,7 @@ fn relationship_property_statistics_drive_expand_costing() {
         explain.trace.selected_plan_cost,
         PlanCost {
             estimated_rows: 1,
-            cost: 27,
+            cost: 6,
         }
     );
 }
