@@ -40,8 +40,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+mod columnar_aggregate;
 mod locator;
 
+use self::columnar_aggregate::ColumnarAggregateExecutor;
 use self::locator::{
     hex_encode, RelationalLocatorLayout, RelationalRowSetLocator, RelationalSortKey,
     RelationalSortRecord,
@@ -2550,13 +2552,91 @@ fn execute_aggregate_select<'a>(
             "aggregate SELECT does not yet support statement DISTINCT or ORDER BY".to_string(),
         ));
     }
+    let memory_ledger = QueryMemoryLedger::new(execution_memory.query_memory_bytes);
+    if let Some(mut aggregate) = ColumnarAggregateExecutor::try_new(
+        select,
+        base_schema,
+        &select.from.name,
+        base_qualifier,
+        joins.is_empty(),
+        limits.batch_rows.get(),
+        execution_memory.batch_payload_bytes,
+        &memory_ledger,
+    )? {
+        let mut memory_tracker = OperatorMemoryTracker::with_account(
+            limits.blocking_operator_bytes,
+            memory_ledger.account(
+                QueryMemoryClass::BlockingState,
+                "RelationalColumnarAggregate",
+                limits.blocking_operator_bytes,
+            ),
+        );
+        charge_aggregate_memory(aggregate.blocking_state_bytes(), &mut memory_tracker)?;
+        let mut aggregate_input_rows = 0usize;
+        visit_relational_rows(
+            select,
+            parameters,
+            state,
+            base_schema,
+            base_qualifier,
+            base_access,
+            joins,
+            pipeline,
+            index_runtime,
+            row_runtime,
+            &mut |row| {
+                aggregate_input_rows = aggregate_input_rows.saturating_add(1);
+                aggregate.push(&row)?;
+                Ok(true)
+            },
+        )?;
+        pipeline.finish()?;
+        let intermediate_rows = pipeline.intermediate_rows;
+        let finished = aggregate.finish()?;
+        let offset = usize::try_from(bind_bound(select.offset, parameters, "OFFSET")?.unwrap_or(0))
+            .map_err(|_| SkeinError::Semantic("SQL OFFSET is too large".to_string()))?;
+        let requested = bind_bound(select.limit, parameters, "LIMIT")?
+            .map(|value| usize::try_from(value).unwrap_or(usize::MAX))
+            .unwrap_or(usize::MAX);
+        let mut rows = Vec::new();
+        if offset == 0 && requested != 0 {
+            if limits.max_output_rows == 0 {
+                return Err(SkeinError::Execution(
+                    "relational SQL output exceeds max_output_rows 0".to_string(),
+                ));
+            }
+            let row = finished.into_iter().collect::<Row>();
+            if map_payload_bytes(&row) > limits.max_output_payload_bytes {
+                return Err(SkeinError::Execution(format!(
+                    "relational SQL output exceeds max_output_payload_bytes {}",
+                    limits.max_output_payload_bytes
+                )));
+            }
+            rows.push(row);
+        }
+        return Ok(RelationalQueryOutput {
+            rows,
+            intermediate_rows,
+            hydration: row_runtime.hydration(),
+            access_path,
+            join_access_paths,
+            index_execution_evidence: index_runtime.evidence(),
+            row_execution_evidence: row_runtime.evidence(),
+            blocking_operator_memory_reports: vec![skein_executor::blocking::in_memory_report(
+                "RelationalAggregateExec",
+                &memory_tracker,
+                memory_tracker.peak_bytes,
+                aggregate_input_rows,
+                execution_memory,
+            )],
+        });
+    }
     let projection_template = select
         .projection
         .iter()
         .map(|projection| AggregateProjectionState::new(projection, parameters))
         .collect::<Result<Vec<_>>>()?;
     let mut groups = BTreeMap::<Vec<RelationalValue>, Vec<AggregateProjectionState>>::new();
-    let memory_ledger = QueryMemoryLedger::new(execution_memory.query_memory_bytes);
     let mut memory_tracker = OperatorMemoryTracker::with_account(
         limits.blocking_operator_bytes,
         memory_ledger.account(

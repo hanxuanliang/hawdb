@@ -1763,7 +1763,7 @@ mod tests {
         let store = RelationalStore::default();
         for ddl in [
             "CREATE TABLE documents (id TEXT PRIMARY KEY, owner_kind TEXT NOT NULL, owner_id TEXT NOT NULL, UNIQUE (owner_kind, owner_id))",
-            "CREATE TABLE messages (id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(id), stream_id TEXT NOT NULL, order_index BIGINT NOT NULL, body TEXT NOT NULL, token_count BIGINT NOT NULL)",
+            "CREATE TABLE messages (id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(id), stream_id TEXT NOT NULL, order_index BIGINT NOT NULL, body TEXT NOT NULL, token_count BIGINT)",
             "CREATE TABLE anchors (id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(id), message_id TEXT NOT NULL)",
             "CREATE INDEX idx_messages_order ON messages (stream_id, order_index, id)",
             "CREATE INDEX idx_anchors_message ON anchors (document_id, message_id)",
@@ -1789,6 +1789,18 @@ mod tests {
                 ],
             );
         }
+        commit_sql(
+            &store,
+            "INSERT INTO messages (id, document_id, stream_id, order_index, body, token_count) VALUES ($1, $2, $3, $4, $5, $6)",
+            &[
+                text("message-3"),
+                text("doc-1"),
+                text("stream-1"),
+                Value::Int(3),
+                text("body-3"),
+                Value::Null,
+            ],
+        );
         commit_sql(
             &store,
             "INSERT INTO anchors (id, document_id, message_id) VALUES ($1, $2, $3)",
@@ -1917,9 +1929,61 @@ mod tests {
             None,
         )
         .expect("bounded aggregate");
-        assert_eq!(summary.rows[0]["message_count"], Value::Int(2));
+        assert_eq!(summary.rows[0]["message_count"], Value::Int(3));
         assert_eq!(summary.rows[0]["token_count"], Value::Int(20));
         assert_eq!(summary.hydration.hydrated_rows, 0);
+
+        let counted_tokens = execute_relational_query_sql_with_runtime(
+            "SELECT COUNT(token_count) AS counted_tokens FROM messages WHERE stream_id = $1",
+            &[text("stream-1")],
+            snapshot.value(),
+            RelationalQueryReadModes::new(
+                RelationalIndexReadMode::Materialized,
+                RelationalRowReadMode::CanonicalMemory,
+            ),
+            query_limits(1, 4 * 1024),
+            &skein_executor::ExecutionMemoryConfig::default(),
+            None,
+        )
+        .expect("columnar nullable COUNT");
+        assert_eq!(counted_tokens.rows[0]["counted_tokens"], Value::Int(2));
+
+        let row_oracle = execute_relational_query_sql_with_runtime(
+            "SELECT COUNT(*) AS message_count, COALESCE(SUM(token_count), 0) AS token_count FROM messages WHERE stream_id = $1",
+            &[text("stream-1")],
+            snapshot.value(),
+            RelationalQueryReadModes::new(
+                RelationalIndexReadMode::Materialized,
+                RelationalRowReadMode::CanonicalMemory,
+            ),
+            query_limits(1, 4 * 1024),
+            &skein_executor::ExecutionMemoryConfig::default(),
+            None,
+        )
+        .expect("row aggregate oracle");
+        assert_eq!(summary.rows, row_oracle.rows);
+
+        let aggregate_constrained_memory = skein_executor::ExecutionMemoryConfig {
+            batch_payload_bytes: std::num::NonZeroUsize::new(128)
+                .expect("non-zero aggregate batch budget"),
+            ..skein_executor::ExecutionMemoryConfig::default()
+        };
+        let error = execute_relational_query_sql_with_runtime(
+            summary_sql,
+            &[text("stream-1")],
+            snapshot.value(),
+            RelationalQueryReadModes::new(
+                RelationalIndexReadMode::Materialized,
+                RelationalRowReadMode::CanonicalMemory,
+            ),
+            query_limits(1, 4 * 1024),
+            &aggregate_constrained_memory,
+            None,
+        )
+        .expect_err("columnar aggregate must honor batch_payload_bytes");
+        assert!(error
+            .to_string()
+            .contains("relational columnar aggregate cannot fit one row"));
 
         let mut constrained = query_limits(1, 4 * 1024);
         constrained.blocking_operator_bytes =

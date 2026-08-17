@@ -298,9 +298,18 @@ pub enum ColumnVector {
 
 impl ColumnVector {
     pub fn boolean(values: Vec<bool>, validity: Validity) -> Result<Self> {
+        Self::boolean_bytes(values.into_iter().map(u8::from).collect(), validity)
+    }
+
+    pub fn boolean_bytes(values: Vec<u8>, validity: Validity) -> Result<Self> {
         ensure_column_len("Bool", values.len(), validity.len())?;
+        if values.iter().any(|value| *value > 1) {
+            return Err(SkeinError::Execution(
+                "Bool column contains a value other than 0 or 1".to_string(),
+            ));
+        }
         Ok(Self::Bool {
-            values: values.into_iter().map(u8::from).collect::<Vec<_>>().into(),
+            values: values.into(),
             validity,
         })
     }
@@ -1059,6 +1068,13 @@ mod tests {
         assert!(validity.is_valid(64));
         assert!(!validity.is_valid(65));
         assert!(validity.is_valid(66));
+    }
+
+    #[test]
+    fn boolean_bytes_reject_non_canonical_values() {
+        let error = ColumnVector::boolean_bytes(vec![0, 2], Validity::all(2)).unwrap_err();
+
+        assert!(error.to_string().contains("other than 0 or 1"));
     }
 
     #[test]

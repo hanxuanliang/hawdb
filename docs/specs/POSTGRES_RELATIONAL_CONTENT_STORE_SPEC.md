@@ -267,6 +267,17 @@ time; non-grouped aggregation retains one admitted incremental state. Large
 payload hydration remains after the blocking locator selection unless exact
 statement `DISTINCT` requires the projected value.
 
+An ungrouped, non-distinct, single-table aggregate consisting only of
+`COUNT(*)`, `COUNT(column)`, and `SUM(BIGINT column)` MUST lower qualified rows
+into a typed Bool/Int64 `ColumnarBatch`. Batch-local `count_selected`,
+`count_valid`, and checked Int64 sum kernels merge into one admitted aggregate
+state. The batch is conservatively sized before allocation against both
+`batch_rows` and `batch_payload_bytes`, and its pipeline reservation shares the
+query root ledger with the aggregate state. Null and overflow semantics MUST
+match the row executor. Any expression outside this proven fragment uses the
+row implementation for the entire aggregate; it MUST NOT switch paths after
+consuming input, and the row path remains the differential oracle.
+
 An ordered index projection whose equality prefix and `ORDER BY` suffix are
 fully covered MUST stream compact row locators through an executor-owned typed
 `ColumnarBatch`. `OFFSET` and `LIMIT` apply while visiting the ordered cursor,
