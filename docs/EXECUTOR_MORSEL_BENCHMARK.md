@@ -33,7 +33,17 @@ done
 sixteen morsels. An explicit row count is rejected when it cannot activate the
 requested worker count under the default four-morsels-per-worker admission
 rule. The fixture has a numeric predicate field and a 256-byte non-projected
-payload so the scan retains a production-shaped resident row width.
+payload so the scan retains a production-shaped resident row width. The local
+harness gives the query an explicit 512 MiB execution-memory ceiling so the
+16-worker case can reserve its complete typed-output window; this is a query
+budget, not a claim that the fixture process is confined to 512 MiB.
+
+Morsel mode additionally runs 0%, 1%, 10%, 50%, and 100% predicate-selectivity
+cases. Each case alternates serial and parallel execution, verifies identical
+row counts and checksums, and records P50/P95/P99, RSS, page faults, query-ledger
+peak and completion bytes, bounded output/reorder state, and spill totals. The
+harness rejects a case if the worker window, byte reservation, root budget,
+zero-completion, or spill-free streaming invariant is violated.
 
 The adjacency mode measures the Mem-shaped `LIMIT 50` one-hop expansion at
 degrees 1, 32, 1,024, and 100,000 without running the numeric or scheduler

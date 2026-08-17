@@ -20,6 +20,8 @@ const END_TO_END_PAYLOAD_BYTES: usize = 256;
 const SAMPLES: usize = 11;
 const MORSEL_MATRIX_SAMPLES: usize = 3;
 const LOCAL_MORSEL_BENCHMARK_PROTOCOL: &str = "skein-local-morsel-benchmark-v1";
+const LOCAL_MORSEL_SELECTIVITY_PROTOCOL: &str = "skein-local-morsel-selectivity-matrix-v1";
+const MORSEL_SELECTIVITY_PERCENTAGES: [usize; 5] = [0, 1, 10, 50, 100];
 const EXECUTOR_BENCH_MODE_ENV: &str = "SKEIN_EXECUTOR_BENCH_MODE";
 
 #[path = "executor_vectorization/adjacency.rs"]
@@ -36,12 +38,14 @@ fn main() {
     );
     let full = mode == "full";
     let micro = full.then(micro_benchmark);
-    let (end_to_end, production_morsel) = if matches!(mode.as_str(), "scheduler" | "adjacency") {
-        (None, None)
-    } else {
-        let (comparison, production) = end_to_end_benchmark(requested_workers, full);
-        (comparison, Some(production))
-    };
+    let (end_to_end, production_morsel, morsel_selectivity) =
+        if matches!(mode.as_str(), "scheduler" | "adjacency") {
+            (None, None, None)
+        } else {
+            let (comparison, production, selectivity) =
+                end_to_end_benchmark(requested_workers, full);
+            (comparison, Some(production), selectivity)
+        };
     let morsel = matches!(mode.as_str(), "full" | "scheduler")
         .then(|| morsel::scheduler_benchmark(requested_workers));
     let adjacency_limit = matches!(mode.as_str(), "full" | "adjacency").then(adjacency::benchmark);
@@ -59,6 +63,7 @@ fn main() {
             "end_to_end": end_to_end.map(ComparisonReport::json),
             "morsel": morsel,
             "production_morsel": production_morsel,
+            "morsel_selectivity": morsel_selectivity,
             "adjacency_limit": adjacency_limit,
             "end_to_end_payload_bytes_per_row": END_TO_END_PAYLOAD_BYTES,
             "mode": mode,
@@ -131,7 +136,11 @@ fn micro_benchmark() -> ComparisonReport {
 fn end_to_end_benchmark(
     requested_workers: NonZeroUsize,
     include_vectorization_comparison: bool,
-) -> (Option<ComparisonReport>, serde_json::Value) {
+) -> (
+    Option<ComparisonReport>,
+    serde_json::Value,
+    Option<serde_json::Value>,
+) {
     let workload_rows = if include_vectorization_comparison {
         END_TO_END_ROWS
     } else {
@@ -147,7 +156,11 @@ fn end_to_end_benchmark(
     } else {
         MORSEL_MATRIX_SAMPLES
     };
-    let memory = ExecutionMemoryConfig::default();
+    let memory = ExecutionMemoryConfig {
+        query_memory_bytes: NonZeroUsize::new(512 * 1024 * 1024)
+            .expect("benchmark query memory budget is non-zero"),
+        ..ExecutionMemoryConfig::default()
+    };
     let mut catalog = Catalog::default();
     let table = catalog.get_or_create_table(TableKind::Node, "Item");
     catalog.get_or_create_property(table, "score", PropertyType::Int, false);
@@ -278,8 +291,15 @@ fn end_to_end_benchmark(
     );
     assert_eq!(serial_probe.checksum, parallel_probe.checksum);
     assert!(serial_probe.fully_streamed && parallel_probe.fully_streamed);
+    assert_eq!(serial_probe.output_rows, parallel_probe.output_rows);
     assert_eq!(parallel_probe.max_admitted_workers, requested_workers.get());
     assert_eq!(parallel_probe.peak_active_workers, requested_workers.get());
+    assert!(parallel_probe.peak_buffered_outputs <= requested_workers.get());
+    assert!(parallel_probe.peak_reorder_entries <= requested_workers.get());
+    assert!(parallel_probe.query_memory_peak_bytes <= memory.query_memory_bytes.get());
+    assert_eq!(parallel_probe.query_memory_completion_bytes, 0);
+    assert_eq!(parallel_probe.spilled_bytes, 0);
+    assert_eq!(parallel_probe.spill_run_count, 0);
     let serial_ns_per_iteration = serial_ns as f64 / iterations as f64;
     let parallel_ns_per_iteration = parallel_ns as f64 / iterations as f64;
     let production_morsel = json!({
@@ -290,12 +310,18 @@ fn end_to_end_benchmark(
         "rows": workload_rows,
         "batch_rows": memory.batch_rows,
         "requested_workers": requested_workers,
+        "output_rows": parallel_probe.output_rows,
         "morsel_count": parallel_probe.morsel_count,
         "morsel_max_admitted_workers": parallel_probe.max_admitted_workers,
         "morsel_peak_active_workers": parallel_probe.peak_active_workers,
         "morsel_peak_buffered_outputs": parallel_probe.peak_buffered_outputs,
         "morsel_peak_buffered_output_bytes": parallel_probe.peak_buffered_output_bytes,
         "morsel_peak_reorder_entries": parallel_probe.peak_reorder_entries,
+        "query_memory_budget_bytes": memory.query_memory_bytes,
+        "query_memory_peak_bytes": parallel_probe.query_memory_peak_bytes,
+        "query_memory_completion_bytes": parallel_probe.query_memory_completion_bytes,
+        "spilled_bytes": parallel_probe.spilled_bytes,
+        "spill_run_count": parallel_probe.spill_run_count,
         "iterations_per_sample": iterations,
         "samples": samples,
         "serial_p50_ns": serial_ns,
@@ -316,7 +342,138 @@ fn end_to_end_benchmark(
         "major_page_faults": parallel_probe.major_page_faults,
         "checksum": parallel_checksum,
     });
-    (comparison, production_morsel)
+    let selectivity = (!include_vectorization_comparison).then(|| {
+        benchmark_morsel_selectivity_matrix(MorselSelectivityContext {
+            workload_rows,
+            requested_workers,
+            catalog: &mut catalog,
+            store: &mut store,
+            serial_context: &serial_context,
+            parallel_context: &parallel_context,
+            memory: &memory,
+        })
+    });
+    (comparison, production_morsel, selectivity)
+}
+
+struct MorselSelectivityContext<'a> {
+    workload_rows: usize,
+    requested_workers: NonZeroUsize,
+    catalog: &'a mut Catalog,
+    store: &'a mut GraphStore,
+    serial_context: &'a RuntimeTaskContext,
+    parallel_context: &'a RuntimeTaskContext,
+    memory: &'a ExecutionMemoryConfig,
+}
+
+fn benchmark_morsel_selectivity_matrix(context: MorselSelectivityContext<'_>) -> serde_json::Value {
+    let MorselSelectivityContext {
+        workload_rows,
+        requested_workers,
+        catalog,
+        store,
+        serial_context,
+        parallel_context,
+        memory,
+    } = context;
+    let cases = MORSEL_SELECTIVITY_PERCENTAGES
+        .into_iter()
+        .map(|selectivity_percent| {
+            let expected_rows = workload_rows
+                .saturating_mul(selectivity_percent)
+                .div_ceil(100);
+            let threshold = workload_rows.saturating_sub(expected_rows) as i64;
+            let plan = projection_plan(Predicate::PropertyCompare {
+                variable: "n".to_string(),
+                property: "score".to_string(),
+                op: ComparisonOp::Gte,
+                value: Value::Int(threshold),
+            });
+            let mut serial_samples = Vec::with_capacity(MORSEL_MATRIX_SAMPLES);
+            let mut parallel_samples = Vec::with_capacity(MORSEL_MATRIX_SAMPLES);
+            let mut serial_checksum = 0u64;
+            let mut parallel_checksum = 0u64;
+            for sample in 0..MORSEL_MATRIX_SAMPLES {
+                let parallel_first = sample % 2 == 1;
+                for parallel in [parallel_first, !parallel_first] {
+                    let context = if parallel {
+                        parallel_context
+                    } else {
+                        serial_context
+                    };
+                    let started = Instant::now();
+                    let probe =
+                        morsel::stream_probe(black_box(&plan), catalog, store, context, memory);
+                    assert_eq!(probe.output_rows, expected_rows);
+                    if parallel {
+                        parallel_checksum = black_box(probe.checksum);
+                        parallel_samples.push(started.elapsed().as_nanos());
+                    } else {
+                        serial_checksum = black_box(probe.checksum);
+                        serial_samples.push(started.elapsed().as_nanos());
+                    }
+                }
+            }
+            assert_eq!(serial_checksum, parallel_checksum);
+            serial_samples.sort_unstable();
+            parallel_samples.sort_unstable();
+            let probe = morsel::stream_probe(&plan, catalog, store, parallel_context, memory);
+            assert!(probe.fully_streamed);
+            assert_eq!(probe.output_rows, expected_rows);
+            assert_eq!(probe.max_admitted_workers, requested_workers.get());
+            assert_eq!(probe.peak_active_workers, requested_workers.get());
+            assert!(probe.peak_buffered_outputs <= requested_workers.get());
+            assert!(probe.peak_reorder_entries <= requested_workers.get());
+            assert!(
+                probe.peak_buffered_output_bytes
+                    <= memory
+                        .batch_payload_bytes
+                        .get()
+                        .saturating_mul(requested_workers.get())
+            );
+            assert!(probe.query_memory_peak_bytes <= memory.query_memory_bytes.get());
+            assert_eq!(probe.query_memory_completion_bytes, 0);
+            assert_eq!(probe.spilled_bytes, 0);
+            assert_eq!(probe.spill_run_count, 0);
+
+            json!({
+                "selectivity_percent": selectivity_percent,
+                "expected_rows": expected_rows,
+                "serial_p50_ns": morsel::percentile(&serial_samples, 50),
+                "serial_p95_ns": morsel::percentile(&serial_samples, 95),
+                "serial_p99_ns": morsel::percentile(&serial_samples, 99),
+                "parallel_p50_ns": morsel::percentile(&parallel_samples, 50),
+                "parallel_p95_ns": morsel::percentile(&parallel_samples, 95),
+                "parallel_p99_ns": morsel::percentile(&parallel_samples, 99),
+                "morsel_count": probe.morsel_count,
+                "morsel_max_admitted_workers": probe.max_admitted_workers,
+                "morsel_peak_active_workers": probe.peak_active_workers,
+                "morsel_peak_buffered_outputs": probe.peak_buffered_outputs,
+                "morsel_peak_buffered_output_bytes": probe.peak_buffered_output_bytes,
+                "morsel_peak_reorder_entries": probe.peak_reorder_entries,
+                "query_memory_peak_bytes": probe.query_memory_peak_bytes,
+                "query_memory_completion_bytes": probe.query_memory_completion_bytes,
+                "spilled_bytes": probe.spilled_bytes,
+                "spill_run_count": probe.spill_run_count,
+                "steady_resident_bytes": probe.steady_resident_bytes,
+                "peak_resident_bytes": probe.peak_resident_bytes,
+                "minor_page_faults": probe.minor_page_faults,
+                "major_page_faults": probe.major_page_faults,
+                "checksum": probe.checksum,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "protocol": LOCAL_MORSEL_SELECTIVITY_PROTOCOL,
+        "evidence_kind": "local_kernel_diagnostic",
+        "production_eligible": false,
+        "rows": workload_rows,
+        "requested_workers": requested_workers,
+        "query_memory_budget_bytes": memory.query_memory_bytes,
+        "batch_payload_budget_bytes": memory.batch_payload_bytes,
+        "samples_per_case": MORSEL_MATRIX_SAMPLES,
+        "cases": cases,
+    })
 }
 
 fn projection_plan(predicate: Predicate) -> PhysicalPlan {

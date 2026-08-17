@@ -163,6 +163,7 @@ pub(super) fn benchmark_production_rows(requested_workers: NonZeroUsize) -> usiz
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Probe {
     pub(super) checksum: u64,
+    pub(super) output_rows: usize,
     pub(super) fully_streamed: bool,
     pub(super) morsel_count: usize,
     pub(super) max_admitted_workers: usize,
@@ -170,6 +171,10 @@ pub(super) struct Probe {
     pub(super) peak_buffered_outputs: usize,
     pub(super) peak_buffered_output_bytes: usize,
     pub(super) peak_reorder_entries: usize,
+    pub(super) query_memory_peak_bytes: usize,
+    pub(super) query_memory_completion_bytes: usize,
+    pub(super) spilled_bytes: u64,
+    pub(super) spill_run_count: usize,
     pub(super) steady_resident_bytes: Option<u64>,
     pub(super) peak_resident_bytes: Option<u64>,
     pub(super) minor_page_faults: Option<u64>,
@@ -184,6 +189,7 @@ pub(super) fn stream_probe(
     memory: &ExecutionMemoryConfig,
 ) -> Probe {
     let mut checksum = 0u64;
+    let mut output_rows = 0usize;
     let mut external = BenchmarkExternalRead;
     let report = execute_with_row_consumer_profile_and_external_and_context_and_memory(
         plan,
@@ -194,6 +200,7 @@ pub(super) fn stream_probe(
         None,
         None,
         &mut |row| {
+            output_rows = output_rows.saturating_add(1);
             checksum = checksum.wrapping_add(super::output_row_score(&row));
             Ok(())
         },
@@ -201,9 +208,24 @@ pub(super) fn stream_probe(
         memory,
     )
     .expect("morsel production benchmark execution must succeed");
+    let spilled_bytes = report
+        .profile
+        .blocking_operator_memory_reports
+        .iter()
+        .fold(0u64, |total, operator| {
+            total.saturating_add(operator.spilled_bytes)
+        });
+    let spill_run_count = report
+        .profile
+        .blocking_operator_memory_reports
+        .iter()
+        .fold(0usize, |total, operator| {
+            total.saturating_add(operator.spill_run_count)
+        });
     let pipeline = report.profile.pipeline_memory_report;
     Probe {
         checksum,
+        output_rows,
         fully_streamed: report.fully_streamed,
         morsel_count: pipeline.morsel_count,
         max_admitted_workers: pipeline.morsel_max_admitted_workers,
@@ -211,6 +233,10 @@ pub(super) fn stream_probe(
         peak_buffered_outputs: pipeline.morsel_peak_buffered_outputs,
         peak_buffered_output_bytes: pipeline.morsel_peak_buffered_output_bytes,
         peak_reorder_entries: pipeline.morsel_peak_reorder_entries,
+        query_memory_peak_bytes: pipeline.query_memory_peak_bytes,
+        query_memory_completion_bytes: pipeline.query_memory_completion_bytes,
+        spilled_bytes,
+        spill_run_count,
         steady_resident_bytes: pipeline.steady_resident_bytes,
         peak_resident_bytes: pipeline.peak_resident_bytes,
         minor_page_faults: pipeline.minor_page_faults,
