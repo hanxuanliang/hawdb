@@ -1,3 +1,9 @@
+#[cfg(test)]
+use crate::api::{
+    KnowledgeEntityDeleteBatchOutput, KnowledgeEntityDeleteBatchRequest,
+    KnowledgeMemoryEvolvesCreateBatchOutput, KnowledgeMemoryEvolvesCreateBatchRequest,
+    KnowledgeMemoryLifecycleBatchOutput, KnowledgeMemoryLifecycleBatchRequest,
+};
 use crate::search::{
     AdaptiveVectorSearchOptions, CompressedVectorSearchMode, SearchCandidateSetReport,
     SearchFallbackReasonCode, SearchFusionWeights, SearchLexicalProductionQualificationReport,
@@ -15,9 +21,6 @@ use crate::{
     cypher, BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundMaintenanceSummary,
     BackgroundWorkHint, BackgroundWorkPlan, BoundedReadQueryOutput, Database, DatabaseConfig,
     GraphRagGeneratedQuery, GraphRagSchemaContext, GraphRagSchemaContextOptions,
-    KnowledgeEntityDeleteBatchOutput, KnowledgeEntityDeleteBatchRequest,
-    KnowledgeMemoryEvolvesCreateBatchOutput, KnowledgeMemoryEvolvesCreateBatchRequest,
-    KnowledgeMemoryLifecycleBatchOutput, KnowledgeMemoryLifecycleBatchRequest,
     KnowledgeRetrievalOutput, KnowledgeRetrievalRequest, LocalQosPolicy, LocalQosScheduler,
     LocalQosState, NowledgeGraphStatement, PlanCacheLookup, QueryOutput, QueryStreamOptions,
     QueryStreamReport, ReadExecutionProfile, Result, ScheduledSearchProjectionCatchUpReport,
@@ -3199,6 +3202,11 @@ pub struct NowledgeMemReadOutput {
     pub report: NowledgeMemReadReport,
 }
 
+#[rustfmt::skip]
+#[cfg(test)]
+mod legacy_graph_route_types {
+use super::*;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NowledgeMemGraphOverviewOptions {
     pub limit: usize,
@@ -4057,6 +4065,11 @@ impl NowledgeMemGraphOrphansOutput {
         })
     }
 }
+
+}
+
+#[cfg(test)]
+pub use legacy_graph_route_types::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NowledgeMemQueryExecutionPath {
@@ -6050,7 +6063,17 @@ impl NowledgeMemGraph {
             .query_generated_graph_rag_bounded_profile(query, parameters, options.max_rows)?;
         bounded_nowledge_mem_read_output(self.mode, bounded, options)
     }
+}
 
+// Route-shaped readers are retained only as regression fixtures for the named
+// Cypher statements below. Production hosts execute those statements through
+// the bounded query surface and own response shaping.
+#[rustfmt::skip]
+#[cfg(test)]
+mod legacy_graph_route_api {
+use super::*;
+
+impl NowledgeMemGraph {
     pub fn read_graph_overview(
         &self,
         options: &NowledgeMemGraphOverviewOptions,
@@ -7373,7 +7396,7 @@ fn optional_f64_field(row: &BTreeMap<String, Value>, field: &str) -> Result<Opti
     }
 }
 
-fn required_u64_field(row: &BTreeMap<String, Value>, field: &str) -> Result<u64> {
+pub(super) fn required_u64_field(row: &BTreeMap<String, Value>, field: &str) -> Result<u64> {
     match row.get(field) {
         Some(Value::Int(value)) if *value >= 0 => Ok(*value as u64),
         Some(value) => Err(SkeinError::Semantic(format!(
@@ -7393,6 +7416,11 @@ fn required_usize_field(row: &BTreeMap<String, Value>, field: &str) -> Result<us
         ))
     })
 }
+
+}
+
+#[cfg(test)]
+use legacy_graph_route_api::required_u64_field;
 
 #[derive(Debug)]
 pub struct NowledgeMemSearchProjection {
@@ -8278,7 +8306,10 @@ impl NowledgeMemEmbeddedStoreHandle {
             (Some(_), Some(_)) => Err(ambiguous_search_projection_error()),
         }
     }
+}
 
+#[cfg(test)]
+impl NowledgeMemEmbeddedStoreHandle {
     pub fn create_knowledge_memory_evolves_batch(
         &self,
         request: &KnowledgeMemoryEvolvesCreateBatchRequest,
@@ -8311,7 +8342,9 @@ impl NowledgeMemEmbeddedStoreHandle {
             .database_mut()
             .delete_knowledge_entity_batch(request)
     }
+}
 
+impl NowledgeMemEmbeddedStoreHandle {
     pub fn transaction(
         &self,
         statements: &[NowledgeGraphStatement],
@@ -8592,7 +8625,10 @@ impl NowledgeMemEmbeddedStoreHandle {
         self.read_store()?
             .read_generated_graph_rag(query, parameters, options)
     }
+}
 
+#[cfg(test)]
+impl NowledgeMemEmbeddedStoreHandle {
     pub fn read_graph_overview(
         &self,
         options: &NowledgeMemGraphOverviewOptions,
@@ -8663,7 +8699,9 @@ impl NowledgeMemEmbeddedStoreHandle {
     ) -> Result<NowledgeMemGraphOrphansOutput> {
         self.read_store()?.read_graph_orphans(options)
     }
+}
 
+impl NowledgeMemEmbeddedStoreHandle {
     pub fn search_candidates(
         &self,
         request: &NowledgeMemSearchCandidateRequest,
@@ -9911,7 +9949,10 @@ impl NowledgeMemEmbeddedStore {
         self.graph
             .read_generated_graph_rag(query, parameters, options)
     }
+}
 
+#[cfg(test)]
+impl NowledgeMemEmbeddedStore {
     pub fn read_graph_overview(
         &self,
         options: &NowledgeMemGraphOverviewOptions,
@@ -9981,7 +10022,9 @@ impl NowledgeMemEmbeddedStore {
     ) -> Result<NowledgeMemGraphOrphansOutput> {
         self.graph.read_graph_orphans(options)
     }
+}
 
+impl NowledgeMemEmbeddedStore {
     pub fn background_maintenance_summary(
         &self,
         policy: &LocalQosPolicy,
@@ -12826,6 +12869,7 @@ fn estimate_value_payload_bytes(value: &Value) -> usize {
     }
 }
 
+#[cfg(test)]
 fn nowledge_value_json(value: &Value) -> serde_json::Value {
     match value {
         Value::Null => serde_json::Value::Null,

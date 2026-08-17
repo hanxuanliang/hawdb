@@ -2,14 +2,6 @@ use super::super::*;
 #[cfg(test)]
 use super::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) enum KnowledgeNeighborDirection {
-    Outgoing,
-    Incoming,
-    Both,
-}
-
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeNeighborsRequest {

@@ -3,6 +3,11 @@
 > This document is a historical implementation plan. Current normative
 > contracts are indexed by `docs/specs/README.md`, and current incomplete work
 > is tracked only in `TODO.md`.
+>
+> Descriptions below of typed Nowledge business CRUD or route APIs are
+> historical evidence only. Those facades are excluded from release builds by
+> `docs/specs/QUERY_FIRST_PUBLIC_API_SPEC.md`; current integrations use
+> parameterized Cypher or PostgreSQL-dialect SQL.
 
 ## Objective
 

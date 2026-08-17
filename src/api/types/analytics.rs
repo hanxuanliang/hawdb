@@ -1,3 +1,11 @@
+use super::super::*;
+
+#[rustfmt::skip]
+#[cfg(test)]
+mod legacy_business_types {
+use super::super::*;
+use super::*;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgePageRankScoreUpdate {
     pub label: String,
@@ -9,9 +17,6 @@ pub struct KnowledgePageRankScoreUpdate {
 pub struct KnowledgePageRankScoreBatchRequest {
     pub updates: Vec<KnowledgePageRankScoreUpdate>,
 }
-
-use super::super::*;
-use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgePageRankScoreBatchRow {
@@ -777,6 +782,11 @@ pub struct KnowledgeSourceReferenceRelationshipCleanupOutput {
     pub candidate_count: usize,
     pub deleted_relationship_count: usize,
 }
+
+}
+
+#[cfg(test)]
+pub use legacy_business_types::*;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeEntity {

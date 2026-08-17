@@ -130,6 +130,12 @@ the internal storage crate as an accidental second production API.
 
 Cypher exposes lightweight runtime resource intent through session-scoped
 system variables instead of query-shape-specific typed APIs.
+The release-facing application API follows the same rule: business reads and
+mutations execute parameterized Cypher or PostgreSQL-dialect SQL, while typed
+Rust APIs are limited to route-neutral kernel contracts that coordinate
+transactions, recovery, projections, import, bounded retrieval, QoS, or
+readiness. Route response shaping belongs to the host. The normative boundary
+is defined by `docs/specs/QUERY_FIRST_PUBLIC_API_SPEC.md`.
 `SET system.work_priority`, `SET SYSTEM VARIABLE work_priority`,
 `SET system.work_class`, `SET SYSTEM VARIABLE work_class`,
 `SET system.estimated_operations`, and

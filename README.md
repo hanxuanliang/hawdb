@@ -126,6 +126,14 @@ should open Skein in-process and consume typed readiness APIs such as
 `nowledge_mem_final_cutover_preflight`; they should not shell out to the `skein`
 binary for read routing, migration gates, or previous-wrapper comparison.
 
+Application graph reads and mutations use parameterized Cypher; relational
+operations use PostgreSQL-dialect SQL. Skein does not expose route-shaped
+`read_graph_*` methods or business-specific CRUD batch facades in release
+builds. Typed APIs are reserved for stable multi-statement kernel boundaries
+such as transactions, recovery, projections, import, bounded retrieval, QoS,
+and readiness. See
+[`docs/specs/QUERY_FIRST_PUBLIC_API_SPEC.md`](docs/specs/QUERY_FIRST_PUBLIC_API_SPEC.md).
+
 Compatibility commands that execute external previous-wrapper or shadow compare
 processes are quarantined as developer/preflight tools. They require
 `SKEIN_ENABLE_COMPATIBILITY_TOOLS=1` and are only for isolated CI, release, or

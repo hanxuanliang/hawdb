@@ -12,7 +12,9 @@ use crate::qos::{
     LocalQosScheduler, LocalQosSnapshot, LocalQosState, QosAdmission, QosAdmissionCode, WorkClass,
     WorkPriority, WorkRequest,
 };
-use crate::schema::{Catalog, GraphStatistics, IndexKind, LabelId, SchemaObjectState};
+#[cfg(test)]
+use crate::schema::LabelId;
+use crate::schema::{Catalog, GraphStatistics, IndexKind, SchemaObjectState};
 #[cfg(test)]
 use crate::schema::{
     CompositeIndexDescriptor, ConstraintDescriptor, IndexDescriptor, PropertyDescriptor,
@@ -62,6 +64,15 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KnowledgeNeighborDirection {
+    #[cfg(test)]
+    Outgoing,
+    #[cfg(test)]
+    Incoming,
+    Both,
+}
 use system_variables::{
     query_statement_variables_for_statement, query_work_request_for_statement,
     reject_system_variable_parameters,
@@ -3317,7 +3328,13 @@ impl Database {
         }
         .retrieve_knowledge_from_search(search, projection_freshness, request)
     }
+}
 
+// Keep the old typed mutation adapters only as regression-test fixtures. The
+// production embedded surface is query-first: callers execute parameterized
+// Cypher through Database or DatabaseTransaction.
+#[cfg(test)]
+impl Database {
     pub fn merge_knowledge_crystal_source(
         &mut self,
         request: &KnowledgeCrystalSourceMergeRequest,
@@ -3835,7 +3852,9 @@ impl Database {
     ) -> Result<KnowledgeSourceReferenceRelationshipCleanupOutput> {
         delete_knowledge_source_reference_relationships_for(self, request)
     }
+}
 
+impl Database {
     fn ensure_writable(&self) -> Result<()> {
         self.store.ensure_usable()?;
         if self.config.read_only {
@@ -5582,6 +5601,7 @@ fn graph_seed_score(
     (score, matched_properties)
 }
 
+#[cfg(test)]
 fn knowledge_graph_seed_matches_filters(
     catalog: &Catalog,
     store: &GraphStore,
@@ -5864,8 +5884,12 @@ fn knowledge_query_terms(text: &str) -> BTreeSet<String> {
         .collect()
 }
 
+#[rustfmt::skip]
 #[cfg(test)]
-fn knowledge_community_entity_visibility_via_query_runtime(
+mod legacy_business_api {
+use super::*;
+
+pub(super) fn knowledge_community_entity_visibility_via_query_runtime(
     db: &Database,
     request: &KnowledgeCommunityEntityVisibilityRequest,
 ) -> Result<KnowledgeCommunityEntityVisibilityOutput> {
@@ -5968,7 +5992,7 @@ fn knowledge_community_entity_visibility_via_query_runtime(
 
 #[derive(Debug, Clone)]
 #[cfg(test)]
-struct CommunityEntityVisibilityEntityRow {
+pub(super) struct CommunityEntityVisibilityEntityRow {
     community_id: Value,
     entity_id: Option<String>,
     entity_node_id: u64,
@@ -6004,7 +6028,7 @@ impl CommunityEntityVisibilityEntityRow {
 
 #[derive(Debug, Clone)]
 #[cfg(test)]
-struct CommunityEntityVisibilityMemoryRow {
+pub(super) struct CommunityEntityVisibilityMemoryRow {
     entity_node_id: u64,
     memory_id: Option<String>,
     memory_node_id: u64,
@@ -6014,7 +6038,7 @@ struct CommunityEntityVisibilityMemoryRow {
 }
 
 #[cfg(test)]
-fn community_entity_visibility_entity_row_from_query(
+pub(super) fn community_entity_visibility_entity_row_from_query(
     row: &Row,
 ) -> Result<CommunityEntityVisibilityEntityRow> {
     let community_id = row.get("community_id").cloned().ok_or_else(|| {
@@ -6040,7 +6064,7 @@ fn community_entity_visibility_entity_row_from_query(
 }
 
 #[cfg(test)]
-fn community_entity_visibility_memory_row_from_query(
+pub(super) fn community_entity_visibility_memory_row_from_query(
     row: &Row,
 ) -> Result<CommunityEntityVisibilityMemoryRow> {
     let entity_node_id = row
@@ -6081,7 +6105,7 @@ fn community_entity_visibility_memory_row_from_query(
 }
 
 #[cfg(test)]
-fn empty_community_entity_visibility_output(
+pub(super) fn empty_community_entity_visibility_output(
     graph_commit_epoch: u64,
 ) -> KnowledgeCommunityEntityVisibilityOutput {
     KnowledgeCommunityEntityVisibilityOutput {
@@ -6094,7 +6118,7 @@ fn empty_community_entity_visibility_output(
 }
 
 #[cfg(test)]
-fn validate_knowledge_community_entity_visibility_request(
+pub(super) fn validate_knowledge_community_entity_visibility_request(
     request: &KnowledgeCommunityEntityVisibilityRequest,
 ) -> Result<()> {
     if request.community_ids.is_empty() {
@@ -6115,7 +6139,7 @@ fn validate_knowledge_community_entity_visibility_request(
 }
 
 #[cfg(test)]
-fn sort_community_entity_visibility_rows(rows: &mut [KnowledgeCommunityEntityVisibilityRow]) {
+pub(super) fn sort_community_entity_visibility_rows(rows: &mut [KnowledgeCommunityEntityVisibilityRow]) {
     rows.sort_by(|left, right| {
         left.community_id
             .cmp(&right.community_id)
@@ -6128,7 +6152,7 @@ fn sort_community_entity_visibility_rows(rows: &mut [KnowledgeCommunityEntityVis
 }
 
 #[cfg(test)]
-fn knowledge_community_memories_via_query_runtime(
+pub(super) fn knowledge_community_memories_via_query_runtime(
     db: &Database,
     request: &KnowledgeCommunityMemoryListRequest,
 ) -> Result<KnowledgeCommunityMemoryListOutput> {
@@ -6168,7 +6192,7 @@ fn knowledge_community_memories_via_query_runtime(
 }
 
 #[cfg(test)]
-fn validate_knowledge_community_memory_list_request(
+pub(super) fn validate_knowledge_community_memory_list_request(
     request: &KnowledgeCommunityMemoryListRequest,
 ) -> Result<()> {
     if request.community_ids.is_empty() {
@@ -6194,7 +6218,7 @@ fn validate_knowledge_community_memory_list_request(
 }
 
 #[cfg(test)]
-fn mentioned_community_memory_rows_via_query_runtime(
+pub(super) fn mentioned_community_memory_rows_via_query_runtime(
     db: &Database,
     request: &KnowledgeCommunityMemoryListRequest,
 ) -> Result<Vec<KnowledgeCommunityMemoryRow>> {
@@ -6221,7 +6245,7 @@ fn mentioned_community_memory_rows_via_query_runtime(
 }
 
 #[cfg(test)]
-fn direct_community_memory_rows_via_query_runtime(
+pub(super) fn direct_community_memory_rows_via_query_runtime(
     db: &Database,
     request: &KnowledgeCommunityMemoryListRequest,
 ) -> Result<Vec<KnowledgeCommunityMemoryRow>> {
@@ -6246,7 +6270,7 @@ fn direct_community_memory_rows_via_query_runtime(
 }
 
 #[cfg(test)]
-fn knowledge_community_memory_query_parameters(
+pub(super) fn knowledge_community_memory_query_parameters(
     request: &KnowledgeCommunityMemoryListRequest,
 ) -> BTreeMap<String, Value> {
     let mut parameters = BTreeMap::from([(
@@ -6270,7 +6294,7 @@ fn knowledge_community_memory_query_parameters(
 }
 
 #[cfg(test)]
-fn knowledge_community_memory_query_predicate(
+pub(super) fn knowledge_community_memory_query_predicate(
     alias: &str,
     request: &KnowledgeCommunityMemoryListRequest,
     parameters: &mut BTreeMap<String, Value>,
@@ -6299,7 +6323,7 @@ fn knowledge_community_memory_query_predicate(
 }
 
 #[cfg(test)]
-fn knowledge_community_memory_row_from_query(
+pub(super) fn knowledge_community_memory_row_from_query(
     row: &Row,
     source: KnowledgeCommunityMemoryRowSource,
 ) -> Result<KnowledgeCommunityMemoryRow> {
@@ -6356,7 +6380,7 @@ fn knowledge_community_memory_row_from_query(
 }
 
 #[cfg(test)]
-fn sort_community_memory_rows(
+pub(super) fn sort_community_memory_rows(
     rows: &mut [KnowledgeCommunityMemoryRow],
     order: KnowledgeCommunityMemoryListOrder,
 ) {
@@ -6401,7 +6425,7 @@ fn sort_community_memory_rows(
 }
 
 #[cfg(test)]
-fn compare_community_memory_importance_desc(
+pub(super) fn compare_community_memory_importance_desc(
     left: &KnowledgeCommunityMemoryRow,
     right: &KnowledgeCommunityMemoryRow,
 ) -> std::cmp::Ordering {
@@ -6411,7 +6435,7 @@ fn compare_community_memory_importance_desc(
 }
 
 #[cfg(test)]
-fn compare_community_memory_ids(
+pub(super) fn compare_community_memory_ids(
     left: &KnowledgeCommunityMemoryRow,
     right: &KnowledgeCommunityMemoryRow,
 ) -> std::cmp::Ordering {
@@ -6422,7 +6446,7 @@ fn compare_community_memory_ids(
 }
 
 #[cfg(test)]
-fn projected_properties(
+pub(super) fn projected_properties(
     properties: &BTreeMap<String, Value>,
     property_names: &[String],
 ) -> BTreeMap<String, Value> {
@@ -6439,7 +6463,7 @@ fn projected_properties(
 }
 
 #[cfg(test)]
-fn boolean_property_value(properties: &BTreeMap<String, Value>, property: &str) -> Option<bool> {
+pub(super) fn boolean_property_value(properties: &BTreeMap<String, Value>, property: &str) -> Option<bool> {
     match properties.get(property) {
         Some(Value::Bool(value)) => Some(*value),
         _ => None,
@@ -6447,7 +6471,7 @@ fn boolean_property_value(properties: &BTreeMap<String, Value>, property: &str) 
 }
 
 #[cfg(test)]
-fn integer_property_value(properties: &BTreeMap<String, Value>, property: &str) -> Option<i64> {
+pub(super) fn integer_property_value(properties: &BTreeMap<String, Value>, property: &str) -> Option<i64> {
     match properties.get(property) {
         Some(Value::Int(value)) => Some(*value),
         _ => None,
@@ -6455,7 +6479,7 @@ fn integer_property_value(properties: &BTreeMap<String, Value>, property: &str) 
 }
 
 #[cfg(test)]
-fn knowledge_crystals_via_query_runtime(
+pub(super) fn knowledge_crystals_via_query_runtime(
     db: &Database,
     request: &KnowledgeCrystalListRequest,
 ) -> Result<KnowledgeCrystalListOutput> {
@@ -6490,7 +6514,7 @@ fn knowledge_crystals_via_query_runtime(
 }
 
 #[cfg(test)]
-fn validate_knowledge_crystal_list_request(request: &KnowledgeCrystalListRequest) -> Result<()> {
+pub(super) fn validate_knowledge_crystal_list_request(request: &KnowledgeCrystalListRequest) -> Result<()> {
     if request.key_match.as_ref().is_some_and(String::is_empty) {
         return Err(SkeinError::Semantic(
             "knowledge crystal list requires a non-empty key match".to_string(),
@@ -6510,7 +6534,7 @@ fn validate_knowledge_crystal_list_request(request: &KnowledgeCrystalListRequest
 }
 
 #[cfg(test)]
-fn knowledge_crystal_list_query_predicate(
+pub(super) fn knowledge_crystal_list_query_predicate(
     request: &KnowledgeCrystalListRequest,
     parameters: &mut BTreeMap<String, Value>,
 ) -> String {
@@ -6528,7 +6552,7 @@ fn knowledge_crystal_list_query_predicate(
 }
 
 #[cfg(test)]
-fn knowledge_crystal_row_from_entity(memory: &KnowledgeEntity) -> KnowledgeCrystalRow {
+pub(super) fn knowledge_crystal_row_from_entity(memory: &KnowledgeEntity) -> KnowledgeCrystalRow {
     let crystal_title = string_property_value(&memory.properties, "crystal_title");
     let title = string_property_value(&memory.properties, "title");
     let display_title = crystal_title
@@ -6553,7 +6577,7 @@ fn knowledge_crystal_row_from_entity(memory: &KnowledgeEntity) -> KnowledgeCryst
 }
 
 #[cfg(test)]
-fn sort_crystal_rows(rows: &mut [KnowledgeCrystalRow], request: &KnowledgeCrystalListRequest) {
+pub(super) fn sort_crystal_rows(rows: &mut [KnowledgeCrystalRow], request: &KnowledgeCrystalListRequest) {
     rows.sort_by(|left, right| {
         crystal_key_match_rank(left, request)
             .cmp(&crystal_key_match_rank(right, request))
@@ -6567,7 +6591,7 @@ fn sort_crystal_rows(rows: &mut [KnowledgeCrystalRow], request: &KnowledgeCrysta
     });
 }
 
-fn merge_knowledge_crystal_source_for(
+pub(super) fn merge_knowledge_crystal_source_for(
     db: &mut Database,
     request: &KnowledgeCrystalSourceMergeRequest,
 ) -> Result<KnowledgeCrystalSourceMergeOutput> {
@@ -6622,7 +6646,7 @@ fn merge_knowledge_crystal_source_for(
     })
 }
 
-fn validate_knowledge_crystal_source_weight(weight: &Value) -> Result<()> {
+pub(super) fn validate_knowledge_crystal_source_weight(weight: &Value) -> Result<()> {
     let valid = match weight {
         Value::Float(value) => value.is_finite(),
         Value::Int(_) => true,
@@ -6638,7 +6662,7 @@ fn validate_knowledge_crystal_source_weight(weight: &Value) -> Result<()> {
 }
 
 #[cfg(test)]
-fn crystal_key_match_rank(row: &KnowledgeCrystalRow, request: &KnowledgeCrystalListRequest) -> u8 {
+pub(super) fn crystal_key_match_rank(row: &KnowledgeCrystalRow, request: &KnowledgeCrystalListRequest) -> u8 {
     let Some(key) = &request.key_match else {
         return 0;
     };
@@ -6655,7 +6679,7 @@ fn crystal_key_match_rank(row: &KnowledgeCrystalRow, request: &KnowledgeCrystalL
 }
 
 #[cfg(test)]
-fn compare_crystal_ids(
+pub(super) fn compare_crystal_ids(
     left: &KnowledgeCrystalRow,
     right: &KnowledgeCrystalRow,
 ) -> std::cmp::Ordering {
@@ -6665,7 +6689,7 @@ fn compare_crystal_ids(
 }
 
 #[cfg(test)]
-fn compare_crystal_importance_created_at(
+pub(super) fn compare_crystal_importance_created_at(
     left: &KnowledgeCrystalRow,
     right: &KnowledgeCrystalRow,
 ) -> std::cmp::Ordering {
@@ -6681,7 +6705,7 @@ fn compare_crystal_importance_created_at(
 }
 
 #[cfg(test)]
-fn knowledge_crystal_communities_via_query_runtime(
+pub(super) fn knowledge_crystal_communities_via_query_runtime(
     db: &Database,
     request: &KnowledgeCrystalCommunityListRequest,
 ) -> Result<KnowledgeCrystalCommunityListOutput> {
@@ -6726,7 +6750,7 @@ fn knowledge_crystal_communities_via_query_runtime(
 }
 
 #[cfg(test)]
-fn validate_knowledge_crystal_community_list_request(
+pub(super) fn validate_knowledge_crystal_community_list_request(
     request: &KnowledgeCrystalCommunityListRequest,
 ) -> Result<()> {
     match &request.scope {
@@ -6751,7 +6775,7 @@ fn validate_knowledge_crystal_community_list_request(
 }
 
 #[cfg(test)]
-fn knowledge_crystal_community_query_predicate(
+pub(super) fn knowledge_crystal_community_query_predicate(
     request: &KnowledgeCrystalCommunityListRequest,
     parameters: &mut BTreeMap<String, Value>,
 ) -> String {
@@ -6770,7 +6794,7 @@ fn knowledge_crystal_community_query_predicate(
 }
 
 #[cfg(test)]
-fn knowledge_crystal_community_row_from_query(row: &Row) -> Result<KnowledgeCrystalCommunityRow> {
+pub(super) fn knowledge_crystal_community_row_from_query(row: &Row) -> Result<KnowledgeCrystalCommunityRow> {
     let crystal_memory_id = row
         .get("crystal_memory_id")
         .map(value_to_external_id)
@@ -6831,7 +6855,7 @@ fn knowledge_crystal_community_row_from_query(row: &Row) -> Result<KnowledgeCrys
 }
 
 #[cfg(test)]
-fn sort_crystal_community_rows(
+pub(super) fn sort_crystal_community_rows(
     rows: &mut [KnowledgeCrystalCommunityRow],
     order: KnowledgeCrystalCommunityListOrder,
 ) {
@@ -6850,7 +6874,7 @@ fn sort_crystal_community_rows(
 }
 
 #[cfg(test)]
-fn compare_crystal_community_ids(
+pub(super) fn compare_crystal_community_ids(
     left: &KnowledgeCrystalCommunityRow,
     right: &KnowledgeCrystalCommunityRow,
 ) -> std::cmp::Ordering {
@@ -6861,7 +6885,7 @@ fn compare_crystal_community_ids(
 }
 
 #[cfg(test)]
-fn knowledge_crystal_source_visibility_via_query_runtime(
+pub(super) fn knowledge_crystal_source_visibility_via_query_runtime(
     db: &Database,
     request: &KnowledgeCrystalSourceVisibilityRequest,
 ) -> Result<KnowledgeCrystalSourceVisibilityOutput> {
@@ -6900,7 +6924,7 @@ fn knowledge_crystal_source_visibility_via_query_runtime(
 }
 
 #[cfg(test)]
-fn validate_knowledge_crystal_source_visibility_request(
+pub(super) fn validate_knowledge_crystal_source_visibility_request(
     request: &KnowledgeCrystalSourceVisibilityRequest,
 ) -> Result<()> {
     if request.community_ids.is_empty() {
@@ -6921,7 +6945,7 @@ fn validate_knowledge_crystal_source_visibility_request(
 }
 
 #[cfg(test)]
-fn knowledge_crystal_source_visibility_row_from_query(
+pub(super) fn knowledge_crystal_source_visibility_row_from_query(
     row: &Row,
 ) -> Result<KnowledgeCrystalSourceVisibilityRow> {
     let crystal = row
@@ -6988,7 +7012,7 @@ fn knowledge_crystal_source_visibility_row_from_query(
 }
 
 #[cfg(test)]
-fn sort_crystal_source_visibility_rows(rows: &mut [KnowledgeCrystalSourceVisibilityRow]) {
+pub(super) fn sort_crystal_source_visibility_rows(rows: &mut [KnowledgeCrystalSourceVisibilityRow]) {
     rows.sort_by(|left, right| {
         left.community_id
             .cmp(&right.community_id)
@@ -7001,7 +7025,7 @@ fn sort_crystal_source_visibility_rows(rows: &mut [KnowledgeCrystalSourceVisibil
     });
 }
 
-fn create_knowledge_entity_for(
+pub(super) fn create_knowledge_entity_for(
     db: &mut Database,
     request: &KnowledgeEntityCreateRequest,
 ) -> Result<KnowledgeEntityCreateOutput> {
@@ -7046,7 +7070,7 @@ fn create_knowledge_entity_for(
     })
 }
 
-fn create_knowledge_entity_batch_for(
+pub(super) fn create_knowledge_entity_batch_for(
     db: &mut Database,
     request: &KnowledgeEntityCreateBatchRequest,
 ) -> Result<KnowledgeEntityCreateBatchOutput> {
@@ -7141,7 +7165,7 @@ fn create_knowledge_entity_batch_for(
     })
 }
 
-fn validate_knowledge_entity_create(request: &KnowledgeEntityCreateRequest) -> Result<()> {
+pub(super) fn validate_knowledge_entity_create(request: &KnowledgeEntityCreateRequest) -> Result<()> {
     validate_cypher_identifier(&request.label, "label")?;
     if request.external_id.is_empty() {
         return Err(SkeinError::Semantic(
@@ -7163,7 +7187,7 @@ fn validate_knowledge_entity_create(request: &KnowledgeEntityCreateRequest) -> R
     Ok(())
 }
 
-fn knowledge_entity_create_statement(
+pub(super) fn knowledge_entity_create_statement(
     request: &KnowledgeEntityCreateRequest,
 ) -> (String, BTreeMap<String, Value>) {
     let mut cypher = format!("CREATE (:{} {{id: $external_id", request.label);
@@ -7185,7 +7209,7 @@ fn knowledge_entity_create_statement(
     (cypher, parameters)
 }
 
-fn upsert_knowledge_entity_for(
+pub(super) fn upsert_knowledge_entity_for(
     db: &mut Database,
     request: &KnowledgeEntityUpsertRequest,
 ) -> Result<KnowledgeEntityUpsertOutput> {
@@ -7269,7 +7293,7 @@ fn upsert_knowledge_entity_for(
     })
 }
 
-fn upsert_knowledge_entity_batch_for(
+pub(super) fn upsert_knowledge_entity_batch_for(
     db: &mut Database,
     request: &KnowledgeEntityUpsertBatchRequest,
 ) -> Result<KnowledgeEntityUpsertBatchOutput> {
@@ -7422,7 +7446,7 @@ fn upsert_knowledge_entity_batch_for(
     })
 }
 
-fn validate_knowledge_entity_upsert(request: &KnowledgeEntityUpsertRequest) -> Result<()> {
+pub(super) fn validate_knowledge_entity_upsert(request: &KnowledgeEntityUpsertRequest) -> Result<()> {
     validate_cypher_identifier(&request.label, "label")?;
     if request.external_id.is_empty() {
         return Err(SkeinError::Semantic(
@@ -7441,7 +7465,7 @@ fn validate_knowledge_entity_upsert(request: &KnowledgeEntityUpsertRequest) -> R
     )
 }
 
-fn validate_knowledge_entity_upsert_properties(
+pub(super) fn validate_knowledge_entity_upsert_properties(
     external_id: &str,
     phase: &str,
     properties: &BTreeMap<String, Value>,
@@ -7460,7 +7484,7 @@ fn validate_knowledge_entity_upsert_properties(
     Ok(())
 }
 
-fn knowledge_entity_upsert_create_request(
+pub(super) fn knowledge_entity_upsert_create_request(
     request: &KnowledgeEntityUpsertRequest,
 ) -> KnowledgeEntityCreateRequest {
     KnowledgeEntityCreateRequest {
@@ -7470,7 +7494,7 @@ fn knowledge_entity_upsert_create_request(
     }
 }
 
-fn knowledge_entity_upsert_update_properties(
+pub(super) fn knowledge_entity_upsert_update_properties(
     request: &KnowledgeEntityUpsertRequest,
 ) -> BTreeMap<String, Value> {
     request
@@ -7482,7 +7506,7 @@ fn knowledge_entity_upsert_update_properties(
 }
 
 #[cfg(test)]
-fn dedup_property_names(property_names: &[String]) -> Vec<String> {
+pub(super) fn dedup_property_names(property_names: &[String]) -> Vec<String> {
     let mut seen = BTreeSet::new();
     property_names
         .iter()
@@ -7492,7 +7516,7 @@ fn dedup_property_names(property_names: &[String]) -> Vec<String> {
 }
 
 #[cfg(test)]
-fn empty_property_projection(property_names: &[String]) -> BTreeMap<String, Option<Value>> {
+pub(super) fn empty_property_projection(property_names: &[String]) -> BTreeMap<String, Option<Value>> {
     property_names
         .iter()
         .cloned()
@@ -7501,7 +7525,7 @@ fn empty_property_projection(property_names: &[String]) -> BTreeMap<String, Opti
 }
 
 #[cfg(test)]
-fn project_knowledge_entity_properties(
+pub(super) fn project_knowledge_entity_properties(
     entity: &KnowledgeEntity,
     property_names: &[String],
 ) -> BTreeMap<String, Option<Value>> {
@@ -7515,7 +7539,7 @@ fn project_knowledge_entity_properties(
         .collect()
 }
 
-fn update_knowledge_properties_for(
+pub(super) fn update_knowledge_properties_for(
     db: &mut Database,
     request: &KnowledgePropertyUpdateRequest,
 ) -> Result<KnowledgePropertyUpdateOutput> {
@@ -7528,7 +7552,7 @@ fn update_knowledge_properties_for(
     )
 }
 
-fn update_scoped_knowledge_properties_for(
+pub(super) fn update_scoped_knowledge_properties_for(
     db: &mut Database,
     request: &KnowledgeScopedPropertyUpdateRequest,
 ) -> Result<KnowledgePropertyUpdateOutput> {
@@ -7596,7 +7620,7 @@ fn update_scoped_knowledge_properties_for(
     })
 }
 
-fn knowledge_property_update_statement(
+pub(super) fn knowledge_property_update_statement(
     label: &str,
     node_id: u64,
     assignments: &BTreeMap<String, Value>,
@@ -7614,7 +7638,7 @@ fn knowledge_property_update_statement(
     (cypher, parameters)
 }
 
-fn update_knowledge_properties_batch_for(
+pub(super) fn update_knowledge_properties_batch_for(
     db: &mut Database,
     request: &KnowledgePropertyUpdateBatchRequest,
 ) -> Result<KnowledgePropertyUpdateBatchOutput> {
@@ -7627,7 +7651,7 @@ fn update_knowledge_properties_batch_for(
     )
 }
 
-fn update_scoped_knowledge_properties_batch_for(
+pub(super) fn update_scoped_knowledge_properties_batch_for(
     db: &mut Database,
     request: &KnowledgeScopedPropertyUpdateBatchRequest,
 ) -> Result<KnowledgePropertyUpdateBatchOutput> {
@@ -7755,7 +7779,7 @@ fn update_scoped_knowledge_properties_batch_for(
     })
 }
 
-fn move_knowledge_normalized_space_batch_for(
+pub(super) fn move_knowledge_normalized_space_batch_for(
     db: &mut Database,
     request: &KnowledgeNormalizedSpaceMoveBatchRequest,
 ) -> Result<KnowledgeNormalizedSpaceMoveBatchOutput> {
@@ -7903,7 +7927,7 @@ fn move_knowledge_normalized_space_batch_for(
     })
 }
 
-fn touch_knowledge_memory_access_batch_for(
+pub(super) fn touch_knowledge_memory_access_batch_for(
     db: &mut Database,
     request: &KnowledgeMemoryAccessBatchRequest,
 ) -> Result<KnowledgeMemoryAccessBatchOutput> {
@@ -8033,7 +8057,7 @@ fn touch_knowledge_memory_access_batch_for(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct AggregatedMemoryAccessTouch {
+pub(super) struct AggregatedMemoryAccessTouch {
     access_count_increment: usize,
     last_accessed_at: Value,
     click_increment: usize,
@@ -8041,7 +8065,7 @@ struct AggregatedMemoryAccessTouch {
     last_clicked_at: Option<Value>,
 }
 
-fn knowledge_memory_access_touch_statement(
+pub(super) fn knowledge_memory_access_touch_statement(
     node_id: NodeId,
     touch: &AggregatedMemoryAccessTouch,
 ) -> (String, BTreeMap<String, Value>) {
@@ -8078,7 +8102,7 @@ fn knowledge_memory_access_touch_statement(
     (cypher, parameters)
 }
 
-fn update_knowledge_memory_content_batch_for(
+pub(super) fn update_knowledge_memory_content_batch_for(
     db: &mut Database,
     request: &KnowledgeMemoryContentBatchRequest,
 ) -> Result<KnowledgeMemoryContentBatchOutput> {
@@ -8198,7 +8222,7 @@ fn update_knowledge_memory_content_batch_for(
     })
 }
 
-fn validate_knowledge_memory_content_update(update: &KnowledgeMemoryContentUpdate) -> Result<()> {
+pub(super) fn validate_knowledge_memory_content_update(update: &KnowledgeMemoryContentUpdate) -> Result<()> {
     if update.memory_id.is_empty() {
         return Err(SkeinError::Semantic(
             "knowledge memory content update requires a non-empty memory id".to_string(),
@@ -8225,7 +8249,7 @@ fn validate_knowledge_memory_content_update(update: &KnowledgeMemoryContentUpdat
     Ok(())
 }
 
-fn validate_finite_numeric_value(value: &Value, message: &str) -> Result<()> {
+pub(super) fn validate_finite_numeric_value(value: &Value, message: &str) -> Result<()> {
     let valid = match value {
         Value::Float(value) => value.is_finite(),
         Value::Int(_) => true,
@@ -8238,7 +8262,7 @@ fn validate_finite_numeric_value(value: &Value, message: &str) -> Result<()> {
     }
 }
 
-fn memory_content_assignments(update: &KnowledgeMemoryContentUpdate) -> BTreeMap<String, Value> {
+pub(super) fn memory_content_assignments(update: &KnowledgeMemoryContentUpdate) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("content".to_string(), Value::String(update.content.clone())),
         ("title".to_string(), Value::String(update.title.clone())),
@@ -8274,7 +8298,7 @@ fn memory_content_assignments(update: &KnowledgeMemoryContentUpdate) -> BTreeMap
     ])
 }
 
-fn update_knowledge_memory_metadata_batch_for(
+pub(super) fn update_knowledge_memory_metadata_batch_for(
     db: &mut Database,
     request: &KnowledgeMemoryMetadataBatchRequest,
 ) -> Result<KnowledgeMemoryMetadataBatchOutput> {
@@ -8401,7 +8425,7 @@ fn update_knowledge_memory_metadata_batch_for(
     })
 }
 
-fn update_knowledge_memory_dedup_reviewed_batch_for(
+pub(super) fn update_knowledge_memory_dedup_reviewed_batch_for(
     db: &mut Database,
     request: &KnowledgeMemoryDedupReviewedBatchRequest,
 ) -> Result<KnowledgeMemoryDedupReviewedBatchOutput> {
@@ -8510,7 +8534,7 @@ fn update_knowledge_memory_dedup_reviewed_batch_for(
     })
 }
 
-fn update_knowledge_memory_decay_refresh_batch_for(
+pub(super) fn update_knowledge_memory_decay_refresh_batch_for(
     db: &mut Database,
     request: &KnowledgeMemoryDecayRefreshBatchRequest,
 ) -> Result<KnowledgeMemoryDecayRefreshBatchOutput> {
@@ -8630,7 +8654,7 @@ fn update_knowledge_memory_decay_refresh_batch_for(
     })
 }
 
-fn validate_knowledge_memory_decay_refresh_update(
+pub(super) fn validate_knowledge_memory_decay_refresh_update(
     update: &KnowledgeMemoryDecayRefreshUpdate,
 ) -> Result<()> {
     if update.memory_id.is_empty() {
@@ -8651,7 +8675,7 @@ fn validate_knowledge_memory_decay_refresh_update(
     Ok(())
 }
 
-fn memory_decay_refresh_assignments(
+pub(super) fn memory_decay_refresh_assignments(
     update: &KnowledgeMemoryDecayRefreshUpdate,
 ) -> BTreeMap<String, Value> {
     let mut assignments = BTreeMap::from([(
@@ -8664,7 +8688,7 @@ fn memory_decay_refresh_assignments(
     assignments
 }
 
-fn adjust_knowledge_source_memory_count_batch_for(
+pub(super) fn adjust_knowledge_source_memory_count_batch_for(
     db: &mut Database,
     request: &KnowledgeSourceMemoryCountBatchRequest,
 ) -> Result<KnowledgeSourceMemoryCountBatchOutput> {
@@ -8800,12 +8824,12 @@ fn adjust_knowledge_source_memory_count_batch_for(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct AggregatedSourceMemoryCountAdjustment {
+pub(super) struct AggregatedSourceMemoryCountAdjustment {
     old_count: i64,
     new_count: i64,
 }
 
-fn source_memory_count(node: &NodeRecord) -> Option<i64> {
+pub(super) fn source_memory_count(node: &NodeRecord) -> Option<i64> {
     match node.properties.get("memory_count") {
         None | Some(Value::Null) => Some(0),
         Some(Value::Int(value)) => Some((*value).max(0)),
@@ -8813,11 +8837,11 @@ fn source_memory_count(node: &NodeRecord) -> Option<i64> {
     }
 }
 
-fn apply_source_memory_count_delta(current_count: i64, delta: i64) -> i64 {
+pub(super) fn apply_source_memory_count_delta(current_count: i64, delta: i64) -> i64 {
     current_count.saturating_add(delta).max(0)
 }
 
-fn knowledge_source_memory_count_set_statement(
+pub(super) fn knowledge_source_memory_count_set_statement(
     node_id: NodeId,
     memory_count: i64,
 ) -> (String, BTreeMap<String, Value>) {
@@ -8830,7 +8854,7 @@ fn knowledge_source_memory_count_set_statement(
     )
 }
 
-fn update_knowledge_source_lifecycle_batch_for(
+pub(super) fn update_knowledge_source_lifecycle_batch_for(
     db: &mut Database,
     request: &KnowledgeSourceLifecycleBatchRequest,
 ) -> Result<KnowledgeSourceLifecycleBatchOutput> {
@@ -9018,7 +9042,7 @@ fn update_knowledge_source_lifecycle_batch_for(
     })
 }
 
-fn update_knowledge_source_metadata_batch_for(
+pub(super) fn update_knowledge_source_metadata_batch_for(
     db: &mut Database,
     request: &KnowledgeSourceMetadataBatchRequest,
 ) -> Result<KnowledgeSourceMetadataBatchOutput> {
@@ -9145,7 +9169,7 @@ fn update_knowledge_source_metadata_batch_for(
     })
 }
 
-fn update_knowledge_source_parsed_metadata_batch_for(
+pub(super) fn update_knowledge_source_parsed_metadata_batch_for(
     db: &mut Database,
     request: &KnowledgeSourceParsedMetadataBatchRequest,
 ) -> Result<KnowledgeSourceParsedMetadataBatchOutput> {
@@ -9281,7 +9305,7 @@ fn update_knowledge_source_parsed_metadata_batch_for(
     })
 }
 
-fn source_parsed_metadata_assignments(
+pub(super) fn source_parsed_metadata_assignments(
     update: &KnowledgeSourceParsedMetadataUpdate,
 ) -> BTreeMap<String, Value> {
     let mut assignments = BTreeMap::from([
@@ -9321,7 +9345,7 @@ fn source_parsed_metadata_assignments(
     assignments
 }
 
-fn create_knowledge_source_parsed_batch_for(
+pub(super) fn create_knowledge_source_parsed_batch_for(
     db: &mut Database,
     request: &KnowledgeSourceParsedCreateBatchRequest,
 ) -> Result<KnowledgeSourceParsedCreateBatchOutput> {
@@ -9360,7 +9384,7 @@ fn create_knowledge_source_parsed_batch_for(
     })
 }
 
-fn validate_knowledge_source_parsed_create(create: &KnowledgeSourceParsedCreate) -> Result<()> {
+pub(super) fn validate_knowledge_source_parsed_create(create: &KnowledgeSourceParsedCreate) -> Result<()> {
     if create.source_id.is_empty() {
         return Err(SkeinError::Semantic(
             "knowledge source parsed create requires a non-empty source id".to_string(),
@@ -9409,7 +9433,7 @@ fn validate_knowledge_source_parsed_create(create: &KnowledgeSourceParsedCreate)
     Ok(())
 }
 
-fn knowledge_source_parsed_entity_create(
+pub(super) fn knowledge_source_parsed_entity_create(
     create: &KnowledgeSourceParsedCreate,
 ) -> KnowledgeEntityCreateRequest {
     KnowledgeEntityCreateRequest {
@@ -9467,7 +9491,7 @@ fn knowledge_source_parsed_entity_create(
     }
 }
 
-fn create_knowledge_source_revision_batch_for(
+pub(super) fn create_knowledge_source_revision_batch_for(
     db: &mut Database,
     request: &KnowledgeSourceRevisionCreateBatchRequest,
 ) -> Result<KnowledgeSourceRevisionCreateBatchOutput> {
@@ -9516,7 +9540,7 @@ fn create_knowledge_source_revision_batch_for(
     })
 }
 
-fn knowledge_source_revision_relationship_create(
+pub(super) fn knowledge_source_revision_relationship_create(
     create: &KnowledgeSourceRevisionCreate,
 ) -> KnowledgeRelationshipCreateRequest {
     KnowledgeRelationshipCreateRequest {
@@ -9548,7 +9572,7 @@ fn knowledge_source_revision_relationship_create(
     }
 }
 
-fn delete_knowledge_sources_for(
+pub(super) fn delete_knowledge_sources_for(
     db: &mut Database,
     request: &KnowledgeSourceDeleteBatchRequest,
 ) -> Result<KnowledgeSourceDeleteBatchOutput> {
@@ -9588,7 +9612,7 @@ fn delete_knowledge_sources_for(
     })
 }
 
-fn delete_knowledge_skills_for(
+pub(super) fn delete_knowledge_skills_for(
     db: &mut Database,
     request: &KnowledgeSkillDeleteBatchRequest,
 ) -> Result<KnowledgeSkillDeleteBatchOutput> {
@@ -9628,7 +9652,7 @@ fn delete_knowledge_skills_for(
     })
 }
 
-fn assign_knowledge_source_labels_batch_for(
+pub(super) fn assign_knowledge_source_labels_batch_for(
     db: &mut Database,
     request: &KnowledgeSourceLabelAssignmentBatchRequest,
 ) -> Result<KnowledgeSourceLabelAssignmentBatchOutput> {
@@ -9691,7 +9715,7 @@ fn assign_knowledge_source_labels_batch_for(
     })
 }
 
-fn validate_knowledge_source_label_assignment(
+pub(super) fn validate_knowledge_source_label_assignment(
     assignment: &KnowledgeSourceLabelAssignment,
 ) -> Result<()> {
     if assignment.source_id.is_empty() {
@@ -9712,7 +9736,7 @@ fn validate_knowledge_source_label_assignment(
     Ok(())
 }
 
-fn delete_knowledge_source_labels_batch_for(
+pub(super) fn delete_knowledge_source_labels_batch_for(
     db: &mut Database,
     request: &KnowledgeSourceLabelDeleteBatchRequest,
 ) -> Result<KnowledgeSourceLabelDeleteBatchOutput> {
@@ -9763,7 +9787,7 @@ fn delete_knowledge_source_labels_batch_for(
     })
 }
 
-fn validate_knowledge_source_label_delete(delete: &KnowledgeSourceLabelDelete) -> Result<()> {
+pub(super) fn validate_knowledge_source_label_delete(delete: &KnowledgeSourceLabelDelete) -> Result<()> {
     if delete.source_id.is_empty() {
         return Err(SkeinError::Semantic(
             "knowledge source label delete requires a non-empty source id".to_string(),
@@ -9778,7 +9802,7 @@ fn validate_knowledge_source_label_delete(delete: &KnowledgeSourceLabelDelete) -
 }
 
 #[cfg(test)]
-fn value_to_non_negative_usize(value: &Value) -> Option<usize> {
+pub(super) fn value_to_non_negative_usize(value: &Value) -> Option<usize> {
     match value {
         Value::Int(value) if *value >= 0 => usize::try_from(*value).ok(),
         _ => None,
@@ -9786,7 +9810,7 @@ fn value_to_non_negative_usize(value: &Value) -> Option<usize> {
 }
 
 #[cfg(test)]
-fn value_to_non_negative_u64(value: &Value) -> Option<u64> {
+pub(super) fn value_to_non_negative_u64(value: &Value) -> Option<u64> {
     match value {
         Value::Int(value) if *value >= 0 => u64::try_from(*value).ok(),
         _ => None,
@@ -9794,7 +9818,7 @@ fn value_to_non_negative_u64(value: &Value) -> Option<u64> {
 }
 
 #[cfg(test)]
-fn value_to_bool(value: &Value) -> Option<bool> {
+pub(super) fn value_to_bool(value: &Value) -> Option<bool> {
     match value {
         Value::Bool(value) => Some(*value),
         _ => None,
@@ -9802,7 +9826,7 @@ fn value_to_bool(value: &Value) -> Option<bool> {
 }
 
 #[cfg(test)]
-fn optional_external_id_value(value: &Value) -> Option<String> {
+pub(super) fn optional_external_id_value(value: &Value) -> Option<String> {
     if matches!(value, Value::Null) {
         return None;
     }
@@ -9811,12 +9835,12 @@ fn optional_external_id_value(value: &Value) -> Option<String> {
 }
 
 #[cfg(test)]
-fn optional_non_null_value(value: &Value) -> Option<Value> {
+pub(super) fn optional_non_null_value(value: &Value) -> Option<Value> {
     (!matches!(value, Value::Null)).then(|| value.clone())
 }
 
 #[cfg(test)]
-fn value_to_map(value: &Value) -> Option<&BTreeMap<String, Value>> {
+pub(super) fn value_to_map(value: &Value) -> Option<&BTreeMap<String, Value>> {
     match value {
         Value::Map(values) => Some(values),
         _ => None,
@@ -9824,7 +9848,7 @@ fn value_to_map(value: &Value) -> Option<&BTreeMap<String, Value>> {
 }
 
 #[cfg(test)]
-fn value_to_string_list(value: &Value) -> Option<Vec<String>> {
+pub(super) fn value_to_string_list(value: &Value) -> Option<Vec<String>> {
     let Value::List(values) = value else {
         return None;
     };
@@ -9839,7 +9863,7 @@ fn value_to_string_list(value: &Value) -> Option<Vec<String>> {
 }
 
 #[cfg(test)]
-fn optional_string_cell(row: &Row, column: &str) -> Option<String> {
+pub(super) fn optional_string_cell(row: &Row, column: &str) -> Option<String> {
     row.get(column)
         .filter(|value| !matches!(value, Value::Null))
         .map(value_to_external_id)
@@ -9847,13 +9871,13 @@ fn optional_string_cell(row: &Row, column: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-fn optional_value_cell(row: &Row, column: &str) -> Option<Value> {
+pub(super) fn optional_value_cell(row: &Row, column: &str) -> Option<Value> {
     row.get(column)
         .filter(|value| !matches!(value, Value::Null))
         .cloned()
 }
 
-fn string_property(node: &NodeRecord, property: &str) -> Option<String> {
+pub(super) fn string_property(node: &NodeRecord, property: &str) -> Option<String> {
     node.properties
         .get(property)
         .map(value_to_external_id)
@@ -9861,14 +9885,14 @@ fn string_property(node: &NodeRecord, property: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-fn string_property_value(properties: &BTreeMap<String, Value>, property: &str) -> Option<String> {
+pub(super) fn string_property_value(properties: &BTreeMap<String, Value>, property: &str) -> Option<String> {
     properties
         .get(property)
         .map(value_to_external_id)
         .filter(|value| !value.is_empty())
 }
 
-fn update_knowledge_memory_lifecycle_batch_for(
+pub(super) fn update_knowledge_memory_lifecycle_batch_for(
     db: &mut Database,
     request: &KnowledgeMemoryLifecycleBatchRequest,
 ) -> Result<KnowledgeMemoryLifecycleBatchOutput> {
@@ -10006,7 +10030,7 @@ fn update_knowledge_memory_lifecycle_batch_for(
     })
 }
 
-fn update_knowledge_memory_latest_batch_for(
+pub(super) fn update_knowledge_memory_latest_batch_for(
     db: &mut Database,
     request: &KnowledgeMemoryLatestBatchRequest,
 ) -> Result<KnowledgeMemoryLatestBatchOutput> {
@@ -10142,7 +10166,7 @@ fn update_knowledge_memory_latest_batch_for(
     })
 }
 
-fn memory_latest_update_matches_space(
+pub(super) fn memory_latest_update_matches_space(
     node: &NodeRecord,
     update: &KnowledgeMemoryLatestUpdate,
 ) -> bool {
@@ -10154,7 +10178,7 @@ fn memory_latest_update_matches_space(
         .is_some_and(|value| value_to_external_id(value) == *space_id_filter)
 }
 
-fn create_knowledge_memory_evolves_batch_for(
+pub(super) fn create_knowledge_memory_evolves_batch_for(
     db: &mut Database,
     request: &KnowledgeMemoryEvolvesCreateBatchRequest,
 ) -> Result<KnowledgeMemoryEvolvesCreateBatchOutput> {
@@ -10205,7 +10229,7 @@ fn create_knowledge_memory_evolves_batch_for(
     })
 }
 
-fn validate_knowledge_memory_evolves_create(create: &KnowledgeMemoryEvolvesCreate) -> Result<()> {
+pub(super) fn validate_knowledge_memory_evolves_create(create: &KnowledgeMemoryEvolvesCreate) -> Result<()> {
     if create.older_memory_id.is_empty() {
         return Err(SkeinError::Semantic(
             "knowledge memory evolves create requires a non-empty older memory id".to_string(),
@@ -10235,7 +10259,7 @@ fn validate_knowledge_memory_evolves_create(create: &KnowledgeMemoryEvolvesCreat
     Ok(())
 }
 
-fn memory_evolves_create_properties(
+pub(super) fn memory_evolves_create_properties(
     create: &KnowledgeMemoryEvolvesCreate,
 ) -> BTreeMap<String, Value> {
     let mut properties = BTreeMap::from([
@@ -10266,7 +10290,7 @@ fn memory_evolves_create_properties(
     properties
 }
 
-fn update_knowledge_skill_usage_stats_batch_for(
+pub(super) fn update_knowledge_skill_usage_stats_batch_for(
     db: &mut Database,
     request: &KnowledgeSkillUsageStatsBatchRequest,
 ) -> Result<KnowledgeSkillUsageStatsBatchOutput> {
@@ -10409,7 +10433,7 @@ fn update_knowledge_skill_usage_stats_batch_for(
     })
 }
 
-fn update_knowledge_skill_metadata_batch_for(
+pub(super) fn update_knowledge_skill_metadata_batch_for(
     db: &mut Database,
     request: &KnowledgeSkillMetadataBatchRequest,
 ) -> Result<KnowledgeSkillMetadataBatchOutput> {
@@ -10536,7 +10560,7 @@ fn update_knowledge_skill_metadata_batch_for(
     })
 }
 
-fn validate_skill_success_rate(value: &Value) -> Result<()> {
+pub(super) fn validate_skill_success_rate(value: &Value) -> Result<()> {
     let valid = match value {
         Value::Float(rate) => rate.is_finite() && (0.0..=1.0).contains(rate),
         Value::Int(rate) => (0..=1).contains(rate),
@@ -10551,7 +10575,7 @@ fn validate_skill_success_rate(value: &Value) -> Result<()> {
     }
 }
 
-fn merge_knowledge_skill_source_for(
+pub(super) fn merge_knowledge_skill_source_for(
     db: &mut Database,
     request: &KnowledgeSkillSourceMergeRequest,
 ) -> Result<KnowledgeSkillSourceMergeOutput> {
@@ -10608,7 +10632,7 @@ fn merge_knowledge_skill_source_for(
     })
 }
 
-fn update_knowledge_skill_lifecycle_batch_for(
+pub(super) fn update_knowledge_skill_lifecycle_batch_for(
     db: &mut Database,
     request: &KnowledgeSkillLifecycleBatchRequest,
 ) -> Result<KnowledgeSkillLifecycleBatchOutput> {
@@ -10748,7 +10772,7 @@ fn update_knowledge_skill_lifecycle_batch_for(
     })
 }
 
-fn skill_lifecycle_update_has_business_field(update: &KnowledgeSkillLifecycleUpdate) -> bool {
+pub(super) fn skill_lifecycle_update_has_business_field(update: &KnowledgeSkillLifecycleUpdate) -> bool {
     update.stage.is_some()
         || update.rejected_at.is_some()
         || update.rationale.is_some()
@@ -10764,7 +10788,7 @@ fn skill_lifecycle_update_has_business_field(update: &KnowledgeSkillLifecycleUpd
         || update.metadata.is_some()
 }
 
-fn skill_lifecycle_assignments(update: &KnowledgeSkillLifecycleUpdate) -> BTreeMap<String, Value> {
+pub(super) fn skill_lifecycle_assignments(update: &KnowledgeSkillLifecycleUpdate) -> BTreeMap<String, Value> {
     let mut assignments = BTreeMap::new();
     if let Some(stage) = &update.stage {
         assignments.insert("stage".to_string(), Value::String(stage.clone()));
@@ -10790,7 +10814,7 @@ fn skill_lifecycle_assignments(update: &KnowledgeSkillLifecycleUpdate) -> BTreeM
     assignments
 }
 
-fn insert_optional_assignment(
+pub(super) fn insert_optional_assignment(
     assignments: &mut BTreeMap<String, Value>,
     property_name: &str,
     value: &Option<Value>,
@@ -10800,7 +10824,7 @@ fn insert_optional_assignment(
     }
 }
 
-fn update_knowledge_thread_metadata_batch_for(
+pub(super) fn update_knowledge_thread_metadata_batch_for(
     db: &mut Database,
     request: &KnowledgeThreadMetadataBatchRequest,
 ) -> Result<KnowledgeThreadMetadataBatchOutput> {
@@ -10927,7 +10951,7 @@ fn update_knowledge_thread_metadata_batch_for(
     })
 }
 
-fn delete_knowledge_threads_for(
+pub(super) fn delete_knowledge_threads_for(
     db: &mut Database,
     request: &KnowledgeThreadDeleteBatchRequest,
 ) -> Result<KnowledgeThreadDeleteBatchOutput> {
@@ -10967,7 +10991,7 @@ fn delete_knowledge_threads_for(
     })
 }
 
-fn update_knowledge_thread_message_count_batch_for(
+pub(super) fn update_knowledge_thread_message_count_batch_for(
     db: &mut Database,
     request: &KnowledgeThreadMessageCountBatchRequest,
 ) -> Result<KnowledgeThreadMessageCountBatchOutput> {
@@ -11114,7 +11138,7 @@ fn update_knowledge_thread_message_count_batch_for(
     })
 }
 
-fn should_update_thread_updated_at(
+pub(super) fn should_update_thread_updated_at(
     seed: &NodeRecord,
     update: &KnowledgeThreadMessageCountUpdate,
 ) -> bool {
@@ -11130,7 +11154,7 @@ fn should_update_thread_updated_at(
     }
 }
 
-fn value_is_greater(left: &Value, right: &Value) -> bool {
+pub(super) fn value_is_greater(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Int(left), Value::Int(right)) => left > right,
         (Value::Float(left), Value::Float(right)) => left > right,
@@ -11143,12 +11167,12 @@ fn value_is_greater(left: &Value, right: &Value) -> bool {
 
 #[derive(Clone, Copy)]
 #[cfg(test)]
-enum KnowledgeCreatedAtOrder {
+pub(super) enum KnowledgeCreatedAtOrder {
     Descending,
 }
 
 #[cfg(test)]
-fn compare_knowledge_created_at(
+pub(super) fn compare_knowledge_created_at(
     left: &Option<Value>,
     right: &Option<Value>,
     order: KnowledgeCreatedAtOrder,
@@ -11171,7 +11195,7 @@ fn compare_knowledge_created_at(
 }
 
 #[cfg(test)]
-fn compare_knowledge_values(left: &Value, right: &Value) -> std::cmp::Ordering {
+pub(super) fn compare_knowledge_values(left: &Value, right: &Value) -> std::cmp::Ordering {
     match (left, right) {
         (Value::Int(left), Value::Int(right)) => left.cmp(right),
         (Value::Float(left), Value::Float(right)) => left.total_cmp(right),
@@ -11182,7 +11206,7 @@ fn compare_knowledge_values(left: &Value, right: &Value) -> std::cmp::Ordering {
     }
 }
 
-fn delete_knowledge_thread_identities_for(
+pub(super) fn delete_knowledge_thread_identities_for(
     db: &mut Database,
     request: &KnowledgeThreadIdentityDeleteRequest,
 ) -> Result<KnowledgeThreadIdentityDeleteOutput> {
@@ -11247,7 +11271,7 @@ fn delete_knowledge_thread_identities_for(
     })
 }
 
-fn validate_knowledge_thread_identity_delete_request(
+pub(super) fn validate_knowledge_thread_identity_delete_request(
     request: &KnowledgeThreadIdentityDeleteRequest,
 ) -> Result<()> {
     match (&request.identity_key, &request.cascade_keys) {
@@ -11271,7 +11295,7 @@ fn validate_knowledge_thread_identity_delete_request(
     }
 }
 
-fn thread_identity_delete_candidates(
+pub(super) fn thread_identity_delete_candidates(
     catalog: &Catalog,
     store: &GraphStore,
     request: &KnowledgeThreadIdentityDeleteRequest,
@@ -11309,7 +11333,7 @@ fn thread_identity_delete_candidates(
     }
 }
 
-fn create_knowledge_thread_compaction_link_for(
+pub(super) fn create_knowledge_thread_compaction_link_for(
     db: &mut Database,
     request: &KnowledgeThreadCompactionLinkRequest,
 ) -> Result<KnowledgeThreadCompactionLinkOutput> {
@@ -11396,7 +11420,7 @@ fn create_knowledge_thread_compaction_link_for(
     })
 }
 
-fn validate_knowledge_thread_compaction_link_request(
+pub(super) fn validate_knowledge_thread_compaction_link_request(
     request: &KnowledgeThreadCompactionLinkRequest,
 ) -> Result<()> {
     if request.thread_id.is_empty() {
@@ -11418,7 +11442,7 @@ fn validate_knowledge_thread_compaction_link_request(
     Ok(())
 }
 
-fn delete_knowledge_thread_messages_for(
+pub(super) fn delete_knowledge_thread_messages_for(
     db: &mut Database,
     request: &KnowledgeThreadMessageDeleteRequest,
 ) -> Result<KnowledgeThreadMessageDeleteOutput> {
@@ -11484,7 +11508,7 @@ fn delete_knowledge_thread_messages_for(
     })
 }
 
-fn thread_message_node_ids(
+pub(super) fn thread_message_node_ids(
     catalog: &Catalog,
     store: &GraphStore,
     thread_node_id: NodeId,
@@ -11513,7 +11537,7 @@ fn thread_message_node_ids(
     Ok(node_ids)
 }
 
-fn update_knowledge_label_lifecycle_batch_for(
+pub(super) fn update_knowledge_label_lifecycle_batch_for(
     db: &mut Database,
     request: &KnowledgeLabelLifecycleBatchRequest,
 ) -> Result<KnowledgeLabelLifecycleBatchOutput> {
@@ -11653,11 +11677,11 @@ fn update_knowledge_label_lifecycle_batch_for(
     })
 }
 
-fn label_lifecycle_update_has_business_field(update: &KnowledgeLabelLifecycleUpdate) -> bool {
+pub(super) fn label_lifecycle_update_has_business_field(update: &KnowledgeLabelLifecycleUpdate) -> bool {
     update.name.is_some() || update.canonical_name.is_some() || update.metadata.is_some()
 }
 
-fn label_lifecycle_assignments(update: &KnowledgeLabelLifecycleUpdate) -> BTreeMap<String, Value> {
+pub(super) fn label_lifecycle_assignments(update: &KnowledgeLabelLifecycleUpdate) -> BTreeMap<String, Value> {
     let mut assignments = BTreeMap::new();
     if let Some(name) = &update.name {
         assignments.insert("name".to_string(), Value::String(name.clone()));
@@ -11673,7 +11697,7 @@ fn label_lifecycle_assignments(update: &KnowledgeLabelLifecycleUpdate) -> BTreeM
     assignments
 }
 
-fn delete_knowledge_memory_labels_for(
+pub(super) fn delete_knowledge_memory_labels_for(
     db: &mut Database,
     request: &KnowledgeMemoryLabelDeleteRequest,
 ) -> Result<KnowledgeMemoryLabelDeleteOutput> {
@@ -11791,7 +11815,7 @@ fn delete_knowledge_memory_labels_for(
     })
 }
 
-fn validate_knowledge_memory_label_delete_request(
+pub(super) fn validate_knowledge_memory_label_delete_request(
     request: &KnowledgeMemoryLabelDeleteRequest,
 ) -> Result<()> {
     if request.memory_id.is_empty() {
@@ -11807,7 +11831,7 @@ fn validate_knowledge_memory_label_delete_request(
     Ok(())
 }
 
-fn knowledge_memory_label_delete_empty_output(
+pub(super) fn knowledge_memory_label_delete_empty_output(
     request: &KnowledgeMemoryLabelDeleteRequest,
     graph_commit_epoch: u64,
     memory_node_id: Option<u64>,
@@ -11832,7 +11856,7 @@ fn knowledge_memory_label_delete_empty_output(
     }
 }
 
-fn memory_label_relationship_ids(
+pub(super) fn memory_label_relationship_ids(
     catalog: &Catalog,
     store: &GraphStore,
     memory_node_id: NodeId,
@@ -11864,7 +11888,7 @@ fn memory_label_relationship_ids(
     Ok(relationship_ids)
 }
 
-fn transfer_knowledge_label_memory_edges_for(
+pub(super) fn transfer_knowledge_label_memory_edges_for(
     db: &mut Database,
     request: &KnowledgeLabelMemoryTransferRequest,
 ) -> Result<KnowledgeLabelMemoryTransferOutput> {
@@ -12026,7 +12050,7 @@ fn transfer_knowledge_label_memory_edges_for(
     })
 }
 
-fn validate_knowledge_label_memory_transfer_request(
+pub(super) fn validate_knowledge_label_memory_transfer_request(
     request: &KnowledgeLabelMemoryTransferRequest,
 ) -> Result<()> {
     if request.source_label_id.is_empty() {
@@ -12042,7 +12066,7 @@ fn validate_knowledge_label_memory_transfer_request(
     Ok(())
 }
 
-fn knowledge_label_memory_transfer_empty_output(
+pub(super) fn knowledge_label_memory_transfer_empty_output(
     request: &KnowledgeLabelMemoryTransferRequest,
     graph_commit_epoch: u64,
     source_label_node_id: Option<u64>,
@@ -12067,7 +12091,7 @@ fn knowledge_label_memory_transfer_empty_output(
     }
 }
 
-fn source_label_memory_transfer_candidates(
+pub(super) fn source_label_memory_transfer_candidates(
     catalog: &Catalog,
     store: &GraphStore,
     source_label_node_id: NodeId,
@@ -12104,7 +12128,7 @@ fn source_label_memory_transfer_candidates(
     Ok(memories)
 }
 
-fn transfer_knowledge_memory_label_edges_for(
+pub(super) fn transfer_knowledge_memory_label_edges_for(
     db: &mut Database,
     request: &KnowledgeMemoryLabelTransferRequest,
 ) -> Result<KnowledgeMemoryLabelTransferOutput> {
@@ -12304,7 +12328,7 @@ fn transfer_knowledge_memory_label_edges_for(
     })
 }
 
-fn validate_knowledge_memory_label_transfer_request(
+pub(super) fn validate_knowledge_memory_label_transfer_request(
     request: &KnowledgeMemoryLabelTransferRequest,
 ) -> Result<()> {
     if request.older_memory_id.is_empty() {
@@ -12325,7 +12349,7 @@ fn validate_knowledge_memory_label_transfer_request(
     Ok(())
 }
 
-struct MemoryLabelTransferEmptyInput {
+pub(super) struct MemoryLabelTransferEmptyInput {
     graph_commit_epoch: u64,
     older_memory_node_id: Option<u64>,
     newer_memory_node_id: Option<u64>,
@@ -12336,7 +12360,7 @@ struct MemoryLabelTransferEmptyInput {
     duplicate_source_edge_count: usize,
 }
 
-fn knowledge_memory_label_transfer_empty_output(
+pub(super) fn knowledge_memory_label_transfer_empty_output(
     request: &KnowledgeMemoryLabelTransferRequest,
     input: MemoryLabelTransferEmptyInput,
 ) -> KnowledgeMemoryLabelTransferOutput {
@@ -12361,7 +12385,7 @@ fn knowledge_memory_label_transfer_empty_output(
     }
 }
 
-fn memory_label_transfer_candidates(
+pub(super) fn memory_label_transfer_candidates(
     catalog: &Catalog,
     store: &GraphStore,
     older_memory_node_id: NodeId,
@@ -12402,14 +12426,14 @@ fn memory_label_transfer_candidates(
     Ok((labels, duplicate_source_edge_count))
 }
 
-fn node_property_equals_external_id(node: &NodeRecord, key: &str, expected: &str) -> bool {
+pub(super) fn node_property_equals_external_id(node: &NodeRecord, key: &str, expected: &str) -> bool {
     node.properties
         .get(key)
         .is_some_and(|value| value_to_external_id(value) == expected)
 }
 
 #[cfg(test)]
-fn knowledge_entity_labels_via_query_runtime(
+pub(super) fn knowledge_entity_labels_via_query_runtime(
     db: &Database,
     request: &KnowledgeEntityLabelListRequest,
 ) -> Result<KnowledgeEntityLabelListOutput> {
@@ -12460,7 +12484,7 @@ fn knowledge_entity_labels_via_query_runtime(
 }
 
 #[cfg(test)]
-fn knowledge_entity_label_projected_list_via_query_runtime(
+pub(super) fn knowledge_entity_label_projected_list_via_query_runtime(
     db: &Database,
     request: &KnowledgeEntityLabelProjectedListRequest,
 ) -> Result<KnowledgeEntityLabelProjectedListOutput> {
@@ -12516,7 +12540,7 @@ fn knowledge_entity_label_projected_list_via_query_runtime(
 }
 
 #[cfg(test)]
-fn validate_knowledge_entity_label_list_request(
+pub(super) fn validate_knowledge_entity_label_list_request(
     request: &KnowledgeEntityLabelListRequest,
 ) -> Result<()> {
     validate_cypher_identifier(&request.entity_label, "knowledge entity label")?;
@@ -12533,7 +12557,7 @@ fn validate_knowledge_entity_label_list_request(
 }
 
 #[cfg(test)]
-fn validate_knowledge_entity_label_projected_list_request(
+pub(super) fn validate_knowledge_entity_label_projected_list_request(
     request: &KnowledgeEntityLabelProjectedListRequest,
 ) -> Result<()> {
     validate_knowledge_entity_label_list_request(&request.list)?;
@@ -12551,7 +12575,7 @@ fn validate_knowledge_entity_label_projected_list_request(
 }
 
 #[cfg(test)]
-fn knowledge_entity_label_entities_via_query_runtime(
+pub(super) fn knowledge_entity_label_entities_via_query_runtime(
     db: &Database,
     entity_label: &str,
     external_ids: &[String],
@@ -12590,7 +12614,7 @@ fn knowledge_entity_label_entities_via_query_runtime(
 }
 
 #[cfg(test)]
-fn entity_label_rows_via_query_runtime(
+pub(super) fn entity_label_rows_via_query_runtime(
     db: &Database,
     entity_node_id: u64,
     limit: usize,
@@ -12614,7 +12638,7 @@ fn entity_label_rows_via_query_runtime(
 }
 
 #[cfg(test)]
-fn entity_label_projected_rows_via_query_runtime(
+pub(super) fn entity_label_projected_rows_via_query_runtime(
     db: &Database,
     entity_node_id: u64,
     limit: usize,
@@ -12679,7 +12703,7 @@ fn entity_label_projected_rows_via_query_runtime(
 }
 
 #[cfg(test)]
-fn entity_label_query_output_via_query_runtime(
+pub(super) fn entity_label_query_output_via_query_runtime(
     db: &Database,
     entity_node_id: u64,
 ) -> Result<QueryOutput> {
@@ -12697,7 +12721,7 @@ fn entity_label_query_output_via_query_runtime(
 }
 
 #[cfg(test)]
-fn entity_label_row_from_query_row(row: &Row) -> Result<KnowledgeEntityLabelRow> {
+pub(super) fn entity_label_row_from_query_row(row: &Row) -> Result<KnowledgeEntityLabelRow> {
     let label = row
         .get("label")
         .and_then(knowledge_entity_from_value)
@@ -12713,11 +12737,11 @@ fn entity_label_row_from_query_row(row: &Row) -> Result<KnowledgeEntityLabelRow>
 }
 
 #[cfg(test)]
-fn knowledge_entity_string_property(entity: &KnowledgeEntity, key: &str) -> Option<String> {
+pub(super) fn knowledge_entity_string_property(entity: &KnowledgeEntity, key: &str) -> Option<String> {
     entity.properties.get(key).map(value_to_external_id)
 }
 
-fn update_knowledge_pagerank_scores_batch_for(
+pub(super) fn update_knowledge_pagerank_scores_batch_for(
     db: &mut Database,
     request: &KnowledgePageRankScoreBatchRequest,
 ) -> Result<KnowledgePageRankScoreBatchOutput> {
@@ -12844,7 +12868,7 @@ fn update_knowledge_pagerank_scores_batch_for(
     })
 }
 
-fn clear_knowledge_pagerank_scores_for(
+pub(super) fn clear_knowledge_pagerank_scores_for(
     db: &mut Database,
     request: &KnowledgePageRankClearRequest,
 ) -> Result<KnowledgePageRankClearOutput> {
@@ -12939,14 +12963,14 @@ fn clear_knowledge_pagerank_scores_for(
 }
 
 #[cfg(test)]
-fn validate_non_empty_external_ids(external_ids: &[String], message: &str) -> Result<()> {
+pub(super) fn validate_non_empty_external_ids(external_ids: &[String], message: &str) -> Result<()> {
     if external_ids.iter().any(String::is_empty) {
         return Err(SkeinError::Semantic(message.to_string()));
     }
     Ok(())
 }
 
-fn validate_pagerank_label(label: &str) -> Result<()> {
+pub(super) fn validate_pagerank_label(label: &str) -> Result<()> {
     match label {
         "Memory" | "memory" | "Entity" | "entity" => Ok(()),
         _ => Err(SkeinError::Semantic(
@@ -12955,7 +12979,7 @@ fn validate_pagerank_label(label: &str) -> Result<()> {
     }
 }
 
-fn pagerank_label(label: &str) -> &'static str {
+pub(super) fn pagerank_label(label: &str) -> &'static str {
     match label {
         "Memory" | "memory" => "Memory",
         "Entity" | "entity" => "Entity",
@@ -12963,7 +12987,7 @@ fn pagerank_label(label: &str) -> &'static str {
     }
 }
 
-fn clear_knowledge_community_assignments_for(
+pub(super) fn clear_knowledge_community_assignments_for(
     db: &mut Database,
     request: &KnowledgeCommunityAssignmentClearRequest,
 ) -> Result<KnowledgeCommunityAssignmentClearOutput> {
@@ -13032,7 +13056,7 @@ fn clear_knowledge_community_assignments_for(
     })
 }
 
-fn collect_knowledge_community_assignment_clears(
+pub(super) fn collect_knowledge_community_assignment_clears(
     db: &Database,
     label_id: Option<LabelId>,
     seen_node_ids: &mut BTreeSet<NodeId>,
@@ -13066,7 +13090,7 @@ fn collect_knowledge_community_assignment_clears(
     Ok(())
 }
 
-fn community_assignment_clear_statement(node_id: NodeId) -> (String, BTreeMap<String, Value>) {
+pub(super) fn community_assignment_clear_statement(node_id: NodeId) -> (String, BTreeMap<String, Value>) {
     (
         "MATCH (n) WHERE id(n) = $node_id SET n.community_id = $community_id".to_string(),
         BTreeMap::from([
@@ -13076,7 +13100,7 @@ fn community_assignment_clear_statement(node_id: NodeId) -> (String, BTreeMap<St
     )
 }
 
-fn create_knowledge_community_memberships_batch_for(
+pub(super) fn create_knowledge_community_memberships_batch_for(
     db: &mut Database,
     request: &KnowledgeCommunityMembershipCreateBatchRequest,
 ) -> Result<KnowledgeCommunityMembershipCreateBatchOutput> {
@@ -13120,7 +13144,7 @@ fn create_knowledge_community_memberships_batch_for(
     })
 }
 
-fn validate_knowledge_community_membership_create(
+pub(super) fn validate_knowledge_community_membership_create(
     membership: &KnowledgeCommunityMembershipCreate,
 ) -> Result<()> {
     if membership.entity_id.is_empty() {
@@ -13141,7 +13165,7 @@ fn validate_knowledge_community_membership_create(
     Ok(())
 }
 
-fn knowledge_community_membership_relationship_create(
+pub(super) fn knowledge_community_membership_relationship_create(
     membership: &KnowledgeCommunityMembershipCreate,
 ) -> KnowledgeRelationshipCreateRequest {
     KnowledgeRelationshipCreateRequest {
@@ -13163,7 +13187,7 @@ fn knowledge_community_membership_relationship_create(
 }
 
 #[cfg(test)]
-fn knowledge_communities_via_query_runtime(
+pub(super) fn knowledge_communities_via_query_runtime(
     db: &Database,
     request: &KnowledgeCommunityListRequest,
 ) -> Result<KnowledgeCommunityListOutput> {
@@ -13201,7 +13225,7 @@ fn knowledge_communities_via_query_runtime(
 }
 
 #[cfg(test)]
-fn knowledge_community_via_query_runtime(
+pub(super) fn knowledge_community_via_query_runtime(
     db: &Database,
     request: &KnowledgeCommunityRequest,
 ) -> Result<KnowledgeCommunityOutput> {
@@ -13238,7 +13262,7 @@ fn knowledge_community_via_query_runtime(
 }
 
 #[cfg(test)]
-fn validate_knowledge_community_request(request: &KnowledgeCommunityRequest) -> Result<()> {
+pub(super) fn validate_knowledge_community_request(request: &KnowledgeCommunityRequest) -> Result<()> {
     if let KnowledgeCommunityLookupKey::Id(id) = &request.key
         && id.is_empty()
     {
@@ -13250,7 +13274,7 @@ fn validate_knowledge_community_request(request: &KnowledgeCommunityRequest) -> 
 }
 
 #[cfg(test)]
-fn knowledge_community_row_from_entity(community: &KnowledgeEntity) -> KnowledgeCommunityRow {
+pub(super) fn knowledge_community_row_from_entity(community: &KnowledgeEntity) -> KnowledgeCommunityRow {
     let ai_summary = community.properties.get("ai_summary").cloned();
     KnowledgeCommunityRow {
         id: string_property_value(&community.properties, "id")
@@ -13269,7 +13293,7 @@ fn knowledge_community_row_from_entity(community: &KnowledgeEntity) -> Knowledge
 }
 
 #[cfg(test)]
-fn compare_knowledge_community_rows(
+pub(super) fn compare_knowledge_community_rows(
     left: &KnowledgeCommunityRow,
     right: &KnowledgeCommunityRow,
     order: KnowledgeCommunityListOrder,
@@ -13290,7 +13314,7 @@ fn compare_knowledge_community_rows(
 }
 
 #[cfg(test)]
-fn compare_optional_i64_desc(left: Option<i64>, right: Option<i64>) -> std::cmp::Ordering {
+pub(super) fn compare_optional_i64_desc(left: Option<i64>, right: Option<i64>) -> std::cmp::Ordering {
     match (left, right) {
         (Some(left), Some(right)) => right.cmp(&left),
         (Some(_), None) => std::cmp::Ordering::Less,
@@ -13299,7 +13323,7 @@ fn compare_optional_i64_desc(left: Option<i64>, right: Option<i64>) -> std::cmp:
     }
 }
 
-fn update_knowledge_communities_batch_for(
+pub(super) fn update_knowledge_communities_batch_for(
     db: &mut Database,
     request: &KnowledgeCommunityLifecycleBatchRequest,
 ) -> Result<KnowledgeCommunityLifecycleBatchOutput> {
@@ -13486,7 +13510,7 @@ fn update_knowledge_communities_batch_for(
     })
 }
 
-fn validate_knowledge_community_create(create: &KnowledgeCommunityCreate) -> Result<()> {
+pub(super) fn validate_knowledge_community_create(create: &KnowledgeCommunityCreate) -> Result<()> {
     if create.id.is_empty() {
         return Err(SkeinError::Semantic(
             "knowledge community create requires a non-empty id".to_string(),
@@ -13515,7 +13539,7 @@ fn validate_knowledge_community_create(create: &KnowledgeCommunityCreate) -> Res
     Ok(())
 }
 
-fn validate_knowledge_community_summary_update(
+pub(super) fn validate_knowledge_community_summary_update(
     update: &KnowledgeCommunitySummaryUpdate,
 ) -> Result<()> {
     if update.id.is_empty() {
@@ -13531,7 +13555,7 @@ fn validate_knowledge_community_summary_update(
     Ok(())
 }
 
-fn knowledge_community_create_entity_request(
+pub(super) fn knowledge_community_create_entity_request(
     create: &KnowledgeCommunityCreate,
 ) -> KnowledgeEntityCreateRequest {
     KnowledgeEntityCreateRequest {
@@ -13554,7 +13578,7 @@ fn knowledge_community_create_entity_request(
     }
 }
 
-fn knowledge_community_summary_assignments(
+pub(super) fn knowledge_community_summary_assignments(
     update: &KnowledgeCommunitySummaryUpdate,
 ) -> BTreeMap<String, Value> {
     BTreeMap::from([
@@ -13565,7 +13589,7 @@ fn knowledge_community_summary_assignments(
     ])
 }
 
-fn knowledge_community_summary_update_statement(
+pub(super) fn knowledge_community_summary_update_statement(
     node_id: NodeId,
     assignments: &BTreeMap<String, Value>,
 ) -> (String, BTreeMap<String, Value>) {
@@ -13582,7 +13606,7 @@ fn knowledge_community_summary_update_statement(
     (cypher, parameters)
 }
 
-fn delete_knowledge_communities_for(
+pub(super) fn delete_knowledge_communities_for(
     db: &mut Database,
     request: &KnowledgeCommunityCleanupRequest,
 ) -> Result<KnowledgeCommunityCleanupOutput> {
@@ -13637,7 +13661,7 @@ fn delete_knowledge_communities_for(
     })
 }
 
-fn knowledge_community_cleanup_statement(
+pub(super) fn knowledge_community_cleanup_statement(
     node_id: NodeId,
     detach: bool,
 ) -> Result<(String, BTreeMap<String, Value>)> {
@@ -13650,7 +13674,7 @@ fn knowledge_community_cleanup_statement(
     ))
 }
 
-fn delete_knowledge_graph_meta_for(
+pub(super) fn delete_knowledge_graph_meta_for(
     db: &mut Database,
     request: &KnowledgeGraphMetaRequest,
 ) -> Result<KnowledgeGraphMetaDeleteOutput> {
@@ -13688,7 +13712,7 @@ fn delete_knowledge_graph_meta_for(
     })
 }
 
-fn validate_graph_meta_request(request: &KnowledgeGraphMetaRequest) -> Result<()> {
+pub(super) fn validate_graph_meta_request(request: &KnowledgeGraphMetaRequest) -> Result<()> {
     if request.meta_id.is_empty() {
         return Err(SkeinError::Semantic(
             "knowledge graph meta request requires a non-empty meta id".to_string(),
@@ -13697,7 +13721,7 @@ fn validate_graph_meta_request(request: &KnowledgeGraphMetaRequest) -> Result<()
     Ok(())
 }
 
-fn knowledge_graph_meta_delete_statement(
+pub(super) fn knowledge_graph_meta_delete_statement(
     node_id: NodeId,
 ) -> Result<(String, BTreeMap<String, Value>)> {
     let node_id = i64::try_from(node_id.0)
@@ -13708,7 +13732,7 @@ fn knowledge_graph_meta_delete_statement(
     ))
 }
 
-fn stamp_knowledge_graph_meta_batch_for(
+pub(super) fn stamp_knowledge_graph_meta_batch_for(
     db: &mut Database,
     request: &KnowledgeGraphMetaStampBatchRequest,
 ) -> Result<KnowledgeGraphMetaStampBatchOutput> {
@@ -13843,7 +13867,7 @@ fn stamp_knowledge_graph_meta_batch_for(
     })
 }
 
-enum GraphMetaStampOperation {
+pub(super) enum GraphMetaStampOperation {
     Create {
         meta_id: String,
         assignments: BTreeMap<String, Value>,
@@ -13854,7 +13878,7 @@ enum GraphMetaStampOperation {
     },
 }
 
-fn graph_meta_stamp_statement(
+pub(super) fn graph_meta_stamp_statement(
     operation: &GraphMetaStampOperation,
 ) -> (String, BTreeMap<String, Value>) {
     match operation {
@@ -13869,7 +13893,7 @@ fn graph_meta_stamp_statement(
     }
 }
 
-fn graph_meta_create_statement(
+pub(super) fn graph_meta_create_statement(
     meta_id: &str,
     assignments: &BTreeMap<String, Value>,
 ) -> (String, BTreeMap<String, Value>) {
@@ -13885,7 +13909,7 @@ fn graph_meta_create_statement(
     (cypher, parameters)
 }
 
-fn apply_knowledge_schema_migrations_batch_for(
+pub(super) fn apply_knowledge_schema_migrations_batch_for(
     db: &mut Database,
     request: &KnowledgeSchemaMigrationApplyBatchRequest,
 ) -> Result<KnowledgeSchemaMigrationApplyBatchOutput> {
@@ -13992,7 +14016,7 @@ fn apply_knowledge_schema_migrations_batch_for(
     })
 }
 
-fn update_knowledge_augmentation_jobs_batch_for(
+pub(super) fn update_knowledge_augmentation_jobs_batch_for(
     db: &mut Database,
     request: &KnowledgeAugmentationJobLifecycleBatchRequest,
 ) -> Result<KnowledgeAugmentationJobLifecycleBatchOutput> {
@@ -14186,7 +14210,7 @@ fn update_knowledge_augmentation_jobs_batch_for(
     })
 }
 
-enum AugmentationJobLifecycleOperation {
+pub(super) enum AugmentationJobLifecycleOperation {
     Create {
         job_id: String,
         assignments: BTreeMap<String, Value>,
@@ -14197,7 +14221,7 @@ enum AugmentationJobLifecycleOperation {
     },
 }
 
-fn validate_augmentation_job_lifecycle_update(
+pub(super) fn validate_augmentation_job_lifecycle_update(
     update: &KnowledgeAugmentationJobLifecycleUpdate,
 ) -> Result<()> {
     if update.job_id.is_empty() {
@@ -14237,7 +14261,7 @@ fn validate_augmentation_job_lifecycle_update(
     Ok(())
 }
 
-fn augmentation_job_create_assignments(
+pub(super) fn augmentation_job_create_assignments(
     update: &KnowledgeAugmentationJobLifecycleUpdate,
 ) -> BTreeMap<String, Value> {
     let KnowledgeAugmentationJobLifecycleTransition::Create {
@@ -14265,7 +14289,7 @@ fn augmentation_job_create_assignments(
     ])
 }
 
-fn augmentation_job_transition_assignments(
+pub(super) fn augmentation_job_transition_assignments(
     transition: &KnowledgeAugmentationJobLifecycleTransition,
 ) -> BTreeMap<String, Value> {
     match transition {
@@ -14319,7 +14343,7 @@ fn augmentation_job_transition_assignments(
     }
 }
 
-fn augmentation_job_transition_allows_status(
+pub(super) fn augmentation_job_transition_allows_status(
     transition: &KnowledgeAugmentationJobLifecycleTransition,
     status: Option<&str>,
 ) -> bool {
@@ -14338,14 +14362,14 @@ fn augmentation_job_transition_allows_status(
     }
 }
 
-fn augmentation_job_status(node: &NodeRecord) -> Option<String> {
+pub(super) fn augmentation_job_status(node: &NodeRecord) -> Option<String> {
     match node.properties.get("status") {
         Some(Value::String(status)) => Some(status.clone()),
         _ => None,
     }
 }
 
-fn augmentation_job_lifecycle_statement(
+pub(super) fn augmentation_job_lifecycle_statement(
     operation: &AugmentationJobLifecycleOperation,
 ) -> (String, BTreeMap<String, Value>) {
     match operation {
@@ -14360,7 +14384,7 @@ fn augmentation_job_lifecycle_statement(
     }
 }
 
-fn augmentation_job_create_statement(
+pub(super) fn augmentation_job_create_statement(
     job_id: &str,
     assignments: &BTreeMap<String, Value>,
 ) -> (String, BTreeMap<String, Value>) {
@@ -14377,7 +14401,7 @@ fn augmentation_job_create_statement(
 }
 
 #[cfg(test)]
-fn compare_optional_values_desc(left: Option<&Value>, right: Option<&Value>) -> std::cmp::Ordering {
+pub(super) fn compare_optional_values_desc(left: Option<&Value>, right: Option<&Value>) -> std::cmp::Ordering {
     match (
         left.and_then(value_sort_key),
         right.and_then(value_sort_key),
@@ -14392,7 +14416,7 @@ fn compare_optional_values_desc(left: Option<&Value>, right: Option<&Value>) -> 
 }
 
 #[cfg(test)]
-fn value_sort_key(value: &Value) -> Option<f64> {
+pub(super) fn value_sort_key(value: &Value) -> Option<f64> {
     match value {
         Value::Int(value) => Some(*value as f64),
         Value::Float(value) if value.is_finite() => Some(*value),
@@ -14400,7 +14424,7 @@ fn value_sort_key(value: &Value) -> Option<f64> {
     }
 }
 
-fn interrupt_knowledge_augmentation_jobs_for(
+pub(super) fn interrupt_knowledge_augmentation_jobs_for(
     db: &mut Database,
     request: &KnowledgeAugmentationJobInterruptRequest,
 ) -> Result<KnowledgeAugmentationJobInterruptOutput> {
@@ -14490,7 +14514,7 @@ fn interrupt_knowledge_augmentation_jobs_for(
     })
 }
 
-fn delete_knowledge_entity_for(
+pub(super) fn delete_knowledge_entity_for(
     db: &mut Database,
     request: &KnowledgeEntityDeleteRequest,
 ) -> Result<KnowledgeEntityDeleteOutput> {
@@ -14503,7 +14527,7 @@ fn delete_knowledge_entity_for(
     )
 }
 
-fn delete_scoped_knowledge_entity_for(
+pub(super) fn delete_scoped_knowledge_entity_for(
     db: &mut Database,
     request: &KnowledgeScopedEntityDeleteRequest,
 ) -> Result<KnowledgeEntityDeleteOutput> {
@@ -14576,7 +14600,7 @@ fn delete_scoped_knowledge_entity_for(
     })
 }
 
-fn delete_knowledge_entity_batch_for(
+pub(super) fn delete_knowledge_entity_batch_for(
     db: &mut Database,
     request: &KnowledgeEntityDeleteBatchRequest,
 ) -> Result<KnowledgeEntityDeleteBatchOutput> {
@@ -14589,7 +14613,7 @@ fn delete_knowledge_entity_batch_for(
     )
 }
 
-fn delete_scoped_knowledge_entity_batch_for(
+pub(super) fn delete_scoped_knowledge_entity_batch_for(
     db: &mut Database,
     request: &KnowledgeScopedEntityDeleteBatchRequest,
 ) -> Result<KnowledgeEntityDeleteBatchOutput> {
@@ -14707,7 +14731,7 @@ fn delete_scoped_knowledge_entity_batch_for(
     })
 }
 
-fn create_knowledge_relationship_for(
+pub(super) fn create_knowledge_relationship_for(
     db: &mut Database,
     request: &KnowledgeRelationshipCreateRequest,
 ) -> Result<KnowledgeRelationshipCreateOutput> {
@@ -14721,7 +14745,7 @@ fn create_knowledge_relationship_for(
     )
 }
 
-fn create_scoped_knowledge_relationship_for(
+pub(super) fn create_scoped_knowledge_relationship_for(
     db: &mut Database,
     request: &KnowledgeScopedRelationshipCreateRequest,
 ) -> Result<KnowledgeRelationshipCreateOutput> {
@@ -14816,7 +14840,7 @@ fn create_scoped_knowledge_relationship_for(
     })
 }
 
-fn knowledge_relationship_create_statement(
+pub(super) fn knowledge_relationship_create_statement(
     request: &KnowledgeRelationshipCreateRequest,
 ) -> (String, BTreeMap<String, Value>) {
     let mut cypher = format!(
@@ -14849,7 +14873,7 @@ fn knowledge_relationship_create_statement(
     (cypher, parameters)
 }
 
-fn create_knowledge_relationship_batch_for(
+pub(super) fn create_knowledge_relationship_batch_for(
     db: &mut Database,
     request: &KnowledgeRelationshipCreateBatchRequest,
 ) -> Result<KnowledgeRelationshipCreateBatchOutput> {
@@ -14863,7 +14887,7 @@ fn create_knowledge_relationship_batch_for(
     )
 }
 
-fn create_scoped_knowledge_relationship_batch_for(
+pub(super) fn create_scoped_knowledge_relationship_batch_for(
     db: &mut Database,
     request: &KnowledgeScopedRelationshipCreateBatchRequest,
 ) -> Result<KnowledgeRelationshipCreateBatchOutput> {
@@ -15018,7 +15042,7 @@ fn create_scoped_knowledge_relationship_batch_for(
     })
 }
 
-fn upsert_knowledge_relationship_for(
+pub(super) fn upsert_knowledge_relationship_for(
     db: &mut Database,
     request: &KnowledgeRelationshipUpsertRequest,
 ) -> Result<KnowledgeRelationshipUpsertOutput> {
@@ -15032,7 +15056,7 @@ fn upsert_knowledge_relationship_for(
     )
 }
 
-fn upsert_scoped_knowledge_relationship_for(
+pub(super) fn upsert_scoped_knowledge_relationship_for(
     db: &mut Database,
     request: &KnowledgeScopedRelationshipUpsertRequest,
 ) -> Result<KnowledgeRelationshipUpsertOutput> {
@@ -15171,7 +15195,7 @@ fn upsert_scoped_knowledge_relationship_for(
     })
 }
 
-fn upsert_knowledge_relationship_batch_for(
+pub(super) fn upsert_knowledge_relationship_batch_for(
     db: &mut Database,
     request: &KnowledgeRelationshipUpsertBatchRequest,
 ) -> Result<KnowledgeRelationshipUpsertBatchOutput> {
@@ -15185,7 +15209,7 @@ fn upsert_knowledge_relationship_batch_for(
     )
 }
 
-fn upsert_scoped_knowledge_relationship_batch_for(
+pub(super) fn upsert_scoped_knowledge_relationship_batch_for(
     db: &mut Database,
     request: &KnowledgeScopedRelationshipUpsertBatchRequest,
 ) -> Result<KnowledgeRelationshipUpsertBatchOutput> {
@@ -15413,7 +15437,7 @@ fn upsert_scoped_knowledge_relationship_batch_for(
     })
 }
 
-fn validate_knowledge_relationship_upsert(
+pub(super) fn validate_knowledge_relationship_upsert(
     request: &KnowledgeRelationshipUpsertRequest,
 ) -> Result<()> {
     validate_cypher_identifier(&request.source.label, "source label")?;
@@ -15425,7 +15449,7 @@ fn validate_knowledge_relationship_upsert(
     Ok(())
 }
 
-fn knowledge_relationship_upsert_create_request(
+pub(super) fn knowledge_relationship_upsert_create_request(
     request: &KnowledgeRelationshipUpsertRequest,
 ) -> KnowledgeRelationshipCreateRequest {
     KnowledgeRelationshipCreateRequest {
@@ -15436,7 +15460,7 @@ fn knowledge_relationship_upsert_create_request(
     }
 }
 
-fn existing_knowledge_relationship_id(
+pub(super) fn existing_knowledge_relationship_id(
     catalog: &Catalog,
     store: &GraphStore,
     source: NodeId,
@@ -15463,7 +15487,7 @@ fn existing_knowledge_relationship_id(
     Ok(relationship_id)
 }
 
-fn delete_knowledge_relationship_for(
+pub(super) fn delete_knowledge_relationship_for(
     db: &mut Database,
     request: &KnowledgeRelationshipDeleteRequest,
 ) -> Result<KnowledgeRelationshipDeleteOutput> {
@@ -15477,7 +15501,7 @@ fn delete_knowledge_relationship_for(
     )
 }
 
-fn delete_scoped_knowledge_relationship_for(
+pub(super) fn delete_scoped_knowledge_relationship_for(
     db: &mut Database,
     request: &KnowledgeScopedRelationshipDeleteRequest,
 ) -> Result<KnowledgeRelationshipDeleteOutput> {
@@ -15573,7 +15597,7 @@ fn delete_scoped_knowledge_relationship_for(
     })
 }
 
-fn knowledge_relationship_delete_statement(
+pub(super) fn knowledge_relationship_delete_statement(
     request: &KnowledgeRelationshipDeleteRequest,
 ) -> (String, BTreeMap<String, Value>) {
     let mut cypher = format!(
@@ -15609,7 +15633,7 @@ fn knowledge_relationship_delete_statement(
     (cypher, parameters)
 }
 
-fn update_knowledge_relationship_for(
+pub(super) fn update_knowledge_relationship_for(
     db: &mut Database,
     request: &KnowledgeRelationshipUpdateRequest,
 ) -> Result<KnowledgeRelationshipUpdateOutput> {
@@ -15623,7 +15647,7 @@ fn update_knowledge_relationship_for(
     )
 }
 
-fn update_scoped_knowledge_relationship_for(
+pub(super) fn update_scoped_knowledge_relationship_for(
     db: &mut Database,
     request: &KnowledgeScopedRelationshipUpdateRequest,
 ) -> Result<KnowledgeRelationshipUpdateOutput> {
@@ -15718,7 +15742,7 @@ fn update_scoped_knowledge_relationship_for(
     })
 }
 
-fn update_knowledge_relationship_batch_for(
+pub(super) fn update_knowledge_relationship_batch_for(
     db: &mut Database,
     request: &KnowledgeRelationshipUpdateBatchRequest,
 ) -> Result<KnowledgeRelationshipUpdateBatchOutput> {
@@ -15732,7 +15756,7 @@ fn update_knowledge_relationship_batch_for(
     )
 }
 
-fn update_scoped_knowledge_relationship_batch_for(
+pub(super) fn update_scoped_knowledge_relationship_batch_for(
     db: &mut Database,
     request: &KnowledgeScopedRelationshipUpdateBatchRequest,
 ) -> Result<KnowledgeRelationshipUpdateBatchOutput> {
@@ -15891,7 +15915,7 @@ fn update_scoped_knowledge_relationship_batch_for(
     })
 }
 
-fn validate_knowledge_relationship_update(
+pub(super) fn validate_knowledge_relationship_update(
     request: &KnowledgeRelationshipUpdateRequest,
 ) -> Result<()> {
     if request.assignments.is_empty() {
@@ -15911,7 +15935,7 @@ fn validate_knowledge_relationship_update(
     Ok(())
 }
 
-fn knowledge_relationship_update_statement(
+pub(super) fn knowledge_relationship_update_statement(
     request: &KnowledgeRelationshipUpdateRequest,
 ) -> (String, BTreeMap<String, Value>) {
     let mut cypher = format!(
@@ -15955,7 +15979,7 @@ fn knowledge_relationship_update_statement(
     (cypher, parameters)
 }
 
-fn delete_knowledge_relationship_batch_for(
+pub(super) fn delete_knowledge_relationship_batch_for(
     db: &mut Database,
     request: &KnowledgeRelationshipDeleteBatchRequest,
 ) -> Result<KnowledgeRelationshipDeleteBatchOutput> {
@@ -15969,7 +15993,7 @@ fn delete_knowledge_relationship_batch_for(
     )
 }
 
-fn delete_scoped_knowledge_relationship_batch_for(
+pub(super) fn delete_scoped_knowledge_relationship_batch_for(
     db: &mut Database,
     request: &KnowledgeScopedRelationshipDeleteBatchRequest,
 ) -> Result<KnowledgeRelationshipDeleteBatchOutput> {
@@ -16124,7 +16148,7 @@ fn delete_scoped_knowledge_relationship_batch_for(
     })
 }
 
-struct KnowledgeSourceReferenceRelationshipDeleteCandidate {
+pub(super) struct KnowledgeSourceReferenceRelationshipDeleteCandidate {
     relationship_id: u64,
     source_node_id: u64,
     target_node_id: u64,
@@ -16132,7 +16156,7 @@ struct KnowledgeSourceReferenceRelationshipDeleteCandidate {
     target_external_id: Option<String>,
 }
 
-fn validate_source_reference(source_reference: &str, operation: &str) -> Result<()> {
+pub(super) fn validate_source_reference(source_reference: &str, operation: &str) -> Result<()> {
     if source_reference.trim().is_empty() {
         return Err(SkeinError::Semantic(format!(
             "knowledge {operation} requires a non-empty source_reference"
@@ -16141,7 +16165,7 @@ fn validate_source_reference(source_reference: &str, operation: &str) -> Result<
     Ok(())
 }
 
-fn delete_knowledge_source_reference_relationships_for(
+pub(super) fn delete_knowledge_source_reference_relationships_for(
     db: &mut Database,
     request: &KnowledgeSourceReferenceRelationshipCleanupRequest,
 ) -> Result<KnowledgeSourceReferenceRelationshipCleanupOutput> {
@@ -16229,7 +16253,7 @@ fn delete_knowledge_source_reference_relationships_for(
     })
 }
 
-fn knowledge_source_reference_relationship_delete_statement(
+pub(super) fn knowledge_source_reference_relationship_delete_statement(
     relationship_id: u64,
 ) -> Result<(String, BTreeMap<String, Value>)> {
     let relationship_id = i64::try_from(relationship_id).map_err(|_| {
@@ -16242,13 +16266,13 @@ fn knowledge_source_reference_relationship_delete_statement(
     ))
 }
 
-fn node_has_external_id_property(node: &NodeRecord, external_id: &str) -> bool {
+pub(super) fn node_has_external_id_property(node: &NodeRecord, external_id: &str) -> bool {
     node.properties
         .get("id")
         .is_some_and(|value| value_to_external_id(value) == external_id)
 }
 
-fn validate_cypher_identifier(value: &str, kind: &str) -> Result<()> {
+pub(super) fn validate_cypher_identifier(value: &str, kind: &str) -> Result<()> {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
         return Err(SkeinError::Semantic(format!("{kind} identifier is empty")));
@@ -16265,6 +16289,11 @@ fn validate_cypher_identifier(value: &str, kind: &str) -> Result<()> {
     }
     Ok(())
 }
+
+}
+
+#[cfg(test)]
+use legacy_business_api::*;
 
 #[cfg(test)]
 fn knowledge_neighbors_via_query_runtime(
@@ -18028,7 +18057,9 @@ fn adjacency_directions_for_request(
     requested_direction: KnowledgeNeighborDirection,
 ) -> Vec<AdjacencyDirection> {
     match requested_direction {
+        #[cfg(test)]
         KnowledgeNeighborDirection::Outgoing => vec![AdjacencyDirection::Outgoing],
+        #[cfg(test)]
         KnowledgeNeighborDirection::Incoming => vec![AdjacencyDirection::Incoming],
         KnowledgeNeighborDirection::Both => {
             vec![AdjacencyDirection::Outgoing, AdjacencyDirection::Incoming]
@@ -18094,6 +18125,7 @@ fn try_seed_node_by_label_and_external_id(
     Ok(found)
 }
 
+#[cfg(test)]
 fn try_node_by_label_property_external_id(
     catalog: &Catalog,
     store: &GraphStore,

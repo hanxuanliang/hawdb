@@ -3,6 +3,12 @@
 This document maps Skein against the current Nowledge Mem local data-plane
 needs. The source product boundary is:
 
+Application-facing replacement paths are query-first. Parameterized Cypher and
+PostgreSQL-dialect SQL are the production integration surface; old typed
+business CRUD and route response facades are test-only historical fixtures and
+must not be used by Mem. Stable typed APIs remain only for route-neutral kernel
+contracts listed in `docs/specs/QUERY_FIRST_PUBLIC_API_SPEC.md`.
+
 - Kuzu/Ladybug is the graph of record for memories, threads, sources, entities,
   relationships, schema migrations, graph algorithms, checkpointing, and
   storage-version checks.
