@@ -163,6 +163,7 @@ impl<'a> GraphTableBinder<'a> {
             pattern: BoundPgqGraphPattern { paths, predicate },
             columns,
             alias,
+            span: table.span,
         })
     }
 
@@ -300,6 +301,7 @@ impl<'a> GraphTableBinder<'a> {
                     name: Some(name.clone()),
                     kind,
                     labels,
+                    span,
                 });
                 slot
             }
@@ -310,6 +312,7 @@ impl<'a> GraphTableBinder<'a> {
                 name: None,
                 kind,
                 labels,
+                span,
             });
             slot
         };

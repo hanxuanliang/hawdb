@@ -94,6 +94,7 @@ pub struct BoundPgqVariable {
     pub name: Option<String>,
     pub kind: PgqElementKind,
     pub labels: Vec<String>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +104,7 @@ pub struct BoundPgqGraphTable {
     pub pattern: BoundPgqGraphPattern,
     pub columns: Vec<BoundPgqColumn>,
     pub alias: Option<String>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -149,6 +149,23 @@ spans on semantic errors and rejects PostgreSQL raw-parse shapes that violate
 the qualified graph-transform subset. It does not publish property-graph state
 or activate production SQL routing.
 
+The first executable lowering slice accepts one linear graph path, zero or one
+exact label per element, single-hop directed or undirected edges, graph-local
+property predicates, bound PostgreSQL parameters, and explicit projection
+columns. It lowers those shapes into the existing `NodeScan`, `Expand`,
+`Filter`, and `Project` logical operators. Anonymous elements receive
+deterministic collision-free internal variable names. Reused path variables,
+label alternation, correlated outer-column evaluation, parenthesized paths,
+and quantified walks fail during lowering until the shared logical operators
+can represent their identity, row-multiplicity, and walk semantics exactly.
+These failures retain the source span from the bound SQL/PGQ IR.
+
+Passing this lowering boundary does not activate the owned parser in
+`Database::query_sql*`. Production routing remains on the existing statement
+families until catalog durability, surrounding relational planning, resource
+admission, result qualification, and error-class differential coverage are all
+complete.
+
 The executable binder MUST lower vertex scans, edge expansion, label/property
 predicates, and projection into shared graph logical operators. The surrounding
 SQL query then treats the result as a normal typed table source. Cross-source

@@ -1800,6 +1800,7 @@ name = "skein-sql"
 version = "0.1.0"
 dependencies = [
  "skein-core",
+ "skein-plan",
  "skein-sql-syntax",
  "sqlparser",
 ]

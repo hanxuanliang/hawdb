@@ -7,5 +7,6 @@ license.workspace = true
 
 [dependencies]
 skein-core = { path = "../core" }
+skein-plan = { path = "../plan" }
 skein-sql-syntax = { path = "../sql-syntax" }
 sqlparser = "0.61"
