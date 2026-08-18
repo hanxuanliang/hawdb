@@ -5,6 +5,7 @@ use super::{
     RelationalProjectedField, RelationalProjectedRow, RelationalProjectedRowRef,
     RelationalProjectedRowView, RelationalRowPageError, RelationalRowPagePublicationError,
     RelationalRowPageRootDescriptor, RelationalRowPageRootReader, RelationalRowPageView,
+    VerifiedRowPage,
 };
 use crate::relational::{
     ordered_key::encode_ordered_relational_key, RelationalHydrationBudget, RelationalKey,
@@ -375,10 +376,8 @@ impl RelationalRowPageDemandReader {
         {
             return Ok((None, context.finish()));
         }
-        let bytes = context.read_page(&descriptor)?;
-        let view =
-            RelationalRowPageView::open_slot(&bytes, self.root.publication_config().page_limits)
-                .map_err(|error| context.map_page_error(error))?;
+        let page = context.read_page(&descriptor)?;
+        let view = page.view();
         context.validate_column_count(&table_root, &view)?;
         let Some(mut row) = view
             .find_projected_row(primary_key, requested_fields)
@@ -594,12 +593,8 @@ impl RelationalRowPageDemandReader {
             if range.page_is_past_upper(&descriptor) {
                 break;
             }
-            let bytes = context.read_page(&descriptor)?;
-            let view = RelationalRowPageView::open_slot(
-                &bytes,
-                self.root.publication_config().page_limits,
-            )
-            .map_err(|error| context.map_page_error(error))?;
+            let page = context.read_page(&descriptor)?;
+            let view = page.view();
             context.validate_column_count(&table_root, &view)?;
             let row_start = if apply_lower_bound {
                 apply_lower_bound = false;
@@ -820,7 +815,7 @@ impl<'a> DemandReadContext<'a> {
     fn read_page(
         &mut self,
         descriptor: &RelationalRowPageRootDescriptor,
-    ) -> Result<Arc<[u8]>, RelationalRowPageDemandReadError> {
+    ) -> Result<VerifiedRowPage, RelationalRowPageDemandReadError> {
         self.checkpoint()?;
         if self.report.pages_read >= self.limits.max_pages.get() {
             return Err(RelationalRowPageDemandReadError::Admission(format!(
@@ -873,7 +868,7 @@ impl<'a> DemandReadContext<'a> {
                     )
                 })?;
         }
-        Ok(read.bytes)
+        Ok(read.page)
     }
 
     fn admit_row(&self) -> Result<(), RelationalRowPageDemandReadError> {

@@ -58,6 +58,7 @@ STORAGE_MODELS = [
     "SkeinSystemSchemaUpgrade",
     "SkeinTransactionConcurrency",
     "SkeinTransactionIndexOverlay",
+    "SkeinVerifiedRowPageCache",
     "SkeinWalDoctor",
     "SkeinWalGroupCommit",
 ]

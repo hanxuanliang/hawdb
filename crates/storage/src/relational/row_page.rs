@@ -11,6 +11,8 @@ use super::{
 use skein_integrity::{IntegrityHasher, Sha256Digest, SHA256_BYTES};
 use std::fmt;
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::ops::Range;
+use std::sync::Arc;
 
 mod delta;
 mod demand;
@@ -500,10 +502,107 @@ pub struct RelationalRowPageView<'a> {
     row_payload: &'a [u8],
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct VerifiedRowPage {
+    bytes: Arc<[u8]>,
+    metadata: VerifiedRowPageMetadata,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct VerifiedRowPageMetadata {
+    limits: RelationalRowPageLimits,
+    generation: u64,
+    source_commit_epoch: u64,
+    page_id: RelationalRowPageId,
+    schema_digest: Sha256Digest,
+    row_count: usize,
+    column_count: usize,
+    encoded_len: usize,
+    lower_bound: Range<usize>,
+    upper_bound: Range<usize>,
+    directory: Range<usize>,
+    key_payload: Range<usize>,
+    row_payload: Range<usize>,
+}
+
+impl VerifiedRowPageMetadata {
+    pub(crate) fn from_view(view: &RelationalRowPageView<'_>) -> Self {
+        let mut offset = ROW_PAGE_HEADER_BYTES;
+        let lower_bound = section_range(&mut offset, view.lower_bound.len());
+        let upper_bound = section_range(&mut offset, view.upper_bound.len());
+        let directory = section_range(&mut offset, view.directory.len());
+        let key_payload = section_range(&mut offset, view.key_payload.len());
+        let row_payload = section_range(&mut offset, view.row_payload.len());
+        debug_assert_eq!(offset, view.encoded_len);
+        Self {
+            limits: view.limits,
+            generation: view.generation,
+            source_commit_epoch: view.source_commit_epoch,
+            page_id: view.page_id,
+            schema_digest: view.schema_digest,
+            row_count: view.row_count,
+            column_count: view.column_count,
+            encoded_len: view.encoded_len,
+            lower_bound,
+            upper_bound,
+            directory,
+            key_payload,
+            row_payload,
+        }
+    }
+}
+
+impl VerifiedRowPage {
+    pub(crate) fn new(bytes: Arc<[u8]>, metadata: VerifiedRowPageMetadata) -> Self {
+        debug_assert_eq!(bytes.len(), metadata.encoded_len);
+        Self { bytes, metadata }
+    }
+
+    pub(crate) fn view(&self) -> RelationalRowPageView<'_> {
+        let metadata = &self.metadata;
+        RelationalRowPageView {
+            limits: metadata.limits,
+            generation: metadata.generation,
+            source_commit_epoch: metadata.source_commit_epoch,
+            page_id: metadata.page_id,
+            schema_digest: metadata.schema_digest,
+            row_count: metadata.row_count,
+            column_count: metadata.column_count,
+            encoded_len: metadata.encoded_len,
+            lower_bound: &self.bytes[metadata.lower_bound.clone()],
+            upper_bound: &self.bytes[metadata.upper_bound.clone()],
+            directory: &self.bytes[metadata.directory.clone()],
+            key_payload: &self.bytes[metadata.key_payload.clone()],
+            row_payload: &self.bytes[metadata.row_payload.clone()],
+        }
+    }
+}
+
+fn section_range(offset: &mut usize, len: usize) -> Range<usize> {
+    let start = *offset;
+    *offset += len;
+    start..*offset
+}
+
 impl<'a> RelationalRowPageView<'a> {
     pub fn open(
         encoded: &'a [u8],
         limits: RelationalRowPageLimits,
+    ) -> Result<Self, RelationalRowPageError> {
+        Self::open_with_validation(encoded, limits, true)
+    }
+
+    pub(crate) fn open_verified(
+        encoded: &'a [u8],
+        limits: RelationalRowPageLimits,
+    ) -> Result<Self, RelationalRowPageError> {
+        Self::open_with_validation(encoded, limits, false)
+    }
+
+    fn open_with_validation(
+        encoded: &'a [u8],
+        limits: RelationalRowPageLimits,
+        validate_integrity: bool,
     ) -> Result<Self, RelationalRowPageError> {
         if encoded.len() > limits.max_page_bytes.get() {
             return Err(RelationalRowPageError::Admission(format!(
@@ -520,7 +619,9 @@ impl<'a> RelationalRowPageView<'a> {
                 encoded.len()
             )));
         }
-        verify_integrity(encoded)?;
+        if validate_integrity {
+            verify_integrity(encoded)?;
+        }
 
         let mut offset = ROW_PAGE_HEADER_BYTES;
         let lower_bound = take(
@@ -564,7 +665,9 @@ impl<'a> RelationalRowPageView<'a> {
             key_payload,
             row_payload,
         };
-        view.validate_directory()?;
+        if validate_integrity {
+            view.validate_directory()?;
+        }
         Ok(view)
     }
 

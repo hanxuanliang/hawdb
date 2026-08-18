@@ -1812,12 +1812,18 @@ row.
 The shared cache key uses store id, the descriptor's physical generation and
 slot, CRC32C content identity, and `RelationalRowPageSlot` representation. The
 physical rather than logical root generation is required because a clean COW
-descriptor may retain a page from an older immutable artifact. A hit and a miss
-both validate CRC32C, SHA-256, page id, physical generation, source epoch, row
-count, encoded length, and key bounds before decoding. An entry-too-large or
-temporarily all-pinned cache falls back to the same one-operation slot buffer;
-it never expands cache capacity. At most one slot `Arc` is retained by a cursor
-wave, and cancellation, error, callback stop, or unwind drops it.
+descriptor may retain a page from an older immutable artifact. A cold read
+validates the complete fixed slot CRC32C and SHA-256, zero padding, the encoded
+page integrity, directory, page id, physical generation, source epoch, row
+count, encoded length, and key bounds exactly once. Cache admission retains only
+the compact `encoded_len` bytes and binds them to the complete physical-slot
+CRC32C and SHA-256. A verified hit checks that strong source tag and the cheap
+page identity fields; it MUST NOT hash or validate the complete slot again.
+Cache resident and pinned bytes are the compact allocation, not the padded
+physical slot length. An entry-too-large or temporarily all-pinned cache falls
+back to the same one-operation compact page buffer; it never expands cache
+capacity. At most one compact page `Arc` is retained by a cursor wave, and
+cancellation, error, callback stop, or unwind drops it.
 
 Projected decode validates the selected row's complete slot layout but decodes
 inline variable-width values as page-backed `RelationalValueRef` values. The
@@ -1932,12 +1938,15 @@ fallback.
 The canonical relational snapshot reader uses the existing shared `SegmentCache`
 for immutable base-page slots and WAL recovery-delta pages. Cache entries retain
 the complete physical identity: store, manifest or delta generation, page
-identity, verified content digest, and representation kind. Base slots whose
-digest is intentionally absent from the compact manifest are first opened by
-generation/page identity, strongly decoded and verified, and only then inserted
-with their computed digest. The cache rejects any later attempt to associate
-different bytes with that immutable identity. Recovery descriptors already
-carry the complete delta-page digest and therefore use exact-key lookup.
+identity, verified content digest, and representation kind. A relational base
+page is inserted as compact encoded bytes only after the complete padded source
+slot has passed CRC32C, SHA-256, zero-tail, encoded-page, directory, and root
+descriptor validation. The cache separately retains the full source SHA-256 as
+a verification tag because the compact bytes intentionally do not have the same
+digest or length as the physical slot. Untagged lookup cannot observe such an
+entry. The cache rejects any later attempt to associate a different source tag
+or different compact bytes with that immutable identity. Recovery descriptors
+already carry the complete delta-page digest and therefore use exact-key lookup.
 
 Opening either reader validates bounded manifests and artifact lengths but does
 not open the page artifact or populate the cache. The first lookup uses

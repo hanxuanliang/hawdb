@@ -189,6 +189,7 @@ struct SegmentCacheInner {
 struct SegmentCacheEntry {
     key: SegmentCacheKey,
     bytes: Arc<[u8]>,
+    verification_tag: Option<[u8; 32]>,
     referenced: bool,
 }
 
@@ -213,7 +214,40 @@ impl SegmentCache {
     pub fn get(&self, key: &SegmentCacheKey) -> Option<SegmentCacheLease> {
         let mut inner = self.lock();
         let bytes = match inner.entries.get_mut(&key.identity()) {
-            Some(entry) if entry.key.content_digest == key.content_digest => {
+            Some(entry)
+                if entry.key.content_digest == key.content_digest
+                    && entry.verification_tag.is_none() =>
+            {
+                entry.referenced = true;
+                Arc::clone(&entry.bytes)
+            }
+            Some(_) | None => {
+                inner.miss_count = inner.miss_count.saturating_add(1);
+                return None;
+            }
+        };
+        inner.hit_count = inner.hit_count.saturating_add(1);
+        Some(SegmentCacheLease { bytes })
+    }
+
+    /// Looks up an immutable representation that was fully validated before
+    /// cache admission.
+    ///
+    /// The compact cached bytes do not need to have the same digest as their
+    /// physical source extent. Callers must bind the immutable physical digest
+    /// through `verification_tag` and must use the same tag for lookup and
+    /// insertion.
+    pub(crate) fn get_verified(
+        &self,
+        key: &SegmentCacheKey,
+        verification_tag: [u8; 32],
+    ) -> Option<SegmentCacheLease> {
+        let mut inner = self.lock();
+        let bytes = match inner.entries.get_mut(&key.identity()) {
+            Some(entry)
+                if entry.key.content_digest == key.content_digest
+                    && entry.verification_tag == Some(verification_tag) =>
+            {
                 entry.referenced = true;
                 Arc::clone(&entry.bytes)
             }
@@ -234,11 +268,11 @@ impl SegmentCache {
     ) -> Option<SegmentCacheLease> {
         let mut inner = self.lock();
         let bytes = match inner.entries.get_mut(identity) {
-            Some(entry) => {
+            Some(entry) if entry.verification_tag.is_none() => {
                 entry.referenced = true;
                 Arc::clone(&entry.bytes)
             }
-            None => {
+            Some(_) | None => {
                 inner.miss_count = inner.miss_count.saturating_add(1);
                 return None;
             }
@@ -254,14 +288,35 @@ impl SegmentCache {
     ) -> Result<SegmentCacheLease, SegmentCacheError> {
         let bytes = bytes.into();
         let actual_digest = content_digest(&bytes);
-        let mut inner = self.lock();
         if actual_digest != key.content_digest {
+            let mut inner = self.lock();
             inner.digest_mismatch_count = inner.digest_mismatch_count.saturating_add(1);
             return Err(SegmentCacheError::DigestMismatch {
                 expected: key.content_digest,
                 actual: actual_digest,
             });
         }
+        self.insert_inner(key, bytes, None)
+    }
+
+    /// Admits compact bytes after the caller has validated their immutable
+    /// physical source against a strong digest.
+    pub(crate) fn insert_verified(
+        &self,
+        key: SegmentCacheKey,
+        verification_tag: [u8; 32],
+        bytes: impl Into<Arc<[u8]>>,
+    ) -> Result<SegmentCacheLease, SegmentCacheError> {
+        self.insert_inner(key, bytes.into(), Some(verification_tag))
+    }
+
+    fn insert_inner(
+        &self,
+        key: SegmentCacheKey,
+        bytes: Arc<[u8]>,
+        verification_tag: Option<[u8; 32]>,
+    ) -> Result<SegmentCacheLease, SegmentCacheError> {
+        let mut inner = self.lock();
         let identity = key.identity();
         if let Some(resident_digest) = inner
             .entries
@@ -275,11 +330,9 @@ impl SegmentCache {
                     resident_digest,
                 });
             }
-            if inner
-                .entries
-                .get(&identity)
-                .is_some_and(|entry| entry.bytes.as_ref() != bytes.as_ref())
-            {
+            if inner.entries.get(&identity).is_some_and(|entry| {
+                entry.verification_tag != verification_tag || entry.bytes.as_ref() != bytes.as_ref()
+            }) {
                 inner.digest_mismatch_count = inner.digest_mismatch_count.saturating_add(1);
                 return Err(SegmentCacheError::DigestCollision { key });
             }
@@ -319,6 +372,7 @@ impl SegmentCache {
             SegmentCacheEntry {
                 key,
                 bytes: Arc::clone(&bytes),
+                verification_tag,
                 referenced: true,
             },
         );
@@ -508,5 +562,26 @@ mod tests {
         assert!(matches!(error, SegmentCacheError::IdentityCollision { .. }));
         assert_eq!(cache.snapshot().entry_count, 1);
         assert_eq!(cache.snapshot().digest_mismatch_count, 1);
+    }
+
+    #[test]
+    fn verified_compact_entries_require_the_strong_source_tag() {
+        let cache = SegmentCache::new(16);
+        let mut cache_key = key(1, b"physical-slot");
+        cache_key.representation = RepresentationKind::RelationalRowPageSlot;
+        let tag = [7; 32];
+        drop(cache.insert_verified(cache_key, tag, &b"page"[..]).unwrap());
+
+        assert!(cache.get(&cache_key).is_none());
+        assert!(cache.get_verified(&cache_key, [8; 32]).is_none());
+        let lease = cache
+            .get_verified(&cache_key, tag)
+            .expect("matching verified page remains cached");
+
+        assert_eq!(&*lease, b"page");
+        let snapshot = cache.snapshot();
+        assert_eq!(snapshot.resident_bytes, 4);
+        assert_eq!(snapshot.hit_count, 1);
+        assert_eq!(snapshot.miss_count, 2);
     }
 }

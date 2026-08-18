@@ -5,6 +5,7 @@ use super::{
     RelationalRowPagePublicationError, RelationalRowPageRootDescriptor,
     RelationalRowPageRootManifest, RelationalRowPageTableRoot, RELATIONAL_ROW_PAGE_MANIFEST_FILE,
 };
+use crate::relational::row_page::{VerifiedRowPage, VerifiedRowPageMetadata};
 use crate::relational::{
     ordered_key::encode_ordered_relational_key, ImmutableRelationalRowPage, RelationalKey,
     RelationalOverflowRootBinding, RelationalOverflowRootReader, RelationalRowPageView,
@@ -27,7 +28,7 @@ pub struct RelationalRowPageRootReader {
 }
 
 pub(crate) struct RelationalRowPageSlotRead {
-    pub bytes: Arc<[u8]>,
+    pub page: VerifiedRowPage,
     pub cache_hit: bool,
     pub cache_miss: bool,
     pub cache_admission_rejected: bool,
@@ -259,28 +260,31 @@ impl RelationalRowPageRootReader {
             content_digest: ContentDigest(descriptor.slot_integrity.slot_crc32c as u64),
             representation: RepresentationKind::RelationalRowPageSlot,
         };
-        if let Some(lease) = cache.get(&cache_key) {
+        let verification_tag = *descriptor.slot_integrity.slot_sha256.as_bytes();
+        if let Some(lease) = cache.get_verified(&cache_key, verification_tag) {
             let bytes = lease.into_arc();
-            self.validate_page_slot(descriptor, &bytes)?;
+            let metadata = self.validate_verified_page(descriptor, &bytes)?;
             return Ok(RelationalRowPageSlotRead {
-                bytes,
+                page: VerifiedRowPage::new(bytes, metadata),
                 cache_hit: true,
                 cache_miss: false,
                 cache_admission_rejected: false,
             });
         }
-        let bytes: Arc<[u8]> = self.read_page_slot_bytes(descriptor)?.into();
-        self.validate_page_slot(descriptor, &bytes)?;
-        match cache.insert(cache_key, Arc::clone(&bytes)) {
+        let slot = self.read_page_slot_bytes(descriptor)?;
+        let view = self.validate_page_slot(descriptor, &slot)?;
+        let metadata = VerifiedRowPageMetadata::from_view(&view);
+        let bytes: Arc<[u8]> = Arc::from(&slot[..view.encoded_len()]);
+        match cache.insert_verified(cache_key, verification_tag, Arc::clone(&bytes)) {
             Ok(lease) => Ok(RelationalRowPageSlotRead {
-                bytes: lease.into_arc(),
+                page: VerifiedRowPage::new(lease.into_arc(), metadata),
                 cache_hit: false,
                 cache_miss: true,
                 cache_admission_rejected: false,
             }),
             Err(SegmentCacheError::EntryTooLarge { .. })
             | Err(SegmentCacheError::PinnedCapacity { .. }) => Ok(RelationalRowPageSlotRead {
-                bytes,
+                page: VerifiedRowPage::new(bytes, metadata),
                 cache_hit: false,
                 cache_miss: true,
                 cache_admission_rejected: true,
@@ -333,6 +337,25 @@ impl RelationalRowPageRootReader {
             )));
         }
         let view = RelationalRowPageView::open_slot(slot, self.config.page_limits)?;
+        self.validate_page_identity(descriptor, &view)?;
+        Ok(view)
+    }
+
+    fn validate_verified_page(
+        &self,
+        descriptor: &RelationalRowPageRootDescriptor,
+        encoded: &[u8],
+    ) -> Result<VerifiedRowPageMetadata, RelationalRowPagePublicationError> {
+        let view = RelationalRowPageView::open_verified(encoded, self.config.page_limits)?;
+        self.validate_page_identity(descriptor, &view)?;
+        Ok(VerifiedRowPageMetadata::from_view(&view))
+    }
+
+    fn validate_page_identity(
+        &self,
+        descriptor: &RelationalRowPageRootDescriptor,
+        view: &RelationalRowPageView<'_>,
+    ) -> Result<(), RelationalRowPagePublicationError> {
         if view.page_id() != descriptor.logical_page_id
             || view.generation() != descriptor.physical_generation
             || view.source_commit_epoch() != descriptor.source_commit_epoch
@@ -346,7 +369,7 @@ impl RelationalRowPageRootReader {
                 descriptor.logical_page_id.get()
             )));
         }
-        Ok(view)
+        Ok(())
     }
 
     pub fn visit_table_pages<F>(

@@ -52,7 +52,16 @@ fn point_projection_hydrates_only_selected_overflow_and_reuses_cache() {
     assert_eq!(cold_report.hydrated_values, 0);
     assert_eq!(inline_budget.hydrated_rows, 0);
     assert_eq!(inline_budget.compressed_bytes, 0);
-    assert_eq!(fixture.cache.snapshot().pinned_bytes, 0);
+    let cached = fixture.cache.snapshot();
+    let encoded_page_bytes = fixture
+        .row_root
+        .read_table_page_descriptor("documents", 0)
+        .expect("read cached page descriptor")
+        .slot_integrity
+        .encoded_len as u64;
+    assert_eq!(cached.pinned_bytes, 0);
+    assert_eq!(cached.resident_bytes, encoded_page_bytes);
+    assert!(cached.resident_bytes < PAGE_BYTES as u64);
 
     let mut overflow_budget = RelationalHydrationBudget::default();
     let (projected, warm_report) = fixture
