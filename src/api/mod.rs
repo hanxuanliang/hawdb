@@ -448,16 +448,35 @@ impl Default for DatabaseConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryOutput {
-    pub rows: Vec<Row>,
+    pub rows: executor::QueryRows,
 }
 
 impl QueryOutput {
+    pub fn from_rows(rows: Vec<Row>) -> Self {
+        Self { rows: rows.into() }
+    }
+
+    pub fn try_from_value_rows(
+        schema: executor::QuerySchema,
+        rows: Vec<Vec<Value>>,
+    ) -> Result<Self> {
+        Ok(Self {
+            rows: executor::QueryRows::try_from_value_rows(schema, rows)?,
+        })
+    }
+
+    pub fn schema(&self) -> &executor::QuerySchema {
+        self.rows.schema()
+    }
+
+    pub fn value_rows(&self) -> &[Vec<Value>] {
+        self.rows.value_rows()
+    }
+
     /// Returns the deterministic payload accounting used by query result
     /// admission. Container allocation overhead is intentionally excluded.
     pub fn payload_bytes(&self) -> usize {
-        self.rows.iter().fold(0usize, |total, row| {
-            total.saturating_add(executor::map_payload_bytes(row))
-        })
+        self.rows.payload_bytes()
     }
 }
 
@@ -975,7 +994,7 @@ impl Database {
                 &mut store,
                 max_rows,
             )?;
-            Ok(QueryOutput { rows })
+            Ok(QueryOutput { rows: rows.into() })
         })();
         self.store.poison_on_storage_error(&query_result);
         self.record_statement_execution(
@@ -1150,7 +1169,7 @@ impl Database {
         let profiled = profiled?;
         Ok(ExplainAnalyzeOutput {
             output: QueryOutput {
-                rows: profiled.rows,
+                rows: profiled.rows.into(),
             },
             execution_profile: profiled.profile,
             physical_plan: optimized.physical_plan,
@@ -2376,7 +2395,7 @@ impl Database {
     }
 
     pub fn plan_schema_maintenance(&self) -> QueryOutput {
-        let rows = self
+        let rows: Vec<Row> = self
             .store
             .plan_schema_maintenance(&self.catalog)
             .into_iter()
@@ -2400,7 +2419,7 @@ impl Database {
                 ])
             })
             .collect();
-        QueryOutput { rows }
+        QueryOutput { rows: rows.into() }
     }
 
     pub fn schema_maintenance_background_work_plan(
@@ -19214,7 +19233,7 @@ fn execute_graph_transaction_statement(
             )?;
             Ok((
                 QueryOutput {
-                    rows: returned_rows.unwrap_or_default(),
+                    rows: returned_rows.unwrap_or_default().into(),
                 },
                 transaction.lock_footprint_since(&statement_savepoint)?,
             ))
@@ -19246,7 +19265,7 @@ fn execute_graph_transaction_statement(
             &runtime.config.execution_memory,
         )
         .map(|profiled| QueryOutput {
-            rows: profiled.rows,
+            rows: profiled.rows.into(),
         })
     };
     transaction.store().poison_on_storage_error(&query_result);
@@ -19481,7 +19500,9 @@ fn execute_database_transaction_sql(
         .relational_transaction
         .writes
         .extend(transaction.writes);
-    Ok(QueryOutput { rows: Vec::new() })
+    Ok(QueryOutput {
+        rows: Vec::new().into(),
+    })
 }
 
 fn map_transaction_relational_error(error: skein_storage::RelationalError) -> SkeinError {
@@ -19545,7 +19566,9 @@ fn commit_database_transaction_state(
         )?
     };
     db.complete_required_relational_row_checkpoint("transaction commit")?;
-    Ok(QueryOutput { rows: summary.rows })
+    Ok(QueryOutput {
+        rows: summary.rows.into(),
+    })
 }
 
 impl DatabaseTransaction<'_> {
@@ -19678,7 +19701,9 @@ impl DatabaseSession<'_> {
                 );
                 self.graph_transaction =
                     Some(self.db.store.begin_mutation_transaction(&self.db.catalog));
-                Ok(QueryOutput { rows: Vec::new() })
+                Ok(QueryOutput {
+                    rows: Vec::new().into(),
+                })
             }
             cypher::Statement::Commit => {
                 reject_transaction_control_parameters("COMMIT", parameters)?;
@@ -19695,7 +19720,9 @@ impl DatabaseSession<'_> {
                     skein_storage::RelationalTransaction::default(),
                     self.db.config.mutation_limits,
                 )?;
-                Ok(QueryOutput { rows: summary.rows })
+                Ok(QueryOutput {
+                    rows: summary.rows.into(),
+                })
             }
             cypher::Statement::Rollback => {
                 reject_transaction_control_parameters("ROLLBACK", parameters)?;
@@ -19705,7 +19732,9 @@ impl DatabaseSession<'_> {
                     ));
                 }
                 self.transaction_runtime.take();
-                Ok(QueryOutput { rows: Vec::new() })
+                Ok(QueryOutput {
+                    rows: Vec::new().into(),
+                })
             }
             cypher::Statement::Checkpoint if self.graph_transaction.is_some() => {
                 Err(SkeinError::Execution(
@@ -19793,7 +19822,8 @@ impl DatabaseSession<'_> {
                     inner_statement_kind,
                     profiled.rows.len(),
                     &profiled.profile,
-                )],
+                )]
+                .into(),
             });
         }
         Ok(QueryOutput {
@@ -19801,7 +19831,8 @@ impl DatabaseSession<'_> {
                 &optimized,
                 work_request,
                 inner_statement_kind,
-            )],
+            )]
+            .into(),
         })
     }
 }
@@ -20329,7 +20360,7 @@ impl DatabaseReadTransaction {
         query_runtime::query_runtime_checkpoint(task_context)?;
         Ok(BoundedReadQueryOutput {
             output: QueryOutput {
-                rows: profiled.rows,
+                rows: profiled.rows.into(),
             },
             execution_profile: profiled.profile,
         })
@@ -20406,7 +20437,8 @@ impl DatabaseReadTransaction {
                         inner_statement_kind,
                         row_count,
                         &profiled.profile,
-                    )],
+                    )]
+                    .into(),
                 },
                 execution_profile: profiled.profile,
             });
@@ -20417,7 +20449,8 @@ impl DatabaseReadTransaction {
                     &optimized,
                     work_request,
                     inner_statement_kind,
-                )],
+                )]
+                .into(),
             },
             execution_profile: empty_read_execution_profile(),
         })

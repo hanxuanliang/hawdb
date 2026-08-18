@@ -708,6 +708,39 @@ mod tests {
     }
 
     #[test]
+    fn database_sql_exposes_projection_schema_without_row_maps() {
+        let mut database = Database::new();
+        database
+            .query_sql("CREATE TABLE documents (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
+            .expect("create documents table");
+        database
+            .query_sql("INSERT INTO documents (id, body) VALUES ('doc-1', 'body-1')")
+            .expect("insert document");
+
+        let output = database
+            .query_sql("SELECT body AS payload, id FROM documents")
+            .expect("query positional result");
+        assert_eq!(output.schema().columns(), ["payload", "id"]);
+        assert_eq!(
+            output.value_rows(),
+            &[vec![
+                Value::String("body-1".to_string()),
+                Value::String("doc-1".to_string()),
+            ]]
+        );
+        assert_eq!(
+            output.rows[0]["payload"],
+            Value::String("body-1".to_string())
+        );
+
+        let empty = database
+            .query_sql("SELECT body AS payload, id FROM documents WHERE body = 'missing'")
+            .expect("query empty positional result");
+        assert_eq!(empty.schema().columns(), ["payload", "id"]);
+        assert!(empty.value_rows().is_empty());
+    }
+
+    #[test]
     fn borrowed_streaming_binding_matches_owned_three_valued_execution() {
         let mut database = Database::new();
         database

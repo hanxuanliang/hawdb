@@ -1,9 +1,9 @@
 use super::{bind_sql_value, compare_value_refs, relational_ref_to_value, value_to_relational};
 use crate::error::{Result, SkeinError};
-use crate::executor::Row;
 use crate::relational_sql::row_access::RelationalReadRowRef;
 use crate::sql::{SelectProjection, SqlColumnRef, SqlComparisonOp, SqlPredicate};
 use crate::value::Value;
+use skein_executor::QuerySchema;
 use skein_storage::{RelationalTableSchema, RelationalValue, RelationalValueRef};
 
 pub(super) enum BoundStreamingPredicate {
@@ -153,6 +153,8 @@ impl BoundStreamingPredicate {
 
 pub(super) struct BoundStreamingProjection {
     columns: Box<[BoundStreamingColumn]>,
+    schema: QuerySchema,
+    row_name_bytes: usize,
 }
 
 struct BoundStreamingColumn {
@@ -202,21 +204,33 @@ impl BoundStreamingProjection {
                 duplicate.output_name
             )));
         }
+        let schema = QuerySchema::try_new(columns.iter().map(|column| column.output_name.clone()))?;
+        let row_name_bytes = columns.iter().fold(0usize, |total, column| {
+            total.saturating_add(column.output_name.len())
+        });
         Ok(Self {
             columns: columns.into_boxed_slice(),
+            schema,
+            row_name_bytes,
         })
     }
 
-    pub(super) fn project(&self, row: RelationalReadRowRef<'_>) -> Result<Row> {
-        let mut output = Row::new();
+    pub(super) fn schema(&self) -> &QuerySchema {
+        &self.schema
+    }
+
+    pub(super) fn project_values(&self, row: RelationalReadRowRef<'_>) -> Result<Vec<Value>> {
+        let mut output = Vec::with_capacity(self.columns.len());
         for column in &self.columns {
-            let previous = output.insert(
-                column.output_name.clone(),
-                relational_ref_to_value(row.value(column.ordinal)?)?,
-            );
-            debug_assert!(previous.is_none(), "projection names were bound uniquely");
+            output.push(relational_ref_to_value(row.value(column.ordinal)?)?);
         }
         Ok(output)
+    }
+
+    pub(super) fn payload_bytes(&self, values: &[Value]) -> usize {
+        values.iter().fold(self.row_name_bytes, |total, value| {
+            total.saturating_add(skein_executor::query_value_payload_bytes(value))
+        })
     }
 }
 

@@ -1,8 +1,299 @@
+use crate::binding::value_payload_bytes;
 use crate::columnar::ColumnarRowRef;
-use skein_core::{Value, ValueRef};
+use skein_core::{Result, SkeinError, Value, ValueRef};
 use std::collections::BTreeMap;
+use std::ops::Deref;
+use std::sync::{Arc, OnceLock};
 
 pub type Row = BTreeMap<String, Value>;
+
+/// Column names shared by every row of one query result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuerySchema {
+    columns: Arc<[String]>,
+}
+
+impl QuerySchema {
+    pub fn try_new(columns: impl IntoIterator<Item = String>) -> Result<Self> {
+        let columns = columns.into_iter().collect::<Vec<_>>();
+        let mut unique = std::collections::BTreeSet::new();
+        if let Some(duplicate) = columns
+            .iter()
+            .find(|column| !unique.insert(column.as_str()))
+        {
+            return Err(SkeinError::Semantic(format!(
+                "query result schema contains duplicate column {duplicate}"
+            )));
+        }
+        Ok(Self {
+            columns: Arc::from(columns),
+        })
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            columns: Arc::from([]),
+        }
+    }
+
+    pub fn columns(&self) -> &[String] {
+        &self.columns
+    }
+
+    pub fn len(&self) -> usize {
+        self.columns.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.columns.is_empty()
+    }
+
+    pub fn position(&self, name: &str) -> Option<usize> {
+        self.columns.iter().position(|column| column == name)
+    }
+}
+
+/// Schema-bearing result rows. Values are stored positionally; the legacy
+/// map representation is constructed only when a compatibility caller asks
+/// for it through the slice facade.
+pub struct QueryRows {
+    schema: QuerySchema,
+    values: Vec<Vec<Value>>,
+    compatibility_rows: OnceLock<Vec<Row>>,
+}
+
+impl QueryRows {
+    pub fn empty() -> Self {
+        Self::from_value_rows_unchecked(QuerySchema::empty(), Vec::new())
+    }
+
+    pub fn try_from_value_rows(schema: QuerySchema, values: Vec<Vec<Value>>) -> Result<Self> {
+        if let Some((row, width)) = values
+            .iter()
+            .enumerate()
+            .find_map(|(row, values)| (values.len() != schema.len()).then_some((row, values.len())))
+        {
+            return Err(SkeinError::Execution(format!(
+                "query result row {row} has width {width}, expected {}",
+                schema.len()
+            )));
+        }
+        Ok(Self::from_value_rows_unchecked(schema, values))
+    }
+
+    fn from_value_rows_unchecked(schema: QuerySchema, values: Vec<Vec<Value>>) -> Self {
+        Self {
+            schema,
+            values,
+            compatibility_rows: OnceLock::new(),
+        }
+    }
+
+    pub fn schema(&self) -> &QuerySchema {
+        &self.schema
+    }
+
+    pub fn value_rows(&self) -> &[Vec<Value>] {
+        &self.values
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    pub fn value(&self, row: usize, column: usize) -> Option<ValueRef<'_>> {
+        self.values.get(row)?.get(column).map(Value::as_ref)
+    }
+
+    pub fn get(&self, row: usize, column: &str) -> Option<ValueRef<'_>> {
+        self.value(row, self.schema.position(column)?)
+    }
+
+    pub fn into_rows(self) -> Vec<Row> {
+        let Self {
+            schema,
+            values,
+            compatibility_rows,
+        } = self;
+        if let Some(rows) = compatibility_rows.into_inner() {
+            return rows;
+        }
+        let columns = schema.columns;
+        values
+            .into_iter()
+            .map(|values| columns.iter().cloned().zip(values).collect())
+            .collect()
+    }
+
+    pub fn retain(&mut self, mut keep: impl FnMut(&Row) -> bool) {
+        let mut rows = self
+            .compatibility_rows
+            .take()
+            .unwrap_or_else(|| materialize_rows(&self.schema, &self.values));
+        rows.retain(|row| keep(row));
+        *self = rows.into();
+    }
+
+    pub fn extend(&mut self, rows: impl IntoIterator<Item = Row>) {
+        let mut compatibility = self
+            .compatibility_rows
+            .take()
+            .unwrap_or_else(|| materialize_rows(&self.schema, &self.values));
+        compatibility.extend(rows);
+        *self = compatibility.into();
+    }
+
+    pub fn as_slice(&self) -> &[Row] {
+        self.compatibility_rows()
+    }
+
+    pub fn sort(&mut self) {
+        let mut rows = self
+            .compatibility_rows
+            .take()
+            .unwrap_or_else(|| materialize_rows(&self.schema, &self.values));
+        rows.sort();
+        *self = rows.into();
+    }
+
+    pub fn payload_bytes(&self) -> usize {
+        let names = self
+            .schema
+            .columns()
+            .iter()
+            .fold(0usize, |total, name| total.saturating_add(name.len()));
+        self.values.iter().flatten().fold(names, |total, value| {
+            total.saturating_add(value_payload_bytes(value))
+        })
+    }
+
+    fn compatibility_rows(&self) -> &[Row] {
+        self.compatibility_rows
+            .get_or_init(|| materialize_rows(&self.schema, &self.values))
+    }
+}
+
+impl Default for QueryRows {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl From<Vec<Row>> for QueryRows {
+    fn from(rows: Vec<Row>) -> Self {
+        let columns = rows
+            .iter()
+            .flat_map(|row| row.keys().cloned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let schema = QuerySchema::try_new(columns).expect("BTreeSet columns are unique");
+        let values = rows
+            .into_iter()
+            .map(|mut row| {
+                schema
+                    .columns()
+                    .iter()
+                    .map(|column| row.remove(column).unwrap_or(Value::Null))
+                    .collect()
+            })
+            .collect();
+        Self {
+            schema,
+            values,
+            compatibility_rows: OnceLock::new(),
+        }
+    }
+}
+
+impl FromIterator<Row> for QueryRows {
+    fn from_iter<T: IntoIterator<Item = Row>>(iter: T) -> Self {
+        iter.into_iter().collect::<Vec<_>>().into()
+    }
+}
+
+impl Clone for QueryRows {
+    fn clone(&self) -> Self {
+        Self {
+            schema: self.schema.clone(),
+            values: self.values.clone(),
+            compatibility_rows: OnceLock::new(),
+        }
+    }
+}
+
+impl std::fmt::Debug for QueryRows {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QueryRows")
+            .field("schema", &self.schema)
+            .field("values", &self.values)
+            .finish()
+    }
+}
+
+impl PartialEq for QueryRows {
+    fn eq(&self, other: &Self) -> bool {
+        self.schema == other.schema && self.values == other.values
+    }
+}
+
+impl Eq for QueryRows {}
+
+impl PartialEq<Vec<Row>> for QueryRows {
+    fn eq(&self, other: &Vec<Row>) -> bool {
+        self.compatibility_rows() == other
+    }
+}
+
+impl PartialEq<QueryRows> for Vec<Row> {
+    fn eq(&self, other: &QueryRows) -> bool {
+        self == other.compatibility_rows()
+    }
+}
+
+impl Deref for QueryRows {
+    type Target = [Row];
+
+    fn deref(&self) -> &Self::Target {
+        self.compatibility_rows()
+    }
+}
+
+impl<'a> IntoIterator for &'a QueryRows {
+    type Item = &'a Row;
+    type IntoIter = std::slice::Iter<'a, Row>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.compatibility_rows().iter()
+    }
+}
+
+impl IntoIterator for QueryRows {
+    type Item = Row;
+    type IntoIter = std::vec::IntoIter<Row>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_rows().into_iter()
+    }
+}
+
+fn materialize_rows(schema: &QuerySchema, values: &[Vec<Value>]) -> Vec<Row> {
+    values
+        .iter()
+        .map(|values| {
+            schema
+                .columns()
+                .iter()
+                .cloned()
+                .zip(values.iter().cloned())
+                .collect()
+        })
+        .collect()
+}
 
 /// A row view whose values remain valid only for the current consumer call.
 ///
@@ -241,6 +532,51 @@ mod tests {
         assert_eq!(row_ref.get("id"), Some(ValueRef::Int(7)));
         assert_eq!(row_ref.get("content").unwrap().as_str(), Some("payload"));
         assert_eq!(row_ref.to_owned_row(), row);
+    }
+
+    #[test]
+    fn schema_bearing_rows_keep_names_once_and_materialize_maps_lazily() {
+        let schema = QuerySchema::try_new(["payload".to_string(), "id".to_string()]).unwrap();
+        let rows = QueryRows::try_from_value_rows(
+            schema,
+            vec![
+                vec![Value::String("one".to_string()), Value::Int(1)],
+                vec![Value::String("two".to_string()), Value::Int(2)],
+            ],
+        )
+        .unwrap();
+
+        assert!(rows.compatibility_rows.get().is_none());
+        assert_eq!(rows.schema().columns(), ["payload", "id"]);
+        assert_eq!(rows.get(1, "payload").unwrap().as_str(), Some("two"));
+        assert_eq!(rows.value(0, 1), Some(ValueRef::Int(1)));
+        assert_eq!(rows.payload_bytes(), "payload".len() + "id".len() + 6 + 16);
+        assert!(rows.compatibility_rows.get().is_none());
+        assert_eq!(rows.len(), 2);
+        assert!(!rows.is_empty());
+        assert!(rows.compatibility_rows.get().is_none());
+
+        assert_eq!(rows[0]["payload"], Value::String("one".to_string()));
+        assert!(rows.compatibility_rows.get().is_some());
+    }
+
+    #[test]
+    fn schema_bearing_rows_reject_duplicate_columns_and_width_mismatch() {
+        assert!(QuerySchema::try_new(["id".to_string(), "id".to_string()]).is_err());
+        let schema = QuerySchema::try_new(["id".to_string()]).unwrap();
+        assert!(QueryRows::try_from_value_rows(schema, vec![vec![]]).is_err());
+
+        let left = QueryRows::try_from_value_rows(
+            QuerySchema::try_new(["left".to_string(), "right".to_string()]).unwrap(),
+            vec![vec![Value::Int(1), Value::Int(2)]],
+        )
+        .unwrap();
+        let right = QueryRows::try_from_value_rows(
+            QuerySchema::try_new(["right".to_string(), "left".to_string()]).unwrap(),
+            vec![vec![Value::Int(1), Value::Int(2)]],
+        )
+        .unwrap();
+        assert_ne!(left, right);
     }
 
     #[test]

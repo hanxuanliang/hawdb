@@ -494,7 +494,8 @@ impl Database {
                         rows: vec![derived_artifact_job_failure_row(
                             &self.derived_artifact_jobs[index],
                             &error.to_string(),
-                        )],
+                        )]
+                        .into(),
                     },
                 }))
             }
@@ -1085,7 +1086,8 @@ impl Database {
                         rows: vec![derived_artifact_job_failure_row(
                             &self.derived_artifact_jobs[index],
                             &error.to_string(),
-                        )],
+                        )]
+                        .into(),
                     },
                 }))
             }
@@ -1239,7 +1241,7 @@ fn external_content_artifact_completion_output(
     completion: ExternalContentArtifactJobCompletion,
 ) -> QueryOutput {
     QueryOutput {
-        rows: vec![external_content_artifact_completion_row(job, completion)],
+        rows: vec![external_content_artifact_completion_row(job, completion)].into(),
     }
 }
 

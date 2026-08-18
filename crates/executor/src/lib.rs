@@ -34,6 +34,8 @@ pub mod store;
 pub mod traversal;
 pub mod vector;
 
+pub use binding::value_payload_bytes as query_value_payload_bytes;
+
 pub use columnar::{
     filter_boolean_column, filter_float64_values, filter_float64_values_view, filter_int64_values,
     filter_int64_values_view, filter_numeric_column, select_float64_values_view,
@@ -60,7 +62,7 @@ pub use morsel::{
 };
 pub use profile::{
     BlockingOperatorMemoryReport, PipelineMemoryReport, ProfiledQueryRows, ProfiledQueryStream,
-    ReadExecutionProfile, Row, RowRef, RowRefIter,
+    QueryRows, QuerySchema, ReadExecutionProfile, Row, RowRef, RowRefIter,
 };
 pub use spill::SpillPoolSnapshot;
 pub use vector::{

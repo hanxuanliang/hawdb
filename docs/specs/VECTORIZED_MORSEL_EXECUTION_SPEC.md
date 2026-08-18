@@ -38,6 +38,17 @@ checking, branch selection, and immediate serialization SHOULD consume
 be explicit and delayed until a result is retained beyond the current batch or
 consumer call.
 
+### Schema-bearing result boundary
+
+Collected query results MUST store one immutable `QuerySchema` plus positional
+`Vec<Value>` rows. Column names MUST NOT be copied into a tree node for every
+row. Consumers that read `schema()` and `value_rows()` stay on this compact
+representation. The legacy `Row = BTreeMap<String, Value>` view is a lazy
+formatting compatibility boundary; materializing it MUST not be required by
+query execution or by schema-aware embedded consumers. Empty relational reads
+MUST retain their projected schema, and every positional row width MUST equal
+the schema width.
+
 `ColumnarRowRef` exposes selected columnar rows by slot or name, and `RowRef`
 provides one host-facing view over scalar-map fallback rows and columnar rows.
 A synchronous consumer MUST NOT retain either view. It MAY call

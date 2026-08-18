@@ -210,7 +210,9 @@ impl Database {
             .store
             .commit_relational_transaction(&mut self.catalog, transaction)?;
         self.complete_required_relational_row_checkpoint("SQL commit")?;
-        Ok(QueryOutput { rows: summary.rows })
+        Ok(QueryOutput {
+            rows: summary.rows.into(),
+        })
     }
 
     pub fn slow_query_log_jsonl(&self) -> Result<String> {

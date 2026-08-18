@@ -521,7 +521,7 @@ impl SkeinTokioEmbedded {
                             Ok(())
                         },
                     )?;
-                    Ok(QueryOutput { rows })
+                    Ok(QueryOutput { rows: rows.into() })
                 })
                 .await
                 .map_err(SkeinTokioEmbeddedError::Task)

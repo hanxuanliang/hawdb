@@ -816,7 +816,11 @@ mod group_commit_tests {
     }
 
     fn successful_task() -> CommitTask {
-        Box::new(|_| Ok(QueryOutput { rows: Vec::new() }))
+        Box::new(|_| {
+            Ok(QueryOutput {
+                rows: Vec::new().into(),
+            })
+        })
     }
 
     #[test]

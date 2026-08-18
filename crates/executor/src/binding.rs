@@ -157,7 +157,7 @@ pub fn relationship_memory_bytes(relationship: &RelRecord) -> usize {
     std::mem::size_of::<RelRecord>().saturating_add(map_memory_bytes(&relationship.properties))
 }
 
-fn value_payload_bytes(value: &Value) -> usize {
+pub fn value_payload_bytes(value: &Value) -> usize {
     match value {
         Value::Null => 0,
         Value::Bool(_) => std::mem::size_of::<bool>(),

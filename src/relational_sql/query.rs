@@ -25,8 +25,8 @@ use skein_executor::observer::ExecutionObserver;
 use skein_executor::pipeline::{BatchControl, BindingBatch};
 use skein_executor::{
     BindingSchema, BlockingOperatorMemoryReport, ColumnVector, ColumnarBatch, ExecutionLimit,
-    QueryMemoryClass, QueryMemoryLease, QueryMemoryLedger, RelationalRowLocator, SlotDescriptor,
-    SlotId, SlotType,
+    QueryMemoryClass, QueryMemoryLease, QueryMemoryLedger, QueryRows, RelationalRowLocator,
+    SlotDescriptor, SlotId, SlotType,
 };
 use skein_optimizer::{
     select_relational_access_path, RelationalAccessPathDescriptor, RelationalAccessPathKind,
@@ -65,7 +65,7 @@ pub(crate) struct RelationalQueryLimits {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RelationalQueryOutput {
-    pub rows: Vec<Row>,
+    pub rows: QueryRows,
     pub intermediate_rows: usize,
     pub hydration: RelationalHydrationBudget,
     pub access_path: RelationalAccessPathDescriptor,
@@ -439,7 +439,7 @@ fn execute_select<'state>(
             select,
             parameters,
             RelationalQueryOutput {
-                rows: Vec::new(),
+                rows: QueryRows::empty(),
                 intermediate_rows: 0,
                 hydration: limits.hydration,
                 access_path,
@@ -801,7 +801,7 @@ fn format_relational_explain(
         }
         push_relational_output(row, &mut rows, &mut payload_bytes, limits)?;
     }
-    output.rows = rows;
+    output.rows = rows.into();
     Ok(output)
 }
 
@@ -1690,7 +1690,7 @@ fn visit_joined_row<'a>(
 }
 
 struct StreamingProjectionOutput {
-    rows: Vec<Row>,
+    rows: QueryRows,
     blocking_operator_memory_reports: Vec<BlockingOperatorMemoryReport>,
 }
 
@@ -1921,7 +1921,7 @@ fn execute_blocking_projection<'a>(
 
     if detection_limit == 0 {
         return Ok(StreamingProjectionOutput {
-            rows: output,
+            rows: output.into(),
             blocking_operator_memory_reports: Vec::new(),
         });
     }
@@ -2068,7 +2068,7 @@ fn execute_blocking_projection<'a>(
         observer.record_blocking_memory_report(report);
     }
     Ok(StreamingProjectionOutput {
-        rows: output,
+        rows: output.into(),
         blocking_operator_memory_reports: observer.reports.into_inner(),
     })
 }
@@ -2428,7 +2428,7 @@ fn execute_ordered_index_projection<'a>(
         locator_batch.emit(&mut hydrate)?;
     }
     Ok(StreamingProjectionOutput {
-        rows: output,
+        rows: output.into(),
         blocking_operator_memory_reports: Vec::new(),
     })
 }
@@ -2509,7 +2509,7 @@ fn execute_streaming_projection<'a>(
         )?;
     }
     Ok(StreamingProjectionOutput {
-        rows: output,
+        rows: output.into(),
         blocking_operator_memory_reports: Vec::new(),
     })
 }
@@ -2573,8 +2573,8 @@ fn execute_borrowed_streaming_full_scan(
                     limits.max_output_rows
                 )));
             }
-            let projected = projection.project(row)?;
-            payload_bytes = payload_bytes.saturating_add(map_payload_bytes(&projected));
+            let projected = projection.project_values(row)?;
+            payload_bytes = payload_bytes.saturating_add(projection.payload_bytes(&projected));
             if payload_bytes > limits.max_output_payload_bytes {
                 return Err(SkeinError::Execution(format!(
                     "relational SQL output exceeds max_output_payload_bytes {}",
@@ -2586,7 +2586,7 @@ fn execute_borrowed_streaming_full_scan(
         })?;
     }
     Ok(StreamingProjectionOutput {
-        rows: output,
+        rows: QueryRows::try_from_value_rows(projection.schema().clone(), output)?,
         blocking_operator_memory_reports: Vec::new(),
     })
 }
@@ -2714,7 +2714,7 @@ fn execute_aggregate_select<'a>(
             rows.push(row);
         }
         return Ok(RelationalQueryOutput {
-            rows,
+            rows: rows.into(),
             intermediate_rows,
             hydration: row_runtime.hydration(),
             access_path,
@@ -2837,7 +2837,7 @@ fn execute_aggregate_select<'a>(
         )));
     }
     Ok(RelationalQueryOutput {
-        rows: output,
+        rows: output.into(),
         intermediate_rows,
         hydration: row_runtime.hydration(),
         access_path,
@@ -2946,7 +2946,7 @@ fn execute_single_count_distinct<'a>(
         ));
     }
     Ok(RelationalQueryOutput {
-        rows: vec![row],
+        rows: vec![row].into(),
         intermediate_rows: pipeline.intermediate_rows,
         hydration: row_runtime.hydration(),
         access_path,
@@ -3119,7 +3119,7 @@ fn execute_grouped_aggregate<'a>(
         execution_memory,
     ));
     Ok(RelationalQueryOutput {
-        rows: output,
+        rows: output.into(),
         intermediate_rows: pipeline.intermediate_rows,
         hydration: row_runtime.hydration(),
         access_path,

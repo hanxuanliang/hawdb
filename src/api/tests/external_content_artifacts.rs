@@ -65,7 +65,8 @@ fn pending_external_content_artifact_jobs_are_bounded_and_filtered() {
                 rows: vec![BTreeMap::from([(
                     "job_id".to_string(),
                     Value::Int(job.id as i64),
-                )])],
+                )])]
+                .into(),
             })
         })
         .unwrap()
@@ -217,7 +218,8 @@ fn succeeded_external_content_artifact_jobs_are_bounded_and_filtered() {
                         "projection_ref".to_string(),
                         Value::String("search:v1".to_string()),
                     ),
-                ])],
+                ])]
+                .into(),
             })
         })
         .unwrap()
@@ -233,7 +235,8 @@ fn succeeded_external_content_artifact_jobs_are_bounded_and_filtered() {
                         "projection_ref".to_string(),
                         Value::String("crawl-log:v1".to_string()),
                     ),
-                ])],
+                ])]
+                .into(),
             })
         })
         .unwrap()
@@ -326,7 +329,8 @@ fn external_content_artifact_job_summary_counts_runtime_work_only() {
                 rows: vec![BTreeMap::from([(
                     "job_id".to_string(),
                     Value::Int(job.id as i64),
-                )])],
+                )])]
+                .into(),
             })
         })
         .unwrap()
@@ -588,7 +592,8 @@ fn external_content_runtime_manifest_runs_only_claimable_jobs() {
                         "runtime_name".to_string(),
                         Value::String("markdown-parser".to_string()),
                     ),
-                ])],
+                ])]
+                .into(),
             })
         })
         .unwrap()
@@ -651,7 +656,8 @@ fn failed_external_content_artifact_jobs_can_be_retried() {
                 rows: vec![BTreeMap::from([
                     ("job_id".to_string(), Value::Int(job.id as i64)),
                     ("attempts".to_string(), Value::Int(job.attempts as i64)),
-                ])],
+                ])]
+                .into(),
             })
         })
         .unwrap()
@@ -811,7 +817,8 @@ fn caller_owned_content_artifact_runtime_can_complete_external_jobs() {
                             .unwrap_or(Value::String("unknown".to_string())),
                     ),
                     ("parsed_chunks".to_string(), Value::Int(2)),
-                ])],
+                ])]
+                .into(),
             })
         })
         .unwrap()
@@ -849,7 +856,8 @@ fn caller_owned_content_artifact_runtime_can_complete_external_jobs() {
                     Value::String("search".to_string()),
                 ),
                 ("parsed_chunks".to_string(), Value::Int(2)),
-            ])],
+            ])]
+            .into(),
         })
     );
     assert!(db
@@ -902,7 +910,8 @@ fn background_external_content_artifact_job_can_run_next_job_for_action() {
                     rows: vec![BTreeMap::from([(
                         "job_id".to_string(),
                         Value::Int(job.id as i64),
-                    )])],
+                    )])]
+                    .into(),
                 })
             },
             2,
@@ -971,7 +980,8 @@ fn scheduled_background_external_content_artifact_job_tracks_import_budget() {
                     rows: vec![BTreeMap::from([(
                         "job_id".to_string(),
                         Value::Int(job.id as i64),
-                    )])],
+                    )])]
+                    .into(),
                 })
             },
             2,
@@ -1075,7 +1085,8 @@ fn background_external_content_artifact_job_can_run_specific_pending_job() {
                     rows: vec![BTreeMap::from([(
                         "job_id".to_string(),
                         Value::Int(job.id as i64),
-                    )])],
+                    )])]
+                    .into(),
                 })
             },
             1,
@@ -1185,7 +1196,8 @@ fn caller_owned_content_artifact_runtime_can_run_specific_pending_job() {
                 rows: vec![BTreeMap::from([(
                     "job_id".to_string(),
                     Value::Int(job.id as i64),
-                )])],
+                )])]
+                .into(),
             })
         })
         .unwrap()
@@ -1215,7 +1227,8 @@ fn caller_owned_content_artifact_runtime_can_run_specific_pending_job() {
                 rows: vec![BTreeMap::from([(
                     "job_id".to_string(),
                     Value::Int(job.id as i64),
-                )])],
+                )])]
+                .into(),
             })
         })
         .unwrap()
@@ -1495,7 +1508,8 @@ fn caller_owned_content_artifact_runtime_can_poll_and_run_by_action() {
                 rows: vec![BTreeMap::from([(
                     "job_id".to_string(),
                     Value::Int(job.id as i64),
-                )])],
+                )])]
+                .into(),
             })
         })
         .unwrap()
@@ -1518,7 +1532,8 @@ fn caller_owned_content_artifact_runtime_can_poll_and_run_by_action() {
                 rows: vec![BTreeMap::from([(
                     "job_id".to_string(),
                     Value::Int(job.id as i64),
-                )])],
+                )])]
+                .into(),
             })
         })
         .unwrap()

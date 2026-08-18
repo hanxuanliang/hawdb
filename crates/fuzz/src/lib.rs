@@ -790,7 +790,7 @@ fn execute_snapshot_case(
             search_mode,
             plan_fingerprint,
             optimizer_stages,
-            outcome: ExecutionOutcome::Rows(output.rows),
+            outcome: ExecutionOutcome::Rows(output.rows.into_rows()),
         },
         Err(error) => ExecutionObservation {
             snapshot_epoch,

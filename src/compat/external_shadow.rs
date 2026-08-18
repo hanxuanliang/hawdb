@@ -1269,7 +1269,7 @@ pub(super) fn decode_external_query_response(
         ))
     })?;
     Ok(QueryOutput {
-        rows: rows_from_json(engine_name, rows)?,
+        rows: rows_from_json(engine_name, rows)?.into(),
     })
 }
 
@@ -1397,11 +1397,13 @@ pub(super) fn decode_external_session_response(
                 ))
             })?;
             Ok(QueryOutput {
-                rows: rows_from_json(engine_name, rows).map_err(|error| {
+                rows: rows_from_json(engine_name, rows)
+                    .map_err(|error| {
                     SkeinError::Execution(format!(
                         "shadow engine '{engine_name}' session output {index} row decoding failed: {error}"
                     ))
-                })?,
+                })?
+                    .into(),
             })
         })
         .collect()
@@ -1764,7 +1766,9 @@ mod protocol_server_tests {
             self.executed.push(statement.cypher);
             let mut row = Row::new();
             row.insert("value".to_string(), Value::Int(self.executed.len() as i64));
-            Ok(QueryOutput { rows: vec![row] })
+            Ok(QueryOutput {
+                rows: vec![row].into(),
+            })
         }
     }
 

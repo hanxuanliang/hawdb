@@ -205,6 +205,7 @@ fn query_output_row(name: &str, value: Value) -> QueryOutput {
         rows: vec![BTreeMap::from([
             ("name".to_string(), Value::String(name.to_string())),
             ("value".to_string(), value),
-        ])],
+        ])]
+        .into(),
     }
 }

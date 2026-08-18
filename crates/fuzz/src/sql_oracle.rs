@@ -438,12 +438,12 @@ fn execute_sql_tlp_queries(
         match snapshot.query_sql_with_params(&query.sql, &query.parameters) {
             Ok(output) => SqlExecutionObservation {
                 snapshot_epoch: Some(snapshot_epoch),
-                plan,
-                outcome: ExecutionOutcome::Rows(output.rows),
+                plan: plan.map(|rows| rows.into_rows()),
+                outcome: ExecutionOutcome::Rows(output.rows.into_rows()),
             },
             Err(error) => SqlExecutionObservation {
                 snapshot_epoch: Some(snapshot_epoch),
-                plan,
+                plan: plan.map(|rows| rows.into_rows()),
                 outcome: sql_error_outcome("execute", error),
             },
         }

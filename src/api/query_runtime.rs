@@ -541,7 +541,9 @@ impl Database {
             }
             self.checkpoint()?;
             return Ok((
-                QueryOutput { rows: Vec::new() },
+                QueryOutput {
+                    rows: Vec::new().into(),
+                },
                 QueryExecutionTrace::uncached(statement),
             ));
         }
@@ -605,7 +607,7 @@ impl Database {
                 query_runtime_checkpoint(task_context)?;
             }
             Ok((
-                QueryOutput { rows },
+                QueryOutput { rows: rows.into() },
                 QueryExecutionTrace {
                     statement,
                     optimizer_trace: capture_trace.then_some(optimized.trace),
@@ -695,7 +697,8 @@ impl Database {
                     inner_statement_kind,
                     profiled.rows.len(),
                     &profiled.profile,
-                )],
+                )]
+                .into(),
             });
         }
         Ok(QueryOutput {
@@ -703,7 +706,8 @@ impl Database {
                 &optimized,
                 work_request,
                 inner_statement_kind,
-            )],
+            )]
+            .into(),
         })
     }
 }

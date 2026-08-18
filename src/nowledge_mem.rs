@@ -5590,7 +5590,7 @@ impl NowledgeMemReadSnapshot<'_> {
         )?;
         self.consume(report.output_rows, report.output_payload_bytes)?;
         self.cypher_statement_count = completed_statement_count;
-        Ok(QueryOutput { rows })
+        Ok(QueryOutput { rows: rows.into() })
     }
 
     pub fn query_sql(
@@ -10264,7 +10264,7 @@ fn streamed_nowledge_mem_read_output(
     streamed: QueryStreamReport,
     options: &NowledgeMemReadOptions,
 ) -> Result<NowledgeMemReadOutput> {
-    let output = QueryOutput { rows };
+    let output = QueryOutput { rows: rows.into() };
     let mut report = nowledge_mem_read_report(mode, &output, options, &streamed.execution_profile);
     report.streaming = true;
     debug_assert_eq!(report.row_count, streamed.output_rows);

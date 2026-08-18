@@ -403,7 +403,7 @@ impl SkeinEmbedded {
                         Ok(())
                     },
                 )
-                .map(|_| QueryOutput { rows })
+                .map(|_| QueryOutput { rows: rows.into() })
         };
         if !is_mutation {
             self.check_admitted_query_context(task_context)?;
