@@ -411,6 +411,12 @@ qualification justifies moving them.
     replayed or prevent cutover.
 
 - [ ] Close the production evidence and decommissioning gates.
+  - Bind the Mem thread-detail shadow to the typed bounded-snapshot report and
+    require at least one successful Cypher statement plus the summary and page
+    SQL statements from the same commit epoch. Recompute the row and payload
+    budget arithmetic in the integration evidence; search-bearing observations
+    must also require a non-zero external vector-seed execution count. Do not
+    accept a graph-only route report as proof of the mixed read.
   - The final release bundle now requires the identity-bound memory-policy
     matrix, distinct production and explicit 512 MiB read-only Content Store
     artifacts, and the isolated 1/4/8/10-writer mutation-replica matrix. It
@@ -463,8 +469,22 @@ qualification justifies moving them.
     retry a second parser after a failure.
   - [ ] Lower SQL/PGQ and Cypher into the same typed graph logical IR, optimizer,
     executor, snapshot, admission, cancellation, and explain pipeline.
+    - [x] Lower the qualified single-path, single-label, single-hop
+      `GRAPH_TABLE` subset into the shared `NodeScan`, `Expand`, `Filter`, and
+      `Project` operators with explicit parameter binding and source-spanned
+      fail-closed errors for unrepresented semantics.
+    - [ ] Integrate the surrounding PostgreSQL relational plan, shared snapshot,
+      admission, cancellation, explain, and equivalent-plan qualification
+      before enabling owned-parser production routing.
   - [ ] Add property-graph catalog durability, information-schema views, bounded
     fuzzing, PostgreSQL differential tests, and recovery qualification.
+    - [ ] Define transactional Property Graph descriptors over stable source
+      table/property identifiers, keys, endpoint mappings, labels, and property
+      exposure. Do not reuse analytics `ProjectedGraphDefinition`, which is a
+      rebuildable materialization selector and lacks semantic catalog identity.
+    - [ ] Publish descriptor creation through the source-schema transaction,
+      WAL, checkpoint, backup/restore, and system-schema upgrade boundary, then
+      add incompatible-source-DDL rejection and checkpoint/reopen coverage.
   - Acceptance: active SQL/PGQ statements produce PostgreSQL-compatible rows
     and error classes without a separate executor or public `query_gql` API.
 
