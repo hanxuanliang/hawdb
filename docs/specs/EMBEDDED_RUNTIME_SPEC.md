@@ -141,6 +141,23 @@ atomicity, recovery, runtime admission, projection generation publication, or a
 bounded multi-statement workflow. New single-query route wrappers and their
 request/output DTOs MUST NOT be added to the embedded facade.
 
+An App workflow that combines Cypher and PostgreSQL reads MUST use
+`NowledgeMemEmbeddedStoreHandle::with_bounded_read_snapshot`. Its report MUST
+identify the pinned commit epoch, the original and remaining row and payload
+budgets, and the number of successfully completed Cypher and SQL statements.
+A successful external vector seed increments a separate execution counter;
+projection presence alone is not evidence that a search statement consumed the
+projection.
+A statement contributes to those counters only after its output has been
+charged to the cumulative budget. Qualification for a mixed workflow MUST fail
+closed when either required statement class is absent; a graph-only query
+report cannot stand in for the relational half of the workflow. The report
+MUST NOT retain query text, parameters, result rows, or payload values.
+`NowledgeMemReadSnapshotReport::json` emits the versioned
+`skein-nowledge-mem-read-snapshot-report-v1` representation of exactly those
+redacted fields; it is evidence input and does not claim route readiness by
+itself.
+
 Business algorithms that need several independent reads MUST keep those reads
 as small named Cypher statements in the host. When all phases require one graph
 version, the host MUST execute them through one `DatabaseReadTransaction` and

@@ -1241,6 +1241,8 @@ pub const NOWLEDGE_MEM_STORAGE_LIFECYCLE_DECISION_PROTOCOL: &str =
     "skein-nowledge-mem-storage-lifecycle-decision-v1";
 pub const NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL: &str =
     "skein-nowledge-mem-readiness-dashboard-v1";
+pub const NOWLEDGE_MEM_READ_SNAPSHOT_REPORT_PROTOCOL: &str =
+    "skein-nowledge-mem-read-snapshot-report-v1";
 pub const NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-mem-bounded-read-evidence-v2";
 pub const NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL: &str = "skein-nowledge-mem-library-readiness-v1";
@@ -5297,6 +5299,7 @@ impl NowledgeMemSearchProjection {
 struct SearchProjectionExternalReadOperator<'a> {
     projection: Option<&'a NowledgeMemSearchProjection>,
     out_of_core_projection: Option<&'a NowledgeMemOutOfCoreSearchProjection>,
+    vector_seed_execution_count: usize,
 }
 
 impl crate::executor::ExternalReadOperator for SearchProjectionExternalReadOperator<'_> {
@@ -5333,7 +5336,7 @@ impl crate::executor::ExternalReadOperator for SearchProjectionExternalReadOpera
                 )
             })?;
         let candidate_score_source = vector_score_source(&retriever.candidate_score_source)?;
-        Ok(crate::executor::VectorSeedExecutionOutput {
+        let execution_output = crate::executor::VectorSeedExecutionOutput {
             rows: output
                 .result
                 .hits
@@ -5386,7 +5389,16 @@ impl crate::executor::ExternalReadOperator for SearchProjectionExternalReadOpera
                     .filter_map(|code| vector_fallback_reason_code(*code))
                     .collect(),
             },
-        })
+        };
+        self.vector_seed_execution_count = self
+            .vector_seed_execution_count
+            .checked_add(1)
+            .ok_or_else(|| {
+                SkeinError::Execution(
+                    "bounded external vector seed execution count overflowed".to_string(),
+                )
+            })?;
+        Ok(execution_output)
     }
 }
 
@@ -5499,10 +5511,36 @@ pub struct NowledgeMemReadSnapshotReport {
     pub search_projection_present: bool,
     pub search_projection_source_graph_commit_epoch: Option<u64>,
     pub search_projection_durable_source_graph_commit_epoch: Option<u64>,
+    pub max_rows: usize,
+    pub max_payload_bytes: usize,
+    pub cypher_statement_count: usize,
+    pub sql_statement_count: usize,
+    pub vector_seed_execution_count: usize,
     pub output_rows: usize,
     pub output_payload_bytes: usize,
     pub remaining_rows: usize,
     pub remaining_payload_bytes: usize,
+}
+
+impl NowledgeMemReadSnapshotReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": NOWLEDGE_MEM_READ_SNAPSHOT_REPORT_PROTOCOL,
+            "commit_epoch": self.commit_epoch,
+            "search_projection_present": self.search_projection_present,
+            "search_projection_source_graph_commit_epoch": self.search_projection_source_graph_commit_epoch,
+            "search_projection_durable_source_graph_commit_epoch": self.search_projection_durable_source_graph_commit_epoch,
+            "max_rows": self.max_rows,
+            "max_payload_bytes": self.max_payload_bytes,
+            "cypher_statement_count": self.cypher_statement_count,
+            "sql_statement_count": self.sql_statement_count,
+            "vector_seed_execution_count": self.vector_seed_execution_count,
+            "output_rows": self.output_rows,
+            "output_payload_bytes": self.output_payload_bytes,
+            "remaining_rows": self.remaining_rows,
+            "remaining_payload_bytes": self.remaining_payload_bytes,
+        })
+    }
 }
 
 pub struct NowledgeMemReadSnapshot<'a> {
@@ -5511,6 +5549,8 @@ pub struct NowledgeMemReadSnapshot<'a> {
     search_projection_source_graph_commit_epoch: Option<u64>,
     search_projection_durable_source_graph_commit_epoch: Option<u64>,
     budget: NowledgeMemReadSnapshotBudget,
+    cypher_statement_count: usize,
+    sql_statement_count: usize,
     output_rows: usize,
     output_payload_bytes: usize,
 }
@@ -5526,6 +5566,12 @@ impl NowledgeMemReadSnapshot<'_> {
         parameters: &BTreeMap<String, Value>,
         max_rows: usize,
     ) -> Result<QueryOutput> {
+        let completed_statement_count =
+            self.cypher_statement_count.checked_add(1).ok_or_else(|| {
+                SkeinError::Execution(
+                    "bounded read snapshot Cypher statement count overflowed".to_string(),
+                )
+            })?;
         let max_rows = self.statement_row_budget(max_rows)?;
         let max_payload_bytes = self.remaining_payload_bytes()?;
         let mut rows = Vec::new();
@@ -5543,6 +5589,7 @@ impl NowledgeMemReadSnapshot<'_> {
             },
         )?;
         self.consume(report.output_rows, report.output_payload_bytes)?;
+        self.cypher_statement_count = completed_statement_count;
         Ok(QueryOutput { rows })
     }
 
@@ -5552,6 +5599,12 @@ impl NowledgeMemReadSnapshot<'_> {
         parameters: &[Value],
         max_rows: usize,
     ) -> Result<QueryOutput> {
+        let completed_statement_count =
+            self.sql_statement_count.checked_add(1).ok_or_else(|| {
+                SkeinError::Execution(
+                    "bounded read snapshot SQL statement count overflowed".to_string(),
+                )
+            })?;
         let max_rows = self.statement_row_budget(max_rows)?;
         let max_payload_bytes = self.remaining_payload_bytes()?;
         let output = self.transaction.query_sql_with_params_options(
@@ -5565,6 +5618,7 @@ impl NowledgeMemReadSnapshot<'_> {
         let output_rows = output.rows.len();
         let output_payload_bytes = estimate_query_output_payload_bytes(&output);
         self.consume(output_rows, output_payload_bytes)?;
+        self.sql_statement_count = completed_statement_count;
         Ok(output)
     }
 
@@ -5577,6 +5631,11 @@ impl NowledgeMemReadSnapshot<'_> {
                 .search_projection_source_graph_commit_epoch,
             search_projection_durable_source_graph_commit_epoch: self
                 .search_projection_durable_source_graph_commit_epoch,
+            max_rows: self.budget.max_rows,
+            max_payload_bytes: self.budget.max_payload_bytes,
+            cypher_statement_count: self.cypher_statement_count,
+            sql_statement_count: self.sql_statement_count,
+            vector_seed_execution_count: self.external.vector_seed_execution_count,
             output_rows: self.output_rows,
             output_payload_bytes: self.output_payload_bytes,
             remaining_rows: self.budget.max_rows.saturating_sub(self.output_rows),
@@ -5977,6 +6036,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         let external = SearchProjectionExternalReadOperator {
             projection: store.search_projection.as_ref(),
             out_of_core_projection: store.out_of_core_search_projection.as_ref(),
+            vector_seed_execution_count: 0,
         };
         let mut snapshot = NowledgeMemReadSnapshot {
             transaction,
@@ -5988,6 +6048,8 @@ impl NowledgeMemEmbeddedStoreHandle {
                 .as_ref()
                 .and_then(|freshness| freshness.durable_source_graph_commit_epoch),
             budget,
+            cypher_statement_count: 0,
+            sql_statement_count: 0,
             output_rows: 0,
             output_payload_bytes: 0,
         };
@@ -7271,6 +7333,7 @@ impl NowledgeMemEmbeddedStore {
         let mut external = SearchProjectionExternalReadOperator {
             projection: search_projection.as_ref(),
             out_of_core_projection: out_of_core_search_projection.as_ref(),
+            vector_seed_execution_count: 0,
         };
         graph.query_with_params_with_report_options_and_external(
             cypher,
@@ -7296,6 +7359,7 @@ impl NowledgeMemEmbeddedStore {
         let mut external = SearchProjectionExternalReadOperator {
             projection: search_projection.as_ref(),
             out_of_core_projection: out_of_core_search_projection.as_ref(),
+            vector_seed_execution_count: 0,
         };
         graph.query_with_params_with_report_options_and_external_context(
             cypher,

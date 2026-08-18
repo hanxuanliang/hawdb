@@ -116,11 +116,119 @@ fn bounded_read_snapshot_coordinates_search_graph_and_relational_queries() {
         output.2.rows[0].get("content_message_id"),
         Some(&Value::String("message-1".to_string()))
     );
+    assert_eq!(output.3.max_rows, 4);
+    assert_eq!(output.3.max_payload_bytes, 4096);
     assert_eq!(output.3.output_rows, 3);
+    assert_eq!(output.3.cypher_statement_count, 2);
+    assert_eq!(output.3.sql_statement_count, 1);
+    assert_eq!(output.3.vector_seed_execution_count, 1);
     assert_eq!(output.3.remaining_rows, 1);
     assert!(output.3.search_projection_present);
     assert!(output.3.output_payload_bytes > 0);
     assert!(output.3.remaining_payload_bytes < 4096);
+    let evidence = output.3.json();
+    let encoded_evidence = evidence.to_string();
+    assert_eq!(
+        evidence["protocol"],
+        "skein-nowledge-mem-read-snapshot-report-v1"
+    );
+    assert_eq!(evidence["cypher_statement_count"], 2);
+    assert_eq!(evidence["sql_statement_count"], 1);
+    assert_eq!(evidence["vector_seed_execution_count"], 1);
+    assert!(!encoded_evidence.contains("nearest"));
+    assert!(!encoded_evidence.contains("thread-1"));
+    assert!(!encoded_evidence.contains("App-owned relational payload"));
+}
+
+#[test]
+fn bounded_read_snapshot_reports_the_thread_detail_mixed_read_shape() {
+    let handle = app_read_handle();
+    let report = handle
+        .with_bounded_read_snapshot(
+            NowledgeMemReadSnapshotBudget {
+                max_rows: 4,
+                max_payload_bytes: 4096,
+            },
+            |snapshot| {
+                let thread = snapshot.query_cypher(
+                    "MATCH (t:Thread) WHERE t.thread_id = $thread_id OR t.id = $thread_id \
+                     RETURN t.id AS id, t.title AS title LIMIT 1",
+                    &BTreeMap::from([(
+                        "thread_id".to_string(),
+                        Value::String("logical-1".to_string()),
+                    )]),
+                    1,
+                )?;
+                let storage_id = thread.rows[0]
+                    .get("id")
+                    .cloned()
+                    .expect("thread id is projected");
+                snapshot.query_sql(
+                    "SELECT COUNT(*) AS total_messages FROM thread_messages \
+                     WHERE thread_storage_id = $1",
+                    std::slice::from_ref(&storage_id),
+                    1,
+                )?;
+                snapshot.query_sql(
+                    "SELECT content_message_id, content FROM thread_messages \
+                     WHERE thread_storage_id = $1 ORDER BY order_index LIMIT $2 OFFSET $3",
+                    &[storage_id, Value::Int(1), Value::Int(0)],
+                    1,
+                )?;
+                Ok(snapshot.report())
+            },
+        )
+        .unwrap();
+
+    assert_eq!(report.cypher_statement_count, 1);
+    assert_eq!(report.sql_statement_count, 2);
+    assert_eq!(report.vector_seed_execution_count, 0);
+    assert_eq!(report.max_rows, 4);
+    assert_eq!(report.max_payload_bytes, 4096);
+    assert_eq!(report.output_rows, 3);
+    assert_eq!(report.remaining_rows, 1);
+    assert!(report.output_payload_bytes > 0);
+    assert!(report.remaining_payload_bytes < 4096);
+}
+
+#[test]
+fn bounded_read_snapshot_counts_only_successfully_budgeted_statements() {
+    let handle = app_read_handle();
+    let report = handle
+        .with_bounded_read_snapshot(
+            NowledgeMemReadSnapshotBudget {
+                max_rows: 2,
+                max_payload_bytes: 4096,
+            },
+            |snapshot| {
+                snapshot
+                    .query_sql("SELECT missing_column FROM thread_messages", &[], 1)
+                    .expect_err("invalid SQL must fail before evidence accounting");
+                let after_failure = snapshot.report();
+                assert_eq!(after_failure.sql_statement_count, 0);
+                assert_eq!(after_failure.vector_seed_execution_count, 0);
+                assert_eq!(after_failure.output_rows, 0);
+                assert_eq!(after_failure.remaining_rows, 2);
+                assert_eq!(after_failure.remaining_payload_bytes, 4096);
+
+                snapshot.query_cypher(
+                    "MATCH (t:Thread {id: $thread_id}) RETURN t.id AS id LIMIT 1",
+                    &BTreeMap::from([(
+                        "thread_id".to_string(),
+                        Value::String("thread-1".to_string()),
+                    )]),
+                    1,
+                )?;
+                Ok(snapshot.report())
+            },
+        )
+        .unwrap();
+
+    assert_eq!(report.cypher_statement_count, 1);
+    assert_eq!(report.sql_statement_count, 0);
+    assert_eq!(report.vector_seed_execution_count, 0);
+    assert_eq!(report.output_rows, 1);
+    assert_eq!(report.remaining_rows, 1);
 }
 
 #[test]

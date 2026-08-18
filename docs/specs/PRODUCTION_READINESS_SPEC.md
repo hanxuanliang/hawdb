@@ -834,6 +834,14 @@ Every active graph and search route MUST declare one selected read owner. Route
 readiness MUST be tied to the shared route catalog, query family, bounded query
 evidence, and the current production build identity.
 
+Active App routes that combine graph and relational reads MUST additionally
+retain the typed bounded-snapshot report for the same observation. The evidence
+consumer MUST recheck the declared row and payload budget arithmetic and the
+required successful Cypher and SQL statement counts. A search-bearing route
+MUST additionally require a non-zero external vector-seed execution count;
+`search_projection_present` alone is insufficient. Such a route MUST NOT be
+added to the graph-only route catalog merely to reuse its readiness result.
+
 Cutover MUST remain blocked when any required area is missing or not ready,
 including:
 
