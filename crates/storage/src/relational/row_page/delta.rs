@@ -24,6 +24,7 @@ const RELATIONAL_ROW_DELTA_PUBLICATION_LOCK_FILE: &str = "relational-row-delta.l
 pub const DEFAULT_RELATIONAL_ROW_DELTA_DIRTY_ENTRIES: usize = 100_000;
 pub const DEFAULT_RELATIONAL_ROW_DELTA_DIRTY_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_RELATIONAL_ROW_DELTA_RUNS: usize = 4096;
+pub const DEFAULT_RELATIONAL_ROW_DELTA_CHECKPOINT_RUNS: usize = 256;
 pub const DEFAULT_RELATIONAL_ROW_DELTA_RANGE_OPEN_FILES: usize = 32;
 pub const DEFAULT_RELATIONAL_ROW_DELTA_MANIFEST_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_RELATIONAL_ROW_DELTA_RUN_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -49,6 +50,8 @@ pub struct RelationalRowDeltaConfig {
     pub max_dirty_entries: NonZeroUsize,
     pub max_dirty_bytes: NonZeroUsize,
     pub max_runs: NonZeroUsize,
+    /// Soft run count at which a canonical checkpoint fold is recommended.
+    pub checkpoint_runs: NonZeroUsize,
     /// Maximum recovery-run files retained by one streaming range merge.
     pub max_range_open_files: NonZeroUsize,
     pub max_manifest_bytes: NonZeroUsize,
@@ -66,6 +69,8 @@ impl Default for RelationalRowDeltaConfig {
                 .expect("default row delta dirty byte limit is non-zero"),
             max_runs: NonZeroUsize::new(DEFAULT_RELATIONAL_ROW_DELTA_RUNS)
                 .expect("default row delta run limit is non-zero"),
+            checkpoint_runs: NonZeroUsize::new(DEFAULT_RELATIONAL_ROW_DELTA_CHECKPOINT_RUNS)
+                .expect("default row delta checkpoint run target is non-zero"),
             max_range_open_files: NonZeroUsize::new(DEFAULT_RELATIONAL_ROW_DELTA_RANGE_OPEN_FILES)
                 .expect("default row delta range open-file limit is non-zero"),
             max_manifest_bytes: NonZeroUsize::new(DEFAULT_RELATIONAL_ROW_DELTA_MANIFEST_BYTES)
@@ -85,6 +90,20 @@ impl RelationalRowDeltaConfig {
             max_entries: self.max_dirty_entries,
             max_bytes: self.max_dirty_bytes,
         }
+    }
+
+    pub const fn checkpoint_recommended(self, run_count: usize) -> bool {
+        run_count >= self.checkpoint_runs.get()
+    }
+
+    fn validate_run_policy(self) -> Result<(), RelationalRowDeltaError> {
+        if self.checkpoint_runs > self.max_runs {
+            return Err(RelationalRowDeltaError::Admission(format!(
+                "row delta checkpoint target {} exceeds hard run limit {}",
+                self.checkpoint_runs, self.max_runs
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -196,6 +215,12 @@ pub struct RelationalRowDeltaReadReport {
     pub bytes_read: u64,
     pub entries_visited: u64,
     pub peak_open_files: usize,
+    /// Successful `File::open` calls made by the range cursor pool.
+    pub range_file_opens: usize,
+    /// Range cursor requests served by an already retained run file.
+    pub range_file_pool_hits: usize,
+    /// Range cursor requests that had to open a run file.
+    pub range_file_pool_misses: usize,
     pub stopped_early: bool,
 }
 

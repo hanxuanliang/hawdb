@@ -151,6 +151,7 @@ impl RelationalRowDeltaBuilder {
         config: RelationalRowDeltaConfig,
         row_root_selection: RowRootSelection,
     ) -> Result<Self, RelationalRowDeltaError> {
+        config.validate_run_policy()?;
         if delta_generation == 0 {
             return Err(RelationalRowDeltaError::Admission(
                 "row delta generation must be non-zero".to_string(),

@@ -694,7 +694,9 @@ coalescing at the minimum-key frontier, tombstone suppression, source and
 distinct-entry admission, a bounded recovery-run file pool, and a peak envelope of the source heads plus one
 selected/working head. It proves that early and complete result prefixes stay
 ordered and match the same pinned oracle while a newer current view cannot move
-the reader. Recovery priming validates every encoded field while decoding only
+the reader. The prepared state retains no run files or decoded heads; lazy
+recovery priming opens the admitted sources only when iteration begins,
+validates every encoded field while decoding only
 the requested field set into owned head values; the model checks both the
 projection subset and full-row validation obligations. An overlay overflow reference becomes visible only after resolution
 through the state pinned at that same epoch. The implementation publishes the

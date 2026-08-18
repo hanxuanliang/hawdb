@@ -1670,6 +1670,14 @@ fn relational_storage_residency_tracks_checkpoint_live_and_recovery_views() {
     let profile = profile.json();
     assert_eq!(profile["storage"]["relational_rows"]["serving"], true);
     assert_eq!(
+        profile["storage"]["relational_rows"]["recovery_delta_checkpoint_runs"],
+        skein_storage::DEFAULT_RELATIONAL_ROW_DELTA_CHECKPOINT_RUNS
+    );
+    assert_eq!(
+        profile["storage"]["relational_rows"]["recovery_delta_checkpoint_recommended"],
+        false
+    );
+    assert_eq!(
         profile["storage"]["relational_rows"]["canonical_artifact_bytes"],
         checkpoint.relational_rows.canonical_artifact_bytes()
     );

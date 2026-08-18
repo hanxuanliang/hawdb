@@ -19,6 +19,34 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[test]
+fn checkpoint_run_target_is_soft_but_cannot_exceed_the_hard_limit() {
+    let config = RelationalRowDeltaConfig::default();
+    assert!(!config.checkpoint_recommended(config.checkpoint_runs.get() - 1));
+    assert!(config.checkpoint_recommended(config.checkpoint_runs.get()));
+
+    let directory = unique_test_dir("checkpoint-run-policy");
+    let base = publish_and_open_base(&directory);
+    let invalid = RelationalRowDeltaConfig {
+        max_runs: NonZeroUsize::new(1).unwrap(),
+        checkpoint_runs: NonZeroUsize::new(2).unwrap(),
+        ..config
+    };
+    assert!(matches!(
+        RelationalRowDeltaBuilder::new(
+            &directory,
+            &base,
+            1,
+            None,
+            table_metadata(),
+            invalid,
+        ),
+        Err(RelationalRowDeltaError::Admission(message))
+            if message.contains("checkpoint target")
+    ));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn immutable_runs_round_trip_across_bounded_flushes() {
     let directory = unique_test_dir("round-trip");
     let base = publish_and_open_base(&directory);
@@ -302,7 +330,7 @@ fn streaming_range_sources_bound_retained_run_files() {
         .unwrap();
     assert_eq!(sources.len(), 4);
     assert_eq!(report.runs_read, 4);
-    assert_eq!(report.peak_open_files, 2);
+    assert_eq!(report.peak_open_files, 0);
 
     let mut keys = Vec::new();
     for source in &mut sources {
@@ -310,6 +338,15 @@ fn streaming_range_sources_bound_retained_run_files() {
         assert!(source.next().unwrap().is_none());
     }
     assert_eq!(keys, vec![key(2), key(3), key(4), key(5)]);
+    let mut completed_report = report;
+    sources[0]
+        .file_pool_snapshot()
+        .unwrap()
+        .apply_to(&mut completed_report);
+    assert_eq!(completed_report.peak_open_files, 2);
+    assert_eq!(completed_report.range_file_opens, 4);
+    assert_eq!(completed_report.range_file_pool_hits, 0);
+    assert_eq!(completed_report.range_file_pool_misses, 4);
 
     fs::remove_dir_all(directory).unwrap();
 }

@@ -287,6 +287,8 @@ fn relational_row_residency_json(
         "overflow_descriptor_artifact_bytes": report.overflow_descriptor_artifact_bytes,
         "canonical_artifact_bytes": report.canonical_artifact_bytes(),
         "recovery_delta_runs": report.recovery_delta_runs,
+        "recovery_delta_checkpoint_runs": report.recovery_delta_checkpoint_runs,
+        "recovery_delta_checkpoint_recommended": report.recovery_delta_checkpoint_recommended,
         "recovery_delta_entries": report.recovery_delta_entries,
         "recovery_delta_artifact_bytes": report.recovery_delta_artifact_bytes,
         "live_batches": report.live_batches,

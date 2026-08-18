@@ -382,15 +382,25 @@ impl RelationalRowPageOverlayRangeSources<'_> {
         }
     }
 
-    pub(super) fn recovery_report(&self) -> super::RelationalRowDeltaReadReport {
+    pub(super) fn recovery_report(
+        &self,
+    ) -> Result<super::RelationalRowDeltaReadReport, RelationalRowDeltaError> {
         let mut report = self.recovery.clone();
+        if let Some(snapshot) = self.sources.iter().find_map(|source| match source {
+            RelationalRowPageOverlayRangeSource::Recovery(cursor) => {
+                Some(cursor.file_pool_snapshot())
+            }
+            RelationalRowPageOverlayRangeSource::Live(_) => None,
+        }) {
+            snapshot?.apply_to(&mut report);
+        }
         report.stopped_early = self.sources.iter().any(|source| {
             matches!(
                 source,
                 RelationalRowPageOverlayRangeSource::Recovery(cursor) if !cursor.is_exhausted()
             )
         });
-        report
+        Ok(report)
     }
 
     pub(super) const fn live_entries_visited(&self) -> usize {

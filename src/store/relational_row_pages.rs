@@ -601,6 +601,7 @@ impl RelationalRowPageState {
             materialized_row_count: state.materialized_row_count(),
             materialized_row_bytes: state.estimated_materialized_row_bytes(),
             logical_row_count: state.total_row_count(),
+            recovery_delta_checkpoint_runs: self.delta_config.checkpoint_runs.get(),
             ..RelationalRowStorageResidencyReport::default()
         };
         let Some(view) = self.current_read_view(commit_epoch) else {
@@ -626,6 +627,10 @@ impl RelationalRowPageState {
         report.overflow_extent_artifact_bytes = overflow.extent_artifact.encoded_len;
         report.overflow_descriptor_artifact_bytes = overflow.descriptor_artifact.encoded_len;
         report.recovery_delta_runs = recovery.map_or(0, |manifest| manifest.run_count());
+        report.recovery_delta_checkpoint_recommended = recovery.is_some_and(|manifest| {
+            self.delta_config
+                .checkpoint_recommended(manifest.run_count())
+        });
         report.recovery_delta_entries = recovery.map_or(0, |manifest| manifest.total_entries());
         report.recovery_delta_artifact_bytes =
             recovery.map_or(0, |manifest| manifest.artifact_bytes());

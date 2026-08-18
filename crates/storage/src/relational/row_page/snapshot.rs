@@ -620,7 +620,9 @@ impl RelationalRowPageSnapshotReader {
                 visit,
             )
             .map_err(|error| self.map_demand_error(error))?;
-        let overlay_report = overlay.report();
+        let overlay_report = overlay
+            .report()
+            .map_err(|error| self.map_delta_error(error))?;
         Ok(RelationalRowPageSnapshotRangeReport {
             identity: self.identity(),
             demand,
@@ -997,16 +999,16 @@ impl<'a> StreamingOverlayCursor<'a> {
         Ok(Some((selected.key, selected.value)))
     }
 
-    fn report(&self) -> OverlayCollectionReport {
-        OverlayCollectionReport {
-            recovery: self.sources.recovery_report(),
+    fn report(&self) -> Result<OverlayCollectionReport, RelationalRowDeltaError> {
+        Ok(OverlayCollectionReport {
+            recovery: self.sources.recovery_report()?,
             live_entries_visited: self.sources.live_entries_visited(),
             overlay_entries: self.entries,
             overlay_resident_bytes: self.peak_resident_bytes,
             overlay_replacements: self.replacements,
             overlay_merge_sources: self.sources.len(),
             overlay_peak_buffered_entries: self.peak_buffered_entries,
-        }
+        })
     }
 
     fn map_error(

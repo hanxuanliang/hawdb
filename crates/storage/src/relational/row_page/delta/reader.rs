@@ -137,6 +137,7 @@ impl RelationalRowDeltaReader {
         expected_recovery: RelationalRecoveryFence,
         config: RelationalRowDeltaConfig,
     ) -> Result<Self, RelationalRowDeltaError> {
+        config.validate_run_policy()?;
         let base = expected_base.manifest();
         if manifest.base.generation != base.generation
             || manifest.base.source_commit_epoch != base.source_commit_epoch
@@ -385,14 +386,15 @@ impl RelationalRowDeltaReader {
                 exhausted: false,
             });
         }
-        report.peak_open_files = file_pool
+        file_pool
             .lock()
             .map_err(|_| {
                 RelationalRowDeltaError::Durability(
                     "row delta range file pool is poisoned".to_string(),
                 )
             })?
-            .peak_open_files;
+            .snapshot()
+            .apply_to(&mut report);
         Ok((sources, report))
     }
 
@@ -884,9 +886,10 @@ struct RowDeltaRunCursor<'a> {
     entry_ordinal: u32,
     expected_payload_offset: u64,
     previous_key: Option<(u32, Vec<u8>)>,
-    expected_content_digest: IntegrityDigest,
+    expected_content_digest: Option<IntegrityDigest>,
     content_hasher: Option<IntegrityHasher>,
     artifact_hasher: Option<IntegrityHasher>,
+    initialized: bool,
     completed: bool,
 }
 
@@ -918,7 +921,11 @@ impl<'a> RowDeltaRunCursor<'a> {
             run.ordinal,
         ));
         codec::validate_artifact_length(&path, run.encoded_len)?;
-        Self::open_with_source(context, run, RowDeltaRunFileSource::Pooled { path, pool })
+        Ok(Self::uninitialized(
+            context,
+            run,
+            RowDeltaRunFileSource::Pooled { path, pool },
+        ))
     }
 
     fn open_with_source(
@@ -926,47 +933,70 @@ impl<'a> RowDeltaRunCursor<'a> {
         run: &'a RowDeltaRunDescriptor,
         file: RowDeltaRunFileSource,
     ) -> Result<Self, RelationalRowDeltaError> {
-        let opened = file.open()?;
+        let mut cursor = Self::uninitialized(context, run, file);
+        let opened = cursor.file.open()?;
+        cursor.initialize(&opened)?;
+        Ok(cursor)
+    }
+
+    fn uninitialized(
+        context: RowDeltaRunContext<'a>,
+        run: &'a RowDeltaRunDescriptor,
+        file: RowDeltaRunFileSource,
+    ) -> Self {
+        Self {
+            context,
+            run,
+            file,
+            payload_start: 0,
+            entry_ordinal: 0,
+            expected_payload_offset: 0,
+            previous_key: None,
+            expected_content_digest: None,
+            content_hasher: None,
+            artifact_hasher: None,
+            initialized: false,
+            completed: false,
+        }
+    }
+
+    fn initialize(&mut self, opened: &File) -> Result<(), RelationalRowDeltaError> {
+        if self.initialized {
+            return Ok(());
+        }
         let mut header = [0u8; codec::RUN_HEADER_BYTES];
-        read_exact_at(&opened, &mut header, 0).map_err(durability("read row delta run header"))?;
+        read_exact_at(opened, &mut header, 0).map_err(durability("read row delta run header"))?;
         let decoded_header = codec::decode_run_header(
             &header,
-            context.base,
-            context.delta_generation,
-            context.schema_set_digest,
-            run,
+            self.context.base,
+            self.context.delta_generation,
+            self.context.schema_set_digest,
+            self.run,
         )?;
         let mut content_hasher = IntegrityHasher::new();
         content_hasher.update(codec::run_integrity_prefix(&header));
         let mut artifact_hasher = IntegrityHasher::new();
         artifact_hasher.update(&header);
         let mut descriptor = [0u8; codec::ENTRY_DESCRIPTOR_BYTES];
-        for entry_ordinal in 0..run.entry_count {
+        for entry_ordinal in 0..self.run.entry_count {
             let offset = descriptor_offset(entry_ordinal)?;
-            read_exact_at(&opened, &mut descriptor, offset)
+            read_exact_at(opened, &mut descriptor, offset)
                 .map_err(durability("read row delta entry descriptor"))?;
             codec::decode_entry_descriptor(&descriptor)?;
             content_hasher.update(&descriptor);
             artifact_hasher.update(&descriptor);
         }
         let payload_start = (codec::RUN_HEADER_BYTES as u64)
-            .checked_add(run.descriptor_bytes)
+            .checked_add(self.run.descriptor_bytes)
             .ok_or_else(|| {
                 RelationalRowDeltaError::Corrupt("row delta payload offset overflow".to_string())
             })?;
-        Ok(Self {
-            context,
-            run,
-            file,
-            payload_start,
-            entry_ordinal: 0,
-            expected_payload_offset: 0,
-            previous_key: None,
-            expected_content_digest: decoded_header.content_digest,
-            content_hasher: Some(content_hasher),
-            artifact_hasher: Some(artifact_hasher),
-            completed: false,
-        })
+        self.payload_start = payload_start;
+        self.expected_content_digest = Some(decoded_header.content_digest);
+        self.content_hasher = Some(content_hasher);
+        self.artifact_hasher = Some(artifact_hasher);
+        self.initialized = true;
+        Ok(())
     }
 
     fn next_entry(&mut self) -> Result<Option<RowDeltaRunEntry>, RelationalRowDeltaError> {
@@ -994,12 +1024,22 @@ impl<'a> RowDeltaRunCursor<'a> {
         if self.completed {
             return Ok(None);
         }
+        let initialized_file = if self.initialized {
+            None
+        } else {
+            let file = self.file.open()?;
+            self.initialize(&file)?;
+            Some(file)
+        };
         if self.entry_ordinal == self.run.entry_count {
             self.finish()?;
             return Ok(None);
         }
         let entry_ordinal = self.entry_ordinal;
-        let file = self.file.open()?;
+        let file = match initialized_file {
+            Some(file) => file,
+            None => self.file.open()?,
+        };
         let mut descriptor = [0u8; codec::ENTRY_DESCRIPTOR_BYTES];
         read_exact_at(&file, &mut descriptor, descriptor_offset(entry_ordinal)?)
             .map_err(durability("read row delta entry descriptor"))?;
@@ -1131,7 +1171,10 @@ impl<'a> RowDeltaRunCursor<'a> {
             .take()
             .expect("active run has a content hasher")
             .finish()
-            != self.expected_content_digest
+            != self
+                .expected_content_digest
+                .take()
+                .expect("initialized run has an expected content digest")
         {
             return Err(RelationalRowDeltaError::Corrupt(
                 "row delta run content checksum mismatch".to_string(),
@@ -1175,12 +1218,49 @@ impl RowDeltaRunFileSource {
                 .open(path),
         }
     }
+
+    fn pool_snapshot(&self) -> Result<RowDeltaRunFilePoolSnapshot, RelationalRowDeltaError> {
+        match self {
+            Self::Dedicated(_) => Ok(RowDeltaRunFilePoolSnapshot::default()),
+            Self::Pooled { pool, .. } => Ok(pool
+                .lock()
+                .map_err(|_| {
+                    RelationalRowDeltaError::Durability(
+                        "row delta range file pool is poisoned".to_string(),
+                    )
+                })?
+                .snapshot()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::relational::row_page) struct RowDeltaRunFilePoolSnapshot {
+    peak_open_files: usize,
+    file_opens: usize,
+    hits: usize,
+    misses: usize,
+}
+
+impl RowDeltaRunFilePoolSnapshot {
+    pub(in crate::relational::row_page) fn apply_to(
+        self,
+        report: &mut RelationalRowDeltaReadReport,
+    ) {
+        report.peak_open_files = self.peak_open_files;
+        report.range_file_opens = self.file_opens;
+        report.range_file_pool_hits = self.hits;
+        report.range_file_pool_misses = self.misses;
+    }
 }
 
 struct RowDeltaRunFilePool {
     capacity: usize,
     files: VecDeque<(PathBuf, Arc<File>)>,
     peak_open_files: usize,
+    file_opens: usize,
+    hits: usize,
+    misses: usize,
 }
 
 impl RowDeltaRunFilePool {
@@ -1189,6 +1269,9 @@ impl RowDeltaRunFilePool {
             capacity,
             files: VecDeque::new(),
             peak_open_files: 0,
+            file_opens: 0,
+            hits: 0,
+            misses: 0,
         }
     }
 
@@ -1198,6 +1281,7 @@ impl RowDeltaRunFilePool {
             .iter()
             .position(|(candidate, _)| candidate == path)
         {
+            self.hits = self.hits.saturating_add(1);
             let entry = self
                 .files
                 .remove(position)
@@ -1207,6 +1291,8 @@ impl RowDeltaRunFilePool {
             return Ok(file);
         }
         let file = Arc::new(File::open(path).map_err(durability("open row delta run"))?);
+        self.file_opens = self.file_opens.saturating_add(1);
+        self.misses = self.misses.saturating_add(1);
         if self.files.len() == self.capacity {
             self.files.pop_front();
         }
@@ -1214,6 +1300,15 @@ impl RowDeltaRunFilePool {
             .push_back((path.to_path_buf(), Arc::clone(&file)));
         self.peak_open_files = self.peak_open_files.max(self.files.len());
         Ok(file)
+    }
+
+    fn snapshot(&self) -> RowDeltaRunFilePoolSnapshot {
+        RowDeltaRunFilePoolSnapshot {
+            peak_open_files: self.peak_open_files,
+            file_opens: self.file_opens,
+            hits: self.hits,
+            misses: self.misses,
+        }
     }
 }
 
@@ -1229,6 +1324,12 @@ pub(in crate::relational::row_page) struct RelationalRowDeltaRunRangeCursor<'a> 
 }
 
 impl RelationalRowDeltaRunRangeCursor<'_> {
+    pub(in crate::relational::row_page) fn file_pool_snapshot(
+        &self,
+    ) -> Result<RowDeltaRunFilePoolSnapshot, RelationalRowDeltaError> {
+        self.run.file.pool_snapshot()
+    }
+
     pub(in crate::relational::row_page) fn next(
         &mut self,
     ) -> Result<

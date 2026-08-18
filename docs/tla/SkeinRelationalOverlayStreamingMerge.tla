@@ -190,17 +190,17 @@ BeginRead(entries, bytes) ==
     /\ readState = "idle"
     /\ entries \in 1..MaxOverlayEntries
     /\ bytes \in 1..MaxOverlayBytes
-    /\ readState' = "priming"
+    /\ readState' = "prepared"
     /\ outcome' = "none"
     /\ entryBudget' = entries
     /\ byteBudget' = bytes
     /\ positions' = InitialPositions
     /\ baseRemaining' = BaseKeys
-    /\ residentBytes' = BufferedBytes(InitialPositions)
-    /\ openFiles' = Min(Cardinality(ActiveSources(InitialPositions)), MaxOpenFiles)
-    /\ peakOpenFiles' = Min(Cardinality(ActiveSources(InitialPositions)), MaxOpenFiles)
-    /\ peakResidentBytes' = BufferedBytes(InitialPositions)
-    /\ peakBufferedEntries' = Cardinality(ActiveSources(InitialPositions))
+    /\ residentBytes' = 0
+    /\ openFiles' = 0
+    /\ peakOpenFiles' = 0
+    /\ peakResidentBytes' = 0
+    /\ peakBufferedEntries' = 0
     /\ overlayEntries' = 0
     /\ processedKeys' = <<>>
     /\ processedValues' = <<>>
@@ -208,9 +208,26 @@ BeginRead(entries, bytes) ==
     /\ emittedRows' = <<>>
     /\ resolvedOverflow' = FALSE
     /\ stoppedEarly' = FALSE
+    /\ decodedRecoveryFields' = {}
+    /\ validatedRecoveryFields' = {}
+    /\ UNCHANGED <<poisoned, pinnedEpoch, currentEpoch>>
+
+PrimeSources ==
+    /\ readState = "prepared"
+    /\ readState' = "priming"
+    /\ residentBytes' = BufferedBytes(positions)
+    /\ openFiles' = Min(Cardinality(ActiveSources(positions)), MaxOpenFiles)
+    /\ peakOpenFiles' = Min(Cardinality(ActiveSources(positions)), MaxOpenFiles)
+    /\ peakResidentBytes' = BufferedBytes(positions)
+    /\ peakBufferedEntries' = Cardinality(ActiveSources(positions))
     /\ decodedRecoveryFields' = RequestedFields
     /\ validatedRecoveryFields' = AllFields
-    /\ UNCHANGED <<poisoned, pinnedEpoch, currentEpoch>>
+    /\ UNCHANGED <<
+        outcome, entryBudget, byteBudget, positions, baseRemaining,
+        overlayEntries, processedKeys, processedValues, selectedEpochs,
+        emittedRows, resolvedOverflow, stoppedEarly, poisoned,
+        pinnedEpoch, currentEpoch
+        >>
 
 AcceptPrimedSources ==
     /\ readState = "priming"
@@ -349,7 +366,7 @@ StopEarly ==
         >>
 
 CancelRead ==
-    /\ readState \in {"priming", "merging"}
+    /\ readState \in {"prepared", "priming", "merging"}
     /\ readState' = "stopped"
     /\ outcome' = "cancel"
     /\ UNCHANGED <<
@@ -374,6 +391,7 @@ AdvanceCurrentView ==
 Next ==
     \/ \E entries \in 1..MaxOverlayEntries, bytes \in 1..MaxOverlayBytes:
         BeginRead(entries, bytes)
+    \/ PrimeSources
     \/ AcceptPrimedSources
     \/ RejectPrimedSources
     \/ MergeNext
@@ -387,7 +405,7 @@ Next ==
 Spec == Init /\ [][Next]_vars
 
 TypeOK ==
-    /\ readState \in {"idle", "priming", "merging", "succeeded", "failed", "stopped"}
+    /\ readState \in {"idle", "prepared", "priming", "merging", "succeeded", "failed", "stopped"}
     /\ outcome \in {"none", "success", "admission", "cancel", "corruption"}
     /\ entryBudget \in 1..MaxOverlayEntries
     /\ byteBudget \in 1..MaxOverlayBytes
@@ -419,6 +437,14 @@ StreamingStateIsBounded ==
         /\ peakResidentBytes <= byteBudget
         /\ peakBufferedEntries <= MaxSources + 1
         /\ overlayEntries <= entryBudget)
+
+PreparedSourcesAreLazy ==
+    readState = "prepared" =>
+        /\ openFiles = 0
+        /\ peakOpenFiles = 0
+        /\ residentBytes = 0
+        /\ decodedRecoveryFields = {}
+        /\ validatedRecoveryFields = {}
 
 OneHeadPerSource ==
     Cardinality(ActiveSources(positions)) <= MaxSources

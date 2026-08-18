@@ -100,6 +100,10 @@ fn range_reads_merge_ordered_rows_and_keep_overlay_after_the_base_tail() {
     assert_eq!(report.overlay_entries, 6);
     assert_eq!(report.overlay_replacements, 1);
     assert_eq!(report.overlay_merge_sources, 5);
+    assert_eq!(report.recovery.peak_open_files, 3);
+    assert_eq!(report.recovery.range_file_opens, 3);
+    assert_eq!(report.recovery.range_file_pool_misses, 3);
+    assert_eq!(report.recovery.range_file_pool_hits, 0);
     assert!(report.overlay_peak_buffered_entries <= report.overlay_merge_sources + 1);
     assert_eq!(report.demand.rows_emitted, 4);
     assert_eq!(report.demand.borrowed_rows_emitted, 0);

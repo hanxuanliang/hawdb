@@ -1243,6 +1243,35 @@ runs. Callback effects remain provisional until a complete visit returns
 success. An explicit early stop verifies each emitted entry binding but does
 not read or hash the unselected suffix.
 
+Pooled range cursors are lazy: constructing the admitted source vector MUST
+NOT open run files. Priming a source reads its header, descriptors, and first
+entry through one file lease. The shared LRU pool reports peak retained files,
+successful opens, hits, and misses through the range-read report. A successful
+snapshot range report MUST include the final pool counters rather than the
+counters observed only while source cursors were being constructed.
+
+`relational_row_delta_runs` is the production-shaped evidence protocol for
+run fan-in. Release mode measures 32, 256, and 4096 immutable runs with file
+pool capacities 8, 32, and 64. Every run updates one shared hot key and adds one
+new key, forcing the ordered merge to revisit interleaved sources. Setup is
+outside the timed read. The benchmark reports reader-open, first-row, and full
+scan p50 latency together with file-pool and overlay-residency counters. On the
+2026-08-18 qualification host, capacity 32 reduced the 32-run scan from 2.19 ms
+to 1.66 ms and halved opens from 64 to 32. Capacity 64 did not reduce opens;
+at 256 runs its 7.26 ms scan matched capacity 32's 7.24 ms, and at 4096 runs it
+was slower (125.86 ms versus 116.10 ms). Therefore the cross-platform default
+remains 32 files. Increasing the pool beyond 32 is not an accepted substitute
+for folding recovery into a canonical checkpoint.
+
+The preferred checkpoint-fold threshold is 256 recovery runs; the 4096-run
+limit remains a hard recovery admission bound so delayed maintenance does not
+make an otherwise valid WAL prefix unopenable. The fold publishes a new
+canonical row root and recovery fence. Skein MUST NOT compact an arbitrary
+subset of recovery runs into a replacement run because that would require a
+new manifest-last binding protocol and duplicate-version proof. Operators can
+observe both the threshold and whether it has been crossed through the
+relational row residency report.
+
 Publication is manifest-last:
 
 1. synchronize every immutable run;

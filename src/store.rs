@@ -1102,6 +1102,8 @@ pub struct RelationalRowStorageResidencyReport {
     pub overflow_extent_artifact_bytes: u64,
     pub overflow_descriptor_artifact_bytes: u64,
     pub recovery_delta_runs: usize,
+    pub recovery_delta_checkpoint_runs: usize,
+    pub recovery_delta_checkpoint_recommended: bool,
     pub recovery_delta_entries: u64,
     pub recovery_delta_artifact_bytes: u64,
     pub live_batches: usize,
