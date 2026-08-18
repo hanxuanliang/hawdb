@@ -248,28 +248,6 @@ impl QueryRows {
         Self::from_flat_values_unchecked(QuerySchema::empty(), Vec::new(), 0)
     }
 
-    pub fn try_from_value_rows(schema: QuerySchema, values: Vec<Vec<Value>>) -> Result<Self> {
-        if let Some((row, width)) = values
-            .iter()
-            .enumerate()
-            .find_map(|(row, values)| (values.len() != schema.len()).then_some((row, values.len())))
-        {
-            return Err(SkeinError::Execution(format!(
-                "query result row {row} has width {width}, expected {}",
-                schema.len()
-            )));
-        }
-        Ok(Self::from_value_rows_unchecked(schema, values))
-    }
-
-    fn from_value_rows_unchecked(schema: QuerySchema, values: Vec<Vec<Value>>) -> Self {
-        let row_count = values.len();
-        let value_count = row_count.saturating_mul(schema.len());
-        let mut flat_values = Vec::with_capacity(value_count);
-        flat_values.extend(values.into_iter().flatten());
-        Self::from_flat_values_unchecked(schema, flat_values, row_count)
-    }
-
     fn from_flat_values_unchecked(
         schema: QuerySchema,
         values: Vec<Value>,
@@ -412,17 +390,18 @@ impl From<Vec<Row>> for QueryRows {
             .into_iter()
             .collect::<Vec<_>>();
         let schema = QuerySchema::try_new(columns).expect("BTreeSet columns are unique");
-        let values = rows
-            .into_iter()
-            .map(|mut row| {
-                schema
-                    .columns()
-                    .iter()
-                    .map(|column| row.remove(column).unwrap_or(Value::Null))
-                    .collect()
-            })
-            .collect();
-        Self::from_value_rows_unchecked(schema, values)
+        let mut builder = QueryRowsBuilder::with_schema(schema.clone(), rows.len());
+        for mut row in rows {
+            builder
+                .push_values(
+                    schema
+                        .columns()
+                        .iter()
+                        .map(|column| row.remove(column).unwrap_or(Value::Null)),
+                )
+                .expect("row normalization always matches the inferred schema");
+        }
+        builder.finish()
     }
 }
 
@@ -468,13 +447,31 @@ impl QueryRowsBuilder {
     }
 
     pub fn push_values(&mut self, values: impl IntoIterator<Item = Value>) -> Result<()> {
+        self.try_push_values(values.into_iter().map(Ok))
+    }
+
+    /// Appends one fallible row directly into the flat value buffer.
+    ///
+    /// A conversion error or width mismatch rolls the partial row back.
+    pub fn try_push_values(
+        &mut self,
+        values: impl IntoIterator<Item = Result<Value>>,
+    ) -> Result<()> {
         let schema = self.schema.as_ref().ok_or_else(|| {
             SkeinError::Execution(
                 "query result values require a schema before ordinal insertion".to_string(),
             )
         })?;
         let start = self.values.len();
-        self.values.extend(values);
+        for value in values {
+            match value {
+                Ok(value) => self.values.push(value),
+                Err(error) => {
+                    self.values.truncate(start);
+                    return Err(error);
+                }
+            }
+        }
         let width = self.values.len().saturating_sub(start);
         if width != schema.len() {
             self.values.truncate(start);
@@ -942,14 +939,14 @@ mod tests {
     #[test]
     fn schema_bearing_rows_keep_names_once_in_a_flat_value_buffer() {
         let schema = QuerySchema::try_new(["payload".to_string(), "id".to_string()]).unwrap();
-        let rows = QueryRows::try_from_value_rows(
-            schema,
-            vec![
-                vec![Value::String("one".to_string()), Value::Int(1)],
-                vec![Value::String("two".to_string()), Value::Int(2)],
-            ],
-        )
-        .unwrap();
+        let mut builder = QueryRowsBuilder::with_schema(schema, 2);
+        builder
+            .push_values([Value::String("one".to_string()), Value::Int(1)])
+            .unwrap();
+        builder
+            .push_values([Value::String("two".to_string()), Value::Int(2)])
+            .unwrap();
+        let rows = builder.finish();
 
         assert_eq!(rows.schema().columns(), ["payload", "id"]);
         assert_eq!(rows.get(1, "payload").unwrap().as_str(), Some("two"));
@@ -967,19 +964,41 @@ mod tests {
     fn schema_bearing_rows_reject_duplicate_columns_and_width_mismatch() {
         assert!(QuerySchema::try_new(["id".to_string(), "id".to_string()]).is_err());
         let schema = QuerySchema::try_new(["id".to_string()]).unwrap();
-        assert!(QueryRows::try_from_value_rows(schema, vec![vec![]]).is_err());
+        let mut invalid = QueryRowsBuilder::with_schema(schema, 1);
+        assert!(invalid.push_values([]).is_err());
 
-        let left = QueryRows::try_from_value_rows(
+        let mut left = QueryRowsBuilder::with_schema(
             QuerySchema::try_new(["left".to_string(), "right".to_string()]).unwrap(),
-            vec![vec![Value::Int(1), Value::Int(2)]],
-        )
-        .unwrap();
-        let right = QueryRows::try_from_value_rows(
+            1,
+        );
+        left.push_values([Value::Int(1), Value::Int(2)]).unwrap();
+        let left = left.finish();
+        let mut right = QueryRowsBuilder::with_schema(
             QuerySchema::try_new(["right".to_string(), "left".to_string()]).unwrap(),
-            vec![vec![Value::Int(1), Value::Int(2)]],
-        )
-        .unwrap();
+            1,
+        );
+        right.push_values([Value::Int(1), Value::Int(2)]).unwrap();
+        let right = right.finish();
         assert_ne!(left, right);
+    }
+
+    #[test]
+    fn fallible_flat_row_append_rolls_back_partial_values() {
+        let schema = QuerySchema::try_new(["left".to_string(), "right".to_string()]).unwrap();
+        let mut builder = QueryRowsBuilder::with_schema(schema, 1);
+        assert!(builder
+            .try_push_values([
+                Ok(Value::Int(1)),
+                Err(SkeinError::Execution("projection failed".to_string())),
+            ])
+            .is_err());
+        builder.push_values([Value::Int(2), Value::Int(3)]).unwrap();
+        let rows = builder.finish();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.value(0, 0), Some(ValueRef::Int(2)));
+        assert_eq!(rows.value(0, 1), Some(ValueRef::Int(3)));
+        assert_eq!(rows.storage.values.len(), 2);
     }
 
     #[test]

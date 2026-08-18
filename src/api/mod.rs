@@ -475,15 +475,6 @@ impl QueryOutput {
         Self { rows: rows.into() }
     }
 
-    pub fn try_from_value_rows(
-        schema: executor::QuerySchema,
-        rows: Vec<Vec<Value>>,
-    ) -> Result<Self> {
-        Ok(Self {
-            rows: executor::QueryRows::try_from_value_rows(schema, rows)?,
-        })
-    }
-
     pub fn schema(&self) -> &executor::QuerySchema {
         self.rows.schema()
     }

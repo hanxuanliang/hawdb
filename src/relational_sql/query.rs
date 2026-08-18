@@ -25,8 +25,8 @@ use skein_executor::observer::ExecutionObserver;
 use skein_executor::pipeline::{BatchControl, BindingBatch};
 use skein_executor::{
     BindingSchema, BlockingOperatorMemoryReport, ColumnVector, ColumnarBatch, ExecutionLimit,
-    QueryMemoryClass, QueryMemoryLease, QueryMemoryLedger, QueryRows, RelationalRowLocator,
-    SlotDescriptor, SlotId, SlotType,
+    QueryMemoryClass, QueryMemoryLease, QueryMemoryLedger, QueryRows, QueryRowsBuilder,
+    RelationalRowLocator, SlotDescriptor, SlotId, SlotType,
 };
 use skein_optimizer::{
     select_relational_access_path, RelationalAccessPathDescriptor, RelationalAccessPathKind,
@@ -2547,7 +2547,11 @@ fn execute_borrowed_streaming_full_scan(
         })
         .transpose()?
         .unwrap_or(usize::MAX);
-    let mut output = Vec::with_capacity(requested.min(limits.max_output_rows));
+    let mut output = QueryRowsBuilder::with_schema(
+        projection.schema().clone(),
+        requested.min(limits.max_output_rows),
+    );
+    let mut output_rows = 0usize;
     let mut payload_bytes = 0usize;
     if requested != 0 {
         row_runtime.visit_all_ref(&select.from.name, |row| {
@@ -2564,29 +2568,27 @@ fn execute_borrowed_streaming_full_scan(
                 offset -= 1;
                 return Ok(true);
             }
-            if output.len() >= requested {
+            if output_rows >= requested {
                 return Ok(false);
             }
-            if output.len() >= limits.max_output_rows {
+            if output_rows >= limits.max_output_rows {
                 return Err(SkeinError::Execution(format!(
                     "relational SQL output exceeds max_output_rows {}",
                     limits.max_output_rows
                 )));
             }
-            let projected = projection.project_values(row)?;
-            payload_bytes = payload_bytes.saturating_add(projection.payload_bytes(&projected));
-            if payload_bytes > limits.max_output_payload_bytes {
-                return Err(SkeinError::Execution(format!(
-                    "relational SQL output exceeds max_output_payload_bytes {}",
-                    limits.max_output_payload_bytes
-                )));
-            }
-            output.push(projected);
-            Ok(output.len() < requested)
+            projection.project_into(
+                row,
+                &mut output,
+                &mut payload_bytes,
+                limits.max_output_payload_bytes,
+            )?;
+            output_rows = output_rows.saturating_add(1);
+            Ok(output_rows < requested)
         })?;
     }
     Ok(StreamingProjectionOutput {
-        rows: QueryRows::try_from_value_rows(projection.schema().clone(), output)?,
+        rows: output.finish(),
         blocking_operator_memory_reports: Vec::new(),
     })
 }

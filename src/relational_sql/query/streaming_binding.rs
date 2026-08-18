@@ -3,7 +3,7 @@ use crate::error::{Result, SkeinError};
 use crate::relational_sql::row_access::RelationalReadRowRef;
 use crate::sql::{SelectProjection, SqlColumnRef, SqlComparisonOp, SqlPredicate};
 use crate::value::Value;
-use skein_executor::QuerySchema;
+use skein_executor::{QueryRowsBuilder, QuerySchema};
 use skein_storage::{RelationalTableSchema, RelationalValue, RelationalValueRef};
 
 pub(super) enum BoundStreamingPredicate {
@@ -219,18 +219,30 @@ impl BoundStreamingProjection {
         &self.schema
     }
 
-    pub(super) fn project_values(&self, row: RelationalReadRowRef<'_>) -> Result<Vec<Value>> {
-        let mut output = Vec::with_capacity(self.columns.len());
-        for column in &self.columns {
-            output.push(relational_ref_to_value(row.value(column.ordinal)?)?);
+    pub(super) fn project_into(
+        &self,
+        row: RelationalReadRowRef<'_>,
+        output: &mut QueryRowsBuilder,
+        payload_bytes: &mut usize,
+        max_payload_bytes: usize,
+    ) -> Result<()> {
+        let previous_payload_bytes = *payload_bytes;
+        *payload_bytes = payload_bytes.saturating_add(self.row_name_bytes);
+        let result = output.try_push_values(self.columns.iter().map(|column| {
+            let value = relational_ref_to_value(row.value(column.ordinal)?)?;
+            *payload_bytes =
+                payload_bytes.saturating_add(skein_executor::query_value_payload_bytes(&value));
+            if *payload_bytes > max_payload_bytes {
+                return Err(SkeinError::Execution(format!(
+                    "relational SQL output exceeds max_output_payload_bytes {max_payload_bytes}"
+                )));
+            }
+            Ok(value)
+        }));
+        if result.is_err() {
+            *payload_bytes = previous_payload_bytes;
         }
-        Ok(output)
-    }
-
-    pub(super) fn payload_bytes(&self, values: &[Value]) -> usize {
-        values.iter().fold(self.row_name_bytes, |total, value| {
-            total.saturating_add(skein_executor::query_value_payload_bytes(value))
-        })
+        result
     }
 }
 
