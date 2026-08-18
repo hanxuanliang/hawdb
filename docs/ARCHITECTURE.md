@@ -177,14 +177,20 @@ predicate-null partitions on the same snapshot. This supplies a semantic
 relation without maintaining a second Cypher or graph executor. A separate
 Graph TLP Aggregate oracle applies `count(variable)` to the original and three
 partition queries, then requires the original count to equal their checked
-sum. Plan-fingerprint novelty remains coverage telemetry and never changes an
-oracle verdict. The same campaign generates PostgreSQL-style relational tables
+sum. A graph predicate-rewrite oracle independently checks double negation,
+conjunction and disjunction idempotence, and null totality by comparing the
+original and rewritten query directly on one pinned snapshot. Plan-fingerprint
+novelty remains coverage telemetry and never changes an oracle verdict. The
+same campaign generates PostgreSQL-style relational tables
 with primary keys, nullable scalar columns, optional indexes, and parameterized
 inner/left joins. Its predicate shapes cover scalar comparisons, `IN`, column
 comparisons, and nullable boolean composition, with a non-empty unknown
 partition for every shape. SQL row TLP and `COUNT(*)` TLP Aggregate execute
 through the public embedded SQL API on one pinned snapshot and retain
-independent typed replay and fresh-state setup reduction. Failures include
+independent typed replay and fresh-state setup reduction. A SQL
+predicate-rewrite oracle applies the same four three-valued-logic identities,
+including deterministic positional-parameter rebasing for the composed unknown
+partition. Failures include
 exact typed replay data, a direct `--case-index` reproduction command, and an
 oracle-specific reduced mutation sequence; `src/nowledge_fuzz.rs` remains a
 readiness smoke rather than a semantic oracle.

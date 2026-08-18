@@ -11,7 +11,8 @@ use generator::generate_sql_case;
 
 pub const SQL_TLP_PROTOCOL: &str = "skein-sql-tlp-fuzz-v1";
 pub const SQL_TLP_AGGREGATE_PROTOCOL: &str = "skein-sql-tlp-aggregate-fuzz-v1";
-pub const SQL_REPLAY_PROTOCOL: &str = "skein-sql-fuzz-replay-v1";
+pub const SQL_PREDICATE_REWRITE_PROTOCOL: &str = "skein-sql-predicate-rewrite-fuzz-v1";
+pub const SQL_REPLAY_PROTOCOL: &str = "skein-sql-fuzz-replay-v2";
 
 const MAX_SQL_REDUCTION_ATTEMPTS: usize = 64;
 pub(crate) const SQL_QUERY_SHAPES: [&str; 8] = [
@@ -105,12 +106,30 @@ impl SqlTlpCase {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlPredicateRewriteCase {
+    pub name: String,
+    pub original: SqlQueryInvocation,
+    pub rewritten: SqlQueryInvocation,
+}
+
+impl SqlPredicateRewriteCase {
+    fn json(&self) -> JsonValue {
+        json!({
+            "name": self.name,
+            "original": self.original.json(),
+            "rewritten": self.rewritten.json(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SqlFuzzCase {
     seed: u64,
     shape: String,
     setup: Vec<SqlMutation>,
     row_tlp: SqlTlpCase,
     aggregate_tlp: SqlTlpCase,
+    predicate_rewrite: SqlPredicateRewriteCase,
     index_enabled: bool,
 }
 
@@ -121,6 +140,7 @@ pub struct SqlReplayBundle {
     pub setup: Vec<SqlMutation>,
     pub row_tlp: SqlTlpCase,
     pub aggregate_tlp: SqlTlpCase,
+    pub predicate_rewrite: SqlPredicateRewriteCase,
     pub index_enabled: bool,
 }
 
@@ -132,6 +152,7 @@ impl SqlReplayBundle {
             setup: case.setup.clone(),
             row_tlp: case.row_tlp.clone(),
             aggregate_tlp: case.aggregate_tlp.clone(),
+            predicate_rewrite: case.predicate_rewrite.clone(),
             index_enabled: case.index_enabled,
         }
     }
@@ -145,6 +166,7 @@ impl SqlReplayBundle {
             "setup": self.setup.iter().map(SqlMutation::json).collect::<Vec<_>>(),
             "row_tlp": self.row_tlp.json(),
             "aggregate_tlp": self.aggregate_tlp.json(),
+            "predicate_rewrite": self.predicate_rewrite.json(),
         })
     }
 }
@@ -172,6 +194,21 @@ pub struct SqlTlpEvidence {
     pub predicate_true: SqlExecutionObservation,
     pub predicate_false: SqlExecutionObservation,
     pub predicate_null: SqlExecutionObservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlPredicateRewriteEvidence {
+    pub original: SqlExecutionObservation,
+    pub rewritten: SqlExecutionObservation,
+}
+
+impl SqlPredicateRewriteEvidence {
+    fn json(&self) -> JsonValue {
+        json!({
+            "original": self.original.json(),
+            "rewritten": self.rewritten.json(),
+        })
+    }
 }
 
 impl SqlTlpEvidence {
@@ -237,14 +274,38 @@ impl SqlFailureReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlPredicateRewriteFailureReport {
+    pub signature: String,
+    pub reason: String,
+    pub replay: SqlReplayBundle,
+    pub reduction: SqlReductionReport,
+    pub evidence: SqlPredicateRewriteEvidence,
+}
+
+impl SqlPredicateRewriteFailureReport {
+    fn json(&self) -> JsonValue {
+        json!({
+            "signature": self.signature,
+            "reason": self.reason,
+            "replay": self.replay.json(),
+            "reduction": self.reduction.json(),
+            "evidence": self.evidence.json(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlCaseReport {
     pub shape: String,
+    pub predicate_rewrite_shape: String,
     pub index_enabled: bool,
     pub success: bool,
     pub row_tlp_success: bool,
     pub aggregate_tlp_success: bool,
+    pub predicate_rewrite_success: bool,
     pub row_tlp_failure: Option<SqlFailureReport>,
     pub aggregate_tlp_failure: Option<SqlFailureReport>,
+    pub predicate_rewrite_failure: Option<SqlPredicateRewriteFailureReport>,
 }
 
 pub(crate) fn sql_capability_profile_json(aggregate: bool) -> JsonValue {
@@ -263,16 +324,29 @@ pub(crate) fn sql_capability_profile_json(aggregate: bool) -> JsonValue {
     })
 }
 
+pub(crate) fn sql_predicate_rewrite_capability_profile_json() -> JsonValue {
+    json!({
+        "shapes": crate::predicate_rewrite::PREDICATE_REWRITE_SHAPES,
+        "parameterized": true,
+        "three_valued_logic": true,
+        "pinned_snapshot": true,
+        "result_semantics": "bag",
+    })
+}
+
 impl SqlCaseReport {
     pub(crate) fn json(&self) -> JsonValue {
         json!({
             "shape": self.shape,
+            "predicate_rewrite_shape": self.predicate_rewrite_shape,
             "index_enabled": self.index_enabled,
             "success": self.success,
             "row_tlp_success": self.row_tlp_success,
             "aggregate_tlp_success": self.aggregate_tlp_success,
+            "predicate_rewrite_success": self.predicate_rewrite_success,
             "row_tlp_failure": self.row_tlp_failure.as_ref().map(SqlFailureReport::json),
             "aggregate_tlp_failure": self.aggregate_tlp_failure.as_ref().map(SqlFailureReport::json),
+            "predicate_rewrite_failure": self.predicate_rewrite_failure.as_ref().map(SqlPredicateRewriteFailureReport::json),
         })
     }
 }
@@ -281,6 +355,7 @@ impl SqlCaseReport {
 enum SqlOracleKind {
     RowTlp,
     AggregateTlp,
+    PredicateRewrite,
 }
 
 impl SqlOracleKind {
@@ -288,6 +363,7 @@ impl SqlOracleKind {
         match self {
             Self::RowTlp => "sql_tlp",
             Self::AggregateTlp => "sql_tlp_aggregate",
+            Self::PredicateRewrite => "sql_predicate_rewrite",
         }
     }
 }
@@ -309,6 +385,7 @@ enum SqlFailureSignature {
     },
     AggregateOverflow,
     AggregatePartitionMismatch,
+    PredicateRewriteMismatch,
 }
 
 impl SqlFailureSignature {
@@ -327,6 +404,7 @@ impl SqlFailureSignature {
             }
             Self::AggregateOverflow => "sql_tlp_aggregate_overflow".to_string(),
             Self::AggregatePartitionMismatch => "sql_tlp_aggregate_partition_mismatch".to_string(),
+            Self::PredicateRewriteMismatch => "sql_predicate_rewrite_mismatch".to_string(),
         }
     }
 }
@@ -339,18 +417,23 @@ struct DetectedSqlFailure {
 
 pub(crate) fn evaluate_sql_case(seed: u64, index: usize, index_enabled: bool) -> SqlCaseReport {
     let case = generate_sql_case(seed, index, index_enabled);
-    let (row_evidence, aggregate_evidence) = execute_sql_case(&case);
+    let (row_evidence, aggregate_evidence, predicate_rewrite_evidence) = execute_sql_case(&case);
     let row_failure = classify_sql_row_tlp_failure(&row_evidence);
     let aggregate_failure = classify_sql_aggregate_tlp_failure(&aggregate_evidence);
+    let predicate_rewrite_failure =
+        classify_sql_predicate_rewrite_failure(&predicate_rewrite_evidence);
     let row_tlp_success = row_failure.is_none();
     let aggregate_tlp_success = aggregate_failure.is_none();
+    let predicate_rewrite_success = predicate_rewrite_failure.is_none();
 
     SqlCaseReport {
         shape: case.shape.clone(),
+        predicate_rewrite_shape: case.predicate_rewrite.name.clone(),
         index_enabled,
-        success: row_tlp_success && aggregate_tlp_success,
+        success: row_tlp_success && aggregate_tlp_success && predicate_rewrite_success,
         row_tlp_success,
         aggregate_tlp_success,
+        predicate_rewrite_success,
         row_tlp_failure: row_failure
             .map(|failure| failure_report(&case, SqlOracleKind::RowTlp, failure, row_evidence)),
         aggregate_tlp_failure: aggregate_failure.map(|failure| {
@@ -360,6 +443,9 @@ pub(crate) fn evaluate_sql_case(seed: u64, index: usize, index_enabled: bool) ->
                 failure,
                 aggregate_evidence,
             )
+        }),
+        predicate_rewrite_failure: predicate_rewrite_failure.map(|failure| {
+            predicate_rewrite_failure_report(&case, failure, predicate_rewrite_evidence)
         }),
     }
 }
@@ -379,17 +465,35 @@ fn failure_report(
     }
 }
 
-fn execute_sql_case(case: &SqlFuzzCase) -> (SqlTlpEvidence, SqlTlpEvidence) {
+fn predicate_rewrite_failure_report(
+    case: &SqlFuzzCase,
+    failure: DetectedSqlFailure,
+    evidence: SqlPredicateRewriteEvidence,
+) -> SqlPredicateRewriteFailureReport {
+    SqlPredicateRewriteFailureReport {
+        signature: failure.signature.code(),
+        reason: failure.reason,
+        replay: SqlReplayBundle::from_case(case),
+        reduction: reduce_sql_failure(case, SqlOracleKind::PredicateRewrite, &failure.signature),
+        evidence,
+    }
+}
+
+fn execute_sql_case(
+    case: &SqlFuzzCase,
+) -> (SqlTlpEvidence, SqlTlpEvidence, SqlPredicateRewriteEvidence) {
     let (snapshot, snapshot_epoch) = match prepare_sql_case(case) {
         Ok(prepared) => prepared,
         Err(observation) => {
             let evidence = repeated_evidence(observation);
-            return (evidence.clone(), evidence);
+            let predicate_rewrite = repeated_predicate_rewrite_evidence(evidence.original.clone());
+            return (evidence.clone(), evidence, predicate_rewrite);
         }
     };
     (
         execute_sql_tlp_queries(&snapshot, snapshot_epoch, &case.row_tlp),
         execute_sql_tlp_queries(&snapshot, snapshot_epoch, &case.aggregate_tlp),
+        execute_sql_predicate_rewrite_queries(&snapshot, snapshot_epoch, &case.predicate_rewrite),
     )
 }
 
@@ -401,6 +505,9 @@ fn execute_sql_oracle(case: &SqlFuzzCase, oracle: SqlOracleKind) -> SqlTlpEviden
     let queries = match oracle {
         SqlOracleKind::RowTlp => &case.row_tlp,
         SqlOracleKind::AggregateTlp => &case.aggregate_tlp,
+        SqlOracleKind::PredicateRewrite => {
+            unreachable!("predicate rewrite uses its two-observation executor")
+        }
     };
     execute_sql_tlp_queries(&snapshot, snapshot_epoch, queries)
 }
@@ -423,36 +530,52 @@ fn execute_sql_tlp_queries(
     snapshot_epoch: u64,
     queries: &SqlTlpCase,
 ) -> SqlTlpEvidence {
-    let execute = |query: &SqlQueryInvocation| {
-        let explain_sql = format!("EXPLAIN {}", query.sql);
-        let plan = match snapshot.query_sql_with_params(&explain_sql, &query.parameters) {
-            Ok(output) => Some(output.rows),
-            Err(error) => {
-                return SqlExecutionObservation {
-                    snapshot_epoch: Some(snapshot_epoch),
-                    plan: None,
-                    outcome: sql_error_outcome("explain", error),
-                };
-            }
-        };
-        match snapshot.query_sql_with_params(&query.sql, &query.parameters) {
-            Ok(output) => SqlExecutionObservation {
+    SqlTlpEvidence {
+        original: execute_sql_query(snapshot, snapshot_epoch, &queries.original),
+        predicate_true: execute_sql_query(snapshot, snapshot_epoch, &queries.predicate_true),
+        predicate_false: execute_sql_query(snapshot, snapshot_epoch, &queries.predicate_false),
+        predicate_null: execute_sql_query(snapshot, snapshot_epoch, &queries.predicate_null),
+    }
+}
+
+fn execute_sql_predicate_rewrite_queries(
+    snapshot: &DatabaseReadTransaction,
+    snapshot_epoch: u64,
+    queries: &SqlPredicateRewriteCase,
+) -> SqlPredicateRewriteEvidence {
+    SqlPredicateRewriteEvidence {
+        original: execute_sql_query(snapshot, snapshot_epoch, &queries.original),
+        rewritten: execute_sql_query(snapshot, snapshot_epoch, &queries.rewritten),
+    }
+}
+
+fn execute_sql_query(
+    snapshot: &DatabaseReadTransaction,
+    snapshot_epoch: u64,
+    query: &SqlQueryInvocation,
+) -> SqlExecutionObservation {
+    let explain_sql = format!("EXPLAIN {}", query.sql);
+    let plan = match snapshot.query_sql_with_params(&explain_sql, &query.parameters) {
+        Ok(output) => Some(output.rows),
+        Err(error) => {
+            return SqlExecutionObservation {
                 snapshot_epoch: Some(snapshot_epoch),
-                plan: plan.map(|rows| rows.into_rows()),
-                outcome: ExecutionOutcome::Rows(output.rows.into_rows()),
-            },
-            Err(error) => SqlExecutionObservation {
-                snapshot_epoch: Some(snapshot_epoch),
-                plan: plan.map(|rows| rows.into_rows()),
-                outcome: sql_error_outcome("execute", error),
-            },
+                plan: None,
+                outcome: sql_error_outcome("explain", error),
+            };
         }
     };
-    SqlTlpEvidence {
-        original: execute(&queries.original),
-        predicate_true: execute(&queries.predicate_true),
-        predicate_false: execute(&queries.predicate_false),
-        predicate_null: execute(&queries.predicate_null),
+    match snapshot.query_sql_with_params(&query.sql, &query.parameters) {
+        Ok(output) => SqlExecutionObservation {
+            snapshot_epoch: Some(snapshot_epoch),
+            plan: plan.map(|rows| rows.into_rows()),
+            outcome: ExecutionOutcome::Rows(output.rows.into_rows()),
+        },
+        Err(error) => SqlExecutionObservation {
+            snapshot_epoch: Some(snapshot_epoch),
+            plan: plan.map(|rows| rows.into_rows()),
+            outcome: sql_error_outcome("execute", error),
+        },
     }
 }
 
@@ -462,6 +585,15 @@ fn repeated_evidence(observation: SqlExecutionObservation) -> SqlTlpEvidence {
         predicate_true: observation.clone(),
         predicate_false: observation.clone(),
         predicate_null: observation,
+    }
+}
+
+fn repeated_predicate_rewrite_evidence(
+    observation: SqlExecutionObservation,
+) -> SqlPredicateRewriteEvidence {
+    SqlPredicateRewriteEvidence {
+        original: observation.clone(),
+        rewritten: observation,
     }
 }
 
@@ -519,6 +651,49 @@ fn classify_sql_aggregate_tlp_failure(evidence: &SqlTlpEvidence) -> Option<Detec
             counts[0]
         ),
     })
+}
+
+fn classify_sql_predicate_rewrite_failure(
+    evidence: &SqlPredicateRewriteEvidence,
+) -> Option<DetectedSqlFailure> {
+    for (variant, observation) in [
+        ("original", &evidence.original),
+        ("rewritten", &evidence.rewritten),
+    ] {
+        if let ExecutionOutcome::Error { phase, class, .. } = &observation.outcome {
+            return Some(DetectedSqlFailure {
+                signature: SqlFailureSignature::Errored {
+                    oracle: SqlOracleKind::PredicateRewrite,
+                    variant,
+                    phase,
+                    class,
+                },
+                reason: format!("sql predicate rewrite {variant} failed in {phase}/{class}"),
+            });
+        }
+    }
+    if evidence.original.snapshot_epoch.is_none()
+        || evidence.original.snapshot_epoch != evidence.rewritten.snapshot_epoch
+    {
+        return Some(DetectedSqlFailure {
+            signature: SqlFailureSignature::SnapshotMismatch {
+                oracle: SqlOracleKind::PredicateRewrite,
+            },
+            reason: "sql predicate rewrite variants did not use one pinned snapshot".to_string(),
+        });
+    }
+    let ExecutionOutcome::Rows(original) = &evidence.original.outcome else {
+        unreachable!("SQL predicate rewrite errors were classified above")
+    };
+    let ExecutionOutcome::Rows(rewritten) = &evidence.rewritten.outcome else {
+        unreachable!("SQL predicate rewrite errors were classified above")
+    };
+    compare_rows(original, rewritten, ResultSemantics::Bag)
+        .err()
+        .map(|reason| DetectedSqlFailure {
+            signature: SqlFailureSignature::PredicateRewriteMismatch,
+            reason: format!("SQL predicate rewrite mismatch: {reason}"),
+        })
 }
 
 fn classify_sql_common_failure(
@@ -620,10 +795,22 @@ fn reduce_sql_failure(
 }
 
 fn sql_failure_signature(case: &SqlFuzzCase, oracle: SqlOracleKind) -> Option<SqlFailureSignature> {
-    let evidence = execute_sql_oracle(case, oracle);
     match oracle {
-        SqlOracleKind::RowTlp => classify_sql_row_tlp_failure(&evidence),
-        SqlOracleKind::AggregateTlp => classify_sql_aggregate_tlp_failure(&evidence),
+        SqlOracleKind::RowTlp => classify_sql_row_tlp_failure(&execute_sql_oracle(case, oracle)),
+        SqlOracleKind::AggregateTlp => {
+            classify_sql_aggregate_tlp_failure(&execute_sql_oracle(case, oracle))
+        }
+        SqlOracleKind::PredicateRewrite => {
+            let evidence = match prepare_sql_case(case) {
+                Ok((snapshot, snapshot_epoch)) => execute_sql_predicate_rewrite_queries(
+                    &snapshot,
+                    snapshot_epoch,
+                    &case.predicate_rewrite,
+                ),
+                Err(observation) => repeated_predicate_rewrite_evidence(observation),
+            };
+            classify_sql_predicate_rewrite_failure(&evidence)
+        }
     }
     .map(|failure| failure.signature)
 }
@@ -655,10 +842,15 @@ mod tests {
     #[test]
     fn generated_sql_cases_cover_all_shapes_and_oracles() {
         let mut observed = std::collections::BTreeSet::new();
-        for index in 0..SQL_QUERY_SHAPE_COUNT {
+        let mut observed_rewrite_pairs = std::collections::BTreeSet::new();
+        for index in
+            0..SQL_QUERY_SHAPE_COUNT * crate::predicate_rewrite::PREDICATE_REWRITE_SHAPES.len()
+        {
             let case = generate_sql_case(17 + index as u64, index, index.is_multiple_of(2));
             observed.insert(case.shape.clone());
-            let (row, aggregate) = execute_sql_case(&case);
+            observed_rewrite_pairs
+                .insert((case.shape.clone(), case.predicate_rewrite.name.clone()));
+            let (row, aggregate, predicate_rewrite) = execute_sql_case(&case);
             assert!(
                 classify_sql_row_tlp_failure(&row).is_none(),
                 "{}",
@@ -666,6 +858,11 @@ mod tests {
             );
             assert!(
                 classify_sql_aggregate_tlp_failure(&aggregate).is_none(),
+                "{}",
+                SqlReplayBundle::from_case(&case).json()
+            );
+            assert!(
+                classify_sql_predicate_rewrite_failure(&predicate_rewrite).is_none(),
                 "{}",
                 SqlReplayBundle::from_case(&case).json()
             );
@@ -677,6 +874,8 @@ mod tests {
                 .observations()
                 .iter()
                 .all(|(_, observation)| observation.plan.is_some()));
+            assert!(predicate_rewrite.original.plan.is_some());
+            assert!(predicate_rewrite.rewritten.plan.is_some());
             let ExecutionOutcome::Rows(null_rows) = &row.predicate_null.outcome else {
                 panic!("{} null partition did not return rows", case.shape);
             };
@@ -692,6 +891,32 @@ mod tests {
             );
         }
         assert_eq!(observed.len(), SQL_QUERY_SHAPE_COUNT);
+        assert_eq!(
+            observed_rewrite_pairs.len(),
+            SQL_QUERY_SHAPE_COUNT * crate::predicate_rewrite::PREDICATE_REWRITE_SHAPES.len()
+        );
+    }
+
+    #[test]
+    fn sql_predicate_rewrite_detects_and_reduces_invalid_relation() {
+        let mut case = generate_sql_case(29, 0, true);
+        case.predicate_rewrite.rewritten = case.row_tlp.original.clone();
+        let (snapshot, snapshot_epoch) = prepare_sql_case(&case).unwrap();
+        let evidence = execute_sql_predicate_rewrite_queries(
+            &snapshot,
+            snapshot_epoch,
+            &case.predicate_rewrite,
+        );
+        let failure = classify_sql_predicate_rewrite_failure(&evidence).unwrap();
+
+        assert_eq!(
+            failure.signature,
+            SqlFailureSignature::PredicateRewriteMismatch
+        );
+        let reduction =
+            reduce_sql_failure(&case, SqlOracleKind::PredicateRewrite, &failure.signature);
+        assert!(reduction.reduced_setup_count < reduction.original_setup_count);
+        assert_eq!(reduction.oracle, "sql_predicate_rewrite");
     }
 
     #[test]

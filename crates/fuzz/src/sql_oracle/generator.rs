@@ -1,4 +1,8 @@
-use super::{SqlFuzzCase, SqlMutation, SqlQueryInvocation, SqlTlpCase, SQL_QUERY_SHAPE_COUNT};
+use super::{
+    SqlFuzzCase, SqlMutation, SqlPredicateRewriteCase, SqlQueryInvocation, SqlTlpCase,
+    SQL_QUERY_SHAPE_COUNT,
+};
+use crate::predicate_rewrite::PredicateRewriteKind;
 use crate::ResultSemantics;
 use skein::Value;
 
@@ -63,12 +67,14 @@ pub(super) fn generate_sql_case(seed: u64, index: usize, index_enabled: bool) ->
     }
 
     let specification = sql_query_spec(seed, index);
+    let rewrite_kind = PredicateRewriteKind::for_case(index + index / SQL_QUERY_SHAPE_COUNT);
     SqlFuzzCase {
         seed,
         shape: specification.name.to_string(),
         setup,
         row_tlp: specification.build(false),
         aggregate_tlp: specification.build(true),
+        predicate_rewrite: specification.build_predicate_rewrite(rewrite_kind),
         index_enabled,
     }
 }
@@ -91,7 +97,99 @@ impl SqlQuerySpec {
         } else {
             self.projection
         };
-        let query = |predicate: Option<&str>, parameters: Vec<Value>| SqlQueryInvocation {
+        SqlTlpCase {
+            name: if aggregate {
+                format!("{}_count", self.name)
+            } else {
+                self.name.to_string()
+            },
+            original: self.query(projection, None, Vec::new()),
+            predicate_true: self.query(
+                projection,
+                Some(&self.predicate),
+                self.predicate_parameters.clone(),
+            ),
+            predicate_false: self.query(
+                projection,
+                Some(&format!("NOT ({})", self.predicate)),
+                self.predicate_parameters.clone(),
+            ),
+            predicate_null: self.query(
+                projection,
+                Some(&self.null_predicate),
+                self.null_parameters.clone(),
+            ),
+        }
+    }
+
+    fn build_predicate_rewrite(&self, kind: PredicateRewriteKind) -> SqlPredicateRewriteCase {
+        let (original, rewritten) = match kind {
+            PredicateRewriteKind::DoubleNegation => (
+                self.query(
+                    self.projection,
+                    Some(&self.predicate),
+                    self.predicate_parameters.clone(),
+                ),
+                self.query(
+                    self.projection,
+                    Some(&format!("NOT (NOT ({}))", self.predicate)),
+                    self.predicate_parameters.clone(),
+                ),
+            ),
+            PredicateRewriteKind::ConjunctionIdempotence => (
+                self.query(
+                    self.projection,
+                    Some(&self.predicate),
+                    self.predicate_parameters.clone(),
+                ),
+                self.query(
+                    self.projection,
+                    Some(&format!("({0}) AND ({0})", self.predicate)),
+                    self.predicate_parameters.clone(),
+                ),
+            ),
+            PredicateRewriteKind::DisjunctionIdempotence => (
+                self.query(
+                    self.projection,
+                    Some(&self.predicate),
+                    self.predicate_parameters.clone(),
+                ),
+                self.query(
+                    self.projection,
+                    Some(&format!("({0}) OR ({0})", self.predicate)),
+                    self.predicate_parameters.clone(),
+                ),
+            ),
+            PredicateRewriteKind::NullTotality => {
+                let null_predicate = shift_positional_parameters(
+                    &self.null_predicate,
+                    self.predicate_parameters.len(),
+                );
+                let rewritten =
+                    format!("({0}) OR (NOT ({0})) OR ({null_predicate})", self.predicate);
+                let mut parameters = self.predicate_parameters.clone();
+                parameters.extend(self.null_parameters.clone());
+                (
+                    self.query(self.projection, None, Vec::new()),
+                    self.query(self.projection, Some(&rewritten), parameters),
+                )
+            }
+        };
+
+        SqlPredicateRewriteCase {
+            name: kind.as_str().to_string(),
+            original,
+            rewritten,
+        }
+    }
+
+    fn query(
+        &self,
+        projection: &str,
+        predicate: Option<&str>,
+        parameters: Vec<Value>,
+    ) -> SqlQueryInvocation {
+        SqlQueryInvocation {
             sql: match predicate {
                 Some(predicate) => {
                     format!("SELECT {projection} FROM {} WHERE {predicate}", self.from)
@@ -100,22 +198,40 @@ impl SqlQuerySpec {
             },
             parameters,
             result_semantics: ResultSemantics::Bag,
-        };
-        SqlTlpCase {
-            name: if aggregate {
-                format!("{}_count", self.name)
-            } else {
-                self.name.to_string()
-            },
-            original: query(None, Vec::new()),
-            predicate_true: query(Some(&self.predicate), self.predicate_parameters.clone()),
-            predicate_false: query(
-                Some(&format!("NOT ({})", self.predicate)),
-                self.predicate_parameters.clone(),
-            ),
-            predicate_null: query(Some(&self.null_predicate), self.null_parameters.clone()),
         }
     }
+}
+
+fn shift_positional_parameters(predicate: &str, offset: usize) -> String {
+    if offset == 0 {
+        return predicate.to_string();
+    }
+
+    let bytes = predicate.as_bytes();
+    let mut output = String::with_capacity(predicate.len());
+    let mut index = 0;
+    let mut copied_until = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'$' || index + 1 == bytes.len() || !bytes[index + 1].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+        output.push_str(&predicate[copied_until..index]);
+        let start = index + 1;
+        let mut end = start;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        let position = predicate[start..end]
+            .parse::<usize>()
+            .expect("generated SQL parameter positions are numeric");
+        output.push('$');
+        output.push_str(&(position + offset).to_string());
+        index = end;
+        copied_until = end;
+    }
+    output.push_str(&predicate[copied_until..]);
+    output
 }
 
 fn sql_query_spec(seed: u64, index: usize) -> SqlQuerySpec {
@@ -205,5 +321,21 @@ fn sql_query_spec(seed: u64, index: usize) -> SqlQuerySpec {
                 null_parameters: vec![bucket],
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn positional_parameters_are_rebased_without_touching_plain_text() {
+        assert_eq!(
+            shift_positional_parameters("r.score IS NULL AND r.bucket = $1", 2),
+            "r.score IS NULL AND r.bucket = $3"
+        );
+        assert_eq!(shift_positional_parameters("$1 = $10", 3), "$4 = $13");
+        assert_eq!(shift_positional_parameters("café = $1", 1), "café = $2");
+        assert_eq!(crate::predicate_rewrite::PREDICATE_REWRITE_SHAPES.len(), 4);
     }
 }

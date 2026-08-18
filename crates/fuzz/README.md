@@ -5,7 +5,7 @@ production `skein` crate does not depend on it.
 
 The generator first creates a deterministic graph state, then chooses query shapes and typed
 predicate and query AST nodes that are validated against the generated schema before rendering. A
-campaign runs six complementary oracles:
+campaign runs eight complementary oracles:
 
 - The plan-differential oracle applies mutations once, pins one read snapshot, and executes the
   same parameterized Cypher query through memo search and deterministic direct fallback. Direct
@@ -21,6 +21,11 @@ campaign runs six complementary oracles:
   predicate partitions on one pinned snapshot. The original count must equal the checked sum of
   the partition counts. This follows SQLancer's TLP Aggregate construction and exercises Skein's
   aggregate execution path without adding a reference executor or host-side graph semantics.
+- The graph predicate-rewrite oracle cycles through double negation, conjunction idempotence,
+  disjunction idempotence, and null totality. It compares the original and rewritten Cypher on one
+  pinned snapshot under bag semantics. Unlike TLP recombination, each relation must preserve the
+  selected rows directly, so a predicate-classification defect cannot be hidden by compensating
+  partitions.
 - The graph-metamorphic oracle executes an identifier-bijection transform for every query and a
   direction-reversal transform whenever the typed AST contains a directed relationship. The
   transformed graph, parameters, and relationship pattern change together; identifier values are
@@ -36,6 +41,10 @@ campaign runs six complementary oracles:
   variants. The original count must equal the checked sum of all three partition counts. SQL setup,
   typed parameters, queries, `EXPLAIN` plan rows, evidence, and a fresh-state reduced setup are
   retained in the failure report.
+- The SQL predicate-rewrite oracle applies the same four three-valued-logic relations to the
+  generated PostgreSQL-style predicates. Positional parameters in the unknown partition are
+  deterministically rebased before composition. Both variants retain their `EXPLAIN` rows and run
+  against the same relational snapshot.
 
 The TLP relations rely on Cypher and SQL three-valued predicate logic: missing or null operands
 evaluate to unknown, and `NOT unknown` remains unknown. Duplicate rows, missing values, null
@@ -50,7 +59,9 @@ cargo run -p skein-fuzz -- --seed 7 --case-index 19
 
 The command prints a multi-oracle JSON report. Any mismatch exits non-zero and contains the exact
 mutations, typed parameters, rendered query AST metadata, all query variants, result semantics,
-plan fingerprints, optimizer stages, metamorphic transforms, and a direct reproduction command.
+plan fingerprints, optimizer stages, predicate rewrites, metamorphic transforms, and a direct
+reproduction command. Every failure carries a stable oracle-specific signature; reducers retain
+only candidates that reproduce that signature.
 Plan-fingerprint novelty is reported as coverage telemetry and never changes a correctness verdict.
 The differential reducer first minimizes graph mutations and then typed query AST nodes. It accepts
 a candidate only when the same failure signature still triggers, so a setup, parse, or execution

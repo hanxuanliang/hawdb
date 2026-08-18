@@ -73,7 +73,7 @@ jobs:
               campaign_status=1
             fi
             if ! jq -e \
-              '.protocol == "skein-multi-oracle-fuzz-v3" and
+              '.protocol == "skein-multi-oracle-fuzz-v6" and
                .executed_case_count == .requested_case_count and
                .complete_shape_coverage == true and
                .success == true' \
@@ -92,9 +92,20 @@ jobs:
                     seed,
                     shape,
                     graph_tlp_shape,
+                    graph_tlp_aggregate_shape,
+                    graph_predicate_rewrite_shape,
                     reproduction_command,
                     failure,
                     graph_tlp_failure,
+                    graph_tlp_aggregate_failure,
+                    graph_predicate_rewrite_failure,
+                    sql: {
+                      shape: .sql.shape,
+                      predicate_rewrite_shape: .sql.predicate_rewrite_shape,
+                      row_tlp_failure: .sql.row_tlp_failure,
+                      aggregate_tlp_failure: .sql.aggregate_tlp_failure,
+                      predicate_rewrite_failure: .sql.predicate_rewrite_failure
+                    },
                     metamorphic_failure
                   }
               ]

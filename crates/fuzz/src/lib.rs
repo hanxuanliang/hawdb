@@ -10,26 +10,31 @@ use std::fmt::{Display, Formatter};
 
 mod coverage;
 mod generator;
+mod predicate_rewrite;
 mod query_ast;
 mod sql_oracle;
 
 use coverage::PlanCoverageTracker;
 use generator::StateAwareCaseGenerator;
+use predicate_rewrite::PREDICATE_REWRITE_SHAPES;
 use query_ast::QueryAst;
 
 pub use coverage::PlanCoverageReport;
 pub use sql_oracle::{
-    SqlCaseReport, SqlExecutionObservation, SqlFailureReport, SqlMutation, SqlQueryInvocation,
-    SqlReductionReport, SqlReplayBundle, SqlTlpCase, SqlTlpEvidence, SQL_REPLAY_PROTOCOL,
-    SQL_TLP_AGGREGATE_PROTOCOL, SQL_TLP_PROTOCOL,
+    SqlCaseReport, SqlExecutionObservation, SqlFailureReport, SqlMutation, SqlPredicateRewriteCase,
+    SqlPredicateRewriteEvidence, SqlPredicateRewriteFailureReport, SqlQueryInvocation,
+    SqlReductionReport, SqlReplayBundle, SqlTlpCase, SqlTlpEvidence,
+    SQL_PREDICATE_REWRITE_PROTOCOL, SQL_REPLAY_PROTOCOL, SQL_TLP_AGGREGATE_PROTOCOL,
+    SQL_TLP_PROTOCOL,
 };
 
-pub const CAMPAIGN_PROTOCOL: &str = "skein-multi-oracle-fuzz-v5";
+pub const CAMPAIGN_PROTOCOL: &str = "skein-multi-oracle-fuzz-v6";
+pub const GRAPH_PREDICATE_REWRITE_PROTOCOL: &str = "skein-graph-predicate-rewrite-fuzz-v1";
 pub const GRAPH_TLP_AGGREGATE_PROTOCOL: &str = "skein-graph-tlp-aggregate-fuzz-v1";
 pub const GRAPH_TLP_PROTOCOL: &str = "skein-graph-tlp-fuzz-v1";
 pub const METAMORPHIC_PROTOCOL: &str = "skein-graph-metamorphic-fuzz-v1";
 pub const PLAN_DIFFERENTIAL_PROTOCOL: &str = "skein-plan-differential-fuzz-v1";
-pub const REPLAY_BUNDLE_PROTOCOL: &str = "skein-multi-oracle-replay-v4";
+pub const REPLAY_BUNDLE_PROTOCOL: &str = "skein-multi-oracle-replay-v5";
 pub(crate) const QUERY_SHAPE_COUNT: usize = 12;
 const DEFAULT_CASE_COUNT: usize = 128;
 const MAX_CASE_COUNT: usize = 10_000;
@@ -76,6 +81,7 @@ pub struct FuzzCase {
     pub(crate) query_ast: QueryAst,
     pub graph_tlp: GraphTlpCase,
     pub graph_tlp_aggregate: GraphTlpCase,
+    pub graph_predicate_rewrite: GraphPredicateRewriteCase,
     pub metamorphic: MetamorphicCase,
     pub index_enabled: bool,
 }
@@ -94,6 +100,13 @@ pub struct GraphTlpCase {
     pub predicate_true: QueryInvocation,
     pub predicate_false: QueryInvocation,
     pub predicate_null: QueryInvocation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphPredicateRewriteCase {
+    pub name: String,
+    pub original: QueryInvocation,
+    pub rewritten: QueryInvocation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +190,16 @@ impl CapabilityProfile {
             compares_path_values: false,
         }
     }
+
+    pub fn graph_predicate_rewrite_v1() -> Self {
+        Self {
+            shapes: PREDICATE_REWRITE_SHAPES.to_vec(),
+            compares_duplicates: true,
+            compares_missing_and_null: true,
+            compares_float_bit_patterns: true,
+            compares_path_values: false,
+        }
+    }
 }
 
 pub trait Oracle {
@@ -207,6 +230,7 @@ pub struct DifferentialEvidence {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FailureReport {
+    pub signature: String,
     pub reason: String,
     pub replay: ReplayBundle,
     pub reduction: ReductionReport,
@@ -217,6 +241,7 @@ pub struct FailureReport {
 impl FailureReport {
     pub fn json(&self) -> JsonValue {
         json!({
+            "signature": self.signature,
             "reason": self.reason,
             "replay": self.replay.json(),
             "reduction": self.reduction.json(),
@@ -260,6 +285,7 @@ impl GraphTlpEvidence {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphTlpFailureReport {
+    pub signature: String,
     pub reason: String,
     pub replay: ReplayBundle,
     pub reduction: ReductionReport,
@@ -268,6 +294,34 @@ pub struct GraphTlpFailureReport {
 
 pub type GraphTlpAggregateOracleResult = GraphTlpOracleResult;
 pub type GraphTlpAggregateFailureReport = GraphTlpFailureReport;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
+pub enum GraphPredicateRewriteOracleResult {
+    Equivalent(GraphPredicateRewriteEvidence),
+    Failure(GraphPredicateRewriteFailureReport),
+}
+
+impl GraphPredicateRewriteOracleResult {
+    pub const fn is_equivalent(&self) -> bool {
+        matches!(self, Self::Equivalent(_))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphPredicateRewriteEvidence {
+    pub original: ExecutionObservation,
+    pub rewritten: ExecutionObservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphPredicateRewriteFailureReport {
+    pub signature: String,
+    pub reason: String,
+    pub replay: ReplayBundle,
+    pub reduction: ReductionReport,
+    pub evidence: GraphPredicateRewriteEvidence,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
@@ -315,6 +369,7 @@ impl MetamorphicFailureReport {
 impl GraphTlpFailureReport {
     pub fn json(&self) -> JsonValue {
         json!({
+            "signature": self.signature,
             "reason": self.reason,
             "replay": self.replay.json(),
             "reduction": self.reduction.json(),
@@ -322,6 +377,19 @@ impl GraphTlpFailureReport {
             "predicate_true": self.evidence.predicate_true.json(),
             "predicate_false": self.evidence.predicate_false.json(),
             "predicate_null": self.evidence.predicate_null.json(),
+        })
+    }
+}
+
+impl GraphPredicateRewriteFailureReport {
+    pub fn json(&self) -> JsonValue {
+        json!({
+            "signature": self.signature,
+            "reason": self.reason,
+            "replay": self.replay.json(),
+            "reduction": self.reduction.json(),
+            "original": self.evidence.original.json(),
+            "rewritten": self.evidence.rewritten.json(),
         })
     }
 }
@@ -335,6 +403,7 @@ pub struct ReplayBundle {
     pub(crate) query_ast: QueryAst,
     pub graph_tlp: GraphTlpCase,
     pub graph_tlp_aggregate: GraphTlpCase,
+    pub graph_predicate_rewrite: GraphPredicateRewriteCase,
     pub metamorphic: MetamorphicCase,
     pub index_enabled: bool,
 }
@@ -349,6 +418,7 @@ impl ReplayBundle {
             query_ast: case.query_ast.clone(),
             graph_tlp: case.graph_tlp.clone(),
             graph_tlp_aggregate: case.graph_tlp_aggregate.clone(),
+            graph_predicate_rewrite: case.graph_predicate_rewrite.clone(),
             metamorphic: case.metamorphic.clone(),
             index_enabled: case.index_enabled,
         }
@@ -366,6 +436,7 @@ impl ReplayBundle {
             "query_ast": self.query_ast.json(),
             "graph_tlp": graph_tlp_case_json(&self.graph_tlp),
             "graph_tlp_aggregate": graph_tlp_case_json(&self.graph_tlp_aggregate),
+            "graph_predicate_rewrite": graph_predicate_rewrite_case_json(&self.graph_predicate_rewrite),
             "metamorphic": metamorphic_case_json(&self.metamorphic),
         })
     }
@@ -472,6 +543,7 @@ impl Oracle for PlanDifferentialOracle {
 
         if let Some(failure) = failure {
             OracleResult::Failure(FailureReport {
+                signature: failure.signature.code(),
                 reason: failure.reason,
                 replay: ReplayBundle::from_case(case),
                 reduction: reduce_failure(case, OracleKind::PlanDifferential, &failure.signature),
@@ -503,6 +575,7 @@ impl Oracle for GraphTlpOracle {
 
         if let Some(failure) = failure {
             GraphTlpOracleResult::Failure(GraphTlpFailureReport {
+                signature: failure.signature.code(),
                 reason: failure.reason,
                 replay: ReplayBundle::from_case(case),
                 reduction: reduce_failure(case, OracleKind::GraphTlp, &failure.signature),
@@ -530,6 +603,7 @@ impl Oracle for GraphTlpAggregateOracle {
 
         if let Some(failure) = failure {
             GraphTlpOracleResult::Failure(GraphTlpFailureReport {
+                signature: failure.signature.code(),
                 reason: failure.reason,
                 replay: ReplayBundle::from_case(case),
                 reduction: reduce_failure(case, OracleKind::GraphTlpAggregate, &failure.signature),
@@ -537,6 +611,38 @@ impl Oracle for GraphTlpAggregateOracle {
             })
         } else {
             GraphTlpOracleResult::Equivalent(evidence)
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GraphPredicateRewriteOracle;
+
+impl Oracle for GraphPredicateRewriteOracle {
+    type Output = GraphPredicateRewriteOracleResult;
+
+    fn capability_profile(&self) -> CapabilityProfile {
+        CapabilityProfile::graph_predicate_rewrite_v1()
+    }
+
+    fn evaluate(&self, case: &FuzzCase) -> GraphPredicateRewriteOracleResult {
+        let evidence = execute_graph_predicate_rewrite_case(case);
+        let failure = classify_graph_predicate_rewrite_failure(&evidence);
+
+        if let Some(failure) = failure {
+            GraphPredicateRewriteOracleResult::Failure(GraphPredicateRewriteFailureReport {
+                signature: failure.signature.code(),
+                reason: failure.reason,
+                replay: ReplayBundle::from_case(case),
+                reduction: reduce_failure(
+                    case,
+                    OracleKind::GraphPredicateRewrite,
+                    &failure.signature,
+                ),
+                evidence,
+            })
+        } else {
+            GraphPredicateRewriteOracleResult::Equivalent(evidence)
         }
     }
 }
@@ -837,6 +943,32 @@ fn execute_graph_tlp_queries(case: &FuzzCase, queries: &GraphTlpCase) -> GraphTl
     }
 }
 
+fn execute_graph_predicate_rewrite_case(case: &FuzzCase) -> GraphPredicateRewriteEvidence {
+    let (mut snapshot, snapshot_epoch) = match prepare_case(case) {
+        Ok(prepared) => prepared,
+        Err(observation) => {
+            let observation = *observation;
+            return GraphPredicateRewriteEvidence {
+                original: observation.clone(),
+                rewritten: observation,
+            };
+        }
+    };
+    let mut execute = |query: &QueryInvocation| {
+        execute_snapshot_case(
+            &mut snapshot,
+            snapshot_epoch,
+            query,
+            OptimizerSearchDirective::Memo,
+        )
+    };
+
+    GraphPredicateRewriteEvidence {
+        original: execute(&case.graph_predicate_rewrite.original),
+        rewritten: execute(&case.graph_predicate_rewrite.rewritten),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DetectedFailure {
     signature: FailureSignature,
@@ -885,6 +1017,73 @@ enum FailureSignature {
     },
     GraphTlpAggregateOverflow,
     GraphTlpAggregateMismatch,
+    GraphPredicateRewriteErrored {
+        variant: &'static str,
+        phase: &'static str,
+        class: &'static str,
+    },
+    GraphPredicateRewriteSnapshotMismatch,
+    GraphPredicateRewriteMismatch,
+}
+
+impl FailureSignature {
+    fn code(&self) -> String {
+        match self {
+            Self::PlanResultMismatch => "plan_differential_result_mismatch".to_string(),
+            Self::PlanBothErrored {
+                memo_phase,
+                memo_class,
+                direct_phase,
+                direct_class,
+            } => format!(
+                "plan_differential_both_errored_memo_{memo_phase}_{memo_class}_direct_{direct_phase}_{direct_class}"
+            ),
+            Self::PlanMemoErrored { phase, class } => {
+                format!("plan_differential_memo_{phase}_{class}")
+            }
+            Self::PlanDirectFallbackErrored { phase, class } => {
+                format!("plan_differential_direct_fallback_{phase}_{class}")
+            }
+            Self::PlanSnapshotMismatch => "plan_differential_snapshot_mismatch".to_string(),
+            Self::PlanDirectiveMismatch { path } => {
+                format!("plan_differential_{path}_directive_mismatch")
+            }
+            Self::PlanSearchModeMismatch { path } => {
+                format!("plan_differential_{path}_search_mode_mismatch")
+            }
+            Self::GraphTlpErrored {
+                variant,
+                phase,
+                class,
+            } => format!("graph_tlp_{variant}_{phase}_{class}"),
+            Self::GraphTlpSnapshotMismatch => "graph_tlp_snapshot_mismatch".to_string(),
+            Self::GraphTlpPartitionMismatch => "graph_tlp_partition_mismatch".to_string(),
+            Self::GraphTlpAggregateErrored {
+                variant,
+                phase,
+                class,
+            } => format!("graph_tlp_aggregate_{variant}_{phase}_{class}"),
+            Self::GraphTlpAggregateSnapshotMismatch => {
+                "graph_tlp_aggregate_snapshot_mismatch".to_string()
+            }
+            Self::GraphTlpAggregateInvalidResult { variant } => {
+                format!("graph_tlp_aggregate_{variant}_invalid_result")
+            }
+            Self::GraphTlpAggregateOverflow => "graph_tlp_aggregate_overflow".to_string(),
+            Self::GraphTlpAggregateMismatch => "graph_tlp_aggregate_mismatch".to_string(),
+            Self::GraphPredicateRewriteErrored {
+                variant,
+                phase,
+                class,
+            } => format!("graph_predicate_rewrite_{variant}_{phase}_{class}"),
+            Self::GraphPredicateRewriteSnapshotMismatch => {
+                "graph_predicate_rewrite_snapshot_mismatch".to_string()
+            }
+            Self::GraphPredicateRewriteMismatch => {
+                "graph_predicate_rewrite_mismatch".to_string()
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -892,6 +1091,7 @@ enum OracleKind {
     PlanDifferential,
     GraphTlp,
     GraphTlpAggregate,
+    GraphPredicateRewrite,
 }
 
 impl OracleKind {
@@ -900,8 +1100,54 @@ impl OracleKind {
             Self::PlanDifferential => "plan_differential",
             Self::GraphTlp => "graph_tlp",
             Self::GraphTlpAggregate => "graph_tlp_aggregate",
+            Self::GraphPredicateRewrite => "graph_predicate_rewrite",
         }
     }
+}
+
+fn classify_graph_predicate_rewrite_failure(
+    evidence: &GraphPredicateRewriteEvidence,
+) -> Option<DetectedFailure> {
+    for (variant, observation) in [
+        ("original", &evidence.original),
+        ("rewritten", &evidence.rewritten),
+    ] {
+        if let ExecutionOutcome::Error { phase, class, .. } = &observation.outcome {
+            let phase = *phase;
+            let class = *class;
+            return Some(DetectedFailure {
+                signature: FailureSignature::GraphPredicateRewriteErrored {
+                    variant,
+                    phase,
+                    class,
+                },
+                reason: format!("graph predicate rewrite {variant} failed in {phase}/{class}"),
+            });
+        }
+    }
+
+    if evidence.original.snapshot_epoch.is_none()
+        || evidence.original.snapshot_epoch != evidence.rewritten.snapshot_epoch
+    {
+        return Some(DetectedFailure {
+            signature: FailureSignature::GraphPredicateRewriteSnapshotMismatch,
+            reason: "graph predicate rewrite variants did not execute on one pinned snapshot"
+                .to_string(),
+        });
+    }
+
+    let ExecutionOutcome::Rows(original) = &evidence.original.outcome else {
+        unreachable!("graph predicate rewrite errors were classified above")
+    };
+    let ExecutionOutcome::Rows(rewritten) = &evidence.rewritten.outcome else {
+        unreachable!("graph predicate rewrite errors were classified above")
+    };
+    compare_rows(original, rewritten, ResultSemantics::Bag)
+        .err()
+        .map(|reason| DetectedFailure {
+            signature: FailureSignature::GraphPredicateRewriteMismatch,
+            reason: format!("graph predicate rewrite mismatch: {reason}"),
+        })
 }
 
 fn classify_graph_tlp_failure(evidence: &GraphTlpEvidence) -> Option<DetectedFailure> {
@@ -1258,6 +1504,10 @@ fn failure_signature(case: &FuzzCase, oracle: OracleKind) -> Option<FailureSigna
             &execute_graph_tlp_queries(case, &case.graph_tlp_aggregate),
         )
         .map(|failure| failure.signature),
+        OracleKind::GraphPredicateRewrite => {
+            classify_graph_predicate_rewrite_failure(&execute_graph_predicate_rewrite_case(case))
+                .map(|failure| failure.signature)
+        }
     }
 }
 
@@ -1327,11 +1577,13 @@ pub struct CampaignCaseReport {
     pub shape: String,
     pub graph_tlp_shape: String,
     pub graph_tlp_aggregate_shape: String,
+    pub graph_predicate_rewrite_shape: String,
     pub index_enabled: bool,
     pub success: bool,
     pub plan_differential_success: bool,
     pub graph_tlp_success: bool,
     pub graph_tlp_aggregate_success: bool,
+    pub graph_predicate_rewrite_success: bool,
     pub metamorphic_success: bool,
     pub direction_reversal_applicable: bool,
     pub reproduction_command: Option<String>,
@@ -1342,6 +1594,7 @@ pub struct CampaignCaseReport {
     pub failure: Option<FailureReport>,
     pub graph_tlp_failure: Option<GraphTlpFailureReport>,
     pub graph_tlp_aggregate_failure: Option<GraphTlpAggregateFailureReport>,
+    pub graph_predicate_rewrite_failure: Option<GraphPredicateRewriteFailureReport>,
     pub metamorphic_failure: Option<MetamorphicFailureReport>,
 }
 
@@ -1353,11 +1606,13 @@ impl CampaignCaseReport {
             "shape": self.shape,
             "graph_tlp_shape": self.graph_tlp_shape,
             "graph_tlp_aggregate_shape": self.graph_tlp_aggregate_shape,
+            "graph_predicate_rewrite_shape": self.graph_predicate_rewrite_shape,
             "index_enabled": self.index_enabled,
             "success": self.success,
             "plan_differential_success": self.plan_differential_success,
             "graph_tlp_success": self.graph_tlp_success,
             "graph_tlp_aggregate_success": self.graph_tlp_aggregate_success,
+            "graph_predicate_rewrite_success": self.graph_predicate_rewrite_success,
             "metamorphic_success": self.metamorphic_success,
             "direction_reversal_applicable": self.direction_reversal_applicable,
             "reproduction_command": self.reproduction_command,
@@ -1368,6 +1623,7 @@ impl CampaignCaseReport {
             "failure": self.failure.as_ref().map(FailureReport::json),
             "graph_tlp_failure": self.graph_tlp_failure.as_ref().map(GraphTlpFailureReport::json),
             "graph_tlp_aggregate_failure": self.graph_tlp_aggregate_failure.as_ref().map(GraphTlpAggregateFailureReport::json),
+            "graph_predicate_rewrite_failure": self.graph_predicate_rewrite_failure.as_ref().map(GraphPredicateRewriteFailureReport::json),
             "metamorphic_failure": self.metamorphic_failure.as_ref().map(MetamorphicFailureReport::json),
         })
     }
@@ -1394,6 +1650,7 @@ impl CampaignReport {
         let plan_profile = CapabilityProfile::plan_differential_v1();
         let tlp_profile = CapabilityProfile::graph_tlp_v1();
         let tlp_aggregate_profile = CapabilityProfile::graph_tlp_aggregate_v1();
+        let predicate_rewrite_profile = CapabilityProfile::graph_predicate_rewrite_v1();
         let metamorphic_profile = CapabilityProfile::graph_metamorphic_v1();
         json!({
             "protocol": CAMPAIGN_PROTOCOL,
@@ -1405,22 +1662,26 @@ impl CampaignReport {
             "failed_case_count": self.failed_case_count,
             "complete_shape_coverage": self.complete_shape_coverage,
             "plan_coverage": self.plan_coverage.json(),
-            "oracles": ["plan_differential", "graph_tlp", "graph_tlp_aggregate", "graph_metamorphic", "sql_tlp", "sql_tlp_aggregate"],
+            "oracles": ["plan_differential", "graph_tlp", "graph_tlp_aggregate", "graph_predicate_rewrite", "graph_metamorphic", "sql_tlp", "sql_tlp_aggregate", "sql_predicate_rewrite"],
             "oracle_protocols": {
                 "plan_differential": PLAN_DIFFERENTIAL_PROTOCOL,
                 "graph_tlp": GRAPH_TLP_PROTOCOL,
                 "graph_tlp_aggregate": GRAPH_TLP_AGGREGATE_PROTOCOL,
+                "graph_predicate_rewrite": GRAPH_PREDICATE_REWRITE_PROTOCOL,
                 "graph_metamorphic": METAMORPHIC_PROTOCOL,
                 "sql_tlp": SQL_TLP_PROTOCOL,
                 "sql_tlp_aggregate": SQL_TLP_AGGREGATE_PROTOCOL,
+                "sql_predicate_rewrite": SQL_PREDICATE_REWRITE_PROTOCOL,
             },
             "capability_profiles": {
                 "plan_differential": capability_profile_json(&plan_profile),
                 "graph_tlp": capability_profile_json(&tlp_profile),
                 "graph_tlp_aggregate": capability_profile_json(&tlp_aggregate_profile),
+                "graph_predicate_rewrite": capability_profile_json(&predicate_rewrite_profile),
                 "graph_metamorphic": capability_profile_json(&metamorphic_profile),
                 "sql_tlp": sql_oracle::sql_capability_profile_json(false),
                 "sql_tlp_aggregate": sql_oracle::sql_capability_profile_json(true),
+                "sql_predicate_rewrite": sql_oracle::sql_predicate_rewrite_capability_profile_json(),
             },
             "cases": self.cases.iter().map(CampaignCaseReport::json).collect::<Vec<_>>(),
         })
@@ -1449,6 +1710,7 @@ pub fn run_campaign(options: CampaignOptions) -> Result<CampaignReport, FuzzErro
     let plan_oracle = PlanDifferentialOracle;
     let graph_tlp_oracle = GraphTlpOracle;
     let graph_tlp_aggregate_oracle = GraphTlpAggregateOracle;
+    let graph_predicate_rewrite_oracle = GraphPredicateRewriteOracle;
     let metamorphic_oracle = GraphMetamorphicOracle;
     let mut generator = StateAwareCaseGenerator::new(options.seed);
     let generation_case_count = options
@@ -1494,6 +1756,11 @@ pub fn run_campaign(options: CampaignOptions) -> Result<CampaignReport, FuzzErro
                 GraphTlpOracleResult::Equivalent(_) => (true, None),
                 GraphTlpOracleResult::Failure(failure) => (false, Some(failure)),
             };
+        let (graph_predicate_rewrite_success, graph_predicate_rewrite_failure) =
+            match graph_predicate_rewrite_oracle.evaluate(&case) {
+                GraphPredicateRewriteOracleResult::Equivalent(_) => (true, None),
+                GraphPredicateRewriteOracleResult::Failure(failure) => (false, Some(failure)),
+            };
         let (metamorphic_success, metamorphic_failure) = match metamorphic_oracle.evaluate(&case) {
             MetamorphicOracleResult::Equivalent(_) => (true, None),
             MetamorphicOracleResult::Failure(failure) => (false, Some(failure)),
@@ -1502,6 +1769,7 @@ pub fn run_campaign(options: CampaignOptions) -> Result<CampaignReport, FuzzErro
         let success = plan_differential_success
             && graph_tlp_success
             && graph_tlp_aggregate_success
+            && graph_predicate_rewrite_success
             && metamorphic_success
             && sql.success;
         let plan_coverage_novel = plan_coverage.observe(
@@ -1515,11 +1783,13 @@ pub fn run_campaign(options: CampaignOptions) -> Result<CampaignReport, FuzzErro
             shape: case.shape,
             graph_tlp_shape: case.graph_tlp.name,
             graph_tlp_aggregate_shape: case.graph_tlp_aggregate.name,
+            graph_predicate_rewrite_shape: case.graph_predicate_rewrite.name,
             index_enabled: case.index_enabled,
             success,
             plan_differential_success,
             graph_tlp_success,
             graph_tlp_aggregate_success,
+            graph_predicate_rewrite_success,
             metamorphic_success,
             direction_reversal_applicable,
             reproduction_command: (!success).then(|| {
@@ -1535,6 +1805,7 @@ pub fn run_campaign(options: CampaignOptions) -> Result<CampaignReport, FuzzErro
             failure,
             graph_tlp_failure,
             graph_tlp_aggregate_failure,
+            graph_predicate_rewrite_failure,
             metamorphic_failure,
         });
     }
@@ -1557,6 +1828,7 @@ fn has_complete_shape_coverage(cases: &[CampaignCaseReport]) -> bool {
     let plan_profile = CapabilityProfile::plan_differential_v1();
     let graph_tlp_profile = CapabilityProfile::graph_tlp_v1();
     let graph_tlp_aggregate_profile = CapabilityProfile::graph_tlp_aggregate_v1();
+    let graph_predicate_rewrite_profile = CapabilityProfile::graph_predicate_rewrite_v1();
 
     observes_all_shapes(
         cases.iter().map(|case| case.shape.as_str()),
@@ -1570,8 +1842,18 @@ fn has_complete_shape_coverage(cases: &[CampaignCaseReport]) -> bool {
             .map(|case| case.graph_tlp_aggregate_shape.as_str()),
         &graph_tlp_aggregate_profile.shapes,
     ) && observes_all_shapes(
+        cases
+            .iter()
+            .map(|case| case.graph_predicate_rewrite_shape.as_str()),
+        &graph_predicate_rewrite_profile.shapes,
+    ) && observes_all_shapes(
         cases.iter().map(|case| case.sql.shape.as_str()),
         &sql_oracle::SQL_QUERY_SHAPES,
+    ) && observes_all_shapes(
+        cases
+            .iter()
+            .map(|case| case.sql.predicate_rewrite_shape.as_str()),
+        &PREDICATE_REWRITE_SHAPES,
     ) && !cases.is_empty()
         && cases.iter().any(|case| case.direction_reversal_applicable)
 }
@@ -1613,6 +1895,14 @@ fn graph_tlp_case_json(case: &GraphTlpCase) -> JsonValue {
         "predicate_true": query_invocation_json(&case.predicate_true),
         "predicate_false": query_invocation_json(&case.predicate_false),
         "predicate_null": query_invocation_json(&case.predicate_null),
+    })
+}
+
+fn graph_predicate_rewrite_case_json(case: &GraphPredicateRewriteCase) -> JsonValue {
+    json!({
+        "name": case.name,
+        "original": query_invocation_json(&case.original),
+        "rewritten": query_invocation_json(&case.rewritten),
     })
 }
 
@@ -1791,6 +2081,10 @@ mod tests {
             .cases
             .iter()
             .all(|case| case.graph_tlp_aggregate_success));
+        assert!(report
+            .cases
+            .iter()
+            .all(|case| case.graph_predicate_rewrite_success));
         assert!(report.cases.iter().all(|case| case.metamorphic_success));
         assert!(report.cases.iter().all(|case| case.sql.success));
         assert!(report.cases.iter().all(|case| case.sql.row_tlp_success));
@@ -1798,6 +2092,10 @@ mod tests {
             .cases
             .iter()
             .all(|case| case.sql.aggregate_tlp_success));
+        assert!(report
+            .cases
+            .iter()
+            .all(|case| case.sql.predicate_rewrite_success));
         assert!(report
             .cases
             .iter()
@@ -1809,9 +2107,11 @@ mod tests {
         assert_eq!(json["oracles"][0], "plan_differential");
         assert_eq!(json["oracles"][1], "graph_tlp");
         assert_eq!(json["oracles"][2], "graph_tlp_aggregate");
-        assert_eq!(json["oracles"][3], "graph_metamorphic");
-        assert_eq!(json["oracles"][4], "sql_tlp");
-        assert_eq!(json["oracles"][5], "sql_tlp_aggregate");
+        assert_eq!(json["oracles"][3], "graph_predicate_rewrite");
+        assert_eq!(json["oracles"][4], "graph_metamorphic");
+        assert_eq!(json["oracles"][5], "sql_tlp");
+        assert_eq!(json["oracles"][6], "sql_tlp_aggregate");
+        assert_eq!(json["oracles"][7], "sql_predicate_rewrite");
         assert_eq!(
             json["oracle_protocols"]["plan_differential"],
             PLAN_DIFFERENTIAL_PROTOCOL
@@ -1829,6 +2129,14 @@ mod tests {
         assert_eq!(
             json["oracle_protocols"]["sql_tlp_aggregate"],
             SQL_TLP_AGGREGATE_PROTOCOL
+        );
+        assert_eq!(
+            json["oracle_protocols"]["graph_predicate_rewrite"],
+            GRAPH_PREDICATE_REWRITE_PROTOCOL
+        );
+        assert_eq!(
+            json["oracle_protocols"]["sql_predicate_rewrite"],
+            SQL_PREDICATE_REWRITE_PROTOCOL
         );
     }
 
@@ -1860,9 +2168,14 @@ mod tests {
     #[test]
     fn state_aware_generator_emits_parseable_queries_for_all_oracles() {
         let mut generator = StateAwareCaseGenerator::new(7);
+        let mut rewrite_pairs = BTreeSet::new();
 
-        for index in 0..QUERY_SHAPE_COUNT {
+        for index in 0..QUERY_SHAPE_COUNT * PREDICATE_REWRITE_SHAPES.len() {
             let case = generator.case(index);
+            rewrite_pairs.insert((
+                case.shape.clone(),
+                case.graph_predicate_rewrite.name.clone(),
+            ));
             let mut queries = vec![
                 &case.query,
                 &case.graph_tlp.original,
@@ -1873,6 +2186,8 @@ mod tests {
                 &case.graph_tlp_aggregate.predicate_true,
                 &case.graph_tlp_aggregate.predicate_false,
                 &case.graph_tlp_aggregate.predicate_null,
+                &case.graph_predicate_rewrite.original,
+                &case.graph_predicate_rewrite.rewritten,
                 &case.metamorphic.graph_isomorphism.query,
             ];
             if let Some(direction_reversal) = &case.metamorphic.direction_reversal {
@@ -1884,6 +2199,10 @@ mod tests {
                 });
             }
         }
+        assert_eq!(
+            rewrite_pairs.len(),
+            QUERY_SHAPE_COUNT * PREDICATE_REWRITE_SHAPES.len()
+        );
     }
 
     #[test]
@@ -1897,11 +2216,31 @@ mod tests {
             panic!("graph TLP must reject overlapping partitions");
         };
         assert!(failure.reason.contains("graph TLP partition mismatch"));
+        assert_eq!(failure.signature, "graph_tlp_partition_mismatch");
         assert_eq!(
             failure.replay.graph_tlp.predicate_false,
             failure.replay.graph_tlp.predicate_true
         );
         assert_eq!(failure.reduction.oracle, "graph_tlp");
+        assert!(
+            failure.reduction.reduced_mutation_count < failure.reduction.original_mutation_count
+        );
+    }
+
+    #[test]
+    fn graph_predicate_rewrite_detects_and_reduces_invalid_relation() {
+        let mut generator = StateAwareCaseGenerator::new(7);
+        let mut case = generator.case(0);
+        case.graph_predicate_rewrite.rewritten = case.graph_tlp.original.clone();
+
+        let GraphPredicateRewriteOracleResult::Failure(failure) =
+            GraphPredicateRewriteOracle.evaluate(&case)
+        else {
+            panic!("graph predicate rewrite must reject a non-equivalent query");
+        };
+        assert!(failure.reason.contains("graph predicate rewrite mismatch"));
+        assert_eq!(failure.signature, "graph_predicate_rewrite_mismatch");
+        assert_eq!(failure.reduction.oracle, "graph_predicate_rewrite");
         assert!(
             failure.reduction.reduced_mutation_count < failure.reduction.original_mutation_count
         );
@@ -1998,6 +2337,10 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("count("));
+        assert_eq!(
+            replay["graph_predicate_rewrite"]["name"],
+            case.graph_predicate_rewrite.name
+        );
     }
 
     #[test]
@@ -2010,6 +2353,9 @@ mod tests {
             panic!("invalid generated case must fail closed");
         };
         assert!(failure.reason.contains("memo=mutation/parse"));
+        assert!(failure
+            .signature
+            .starts_with("plan_differential_both_errored_"));
         assert_eq!(failure.replay.seed, case.seed);
         assert_eq!(
             failure.replay.mutations.last().unwrap().cypher,

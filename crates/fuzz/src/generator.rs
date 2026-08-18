@@ -1,10 +1,11 @@
+use crate::predicate_rewrite::PredicateRewriteKind;
 use crate::query_ast::{
     GeneratedSchema, MatchPattern, NodePattern, OrderItem, PatternDirection, PropertyExpression,
     QueryAst, QueryPredicate, ReturnItem,
 };
 use crate::{
-    FuzzCase, GraphTlpCase, MetamorphicCase, MetamorphicRelation, Mutation, Parameters,
-    QueryInvocation, ResultSemantics,
+    FuzzCase, GraphPredicateRewriteCase, GraphTlpCase, MetamorphicCase, MetamorphicRelation,
+    Mutation, Parameters, QueryInvocation, ResultSemantics,
 };
 use skein::Value;
 
@@ -28,7 +29,8 @@ impl StateAwareCaseGenerator {
         let graph = GeneratedGraphState::from_seed(seed);
         let query = graph.plan_differential_query(seed, index);
         let metamorphic = graph.metamorphic_case(index_enabled, &query.ast);
-        let graph_tlp = graph.graph_tlp_cases(seed);
+        let rewrite_kind = PredicateRewriteKind::for_case(index + index / crate::QUERY_SHAPE_COUNT);
+        let graph_tlp = graph.graph_tlp_cases(seed, rewrite_kind);
 
         FuzzCase {
             seed,
@@ -38,6 +40,7 @@ impl StateAwareCaseGenerator {
             query_ast: query.ast,
             graph_tlp: graph_tlp.rows,
             graph_tlp_aggregate: graph_tlp.aggregate,
+            graph_predicate_rewrite: graph_tlp.predicate_rewrite,
             metamorphic,
             index_enabled,
         }
@@ -434,7 +437,11 @@ impl GeneratedGraphState {
         }
     }
 
-    fn graph_tlp_cases(self, seed: u64) -> GeneratedGraphTlpCases {
+    fn graph_tlp_cases(
+        self,
+        seed: u64,
+        rewrite_kind: PredicateRewriteKind,
+    ) -> GeneratedGraphTlpCases {
         match (seed >> 3) % 3 {
             0 => GraphTlpBuilder::new(
                 "nullable_node_property",
@@ -448,7 +455,7 @@ impl GeneratedGraphState {
                 "m",
             )
             .with_parameter("tlp_value", Value::String("present".to_string()))
-            .build(),
+            .build(rewrite_kind),
             1 => GraphTlpBuilder::new(
                 "node_range",
                 "MATCH (m:Memory)",
@@ -464,7 +471,7 @@ impl GeneratedGraphState {
                 "tlp_value",
                 Value::Int((seed % self.memory_count as u64) as i64),
             )
-            .build(),
+            .build(rewrite_kind),
             _ => GraphTlpBuilder::new(
                 "relationship_range",
                 "MATCH (a:Entity)-[r:RELATES_TO]->(b:Entity)",
@@ -477,7 +484,7 @@ impl GeneratedGraphState {
                 "r",
             )
             .with_parameter("tlp_value", Value::Int((seed % 4) as i64))
-            .build(),
+            .build(rewrite_kind),
         }
     }
 }
@@ -493,6 +500,7 @@ struct GeneratedQuery {
 struct GeneratedGraphTlpCases {
     rows: GraphTlpCase,
     aggregate: GraphTlpCase,
+    predicate_rewrite: GraphPredicateRewriteCase,
 }
 
 #[derive(Debug)]
@@ -528,28 +536,72 @@ impl GraphTlpBuilder {
         self
     }
 
-    fn build(self) -> GeneratedGraphTlpCases {
-        let build_case = |name: String, projection: String| {
-            let query = |predicate: Option<&GeneratedPredicate>| QueryInvocation {
-                cypher: match predicate {
-                    Some(predicate) => format!(
-                        "{} WHERE {} RETURN {}",
-                        self.match_clause,
-                        predicate.render(),
-                        projection,
-                    ),
-                    None => format!("{} RETURN {}", self.match_clause, projection),
-                },
-                parameters: self.parameters.clone(),
-                result_semantics: ResultSemantics::Bag,
-            };
+    fn build(self, rewrite_kind: PredicateRewriteKind) -> GeneratedGraphTlpCases {
+        let query = |projection: &str, predicate: Option<&GeneratedPredicate>| QueryInvocation {
+            cypher: match predicate {
+                Some(predicate) => format!(
+                    "{} WHERE {} RETURN {projection}",
+                    self.match_clause,
+                    predicate.render(),
+                ),
+                None => format!("{} RETURN {projection}", self.match_clause),
+            },
+            parameters: self.parameters.clone(),
+            result_semantics: ResultSemantics::Bag,
+        };
+        let build_case = |name: String, projection: String| GraphTlpCase {
+            name,
+            original: query(&projection, None),
+            predicate_true: query(&projection, Some(&self.predicate)),
+            predicate_false: query(&projection, Some(&self.predicate.clone().negated())),
+            predicate_null: query(
+                &projection,
+                Some(&GeneratedPredicate::IsNull(self.predicate.property())),
+            ),
+        };
 
-            GraphTlpCase {
-                name,
-                original: query(None),
-                predicate_true: query(Some(&self.predicate)),
-                predicate_false: query(Some(&self.predicate.clone().negated())),
-                predicate_null: query(Some(&GeneratedPredicate::IsNull(self.predicate.property()))),
+        let predicate = self.predicate.clone();
+        let (original, rewritten) = match rewrite_kind {
+            PredicateRewriteKind::DoubleNegation => (
+                query(self.projection, Some(&predicate)),
+                query(
+                    self.projection,
+                    Some(&predicate.clone().negated().negated()),
+                ),
+            ),
+            PredicateRewriteKind::ConjunctionIdempotence => (
+                query(self.projection, Some(&predicate)),
+                query(
+                    self.projection,
+                    Some(&GeneratedPredicate::And(
+                        Box::new(predicate.clone()),
+                        Box::new(predicate),
+                    )),
+                ),
+            ),
+            PredicateRewriteKind::DisjunctionIdempotence => (
+                query(self.projection, Some(&predicate)),
+                query(
+                    self.projection,
+                    Some(&GeneratedPredicate::Or(
+                        Box::new(predicate.clone()),
+                        Box::new(predicate),
+                    )),
+                ),
+            ),
+            PredicateRewriteKind::NullTotality => {
+                let nullable_property = predicate.property();
+                let rewritten = GeneratedPredicate::Or(
+                    Box::new(GeneratedPredicate::Or(
+                        Box::new(predicate.clone()),
+                        Box::new(predicate.negated()),
+                    )),
+                    Box::new(GeneratedPredicate::IsNull(nullable_property)),
+                );
+                (
+                    query(self.projection, None),
+                    query(self.projection, Some(&rewritten)),
+                )
             }
         };
 
@@ -559,6 +611,11 @@ impl GraphTlpBuilder {
                 format!("{}_count", self.name),
                 format!("count({}) AS count", self.count_variable),
             ),
+            predicate_rewrite: GraphPredicateRewriteCase {
+                name: rewrite_kind.as_str().to_string(),
+                original,
+                rewritten,
+            },
         }
     }
 }
@@ -603,6 +660,8 @@ enum GeneratedPredicate {
     },
     IsNull(PropertyRef),
     Not(Box<Self>),
+    And(Box<Self>, Box<Self>),
+    Or(Box<Self>, Box<Self>),
 }
 
 impl GeneratedPredicate {
@@ -622,6 +681,7 @@ impl GeneratedPredicate {
         match self {
             Self::Compare { property, .. } | Self::IsNull(property) => *property,
             Self::Not(predicate) => predicate.property(),
+            Self::And(left, _) | Self::Or(left, _) => left.property(),
         }
     }
 
@@ -638,6 +698,8 @@ impl GeneratedPredicate {
             } => format!("{} {} ${parameter}", property.render(), operator.as_str()),
             Self::IsNull(property) => format!("{} IS NULL", property.render()),
             Self::Not(predicate) => format!("NOT ({})", predicate.render()),
+            Self::And(left, right) => format!("({}) AND ({})", left.render(), right.render()),
+            Self::Or(left, right) => format!("({}) OR ({})", left.render(), right.render()),
         }
     }
 }
