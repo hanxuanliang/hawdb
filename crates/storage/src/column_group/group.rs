@@ -1330,11 +1330,17 @@ mod tests {
         for (property_id, values) in &columns {
             assert_eq!(reader.read_column(*property_id, None).unwrap(), *values);
         }
-        // A byte column refuses the Value read path and vice versa.
-        assert!(matches!(
-            reader.read_column(PropertyId(0), None),
-            Err(ColumnGroupError::Unsupported(_))
-        ));
+        // Binary values use the shared Value read path, while typed byte reads
+        // remain unavailable for non-binary columns.
+        assert_eq!(
+            reader.read_column(PropertyId(0), None).unwrap(),
+            blobs
+                .iter()
+                .map(|value| value
+                    .as_ref()
+                    .map_or(Value::Null, |bytes| Value::Binary(bytes.clone())))
+                .collect::<Vec<_>>()
+        );
         assert!(matches!(
             reader.read_byte_column(PropertyId(1)),
             Err(ColumnGroupError::Unsupported(_))
