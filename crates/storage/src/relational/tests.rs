@@ -1,4 +1,30 @@
 use super::*;
+
+#[test]
+fn relational_types_map_to_shared_logical_types() {
+    assert_eq!(
+        RelationalScalarType::Boolean.logical_type(),
+        LogicalType::Boolean
+    );
+    assert_eq!(
+        RelationalScalarType::BigInt.logical_type(),
+        LogicalType::Int64
+    );
+    assert_eq!(
+        RelationalScalarType::DoublePrecision.logical_type(),
+        LogicalType::Float64
+    );
+    assert_eq!(RelationalScalarType::Text.logical_type(), LogicalType::Text);
+    assert_eq!(
+        RelationalScalarType::Bytea.logical_type(),
+        LogicalType::Binary
+    );
+    assert_eq!(RelationalValue::Null.logical_type(), None);
+    assert_eq!(
+        RelationalValue::Text("payload".into()).logical_type(),
+        Some(LogicalType::Text)
+    );
+}
 use std::cell::RefCell;
 
 #[derive(Default)]

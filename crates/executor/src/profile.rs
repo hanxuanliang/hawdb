@@ -1,7 +1,104 @@
-use skein_core::Value;
+use crate::columnar::ColumnarRowRef;
+use skein_core::{Value, ValueRef};
 use std::collections::BTreeMap;
 
 pub type Row = BTreeMap<String, Value>;
+
+/// A row view whose values remain valid only for the current consumer call.
+///
+/// The map representation covers the scalar fallback executor. The columnar
+/// representation lets a downstream consumer pull selected values directly
+/// from an immutable batch without constructing an intermediate row map.
+#[derive(Debug, Clone, Copy)]
+pub enum RowRef<'a> {
+    Map(&'a Row),
+    Columnar(ColumnarRowRef<'a>),
+}
+
+impl<'a> RowRef<'a> {
+    pub fn len(self) -> usize {
+        match self {
+            Self::Map(row) => row.len(),
+            Self::Columnar(_) => self.iter().count(),
+        }
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn get(self, name: &str) -> Option<ValueRef<'a>> {
+        match self {
+            Self::Map(row) => row.get(name).map(Value::as_ref),
+            Self::Columnar(row) => row.get(name),
+        }
+    }
+
+    pub fn column(self, index: usize) -> Option<(&'a str, ValueRef<'a>)> {
+        match self {
+            Self::Map(row) => row
+                .iter()
+                .nth(index)
+                .map(|(name, value)| (name.as_str(), value.as_ref())),
+            Self::Columnar(row) => row.column(index),
+        }
+    }
+
+    pub fn iter(self) -> RowRefIter<'a> {
+        match self {
+            Self::Map(row) => RowRefIter::Map(row.iter()),
+            Self::Columnar(row) => RowRefIter::Columnar { row, index: 0 },
+        }
+    }
+
+    pub fn to_owned_row(self) -> Row {
+        self.iter()
+            .map(|(name, value)| (name.to_owned(), value.to_owned_value()))
+            .collect()
+    }
+}
+
+impl<'a> From<&'a Row> for RowRef<'a> {
+    fn from(row: &'a Row) -> Self {
+        Self::Map(row)
+    }
+}
+
+impl<'a> From<ColumnarRowRef<'a>> for RowRef<'a> {
+    fn from(row: ColumnarRowRef<'a>) -> Self {
+        Self::Columnar(row)
+    }
+}
+
+pub enum RowRefIter<'a> {
+    Map(std::collections::btree_map::Iter<'a, String, Value>),
+    Columnar {
+        row: ColumnarRowRef<'a>,
+        index: usize,
+    },
+}
+
+impl<'a> Iterator for RowRefIter<'a> {
+    type Item = (&'a str, ValueRef<'a>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Map(iter) => iter
+                .next()
+                .map(|(name, value)| (name.as_str(), value.as_ref())),
+            Self::Columnar { row, index } => loop {
+                let current = *index;
+                *index = index.saturating_add(1);
+                if current >= row.schema().len() {
+                    return None;
+                }
+                if let Some(column) = row.column(current) {
+                    return Some(column);
+                }
+            },
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockingOperatorMemoryReport {
@@ -110,6 +207,11 @@ pub struct ProfiledQueryStream<TScanPruningReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        BindingSchema, ColumnVector, ColumnarBatch, SlotDescriptor, SlotId, SlotType, Validity,
+    };
+    use skein_core::LogicalType;
+    use std::sync::Arc;
 
     #[test]
     fn counts_blocking_operator_kinds() {
@@ -126,5 +228,59 @@ mod tests {
             pipeline_memory_report: PipelineMemoryReport::default(),
         };
         assert_eq!(profile.blocking_operator_count(), 2);
+    }
+
+    #[test]
+    fn borrowed_map_row_materializes_only_on_request() {
+        let row = Row::from([
+            ("id".to_string(), Value::Int(7)),
+            ("content".to_string(), Value::String("payload".into())),
+        ]);
+        let row_ref = RowRef::from(&row);
+
+        assert_eq!(row_ref.get("id"), Some(ValueRef::Int(7)));
+        assert_eq!(row_ref.get("content").unwrap().as_str(), Some("payload"));
+        assert_eq!(row_ref.to_owned_row(), row);
+    }
+
+    #[test]
+    fn borrowed_columnar_row_pulls_values_without_a_row_map() {
+        let schema = Arc::new(
+            BindingSchema::try_new(vec![
+                SlotDescriptor {
+                    id: SlotId(0),
+                    name: "id".into(),
+                    slot_type: SlotType::NodeId,
+                },
+                SlotDescriptor {
+                    id: SlotId(1),
+                    name: "content".into(),
+                    slot_type: SlotType::logical(LogicalType::Text),
+                },
+            ])
+            .unwrap(),
+        );
+        let batch = ColumnarBatch::try_new(
+            schema,
+            vec![
+                Arc::new(ColumnVector::node_ids(vec![7])),
+                Arc::new(ColumnVector::Utf8 {
+                    values: vec!["payload".to_string()].into(),
+                    validity: Validity::all(1),
+                }),
+            ],
+        )
+        .unwrap();
+        let row_ref = RowRef::from(batch.rows().next().unwrap());
+
+        assert_eq!(row_ref.get("id"), Some(ValueRef::Int(7)));
+        assert_eq!(row_ref.get("content").unwrap().as_str(), Some("payload"));
+        assert_eq!(
+            row_ref.to_owned_row(),
+            Row::from([
+                ("content".into(), Value::String("payload".into())),
+                ("id".into(), Value::Int(7)),
+            ])
+        );
     }
 }

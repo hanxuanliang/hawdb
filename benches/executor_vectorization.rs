@@ -14,6 +14,9 @@ use std::time::Instant;
 
 const MICRO_ROWS: usize = 131_072;
 const MICRO_ITERATIONS: usize = 64;
+const VALUE_REF_ROWS: usize = 4_096;
+const VALUE_REF_ITERATIONS: usize = 32;
+const VALUE_REF_PAYLOAD_BYTES: usize = 4_096;
 const END_TO_END_ROWS: usize = 65_536;
 const END_TO_END_ITERATIONS: usize = 16;
 const END_TO_END_PAYLOAD_BYTES: usize = 256;
@@ -33,13 +36,17 @@ fn main() {
     let requested_workers = morsel::benchmark_workers();
     let mode = std::env::var(EXECUTOR_BENCH_MODE_ENV).unwrap_or_else(|_| "full".to_string());
     assert!(
-        matches!(mode.as_str(), "full" | "scheduler" | "morsel" | "adjacency"),
-        "{EXECUTOR_BENCH_MODE_ENV} must be full, scheduler, morsel, or adjacency"
+        matches!(
+            mode.as_str(),
+            "full" | "scheduler" | "morsel" | "adjacency" | "value-ref"
+        ),
+        "{EXECUTOR_BENCH_MODE_ENV} must be full, scheduler, morsel, adjacency, or value-ref"
     );
     let full = mode == "full";
     let micro = full.then(micro_benchmark);
+    let value_ref = matches!(mode.as_str(), "full" | "value-ref").then(value_ref_benchmark);
     let (end_to_end, production_morsel, morsel_selectivity) =
-        if matches!(mode.as_str(), "scheduler" | "adjacency") {
+        if matches!(mode.as_str(), "scheduler" | "adjacency" | "value-ref") {
             (None, None, None)
         } else {
             let (comparison, production, selectivity) =
@@ -60,6 +67,7 @@ fn main() {
         "executor_vectorization {}",
         json!({
             "micro": micro.map(ComparisonReport::json),
+            "value_ref": value_ref,
             "end_to_end": end_to_end.map(ComparisonReport::json),
             "morsel": morsel,
             "production_morsel": production_morsel,
@@ -69,6 +77,61 @@ fn main() {
             "mode": mode,
         })
     );
+}
+
+fn value_ref_benchmark() -> serde_json::Value {
+    let payload = "v".repeat(VALUE_REF_PAYLOAD_BYTES);
+    let values = (0..VALUE_REF_ROWS)
+        .map(|_| payload.clone())
+        .collect::<Vec<_>>();
+    let column = ColumnVector::Utf8 {
+        values: values.into(),
+        validity: Validity::all(VALUE_REF_ROWS),
+    };
+
+    let (owned_ns, owned_checksum, borrowed_ns, borrowed_checksum) =
+        paired_median_sample(VALUE_REF_ITERATIONS, |path| match path {
+            ExecutionPath::Row => {
+                let mut checksum = 0u64;
+                for row in 0..VALUE_REF_ROWS {
+                    let value = black_box(&column)
+                        .value(row)
+                        .expect("benchmark value must exist");
+                    let Value::String(value) = black_box(value) else {
+                        unreachable!("benchmark value is UTF-8")
+                    };
+                    checksum = checksum.wrapping_add(value.len() as u64);
+                }
+                black_box(checksum)
+            }
+            ExecutionPath::Columnar => {
+                let mut checksum = 0u64;
+                for row in 0..VALUE_REF_ROWS {
+                    let value = black_box(&column)
+                        .value_ref(row)
+                        .expect("benchmark value ref must exist");
+                    checksum = checksum.wrapping_add(
+                        value.as_str().expect("benchmark value ref is UTF-8").len() as u64,
+                    );
+                    black_box(value);
+                }
+                black_box(checksum)
+            }
+        });
+    assert_eq!(owned_checksum, borrowed_checksum);
+    json!({
+        "rows": VALUE_REF_ROWS,
+        "iterations": VALUE_REF_ITERATIONS,
+        "payload_bytes_per_row": VALUE_REF_PAYLOAD_BYTES,
+        "owned_ns": owned_ns,
+        "borrowed_ns": borrowed_ns,
+        "speedup": owned_ns as f64 / borrowed_ns.max(1) as f64,
+        "owned_payload_bytes_copied": VALUE_REF_ROWS
+            .saturating_mul(VALUE_REF_ITERATIONS)
+            .saturating_mul(VALUE_REF_PAYLOAD_BYTES),
+        "borrowed_payload_bytes_copied": 0,
+        "checksum": borrowed_checksum,
+    })
 }
 
 fn micro_benchmark() -> ComparisonReport {

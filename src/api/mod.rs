@@ -1,7 +1,7 @@
 use crate::analytics::ProjectedGraph;
 use crate::cypher;
 use crate::error::{Result, SkeinError};
-use crate::executor::{self, Row};
+use crate::executor::{self, Row, RowRef};
 use crate::optimizer::{
     CascadesOptimizer, OptimizerCatalog, OptimizerCatalogIndexes, OptimizerCatalogStatistics,
     OptimizerConfig, OptimizerIndexStatistics, OptimizerSearchDirective, OptimizerTrace,
@@ -20002,6 +20002,26 @@ impl DatabaseReadTransaction {
             None,
             &mut consumer,
         )
+    }
+
+    /// Streams borrowed row views to a synchronous host consumer.
+    ///
+    /// The view cannot outlive the consumer call. Hosts can inspect, serialize,
+    /// or load values without an additional clone; hosts that retain a row
+    /// must call [`RowRef::to_owned_row`]. The scalar fallback currently
+    /// borrows an already materialized row, while the same callback contract
+    /// can receive direct columnar row views after that production path is
+    /// qualified end to end.
+    pub fn query_with_params_streaming_ref(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: QueryStreamOptions,
+        mut consumer: impl for<'row> FnMut(RowRef<'row>) -> Result<()>,
+    ) -> Result<QueryStreamReport> {
+        self.query_with_params_streaming(cypher_text, parameters, options, |row| {
+            consumer(RowRef::from(&row))
+        })
     }
 
     pub fn query_with_params_streaming_context(

@@ -571,3 +571,35 @@ fn read_transaction_streams_rows_with_row_and_payload_budgets() {
     assert_eq!(delivered_rows, 0);
     assert!(error.to_string().contains("max_payload_bytes 1"));
 }
+
+#[test]
+fn read_transaction_exposes_borrowed_rows_to_immediate_consumers() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 7, title: 'borrowed payload'})")
+        .unwrap();
+
+    let mut tx = db.begin_read_transaction();
+    let mut observed = Vec::new();
+    let report = tx
+        .query_with_params_streaming_ref(
+            "MATCH (m:Memory) RETURN m.id AS id, m.title AS title",
+            &BTreeMap::new(),
+            QueryStreamOptions {
+                max_rows: Some(1),
+                max_payload_bytes: Some(1024),
+            },
+            |row| {
+                observed.push((
+                    row.get("id").and_then(crate::ValueRef::as_i64),
+                    row.get("title")
+                        .and_then(crate::ValueRef::as_str)
+                        .map(str::to_owned),
+                ));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    assert_eq!(report.output_rows, 1);
+    assert_eq!(observed, vec![(Some(7), Some("borrowed payload".into()))]);
+}

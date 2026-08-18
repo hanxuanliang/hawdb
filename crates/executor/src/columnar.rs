@@ -1,6 +1,6 @@
 //! Typed columnar batches used by vectorized executor fragments.
 
-use skein_core::{Result, SkeinError, Value};
+use skein_core::{LogicalType, Result, SkeinError, Value, ValueRef};
 use skein_plan::ComparisonOp;
 use skein_storage::{RelationalKey, RelationalValue};
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use std::sync::Arc;
 pub struct SlotId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogicalType {
+pub enum ColumnType {
     Bool,
     Int64,
     Float64,
@@ -17,6 +17,55 @@ pub enum LogicalType {
     NodeId,
     RelationalRowLocator,
     Dynamic,
+}
+
+/// The semantic value type or executor-private role assigned to one slot.
+///
+/// Query-visible values use the shared [`LogicalType`]. Physical identifiers
+/// and row locators remain explicit executor roles and cannot accidentally
+/// escape as logical schema types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotType {
+    Logical(LogicalType),
+    NodeId,
+    RelationalRowLocator,
+}
+
+impl SlotType {
+    pub const fn logical(logical_type: LogicalType) -> Self {
+        Self::Logical(logical_type)
+    }
+
+    pub const fn logical_type(self) -> Option<LogicalType> {
+        match self {
+            Self::Logical(logical_type) => Some(logical_type),
+            Self::NodeId => Some(LogicalType::Int64),
+            Self::RelationalRowLocator => None,
+        }
+    }
+
+    pub const fn accepts(self, column_type: ColumnType) -> bool {
+        match (self, column_type) {
+            (
+                Self::Logical(LogicalType::Any),
+                ColumnType::Bool
+                | ColumnType::Int64
+                | ColumnType::Float64
+                | ColumnType::Utf8
+                | ColumnType::Dynamic,
+            )
+            | (Self::Logical(LogicalType::Boolean), ColumnType::Bool)
+            | (Self::Logical(LogicalType::Int64), ColumnType::Int64)
+            | (Self::Logical(LogicalType::Float64), ColumnType::Float64)
+            | (Self::Logical(LogicalType::String | LogicalType::Text), ColumnType::Utf8)
+            | (Self::NodeId, ColumnType::NodeId)
+            | (Self::RelationalRowLocator, ColumnType::RelationalRowLocator) => true,
+            (Self::Logical(logical_type), ColumnType::Dynamic) => {
+                !matches!(logical_type, LogicalType::Binary)
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +117,13 @@ impl RelationalRowLocator {
 pub struct SlotDescriptor {
     pub id: SlotId,
     pub name: String,
-    pub logical_type: LogicalType,
+    pub slot_type: SlotType,
+}
+
+impl SlotDescriptor {
+    pub const fn logical_type(&self) -> Option<LogicalType> {
+        self.slot_type.logical_type()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +152,10 @@ impl BindingSchema {
 
     pub fn slot(&self, id: SlotId) -> Option<&SlotDescriptor> {
         self.slots.get(id.0 as usize)
+    }
+
+    pub fn slot_by_name(&self, name: &str) -> Option<&SlotDescriptor> {
+        self.slots.iter().find(|slot| slot.name == name)
     }
 
     pub fn len(&self) -> usize {
@@ -354,15 +413,15 @@ impl ColumnVector {
         self.len() == 0
     }
 
-    pub fn logical_type(&self) -> LogicalType {
+    pub fn column_type(&self) -> ColumnType {
         match self {
-            Self::Bool { .. } => LogicalType::Bool,
-            Self::Int64 { .. } => LogicalType::Int64,
-            Self::Float64 { .. } => LogicalType::Float64,
-            Self::Utf8 { .. } => LogicalType::Utf8,
-            Self::NodeId(_) => LogicalType::NodeId,
-            Self::RelationalRowLocator(_) => LogicalType::RelationalRowLocator,
-            Self::Dynamic(_) => LogicalType::Dynamic,
+            Self::Bool { .. } => ColumnType::Bool,
+            Self::Int64 { .. } => ColumnType::Int64,
+            Self::Float64 { .. } => ColumnType::Float64,
+            Self::Utf8 { .. } => ColumnType::Utf8,
+            Self::NodeId(_) => ColumnType::NodeId,
+            Self::RelationalRowLocator(_) => ColumnType::RelationalRowLocator,
+            Self::Dynamic(_) => ColumnType::Dynamic,
         }
     }
 
@@ -378,27 +437,36 @@ impl ColumnVector {
         }
     }
 
-    pub fn value(&self, row: usize) -> Option<Value> {
+    pub fn value_ref(&self, row: usize) -> Option<ValueRef<'_>> {
         match self {
             Self::Bool { values, validity } if validity.is_valid(row) => {
-                values.get(row).map(|value| Value::Bool(*value != 0))
+                values.get(row).map(|value| ValueRef::Bool(*value != 0))
             }
             Self::Int64 { values, validity } if validity.is_valid(row) => {
-                values.get(row).copied().map(Value::Int)
+                values.get(row).copied().map(ValueRef::Int)
             }
             Self::Float64 { values, validity } if validity.is_valid(row) => {
-                values.get(row).copied().map(Value::Float)
+                values.get(row).copied().map(ValueRef::Float)
             }
             Self::Utf8 { values, validity } if validity.is_valid(row) => {
-                values.get(row).cloned().map(Value::String)
+                values.get(row).map(|value| ValueRef::String(value))
+            }
+            Self::Bool { .. } | Self::Int64 { .. } | Self::Float64 { .. } | Self::Utf8 { .. }
+                if row < self.len() =>
+            {
+                Some(ValueRef::Null)
             }
             Self::Bool { .. } | Self::Int64 { .. } | Self::Float64 { .. } | Self::Utf8 { .. } => {
                 None
             }
-            Self::NodeId(values) => values.get(row).map(|value| Value::Int(*value as i64)),
+            Self::NodeId(values) => values.get(row).map(|value| ValueRef::Int(*value as i64)),
             Self::RelationalRowLocator(_) => None,
-            Self::Dynamic(values) => values.get(row).cloned(),
+            Self::Dynamic(values) => values.get(row).map(Value::as_ref),
         }
+    }
+
+    pub fn value(&self, row: usize) -> Option<Value> {
+        self.value_ref(row).map(ValueRef::to_owned_value)
     }
 
     pub fn relational_row_locator(&self, row: usize) -> Option<&RelationalRowLocator> {
@@ -621,6 +689,36 @@ pub struct ColumnarBatch {
     row_count: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ColumnarRowRef<'a> {
+    batch: &'a ColumnarBatch,
+    row: usize,
+}
+
+impl<'a> ColumnarRowRef<'a> {
+    pub fn row_index(self) -> usize {
+        self.row
+    }
+
+    pub fn schema(self) -> &'a BindingSchema {
+        self.batch.schema()
+    }
+
+    pub fn value(self, slot: SlotId) -> Option<ValueRef<'a>> {
+        self.batch.value_ref(slot, self.row)
+    }
+
+    pub fn get(self, name: &str) -> Option<ValueRef<'a>> {
+        let slot = self.schema().slot_by_name(name)?;
+        self.value(slot.id)
+    }
+
+    pub fn column(self, index: usize) -> Option<(&'a str, ValueRef<'a>)> {
+        let slot = self.schema().slots().get(index)?;
+        self.value(slot.id).map(|value| (slot.name.as_str(), value))
+    }
+}
+
 impl ColumnarBatch {
     pub fn try_new(schema: Arc<BindingSchema>, columns: Vec<Arc<ColumnVector>>) -> Result<Self> {
         if schema.len() != columns.len() {
@@ -639,12 +737,12 @@ impl ColumnarBatch {
                     column.len()
                 )));
             }
-            if slot.logical_type != column.logical_type() {
+            if !slot.slot_type.accepts(column.column_type()) {
                 return Err(SkeinError::Execution(format!(
                     "columnar slot '{}' expects {:?}, got {:?}",
                     slot.name,
-                    slot.logical_type,
-                    column.logical_type()
+                    slot.slot_type,
+                    column.column_type()
                 )));
             }
         }
@@ -672,8 +770,18 @@ impl ColumnarBatch {
         self.columns.get(slot.0 as usize)
     }
 
+    pub fn value_ref(&self, slot: SlotId, row: usize) -> Option<ValueRef<'_>> {
+        self.column(slot)?.value_ref(row)
+    }
+
     pub fn selection(&self) -> &Selection {
         &self.selection
+    }
+
+    pub fn rows(&self) -> impl Iterator<Item = ColumnarRowRef<'_>> {
+        self.selection
+            .iter()
+            .map(|row| ColumnarRowRef { batch: self, row })
     }
 
     pub fn with_selection(mut self, selection: Selection) -> Result<Self> {
@@ -698,7 +806,7 @@ impl ColumnarBatch {
             descriptors.push(SlotDescriptor {
                 id: SlotId(output_index as u32),
                 name: descriptor.name.clone(),
-                logical_type: descriptor.logical_type,
+                slot_type: descriptor.slot_type,
             });
             columns.push(Arc::clone(
                 self.column(slot).expect("schema and columns align"),
@@ -764,7 +872,7 @@ impl ColumnarBatch {
         let ColumnVector::Int64 { values, validity } = column.as_ref() else {
             return Err(SkeinError::Execution(format!(
                 "columnar SUM requires Int64, got {:?}",
-                column.logical_type()
+                column.column_type()
             )));
         };
         let mut sum = None::<i64>;
@@ -801,9 +909,13 @@ pub enum NumericLiteral {
 
 impl NumericLiteral {
     pub fn from_value(value: &Value) -> Option<Self> {
+        Self::from_value_ref(value.as_ref())
+    }
+
+    pub fn from_value_ref(value: ValueRef<'_>) -> Option<Self> {
         match value {
-            Value::Int(value) => Some(Self::Int(*value)),
-            Value::Float(value) => Some(Self::Float(*value)),
+            ValueRef::Int(value) => Some(Self::Int(value)),
+            ValueRef::Float(value) => Some(Self::Float(value)),
             _ => None,
         }
     }
@@ -831,7 +943,7 @@ pub fn filter_numeric_column(
         }
         other => Err(SkeinError::Execution(format!(
             "numeric filter requires Int64 or Float64, got {:?}",
-            other.logical_type()
+            other.column_type()
         ))),
     }
 }
@@ -851,7 +963,7 @@ pub fn filter_boolean_column(
     let ColumnVector::Bool { values, validity } = column else {
         return Err(SkeinError::Execution(format!(
             "boolean filter requires Bool, got {:?}",
-            column.logical_type()
+            column.column_type()
         )));
     };
     let expected = u8::from(expected);
@@ -1071,6 +1183,22 @@ mod tests {
     }
 
     #[test]
+    fn value_ref_distinguishes_null_from_out_of_bounds() {
+        let column = ColumnVector::int64(
+            vec![1, 0],
+            Validity::Bitmap {
+                len: 2,
+                words: Arc::from([0b01]),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(column.value_ref(0), Some(ValueRef::Int(1)));
+        assert_eq!(column.value_ref(1), Some(ValueRef::Null));
+        assert_eq!(column.value_ref(2), None);
+    }
+
+    #[test]
     fn boolean_bytes_reject_non_canonical_values() {
         let error = ColumnVector::boolean_bytes(vec![0, 2], Validity::all(2)).unwrap_err();
 
@@ -1183,7 +1311,7 @@ mod tests {
             BindingSchema::try_new(vec![SlotDescriptor {
                 id: SlotId(0),
                 name: "score".to_string(),
-                logical_type: LogicalType::Int64,
+                slot_type: SlotType::logical(LogicalType::Int64),
             }])
             .unwrap(),
         );
@@ -1195,12 +1323,52 @@ mod tests {
     }
 
     #[test]
+    fn utf8_value_ref_borrows_column_storage_until_materialization() {
+        let schema = Arc::new(
+            BindingSchema::try_new(vec![SlotDescriptor {
+                id: SlotId(0),
+                name: "content".to_string(),
+                slot_type: SlotType::logical(LogicalType::Text),
+            }])
+            .unwrap(),
+        );
+        let values: Arc<[String]> = vec!["borrowed content".to_string()].into();
+        let source_ptr = values[0].as_ptr();
+        let column = Arc::new(ColumnVector::Utf8 {
+            values,
+            validity: Validity::all(1),
+        });
+        let batch = ColumnarBatch::try_new(schema, vec![column]).unwrap();
+
+        let value = batch.value_ref(SlotId(0), 0).unwrap();
+        assert_eq!(value.logical_type(), Some(LogicalType::String));
+        assert_eq!(value.as_str().unwrap().as_ptr(), source_ptr);
+        assert_eq!(
+            value.to_owned_value(),
+            Value::String("borrowed content".into())
+        );
+    }
+
+    #[test]
+    fn logical_and_physical_slot_types_are_validated_separately() {
+        assert!(SlotType::logical(LogicalType::Any).accepts(ColumnType::Bool));
+        assert!(SlotType::logical(LogicalType::Any).accepts(ColumnType::Utf8));
+        assert!(!SlotType::logical(LogicalType::Any).accepts(ColumnType::NodeId));
+        assert!(SlotType::logical(LogicalType::String).accepts(ColumnType::Utf8));
+        assert!(SlotType::logical(LogicalType::Text).accepts(ColumnType::Utf8));
+        assert!(SlotType::NodeId.accepts(ColumnType::NodeId));
+        assert!(!SlotType::NodeId.accepts(ColumnType::Int64));
+        assert_eq!(SlotType::NodeId.logical_type(), Some(LogicalType::Int64));
+        assert_eq!(SlotType::RelationalRowLocator.logical_type(), None);
+    }
+
+    #[test]
     fn relational_locator_projection_preserves_compact_identity_storage() {
         let schema = Arc::new(
             BindingSchema::try_new(vec![SlotDescriptor {
                 id: SlotId(0),
                 name: "row_locator".to_string(),
-                logical_type: LogicalType::RelationalRowLocator,
+                slot_type: SlotType::RelationalRowLocator,
             }])
             .unwrap(),
         );
@@ -1238,12 +1406,12 @@ mod tests {
                 SlotDescriptor {
                     id: SlotId(0),
                     name: "visible".to_string(),
-                    logical_type: LogicalType::Bool,
+                    slot_type: SlotType::logical(LogicalType::Boolean),
                 },
                 SlotDescriptor {
                     id: SlotId(1),
                     name: "id".to_string(),
-                    logical_type: LogicalType::NodeId,
+                    slot_type: SlotType::NodeId,
                 },
             ])
             .unwrap(),
@@ -1277,7 +1445,7 @@ mod tests {
             BindingSchema::try_new(vec![SlotDescriptor {
                 id: SlotId(0),
                 name: "token_count".to_string(),
-                logical_type: LogicalType::Int64,
+                slot_type: SlotType::logical(LogicalType::Int64),
             }])
             .unwrap(),
         );
@@ -1308,7 +1476,7 @@ mod tests {
             BindingSchema::try_new(vec![SlotDescriptor {
                 id: SlotId(0),
                 name: "value".to_string(),
-                logical_type: LogicalType::Int64,
+                slot_type: SlotType::logical(LogicalType::Int64),
             }])
             .unwrap(),
         );

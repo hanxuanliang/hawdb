@@ -9,8 +9,8 @@ use lending::{
 };
 use skein_executor::columnar::{
     filter_float64_values, filter_int64_values, select_float64_values_view,
-    select_int64_values_view, BindingSchema, ColumnVector, ColumnarBatch, LogicalType,
-    NumericLiteral, Selection, SlotDescriptor, SlotId, ValidityBuilder,
+    select_int64_values_view, BindingSchema, ColumnVector, ColumnarBatch, NumericLiteral,
+    Selection, SlotDescriptor, SlotId, SlotType, ValidityBuilder,
 };
 use skein_executor::morsel::{
     MorselAdmission, MorselAdmissionRequest, MorselOutput, MorselStreamControl,
@@ -441,20 +441,21 @@ fn numeric_columnar_schema(
     needs_node_ids: bool,
 ) -> Result<Arc<BindingSchema>> {
     let logical_type = match fragment.property_type {
-        crate::schema::PropertyType::Int => LogicalType::Int64,
-        crate::schema::PropertyType::Float => LogicalType::Float64,
+        crate::schema::PropertyType::Int | crate::schema::PropertyType::Float => {
+            fragment.property_type.logical_type()
+        }
         _ => unreachable!("numeric fragment eligibility checks the property type"),
     };
     let mut slots = vec![SlotDescriptor {
         id: PREDICATE_VALUE_SLOT,
         name: fragment.property.to_string(),
-        logical_type,
+        slot_type: SlotType::logical(logical_type),
     }];
     if needs_node_ids {
         slots.push(SlotDescriptor {
             id: NODE_ID_SLOT,
             name: "__node_id".to_string(),
-            logical_type: LogicalType::NodeId,
+            slot_type: SlotType::NodeId,
         });
     }
     Ok(Arc::new(BindingSchema::try_new(slots)?))

@@ -182,12 +182,12 @@ pub fn evaluate_projection_expression(
                 )));
             }
             let value = binding_property(binding, variable, property)
-                .cloned()
-                .unwrap_or(Value::Null);
-            if value == Value::Null || value == *empty {
+                .map(Value::as_ref)
+                .unwrap_or(ValueRef::Null);
+            if value.is_null() || value == empty {
                 Ok(default.clone())
             } else {
-                Ok(value)
+                Ok(value.to_owned_value())
             }
         }
         ProjectionExpression::DefaultIfNull {
@@ -201,12 +201,12 @@ pub fn evaluate_projection_expression(
                 )));
             }
             let value = binding_property(binding, variable, property)
-                .cloned()
-                .unwrap_or(Value::Null);
-            if value == Value::Null {
+                .map(Value::as_ref)
+                .unwrap_or(ValueRef::Null);
+            if value.is_null() {
                 Ok(default.clone())
             } else {
-                Ok(value)
+                Ok(value.to_owned_value())
             }
         }
         ProjectionExpression::CasePropertyNotNullOrEq {
@@ -222,9 +222,9 @@ pub fn evaluate_projection_expression(
                 )));
             }
             let value = binding_property(binding, variable, property)
-                .cloned()
-                .unwrap_or(Value::Null);
-            if value != Value::Null && value != *empty {
+                .map(Value::as_ref)
+                .unwrap_or(ValueRef::Null);
+            if !value.is_null() && value != empty {
                 Ok(non_empty.clone())
             } else {
                 Ok(null_or_empty.clone())
@@ -242,10 +242,10 @@ pub fn evaluate_projection_expression(
                 )));
             }
             let value = binding_property(binding, variable, property)
-                .cloned()
-                .unwrap_or(Value::Null);
+                .map(Value::as_ref)
+                .unwrap_or(ValueRef::Null);
             for (candidate, rank) in branches {
-                if value == *candidate {
+                if value == candidate {
                     return Ok(rank.clone());
                 }
             }
@@ -348,18 +348,21 @@ pub fn evaluate_projection_expression(
                 SkeinError::Execution(format!("missing column '{column}' during projection"))
             })?;
             let value = match value {
-                Value::Map(values) => values.get(property).cloned().unwrap_or(Value::Null),
-                Value::Null => Value::Null,
+                Value::Map(values) => values
+                    .get(property)
+                    .map(Value::as_ref)
+                    .unwrap_or(ValueRef::Null),
+                Value::Null => ValueRef::Null,
                 value => {
                     return Err(SkeinError::Execution(format!(
                         "column default expression requires a map value, got {value:?}"
                     )));
                 }
             };
-            if value == Value::Null || value == *empty {
+            if value.is_null() || value == empty {
                 Ok(default.clone())
             } else {
-                Ok(value)
+                Ok(value.to_owned_value())
             }
         }
         ProjectionExpression::ColumnValueDefaultIfNull { column, default } => {

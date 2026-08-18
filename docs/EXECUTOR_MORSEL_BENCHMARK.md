@@ -65,6 +65,22 @@ page faults for every degree. Debug builds stop at degree 1,024 so local test
 smokes remain bounded; the release benchmark is the performance evidence that
 includes degree 100,000.
 
+The value-ref mode isolates the final variable-width value access boundary. It
+compares owned `Value` materialization with `ValueRef` consumption over 4,096
+rows carrying 4 KiB UTF-8 values:
+
+```bash
+SKEIN_EXECUTOR_BENCH_MODE=value-ref \
+  cargo bench --bench executor_vectorization
+```
+
+Five release-profile runs on 2026-08-18 reported a 196.583 us median for the
+borrowed path and a 12.422 ms median for owned materialization, a 63.2x median
+ratio. Each paired sample produced the same checksum. Across 32 iterations,
+the owned path copied 512 MiB of payload while the borrowed path copied zero
+payload bytes. This is allocation-sensitive kernel evidence for delaying
+materialization; it is not an end-to-end application-query speedup claim.
+
 ### Bounded adjacency spot check
 
 Measured on 2026-08-17 with an Apple M5 Max and the release profile. Each

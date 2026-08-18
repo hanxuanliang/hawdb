@@ -2,6 +2,7 @@ use crate::{
     FileSegmentRangeReader, SegmentRangeReader, SegmentReadRange, SnapshotCommitError,
     SnapshotCoordinator, SnapshotReadGuard,
 };
+use skein_core::LogicalType;
 use skein_integrity::Sha256Digest;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -203,6 +204,18 @@ pub enum RelationalScalarType {
     Bytea,
 }
 
+impl RelationalScalarType {
+    pub const fn logical_type(self) -> LogicalType {
+        match self {
+            Self::Boolean => LogicalType::Boolean,
+            Self::BigInt => LogicalType::Int64,
+            Self::DoublePrecision => LogicalType::Float64,
+            Self::Text => LogicalType::Text,
+            Self::Bytea => LogicalType::Binary,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum RelationalValue {
     Null,
@@ -225,6 +238,10 @@ impl RelationalValue {
             Self::Bytea(_) => Some(RelationalScalarType::Bytea),
             Self::Overflow(reference) => Some(reference.scalar_type),
         }
+    }
+
+    pub fn logical_type(&self) -> Option<LogicalType> {
+        self.scalar_type().map(RelationalScalarType::logical_type)
     }
 
     pub fn estimated_payload_bytes(&self) -> usize {

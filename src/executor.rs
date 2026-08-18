@@ -88,6 +88,7 @@ use traversal::*;
 use vector::*;
 
 pub type Row = skein_executor::Row;
+pub type RowRef<'a> = skein_executor::RowRef<'a>;
 pub type ReadExecutionProfile = skein_executor::ReadExecutionProfile<ScanPruningReport>;
 pub type ProfiledQueryRows = skein_executor::ProfiledQueryRows<ScanPruningReport>;
 pub type ProfiledQueryStream = skein_executor::ProfiledQueryStream<ScanPruningReport>;

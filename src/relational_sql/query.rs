@@ -25,8 +25,8 @@ use skein_executor::observer::ExecutionObserver;
 use skein_executor::pipeline::{BatchControl, BindingBatch};
 use skein_executor::{
     BindingSchema, BlockingOperatorMemoryReport, ColumnVector, ColumnarBatch, ExecutionLimit,
-    LogicalType, QueryMemoryClass, QueryMemoryLease, QueryMemoryLedger, RelationalRowLocator,
-    SlotDescriptor, SlotId,
+    QueryMemoryClass, QueryMemoryLease, QueryMemoryLedger, RelationalRowLocator, SlotDescriptor,
+    SlotId, SlotType,
 };
 use skein_optimizer::{
     select_relational_access_path, RelationalAccessPathDescriptor, RelationalAccessPathKind,
@@ -254,7 +254,7 @@ impl AccountedRelationalLocatorBatch {
         let schema = Arc::new(BindingSchema::try_new(vec![SlotDescriptor {
             id: RELATIONAL_ROW_LOCATOR_SLOT,
             name: "row_locator".to_string(),
-            logical_type: LogicalType::RelationalRowLocator,
+            slot_type: SlotType::RelationalRowLocator,
         }])?);
         let schema_bytes = std::mem::size_of::<BindingSchema>()
             .saturating_add(std::mem::size_of::<SlotDescriptor>())

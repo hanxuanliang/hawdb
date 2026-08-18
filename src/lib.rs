@@ -202,7 +202,7 @@ pub use embedded_tokio::{
     SkeinTokioEmbedded, SkeinTokioEmbeddedError, TokioQueryBatchStream, TokioQueryStreamOptions,
 };
 pub use error::{Result, SkeinError};
-pub use executor::{ReadExecutionProfile, Row};
+pub use executor::{ReadExecutionProfile, Row, RowRef};
 pub use graph_route_evidence::{
     nowledge_graph_route_evidence_json, nowledge_mem_graph_augmentation_state_route_query,
     nowledge_mem_graph_community_members_route_query,
@@ -437,6 +437,7 @@ pub use search_route_ownership::{
     NOWLEDGE_MEM_SEARCH_ROUTE_SOURCE, NOWLEDGE_MEM_SEARCH_ROUTE_SOURCE_CHUNK,
     REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES, REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES,
 };
+pub use skein_core::LogicalType;
 pub use skein_core::{
     GraphRagCommonPathSummary, GraphRagGeneratedQuery, GraphRagLabelSummary,
     GraphRagPropertySubject, GraphRagPropertySummary, GraphRagQueryBinding, GraphRagQueryDraft,
@@ -517,7 +518,7 @@ pub use telemetry::{
     operations_telemetry_readiness, qos_telemetry_sink, KernelTelemetry, KernelTelemetryOperation,
     OperationsTelemetryReadiness, QueryTelemetry, TelemetrySink, REQUIRED_OPERATIONS_TELEMETRY,
 };
-pub use value::Value;
+pub use value::{Value, ValueRef};
 pub use workload_fixtures::{
     nowledge_graph_route_workload_fixture_queries, nowledge_graph_route_workload_fixture_report,
     NowledgeGraphRouteWorkloadBoundedExpansionReport, NowledgeGraphRouteWorkloadFixtureOptions,

@@ -1,4 +1,4 @@
-use crate::value::Value;
+use crate::{LogicalType, Value};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -79,6 +79,20 @@ pub enum PropertyType {
     /// Unbounded text payload. Optimizer value statistics intentionally skip it.
     Text,
     List,
+}
+
+impl PropertyType {
+    pub const fn logical_type(self) -> LogicalType {
+        match self {
+            Self::Any => LogicalType::Any,
+            Self::Bool => LogicalType::Boolean,
+            Self::Int => LogicalType::Int64,
+            Self::Float => LogicalType::Float64,
+            Self::String => LogicalType::String,
+            Self::Text => LogicalType::Text,
+            Self::List => LogicalType::List,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -929,6 +943,17 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn property_types_map_to_shared_logical_types() {
+        assert_eq!(PropertyType::Bool.logical_type(), LogicalType::Boolean);
+        assert_eq!(PropertyType::Int.logical_type(), LogicalType::Int64);
+        assert_eq!(PropertyType::Float.logical_type(), LogicalType::Float64);
+        assert_eq!(PropertyType::String.logical_type(), LogicalType::String);
+        assert_eq!(PropertyType::Text.logical_type(), LogicalType::Text);
+        assert_eq!(PropertyType::List.logical_type(), LogicalType::List);
+        assert_eq!(PropertyType::Any.logical_type(), LogicalType::Any);
+    }
 
     #[test]
     fn index_identifiers_are_unique_across_descriptor_kinds() {

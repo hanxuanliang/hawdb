@@ -4,9 +4,10 @@ use crate::sql::{
     SelectProjection, SelectStatement, SqlColumnRef, SqlExpression, SqlFunctionArgument, SqlValue,
 };
 use crate::value::Value;
+use skein_core::LogicalType;
 use skein_executor::{
-    BindingSchema, ColumnVector, ColumnarBatch, LogicalType, QueryMemoryClass, QueryMemoryLease,
-    QueryMemoryLedger, SlotDescriptor, SlotId, ValidityBuilder,
+    BindingSchema, ColumnVector, ColumnarBatch, QueryMemoryClass, QueryMemoryLease,
+    QueryMemoryLedger, SlotDescriptor, SlotId, SlotType, ValidityBuilder,
 };
 use skein_storage::{RelationalScalarType, RelationalTableSchema, RelationalValue};
 use std::num::NonZeroUsize;
@@ -83,13 +84,13 @@ impl ColumnarAggregateExecutor {
                 .map(|(index, projection)| SlotDescriptor {
                     id: SlotId(index as u32),
                     name: format!("aggregate_{index}"),
-                    logical_type: match projection.kind {
+                    slot_type: SlotType::logical(match projection.kind {
                         ColumnarAggregateKind::CountAll | ColumnarAggregateKind::CountColumn(_) => {
-                            LogicalType::Bool
+                            LogicalType::Boolean
                         }
                         ColumnarAggregateKind::SumInt64(_)
                         | ColumnarAggregateKind::SumOctetLength(_) => LogicalType::Int64,
-                    },
+                    }),
                 })
                 .collect(),
         )?);

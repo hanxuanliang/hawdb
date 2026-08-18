@@ -9,7 +9,7 @@ use crate::predicate::{
 };
 use crate::store::{AdjacencyReadMemory, GraphExecutionRead, ScanControl};
 use crate::traversal::{visit_one_hop_relationships_with_budget, OneHopRelationshipSpec};
-use skein_core::{Catalog, RelationshipDirection, Result, SkeinError, Value};
+use skein_core::{Catalog, RelationshipDirection, Result, SkeinError, Value, ValueRef};
 use skein_plan::{
     AggregateFunction, AggregateTarget, Aggregation, CoalesceDifferenceProjectionTerm,
     ComparisonOp, DatePart, Predicate, Projection, ProjectionExpression, SortDirection, SortItem,

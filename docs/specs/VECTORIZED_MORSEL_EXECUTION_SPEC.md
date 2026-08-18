@@ -16,6 +16,53 @@ durable representation.
 
 ## Columnar Batch Contract
 
+### Logical types and borrowed values
+
+`skein-core::LogicalType` is the shared semantic type vocabulary for graph
+property descriptors, PostgreSQL-compatible relational scalars, planning, and
+execution. Nullability is a separate slot property; `NULL` does not introduce
+another physical column type. Graph `String` and unbounded `Text` remain
+distinct logical policies even though both use the UTF-8 column encoding.
+`Binary` is a logical relational type even when a particular vectorized
+fragment has no binary kernel.
+
+Executor-private identities are not logical types. `SlotType` distinguishes a
+logical value slot from `NodeId` and `RelationalRowLocator`, while `ColumnType`
+describes the concrete in-memory encoding. Batch construction MUST validate
+the logical/physical compatibility once before entering a typed loop.
+
+`ValueRef<'a>` is the borrowed scalar boundary. Fixed-width values are copied;
+strings, lists, and maps borrow their existing payload. Comparison, type
+checking, branch selection, and immediate serialization SHOULD consume
+`ValueRef` without constructing an owned `Value`. Ownership conversion MUST
+be explicit and delayed until a result is retained beyond the current batch or
+consumer call.
+
+`ColumnarRowRef` exposes selected columnar rows by slot or name, and `RowRef`
+provides one host-facing view over scalar-map fallback rows and columnar rows.
+A synchronous consumer MUST NOT retain either view. It MAY call
+`RowRef::to_owned_row` when application state needs ownership. The public
+borrowed streaming entrypoint retains the existing row and payload budgets and
+keeps consumer calls provisional until successful query completion. Its
+initial scalar fallback borrows an already materialized row; direct columnar
+delivery remains an executor capability until end-to-end qualification proves
+that activating it improves the application boundary.
+
+Bulk input must follow the same execution model in the opposite direction:
+an application-provided source is decoded into bounded batches, validated and
+coerced against `LogicalType`, and passed to an executor write sink that owns
+the transaction/WAL boundary. A future `LOAD DATA` or `COPY FROM` syntax is a
+front end for that operator chain; it MUST NOT bypass the executor through a
+route-specific storage API.
+
+Performance qualification MUST compare owned materialization with borrowed
+consumption for production-sized variable-width values. The focused kernel
+gate records elapsed time, payload bytes copied, and identical result
+checksums. End-to-end qualification additionally records query-ledger peak,
+RSS, and payload bytes at the host boundary. A borrowed path that does not
+produce a repeatable end-to-end gain must remain an internal capability rather
+than become the recommended host entrypoint.
+
 `skein-executor` owns the following storage-neutral types:
 
 - dense `SlotId` values and a `BindingSchema`;

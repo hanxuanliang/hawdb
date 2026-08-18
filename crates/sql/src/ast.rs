@@ -1,4 +1,4 @@
-use skein_core::Value;
+use skein_core::{LogicalType, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SqlStatement {
@@ -112,6 +112,18 @@ pub enum SqlDataType {
     DoublePrecision,
     Text,
     Bytea,
+}
+
+impl SqlDataType {
+    pub const fn logical_type(self) -> LogicalType {
+        match self {
+            Self::Boolean => LogicalType::Boolean,
+            Self::BigInt => LogicalType::Int64,
+            Self::DoublePrecision => LogicalType::Float64,
+            Self::Text => LogicalType::Text,
+            Self::Bytea => LogicalType::Binary,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,5 +298,22 @@ impl std::fmt::Display for SqlValue {
             Self::Literal(value) => write!(formatter, "{value}"),
             Self::Parameter(position) => write!(formatter, "${position}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn postgres_data_types_use_shared_logical_types() {
+        assert_eq!(SqlDataType::Boolean.logical_type(), LogicalType::Boolean);
+        assert_eq!(SqlDataType::BigInt.logical_type(), LogicalType::Int64);
+        assert_eq!(
+            SqlDataType::DoublePrecision.logical_type(),
+            LogicalType::Float64
+        );
+        assert_eq!(SqlDataType::Text.logical_type(), LogicalType::Text);
+        assert_eq!(SqlDataType::Bytea.logical_type(), LogicalType::Binary);
     }
 }
