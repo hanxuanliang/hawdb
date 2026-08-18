@@ -1894,14 +1894,21 @@ corruption. The selected head then merges directly with the checkpoint page
 cursor. A tombstone consumes the matching checkpoint key, and an insertion
 after the final checkpoint page remains visible.
 
-The merge validates the complete source row shape but clones only requested
-fields into a head. An unselected large value is dropped after its one bounded
-decode wave. Its resident envelope is therefore one projected head per source,
-one selected/working head, and one pinned checkpoint page; it is independent of
-the total number of overlay rows in the requested range. A callback may observe
-the first ordered row after source heads are primed, without consuming the
-complete overlay. Recovery entry bindings remain demand-verified, and a fully
-consumed run additionally verifies its complete content and artifact digests.
+The merge validates the complete source row shape but owns only requested
+fields in a head. A recovery cursor reads and hashes the exact encoded key and
+complete encoded row, verifies the entry binding, walks the complete value
+directory, checks every value's bounds and encoding, and constructs owned
+`RelationalValue` objects only for requested ordinals. It MUST NOT first build a
+full `RelationalRow` and then project it. Live values are already owned by their
+immutable batch and are projected before heap insertion. An unselected inline
+TEXT, BYTEA, JSON, or vector payload therefore has one bounded encoded-row read
+but no second owned value allocation. The resident envelope is one projected
+head per source, one selected/working head, and one pinned checkpoint page; it
+is independent of the total number of overlay rows in the requested range. A
+callback may observe the first ordered row after source heads are primed,
+without consuming the complete overlay. Recovery entry bindings remain
+demand-verified, and a fully consumed run additionally verifies its complete
+content and artifact digests.
 
 Overlay streaming has explicit distinct-entry, merge-source, and peak
 resident-byte limits in addition to

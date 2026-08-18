@@ -19,7 +19,10 @@ ASSUME /\ MaxSources \in 1..3
        /\ MaxOverlayBytes \in 1..12
 
 Sources == 1..3
+RecoverySources == {1, 2}
 Keys == 1..4
+AllFields == 1..4
+RequestedFields == {1, 3}
 NoKey == 0
 Deleted == 0
 OverflowValue == 5
@@ -125,7 +128,9 @@ VARIABLES
     stoppedEarly,
     poisoned,
     pinnedEpoch,
-    currentEpoch
+    currentEpoch,
+    decodedRecoveryFields,
+    validatedRecoveryFields
 
 vars == <<
     readState,
@@ -148,7 +153,9 @@ vars == <<
     stoppedEarly,
     poisoned,
     pinnedEpoch,
-    currentEpoch
+    currentEpoch,
+    decodedRecoveryFields,
+    validatedRecoveryFields
 >>
 
 DonePositions == [source \in Sources |-> Len(SourceRows(source)) + 1]
@@ -176,6 +183,8 @@ Init ==
     /\ poisoned = FALSE
     /\ pinnedEpoch = 4
     /\ currentEpoch = 4
+    /\ decodedRecoveryFields = {}
+    /\ validatedRecoveryFields = {}
 
 BeginRead(entries, bytes) ==
     /\ readState = "idle"
@@ -199,6 +208,8 @@ BeginRead(entries, bytes) ==
     /\ emittedRows' = <<>>
     /\ resolvedOverflow' = FALSE
     /\ stoppedEarly' = FALSE
+    /\ decodedRecoveryFields' = RequestedFields
+    /\ validatedRecoveryFields' = AllFields
     /\ UNCHANGED <<poisoned, pinnedEpoch, currentEpoch>>
 
 AcceptPrimedSources ==
@@ -211,7 +222,7 @@ AcceptPrimedSources ==
         residentBytes, openFiles, peakOpenFiles, peakResidentBytes, peakBufferedEntries,
         overlayEntries, processedKeys, processedValues, selectedEpochs,
         emittedRows, resolvedOverflow, stoppedEarly, poisoned,
-        pinnedEpoch, currentEpoch
+        pinnedEpoch, currentEpoch, decodedRecoveryFields, validatedRecoveryFields
         >>
 
 RejectPrimedSources ==
@@ -225,7 +236,7 @@ RejectPrimedSources ==
         residentBytes, openFiles, peakOpenFiles, peakResidentBytes, peakBufferedEntries,
         overlayEntries, processedKeys, processedValues, selectedEpochs,
         emittedRows, resolvedOverflow, stoppedEarly, poisoned,
-        pinnedEpoch, currentEpoch
+        pinnedEpoch, currentEpoch, decodedRecoveryFields, validatedRecoveryFields
         >>
 
 MergeNext ==
@@ -259,6 +270,14 @@ MergeNext ==
                 THEN emittedRows
                 ELSE Append(emittedRows, key)
           /\ resolvedOverflow' = (resolvedOverflow \/ (value = OverflowValue))
+          /\ decodedRecoveryFields' =
+                IF sources \cap RecoverySources = {}
+                THEN decodedRecoveryFields
+                ELSE decodedRecoveryFields \cup RequestedFields
+          /\ validatedRecoveryFields' =
+                IF sources \cap RecoverySources = {}
+                THEN validatedRecoveryFields
+                ELSE validatedRecoveryFields \cup AllFields
           /\ UNCHANGED <<
                 readState, outcome, entryBudget, byteBudget, openFiles, peakOpenFiles,
                 stoppedEarly, poisoned, pinnedEpoch, currentEpoch
@@ -284,7 +303,7 @@ RejectNextAdmission ==
         residentBytes, openFiles, peakOpenFiles, peakResidentBytes, peakBufferedEntries,
         overlayEntries, processedKeys, processedValues, selectedEpochs,
         emittedRows, resolvedOverflow, stoppedEarly, poisoned,
-        pinnedEpoch, currentEpoch
+        pinnedEpoch, currentEpoch, decodedRecoveryFields, validatedRecoveryFields
         >>
 
 DetectDuplicateCorruption ==
@@ -299,7 +318,7 @@ DetectDuplicateCorruption ==
         residentBytes, openFiles, peakOpenFiles, peakResidentBytes, peakBufferedEntries,
         overlayEntries, processedKeys, processedValues, selectedEpochs,
         emittedRows, resolvedOverflow, stoppedEarly,
-        pinnedEpoch, currentEpoch
+        pinnedEpoch, currentEpoch, decodedRecoveryFields, validatedRecoveryFields
         >>
 
 FinishRead ==
@@ -312,7 +331,7 @@ FinishRead ==
         residentBytes, openFiles, peakOpenFiles, peakResidentBytes, peakBufferedEntries,
         overlayEntries, processedKeys, processedValues, selectedEpochs,
         emittedRows, resolvedOverflow, stoppedEarly, poisoned,
-        pinnedEpoch, currentEpoch
+        pinnedEpoch, currentEpoch, decodedRecoveryFields, validatedRecoveryFields
         >>
 
 StopEarly ==
@@ -326,7 +345,7 @@ StopEarly ==
         residentBytes, openFiles, peakOpenFiles, peakResidentBytes, peakBufferedEntries,
         overlayEntries, processedKeys, processedValues, selectedEpochs,
         emittedRows, resolvedOverflow, poisoned,
-        pinnedEpoch, currentEpoch
+        pinnedEpoch, currentEpoch, decodedRecoveryFields, validatedRecoveryFields
         >>
 
 CancelRead ==
@@ -338,7 +357,7 @@ CancelRead ==
         residentBytes, openFiles, peakOpenFiles, peakResidentBytes, peakBufferedEntries,
         overlayEntries, processedKeys, processedValues, selectedEpochs,
         emittedRows, resolvedOverflow, stoppedEarly, poisoned,
-        pinnedEpoch, currentEpoch
+        pinnedEpoch, currentEpoch, decodedRecoveryFields, validatedRecoveryFields
         >>
 
 AdvanceCurrentView ==
@@ -348,7 +367,8 @@ AdvanceCurrentView ==
         readState, outcome, entryBudget, byteBudget, positions, baseRemaining,
         residentBytes, openFiles, peakOpenFiles, peakResidentBytes, peakBufferedEntries,
         overlayEntries, processedKeys, processedValues, selectedEpochs,
-        emittedRows, resolvedOverflow, stoppedEarly, poisoned, pinnedEpoch
+        emittedRows, resolvedOverflow, stoppedEarly, poisoned, pinnedEpoch,
+        decodedRecoveryFields, validatedRecoveryFields
         >>
 
 Next ==
@@ -388,6 +408,8 @@ TypeOK ==
     /\ poisoned \in BOOLEAN
     /\ pinnedEpoch = 4
     /\ currentEpoch \in 4..5
+    /\ decodedRecoveryFields \subseteq AllFields
+    /\ validatedRecoveryFields \subseteq AllFields
 
 StreamingStateIsBounded ==
     /\ openFiles <= MaxOpenFiles
@@ -420,5 +442,10 @@ OverflowResolvesBeforeVisibility ==
 OnlyCorruptionPoisons == poisoned <=> outcome = "corruption"
 
 PinnedEpochDoesNotDrift == pinnedEpoch = 4 /\ currentEpoch >= pinnedEpoch
+
+RecoveryDecodeIsProjected == decodedRecoveryFields \subseteq RequestedFields
+
+RecoveryDecodeValidatesFullRow ==
+    decodedRecoveryFields # {} => validatedRecoveryFields = AllFields
 
 =============================================================================

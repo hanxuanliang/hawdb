@@ -4,7 +4,7 @@ use super::demand::{
     RelationalRowPageOverlayCursor, RelationalRowPageOverlayPoint, RelationalRowPageOverlayRange,
     RelationalRowPageOverlayRead, RelationalRowPageProjectedOverlayValue,
 };
-use super::live::RelationalRowPageOverlayRangeSources;
+use super::live::{RelationalRowPageOverlayRangeSources, RelationalRowPageOverlayRangeValue};
 use super::{
     RelationalProjectedField, RelationalProjectedRow, RelationalProjectedRowView,
     RelationalRowDeltaError, RelationalRowDeltaReadReport, RelationalRowPageDemandReadError,
@@ -739,7 +739,6 @@ struct StreamingOverlayCursor<'a> {
     sources: RelationalRowPageOverlayRangeSources<'a>,
     heap: BinaryHeap<StreamingOverlayHead>,
     identity: RelationalRowPageReadViewIdentity,
-    recovery_visible_epoch: Option<u64>,
     column_count: usize,
     requested_fields: &'a [usize],
     limits: RelationalRowPageSnapshotReadLimits,
@@ -778,18 +777,14 @@ impl<'a> StreamingOverlayCursor<'a> {
                 range.table,
                 range.lower,
                 range.upper,
+                range.requested_fields,
+                owner.overlay_overflow.is_some(),
                 limits.max_overlay_entries.get(),
             )
             .map_err(|error| owner.map_delta_error(error))?;
         Ok(Self {
             owner,
             identity: owner.identity(),
-            recovery_visible_epoch: owner.overlay_overflow.as_ref().and_then(|_| {
-                owner
-                    .view
-                    .recovery_delta()
-                    .map(|delta| delta.manifest().visible_commit_epoch)
-            }),
             column_count,
             requested_fields: range.requested_fields,
             limits,
@@ -839,8 +834,21 @@ impl<'a> StreamingOverlayCursor<'a> {
                 self.identity.base_commit_epoch, self.identity.visible_commit_epoch
             )));
         }
-        validate_overlay_row(&value, self.column_count)?;
-        let value_resident_bytes = projected_overlay_resident_bytes(&value, self.requested_fields)?;
+        let (value, value_resident_bytes) = match value {
+            RelationalRowPageOverlayRangeValue::Projected(value) => {
+                let resident_bytes = projected_value_resident_bytes(&value)?;
+                (value, resident_bytes)
+            }
+            RelationalRowPageOverlayRangeValue::Recovered(value) => {
+                validate_overlay_row(&value, self.column_count)?;
+                let resident_bytes =
+                    projected_overlay_resident_bytes(&value, self.requested_fields)?;
+                (
+                    project_overlay_value(&value, self.requested_fields, false),
+                    resident_bytes,
+                )
+            }
+        };
         let entry_bytes = overlay_key_resident_bytes(&key)?
             .checked_add(value_resident_bytes)
             .and_then(|bytes| bytes.checked_add(size_of::<StreamingOverlayHead>()))
@@ -866,12 +874,6 @@ impl<'a> StreamingOverlayCursor<'a> {
                 self.limits.max_overlay_bytes
             )));
         }
-        let value = project_overlay_value(
-            &value,
-            self.requested_fields,
-            self.recovery_visible_epoch
-                .is_some_and(|recovery_epoch| epoch <= recovery_epoch),
-        );
         self.heap.push(StreamingOverlayHead {
             key,
             epoch,
@@ -1093,6 +1095,42 @@ fn projected_overlay_resident_bytes(
         |bytes, ordinal| {
             bytes
                 .checked_add(row.values()[*ordinal].estimated_payload_bytes())
+                .ok_or_else(|| {
+                    RelationalRowPageSnapshotReadError::Admission(
+                        "overlay projection payload accounting overflow".to_string(),
+                    )
+                })
+        },
+    )
+}
+
+fn projected_value_resident_bytes(
+    value: &RelationalRowPageProjectedOverlayValue,
+) -> Result<usize, RelationalRowPageSnapshotReadError> {
+    let RelationalRowPageProjectedOverlayValue::Present { fields, .. } = value else {
+        return Ok(0);
+    };
+    fields.iter().try_fold(
+        size_of::<RelationalRowPageProjectedOverlayValue>()
+            .checked_add(
+                fields
+                    .len()
+                    .checked_mul(size_of::<RelationalProjectedField>())
+                    .ok_or_else(|| {
+                        RelationalRowPageSnapshotReadError::Admission(
+                            "overlay projection allocation accounting overflow".to_string(),
+                        )
+                    })?,
+            )
+            .and_then(|bytes| bytes.checked_add(4 * size_of::<usize>()))
+            .ok_or_else(|| {
+                RelationalRowPageSnapshotReadError::Admission(
+                    "overlay projection byte accounting overflow".to_string(),
+                )
+            })?,
+        |bytes, field| {
+            bytes
+                .checked_add(field.value.estimated_payload_bytes())
                 .ok_or_else(|| {
                     RelationalRowPageSnapshotReadError::Admission(
                         "overlay projection payload accounting overflow".to_string(),

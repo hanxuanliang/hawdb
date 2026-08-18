@@ -5,6 +5,7 @@ use super::{
     RelationalRowDeltaTableMetadata, RowDeltaRunContext, RowDeltaRunDescriptor, RowDeltaValue,
     RELATIONAL_ROW_DELTA_MANIFEST_FILE,
 };
+use crate::relational::row_page::demand::RelationalRowPageProjectedOverlayValue;
 use crate::relational::row_page::RelationalRowPageRecoveredValue;
 #[cfg(test)]
 use crate::relational::RelationalRecoverySourceIdentity;
@@ -256,11 +257,13 @@ impl RelationalRowDeltaReader {
         result
     }
 
-    pub(crate) fn range_sources(
+    pub(in crate::relational::row_page) fn range_sources(
         &self,
         table: &str,
         lower: Bound<&RelationalKey>,
         upper: Bound<&RelationalKey>,
+        requested_fields: &[usize],
+        binds_overlay_overflow: bool,
         max_sources: usize,
     ) -> Result<
         (
@@ -274,7 +277,14 @@ impl RelationalRowDeltaReader {
                 "row delta reader is poisoned".to_string(),
             ));
         }
-        let result = self.range_sources_inner(table, lower, upper, max_sources);
+        let result = self.range_sources_inner(
+            table,
+            lower,
+            upper,
+            requested_fields,
+            binds_overlay_overflow,
+            max_sources,
+        );
         if result.as_ref().is_err_and(should_poison) {
             self.poisoned.store(true, Ordering::Release);
         }
@@ -286,6 +296,8 @@ impl RelationalRowDeltaReader {
         table: &str,
         lower: Bound<&RelationalKey>,
         upper: Bound<&RelationalKey>,
+        requested_fields: &[usize],
+        binds_overlay_overflow: bool,
         max_sources: usize,
     ) -> Result<
         (
@@ -341,6 +353,7 @@ impl RelationalRowDeltaReader {
             encoded_lower.map(|(key, inclusive)| (Arc::<[u8]>::from(key), inclusive));
         let encoded_upper =
             encoded_upper.map(|(key, inclusive)| (Arc::<[u8]>::from(key), inclusive));
+        let requested_fields = Arc::<[usize]>::from(requested_fields);
         let mut sources = Vec::with_capacity(matching.len());
         let mut report = RelationalRowDeltaReadReport::default();
         let file_pool = Arc::new(Mutex::new(RowDeltaRunFilePool::new(
@@ -367,6 +380,8 @@ impl RelationalRowDeltaReader {
                 table_ordinal,
                 lower: encoded_lower.clone(),
                 upper: encoded_upper.clone(),
+                requested_fields: Arc::clone(&requested_fields),
+                binds_overlay_overflow,
                 exhausted: false,
             });
         }
@@ -848,9 +863,16 @@ fn visit_run(
 
 struct RowDeltaRunEntry {
     table_ordinal: u32,
-    encoded_primary_key: Vec<u8>,
     primary_key: RelationalKey,
     value: RelationalRowPageRecoveredValue,
+    last_modified_epoch: u64,
+}
+
+struct EncodedRowDeltaRunEntry {
+    table_ordinal: u32,
+    encoded_primary_key: Vec<u8>,
+    encoded_row: Vec<u8>,
+    kind: u8,
     last_modified_epoch: u64,
 }
 
@@ -948,6 +970,27 @@ impl<'a> RowDeltaRunCursor<'a> {
     }
 
     fn next_entry(&mut self) -> Result<Option<RowDeltaRunEntry>, RelationalRowDeltaError> {
+        let Some(entry) = self.next_encoded_entry()? else {
+            return Ok(None);
+        };
+        let primary_key = decode_delta_primary_key(&entry.encoded_primary_key)?;
+        let value = decode_value(
+            entry.kind,
+            &entry.encoded_row,
+            &self.context.tables[entry.table_ordinal as usize],
+            self.context.config,
+        )?;
+        Ok(Some(RowDeltaRunEntry {
+            table_ordinal: entry.table_ordinal,
+            primary_key,
+            value,
+            last_modified_epoch: entry.last_modified_epoch,
+        }))
+    }
+
+    fn next_encoded_entry(
+        &mut self,
+    ) -> Result<Option<EncodedRowDeltaRunEntry>, RelationalRowDeltaError> {
         if self.completed {
             return Ok(None);
         }
@@ -1066,24 +1109,13 @@ impl<'a> RowDeltaRunCursor<'a> {
                 "row delta upper key bound mismatch".to_string(),
             ));
         }
-        let primary_key = decode_ordered_relational_key(&encoded_key).map_err(|error| {
-            RelationalRowDeltaError::Corrupt(format!(
-                "row delta primary key cannot be decoded: {error}"
-            ))
-        })?;
-        let value = decode_value(
-            decoded.kind,
-            &encoded_row,
-            &self.context.tables[decoded.table_ordinal as usize],
-            self.context.config,
-        )?;
         self.previous_key = Some((decoded.table_ordinal, encoded_key.clone()));
         self.entry_ordinal += 1;
-        Ok(Some(RowDeltaRunEntry {
+        Ok(Some(EncodedRowDeltaRunEntry {
             table_ordinal: decoded.table_ordinal,
             encoded_primary_key: encoded_key,
-            primary_key,
-            value,
+            encoded_row,
+            kind: decoded.kind,
             last_modified_epoch: decoded.last_modified_epoch,
         }))
     }
@@ -1185,20 +1217,22 @@ impl RowDeltaRunFilePool {
     }
 }
 
-pub(crate) struct RelationalRowDeltaRunRangeCursor<'a> {
+pub(in crate::relational::row_page) struct RelationalRowDeltaRunRangeCursor<'a> {
     reader: &'a RelationalRowDeltaReader,
     run: RowDeltaRunCursor<'a>,
     table_ordinal: u32,
     lower: Option<(Arc<[u8]>, bool)>,
     upper: Option<(Arc<[u8]>, bool)>,
+    requested_fields: Arc<[usize]>,
+    binds_overlay_overflow: bool,
     exhausted: bool,
 }
 
 impl RelationalRowDeltaRunRangeCursor<'_> {
-    pub(crate) fn next(
+    pub(in crate::relational::row_page) fn next(
         &mut self,
     ) -> Result<
-        Option<(RelationalKey, RelationalRowPageRecoveredValue, u64)>,
+        Option<(RelationalKey, RelationalRowPageProjectedOverlayValue, u64)>,
         RelationalRowDeltaError,
     > {
         let result = self.next_inner();
@@ -1211,13 +1245,13 @@ impl RelationalRowDeltaRunRangeCursor<'_> {
     fn next_inner(
         &mut self,
     ) -> Result<
-        Option<(RelationalKey, RelationalRowPageRecoveredValue, u64)>,
+        Option<(RelationalKey, RelationalRowPageProjectedOverlayValue, u64)>,
         RelationalRowDeltaError,
     > {
         if self.exhausted {
             return Ok(None);
         }
-        while let Some(entry) = self.run.next_entry()? {
+        while let Some(entry) = self.run.next_encoded_entry()? {
             match entry.table_ordinal.cmp(&self.table_ordinal) {
                 std::cmp::Ordering::Less => continue,
                 std::cmp::Ordering::Greater => {
@@ -1239,17 +1273,22 @@ impl RelationalRowDeltaRunRangeCursor<'_> {
                 self.exhausted = true;
                 return Ok(None);
             }
-            return Ok(Some((
-                entry.primary_key,
-                entry.value,
-                entry.last_modified_epoch,
-            )));
+            let primary_key = decode_delta_primary_key(&entry.encoded_primary_key)?;
+            let value = decode_projected_value(
+                entry.kind,
+                &entry.encoded_row,
+                &self.run.context.tables[entry.table_ordinal as usize],
+                &self.requested_fields,
+                self.binds_overlay_overflow,
+                self.run.context.config,
+            )?;
+            return Ok(Some((primary_key, value, entry.last_modified_epoch)));
         }
         self.exhausted = true;
         Ok(None)
     }
 
-    pub(crate) const fn is_exhausted(&self) -> bool {
+    pub(in crate::relational::row_page) const fn is_exhausted(&self) -> bool {
         self.exhausted
     }
 }
@@ -1315,6 +1354,37 @@ pub(super) fn decode_staged_value(
         table,
         config,
     )
+}
+
+fn decode_delta_primary_key(encoded: &[u8]) -> Result<RelationalKey, RelationalRowDeltaError> {
+    decode_ordered_relational_key(encoded).map_err(|error| {
+        RelationalRowDeltaError::Corrupt(format!(
+            "row delta primary key cannot be decoded: {error}"
+        ))
+    })
+}
+
+fn decode_projected_value(
+    kind: u8,
+    encoded_row: &[u8],
+    table: &super::RelationalRowDeltaTableMetadata,
+    requested_fields: &[usize],
+    binds_overlay_overflow: bool,
+    config: RelationalRowDeltaConfig,
+) -> Result<RelationalRowPageProjectedOverlayValue, RelationalRowDeltaError> {
+    if kind == 0 {
+        return Ok(RelationalRowPageProjectedOverlayValue::Deleted);
+    }
+    let fields = super::super::value::decode_row_fields(
+        encoded_row,
+        table.column_count.get() as usize,
+        Some(requested_fields),
+        config.row_limits,
+    )?;
+    Ok(RelationalRowPageProjectedOverlayValue::Present {
+        fields: fields.into_boxed_slice(),
+        binds_overlay_overflow,
+    })
 }
 
 fn decode_value(

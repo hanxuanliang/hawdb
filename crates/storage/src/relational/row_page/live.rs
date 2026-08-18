@@ -6,6 +6,7 @@
 //! `Arc` only after that WAL batch is durable.
 
 use super::delta::RelationalRowDeltaRunRangeCursor;
+use super::demand::RelationalRowPageProjectedOverlayValue;
 use super::{
     RelationalRowDeltaError, RelationalRowDeltaReader, RelationalRowPageRecoveredValue,
     RelationalRowPageRootReader,
@@ -285,8 +286,13 @@ impl RelationalRowPageLiveOverlay {
 
 pub(super) struct RelationalRowPageOverlayRangeEntry {
     pub key: RelationalKey,
-    pub value: RelationalRowPageRecoveredValue,
+    pub value: RelationalRowPageOverlayRangeValue,
     pub epoch: u64,
+}
+
+pub(super) enum RelationalRowPageOverlayRangeValue {
+    Projected(RelationalRowPageProjectedOverlayValue),
+    Recovered(RelationalRowPageRecoveredValue),
 }
 
 struct RelationalRowPageLiveRangeCursor<'a> {
@@ -301,12 +307,14 @@ impl RelationalRowPageLiveRangeCursor<'_> {
         self.next += 1;
         Some(RelationalRowPageOverlayRangeEntry {
             key: change.primary_key.clone(),
-            value: change
-                .row
-                .clone()
-                .map_or(RelationalRowPageRecoveredValue::Deleted, |row| {
-                    RelationalRowPageRecoveredValue::Present(row)
-                }),
+            value: RelationalRowPageOverlayRangeValue::Recovered(
+                change
+                    .row
+                    .clone()
+                    .map_or(RelationalRowPageRecoveredValue::Deleted, |row| {
+                        RelationalRowPageRecoveredValue::Present(row)
+                    }),
+            ),
             epoch: self.batch.commit_epoch,
         })
     }
@@ -343,7 +351,7 @@ impl RelationalRowPageOverlayRangeSources<'_> {
                         .next()?
                         .map(|(key, value, epoch)| RelationalRowPageOverlayRangeEntry {
                             key,
-                            value,
+                            value: RelationalRowPageOverlayRangeValue::Projected(value),
                             epoch,
                         });
                 if next.is_some() {
@@ -628,6 +636,8 @@ impl RelationalRowPageReadView {
         table: &str,
         lower: Bound<&RelationalKey>,
         upper: Bound<&RelationalKey>,
+        requested_fields: &[usize],
+        binds_recovery_overflow: bool,
         max_sources: usize,
     ) -> Result<RelationalRowPageOverlayRangeSources<'_>, RelationalRowDeltaError> {
         let mut live = Vec::new();
@@ -646,7 +656,16 @@ impl RelationalRowPageReadView {
         let remaining_sources = max_sources.saturating_sub(live.len());
         let (recovery, recovery_report) = self.recovery_delta.as_ref().map_or_else(
             || Ok((Vec::new(), super::RelationalRowDeltaReadReport::default())),
-            |delta| delta.range_sources(table, lower, upper, remaining_sources),
+            |delta| {
+                delta.range_sources(
+                    table,
+                    lower,
+                    upper,
+                    requested_fields,
+                    binds_recovery_overflow,
+                    remaining_sources,
+                )
+            },
         )?;
         let mut sources = Vec::with_capacity(recovery.len().saturating_add(live.len()));
         sources.extend(

@@ -1,3 +1,4 @@
+use super::super::demand::RelationalRowPageProjectedOverlayValue;
 use super::*;
 use crate::relational::{
     ImmutableRelationalRowPage, RelationalKey, RelationalOverflowConfig,
@@ -290,7 +291,14 @@ fn streaming_range_sources_bound_retained_run_files() {
         .unwrap()
         .unwrap();
     let (mut sources, report) = reader
-        .range_sources("documents", Bound::Unbounded, Bound::Unbounded, 8)
+        .range_sources(
+            "documents",
+            Bound::Unbounded,
+            Bound::Unbounded,
+            &[0],
+            false,
+            8,
+        )
         .unwrap();
     assert_eq!(sources.len(), 4);
     assert_eq!(report.runs_read, 4);
@@ -302,6 +310,40 @@ fn streaming_range_sources_bound_retained_run_files() {
         assert!(source.next().unwrap().is_none());
     }
     assert_eq!(keys, vec![key(2), key(3), key(4), key(5)]);
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn streaming_range_sources_decode_only_requested_recovery_fields() {
+    let directory = unique_test_dir("range-projected-decode");
+    let base = publish_and_open_base(&directory);
+    let config = RelationalRowDeltaConfig::default();
+    let large_body = "x".repeat(60 * 1024);
+    let mut builder = builder(&directory, &base, 1, None, config);
+    builder.record(2, capture(2, Some(&large_body))).unwrap();
+    builder.finish(2, None).unwrap();
+
+    let reader = RelationalRowDeltaReader::open_latest(&directory, &base, 2, config)
+        .unwrap()
+        .unwrap();
+    let (mut sources, _) = reader
+        .range_sources(
+            "documents",
+            Bound::Unbounded,
+            Bound::Unbounded,
+            &[0],
+            false,
+            8,
+        )
+        .unwrap();
+    let (_, value, _) = sources[0].next().unwrap().unwrap();
+    let RelationalRowPageProjectedOverlayValue::Present { fields, .. } = value else {
+        panic!("recovery row must remain present");
+    };
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].ordinal, 0);
+    assert_eq!(fields[0].value, RelationalValue::BigInt(2));
 
     fs::remove_dir_all(directory).unwrap();
 }
