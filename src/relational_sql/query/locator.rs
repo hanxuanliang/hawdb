@@ -517,16 +517,6 @@ fn invalid_typed_record(reason: &str) -> SkeinError {
     ))
 }
 
-pub(super) fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -752,7 +742,7 @@ mod tests {
             RelationalValue::BigInt(value) => ("int", Value::Int(*value)),
             RelationalValue::DoublePrecision(value) => ("float", Value::Float(*value)),
             RelationalValue::Text(value) => ("text", Value::String(value.clone())),
-            RelationalValue::Bytea(value) => ("bytea", Value::String(hex_encode(value))),
+            RelationalValue::Bytea(value) => ("bytea", Value::Binary(value.clone())),
             RelationalValue::Null | RelationalValue::Overflow(_) => {
                 panic!("test key must be inline and non-null")
             }

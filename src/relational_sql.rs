@@ -380,6 +380,7 @@ pub(crate) fn bind_relational_value(
         Value::Int(value) => Ok(RelationalValue::BigInt(value)),
         Value::Float(value) => Ok(RelationalValue::DoublePrecision(value)),
         Value::String(value) => Ok(RelationalValue::Text(value)),
+        Value::Binary(value) => Ok(RelationalValue::Bytea(value)),
         Value::List(_) | Value::Map(_) => Err(SkeinError::Semantic(
             "relational SQL parameters must be scalar".to_string(),
         )),
@@ -525,6 +526,7 @@ fn compile_schema_value(value: SqlValue) -> Result<RelationalValue> {
         Value::Int(value) => Ok(RelationalValue::BigInt(value)),
         Value::Float(value) => Ok(RelationalValue::DoublePrecision(value)),
         Value::String(value) => Ok(RelationalValue::Text(value)),
+        Value::Binary(value) => Ok(RelationalValue::Bytea(value)),
         Value::List(_) | Value::Map(_) => Err(SkeinError::Semantic(
             "relational schema defaults must be scalar".to_string(),
         )),
@@ -679,6 +681,30 @@ mod tests {
             snapshot_output.rows[0]["id"],
             Value::String("message-1".to_string())
         );
+    }
+
+    #[test]
+    fn database_sql_preserves_bytea_as_binary_values() {
+        let mut database = Database::new();
+        database
+            .query_sql("CREATE TABLE payloads (id TEXT PRIMARY KEY, payload BYTEA NOT NULL)")
+            .expect("create binary table");
+        let payload = Value::Binary(vec![0, 1, 0xfe, 0xff]);
+        database
+            .query_sql_with_params(
+                "INSERT INTO payloads (id, payload) VALUES ($1, $2)",
+                &[Value::String("payload-1".to_string()), payload.clone()],
+            )
+            .expect("insert binary row");
+
+        let output = database
+            .query_sql_with_params(
+                "SELECT payload FROM payloads WHERE payload = $1",
+                std::slice::from_ref(&payload),
+            )
+            .expect("query binary row");
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.rows[0]["payload"], payload);
     }
 
     #[test]

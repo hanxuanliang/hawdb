@@ -32,6 +32,7 @@ const HAS_FLOAT: u8 = 1 << 2;
 const HAS_STRING: u8 = 1 << 3;
 const HAS_NESTED: u8 = 1 << 4;
 const HAS_NONFINITE: u8 = 1 << 5;
+const HAS_BINARY: u8 = 1 << 6;
 
 const MIN_TRUNCATED: u8 = 1;
 const MAX_TRUNCATED: u8 = 1 << 1;
@@ -162,6 +163,7 @@ impl ChunkZoneMap {
                         },
                     ));
                 }
+                Value::Binary(_) => type_bits |= HAS_BINARY,
                 Value::List(_) | Value::Map(_) => type_bits |= HAS_NESTED,
             }
         }
@@ -229,6 +231,7 @@ impl ChunkZoneMap {
                 !(prefix.min_definitely_greater_than(bytes)
                     || prefix.max_definitely_less_than(bytes))
             }
+            Value::Binary(_) => self.type_bits & HAS_BINARY != 0,
             // Nested equality is never pruned by zone maps.
             Value::List(_) | Value::Map(_) => self.type_bits & HAS_NESTED != 0,
         }
@@ -423,7 +426,14 @@ impl ChunkZoneMap {
         if presence & !(PRESENT_NUMERIC | PRESENT_DATETIME | PRESENT_STRING) != 0 {
             return Err(corrupt("zone map presence flags are invalid".to_string()));
         }
-        if type_bits & !(HAS_BOOL | HAS_INT | HAS_FLOAT | HAS_STRING | HAS_NESTED | HAS_NONFINITE)
+        if type_bits
+            & !(HAS_BOOL
+                | HAS_INT
+                | HAS_FLOAT
+                | HAS_STRING
+                | HAS_NESTED
+                | HAS_NONFINITE
+                | HAS_BINARY)
             != 0
         {
             return Err(corrupt("zone map type bits are invalid".to_string()));

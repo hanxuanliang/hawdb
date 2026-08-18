@@ -32,7 +32,7 @@ describes the concrete in-memory encoding. Batch construction MUST validate
 the logical/physical compatibility once before entering a typed loop.
 
 `ValueRef<'a>` is the borrowed scalar boundary. Fixed-width values are copied;
-strings, lists, and maps borrow their existing payload. Comparison, type
+strings, binary values, lists, and maps borrow their existing payload. Comparison, type
 checking, branch selection, and immediate serialization SHOULD consume
 `ValueRef` without constructing an owned `Value`. Ownership conversion MUST
 be explicit and delayed until a result is retained beyond the current batch or

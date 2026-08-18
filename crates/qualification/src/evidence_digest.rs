@@ -33,6 +33,10 @@ pub(crate) fn hash_value(hasher: &mut Sha256, value: &Value) {
             hasher.update([4]);
             hash_bytes(hasher, value.as_bytes());
         }
+        Value::Binary(value) => {
+            hasher.update([7]);
+            hash_bytes(hasher, value);
+        }
         Value::List(values) => {
             hasher.update([5]);
             hasher.update((values.len() as u64).to_le_bytes());

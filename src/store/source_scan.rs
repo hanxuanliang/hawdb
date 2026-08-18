@@ -303,7 +303,7 @@ fn is_scalar(value: &Value) -> bool {
     match value {
         Value::Bool(_) | Value::Int(_) | Value::String(_) => true,
         Value::Float(value) => value.is_finite(),
-        Value::Null | Value::List(_) | Value::Map(_) => false,
+        Value::Null | Value::Binary(_) | Value::List(_) | Value::Map(_) => false,
     }
 }
 
@@ -368,6 +368,9 @@ fn encode_descriptor(projection: &SourceScanProjection) -> Result<String> {
                     }
                     skein_storage::ScanScalar::String(value) => {
                         encode_value(&Value::String(value.clone()))
+                    }
+                    skein_storage::ScanScalar::Binary(value) => {
+                        encode_value(&Value::Binary(value.clone()))
                     }
                 };
                 body.push_str(&format!(
@@ -585,6 +588,7 @@ fn encode_enum_dictionary(dictionary: Option<&EnumDictionaryStats>) -> String {
                     skein_storage::ScanScalar::Int(value) => Value::Int(*value),
                     skein_storage::ScanScalar::Float(value) => Value::Float(f64::from_bits(*value)),
                     skein_storage::ScanScalar::String(value) => Value::String(value.clone()),
+                    skein_storage::ScanScalar::Binary(value) => Value::Binary(value.clone()),
                 };
                 encode_string(&encode_value(&value))
             })

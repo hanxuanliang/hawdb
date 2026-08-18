@@ -18771,6 +18771,13 @@ fn value_to_external_id(value: &Value) -> String {
         Value::Int(value) => value.to_string(),
         Value::Float(value) => value.to_string(),
         Value::String(value) => value.clone(),
+        Value::Binary(value) => format!(
+            "\\x{}",
+            value
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        ),
         Value::List(values) => values
             .iter()
             .map(value_to_external_id)

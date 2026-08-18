@@ -3414,6 +3414,12 @@ fn append_canonical_value(body: &mut String, value: &Value) {
             body.push(':');
             body.push_str(value);
         }
+        Value::Binary(value) => {
+            body.push_str("binary:");
+            body.push_str(&value.len().to_string());
+            body.push(':');
+            append_hex(body, value);
+        }
         Value::List(values) => {
             body.push_str(&format!("list:{}:[", values.len()));
             for value in values {
@@ -3434,6 +3440,14 @@ fn append_canonical_value(body: &mut String, value: &Value) {
             }
             body.push('}');
         }
+    }
+}
+
+fn append_hex(output: &mut String, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in bytes {
+        output.push(HEX[usize::from(byte >> 4)] as char);
+        output.push(HEX[usize::from(byte & 0x0f)] as char);
     }
 }
 

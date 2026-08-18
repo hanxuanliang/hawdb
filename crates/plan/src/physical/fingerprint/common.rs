@@ -68,6 +68,16 @@ pub(super) fn write_value(output: &mut String, value: &Value) {
             output.push_str("string:");
             write_identifier(output, value);
         }
+        Value::Binary(value) => {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            output.push_str("binary:");
+            output.push_str(&value.len().to_string());
+            output.push(':');
+            for byte in value {
+                output.push(HEX[usize::from(byte >> 4)] as char);
+                output.push(HEX[usize::from(byte & 0x0f)] as char);
+            }
+        }
         Value::List(values) => {
             output.push_str("list:[");
             for (index, value) in values.iter().enumerate() {

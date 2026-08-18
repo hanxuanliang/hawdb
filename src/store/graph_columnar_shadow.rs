@@ -634,6 +634,7 @@ enum InferredType {
     Float,
     Bool,
     Str,
+    Binary,
     Residual,
 }
 
@@ -644,6 +645,7 @@ impl InferredType {
             Value::Float(_) => Self::Float,
             Value::Bool(_) => Self::Bool,
             Value::String(_) => Self::Str,
+            Value::Binary(_) => Self::Binary,
             Value::Null | Value::List(_) | Value::Map(_) => Self::Residual,
         }
     }
@@ -726,6 +728,7 @@ fn estimated_shadow_value_bytes(value: &Value) -> u64 {
     match value {
         Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) => 16,
         Value::String(value) => 16 + value.len() as u64,
+        Value::Binary(value) => 16 + value.len() as u64,
         Value::List(values) => 16 + values.iter().map(estimated_shadow_value_bytes).sum::<u64>(),
         Value::Map(entries) => {
             16 + entries

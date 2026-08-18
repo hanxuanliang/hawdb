@@ -12,6 +12,7 @@ pub enum Value {
     Int(i64),
     Float(f64),
     String(String),
+    Binary(Vec<u8>),
     List(Vec<Value>),
     Map(BTreeMap<String, Value>),
 }
@@ -28,6 +29,7 @@ pub enum ValueRef<'a> {
     Int(i64),
     Float(f64),
     String(&'a str),
+    Binary(&'a [u8]),
     List(&'a [Value]),
     Map(&'a BTreeMap<String, Value>),
 }
@@ -56,6 +58,7 @@ impl Ord for Value {
                 (Value::Int(left), Value::Int(right)) => left.cmp(right),
                 (Value::Float(left), Value::Float(right)) => left.total_cmp(right),
                 (Value::String(left), Value::String(right)) => left.cmp(right),
+                (Value::Binary(left), Value::Binary(right)) => left.cmp(right),
                 (Value::List(left), Value::List(right)) => left.cmp(right),
                 (Value::Map(left), Value::Map(right)) => left.cmp(right),
                 _ => Ordering::Equal,
@@ -72,6 +75,7 @@ impl Hash for Value {
             Value::Int(value) => value.hash(state),
             Value::Float(value) => value.to_bits().hash(state),
             Value::String(value) => value.hash(state),
+            Value::Binary(value) => value.hash(state),
             Value::List(values) => values.hash(state),
             Value::Map(values) => values.hash(state),
         }
@@ -94,8 +98,9 @@ impl Value {
             Value::Int(_) => 2,
             Value::Float(_) => 3,
             Value::String(_) => 4,
-            Value::List(_) => 5,
-            Value::Map(_) => 6,
+            Value::Binary(_) => 5,
+            Value::List(_) => 6,
+            Value::Map(_) => 7,
         }
     }
 }
@@ -112,6 +117,7 @@ impl<'a> ValueRef<'a> {
             Self::Int(_) => Some(LogicalType::Int64),
             Self::Float(_) => Some(LogicalType::Float64),
             Self::String(_) => Some(LogicalType::String),
+            Self::Binary(_) => Some(LogicalType::Binary),
             Self::List(_) => Some(LogicalType::List),
             Self::Map(_) => Some(LogicalType::Map),
         }
@@ -145,6 +151,13 @@ impl<'a> ValueRef<'a> {
         }
     }
 
+    pub const fn as_binary(self) -> Option<&'a [u8]> {
+        match self {
+            Self::Binary(value) => Some(value),
+            _ => None,
+        }
+    }
+
     pub const fn as_list(self) -> Option<&'a [Value]> {
         match self {
             Self::List(value) => Some(value),
@@ -166,6 +179,7 @@ impl<'a> ValueRef<'a> {
             Self::Int(value) => Value::Int(value),
             Self::Float(value) => Value::Float(value),
             Self::String(value) => Value::String(value.to_owned()),
+            Self::Binary(value) => Value::Binary(value.to_vec()),
             Self::List(value) => Value::List(value.to_vec()),
             Self::Map(value) => Value::Map(value.clone()),
         }
@@ -178,8 +192,9 @@ impl<'a> ValueRef<'a> {
             Self::Int(_) => 2,
             Self::Float(_) => 3,
             Self::String(_) => 4,
-            Self::List(_) => 5,
-            Self::Map(_) => 6,
+            Self::Binary(_) => 5,
+            Self::List(_) => 6,
+            Self::Map(_) => 7,
         }
     }
 }
@@ -192,6 +207,7 @@ impl<'a> From<&'a Value> for ValueRef<'a> {
             Value::Int(value) => Self::Int(*value),
             Value::Float(value) => Self::Float(*value),
             Value::String(value) => Self::String(value),
+            Value::Binary(value) => Self::Binary(value),
             Value::List(value) => Self::List(value),
             Value::Map(value) => Self::Map(value),
         }
@@ -222,6 +238,7 @@ impl Ord for ValueRef<'_> {
                 (Self::Int(left), Self::Int(right)) => left.cmp(right),
                 (Self::Float(left), Self::Float(right)) => left.total_cmp(right),
                 (Self::String(left), Self::String(right)) => left.cmp(right),
+                (Self::Binary(left), Self::Binary(right)) => left.cmp(right),
                 (Self::List(left), Self::List(right)) => left.cmp(right),
                 (Self::Map(left), Self::Map(right)) => left.cmp(right),
                 _ => Ordering::Equal,
@@ -238,6 +255,7 @@ impl Hash for ValueRef<'_> {
             Self::Int(value) => value.hash(state),
             Self::Float(value) => value.to_bits().hash(state),
             Self::String(value) => value.hash(state),
+            Self::Binary(value) => value.hash(state),
             Self::List(value) => value.hash(state),
             Self::Map(value) => value.hash(state),
         }
@@ -276,6 +294,7 @@ impl Display for ValueRef<'_> {
             Self::Int(value) => write!(f, "{value}"),
             Self::Float(value) => write!(f, "{value}"),
             Self::String(value) => write!(f, "{value}"),
+            Self::Binary(value) => write_binary(f, value),
             Self::List(values) => {
                 let values = values
                     .iter()
@@ -304,6 +323,7 @@ impl Display for Value {
             Value::Int(value) => write!(f, "{value}"),
             Value::Float(value) => write!(f, "{value}"),
             Value::String(value) => write!(f, "{value}"),
+            Value::Binary(value) => write_binary(f, value),
             Value::List(values) => {
                 let values = values
                     .iter()
@@ -322,6 +342,14 @@ impl Display for Value {
             }
         }
     }
+}
+
+fn write_binary(f: &mut Formatter<'_>, value: &[u8]) -> std::fmt::Result {
+    f.write_str("\\x")?;
+    for byte in value {
+        write!(f, "{byte:02x}")?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -349,6 +377,7 @@ mod tests {
             Value::Int(1),
             Value::Float(f64::NAN),
             Value::String("value".into()),
+            Value::Binary(vec![0, 0xff]),
             Value::List(vec![Value::Int(2)]),
             Value::Map(BTreeMap::from([("key".into(), Value::Int(3))])),
         ];
@@ -365,5 +394,23 @@ mod tests {
     fn null_has_no_intrinsic_logical_type() {
         assert_eq!(Value::Null.logical_type(), None);
         assert_eq!(Value::Int(42).logical_type(), Some(LogicalType::Int64));
+        assert_eq!(
+            Value::Binary(vec![0, 0xff]).logical_type(),
+            Some(LogicalType::Binary)
+        );
+    }
+
+    #[test]
+    fn binary_value_ref_borrows_and_formats_postgres_hex() {
+        let value = Value::Binary(vec![0, 1, 0xfe, 0xff]);
+        let reference = value.as_ref();
+
+        assert_eq!(reference.as_binary(), Some(&[0, 1, 0xfe, 0xff][..]));
+        let Value::Binary(owned) = &value else {
+            unreachable!();
+        };
+        assert_eq!(reference.as_binary().unwrap().as_ptr(), owned.as_ptr());
+        assert_eq!(reference.to_owned_value(), value);
+        assert_eq!(value.to_string(), "\\x0001feff");
     }
 }

@@ -91,6 +91,7 @@ pub fn value_memory_bytes(value: &Value) -> usize {
     std::mem::size_of::<Value>().saturating_add(match value {
         Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) => 0,
         Value::String(value) => value.len(),
+        Value::Binary(value) => value.len(),
         Value::List(values) => values
             .iter()
             .fold(std::mem::size_of::<Vec<Value>>(), |total, value| {
@@ -163,6 +164,7 @@ fn value_payload_bytes(value: &Value) -> usize {
         Value::Int(_) => std::mem::size_of::<i64>(),
         Value::Float(_) => std::mem::size_of::<f64>(),
         Value::String(value) => value.len(),
+        Value::Binary(value) => value.len(),
         Value::List(values) => values.iter().fold(0usize, |total, value| {
             total.saturating_add(value_payload_bytes(value))
         }),

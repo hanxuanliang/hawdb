@@ -1324,6 +1324,7 @@ fn estimated_value_resident_bytes(value: &Value) -> usize {
     std::mem::size_of::<Value>().saturating_add(match value {
         Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) => 0,
         Value::String(value) => value.len(),
+        Value::Binary(value) => value.len(),
         Value::List(values) => values
             .iter()
             .map(estimated_value_resident_bytes)

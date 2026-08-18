@@ -47,8 +47,7 @@ mod streaming_binding;
 
 use self::columnar_aggregate::ColumnarAggregateExecutor;
 use self::locator::{
-    hex_encode, RelationalLocatorLayout, RelationalRowSetLocator, RelationalSortKey,
-    RelationalSortRecord,
+    RelationalLocatorLayout, RelationalRowSetLocator, RelationalSortKey, RelationalSortRecord,
 };
 use self::streaming_binding::{BoundStreamingPredicate, BoundStreamingProjection};
 
@@ -2185,7 +2184,7 @@ fn relational_sort_value(value: &RelationalValue) -> Result<Value> {
         RelationalValue::BigInt(value) => Ok(Value::Int(*value)),
         RelationalValue::DoublePrecision(value) => Ok(Value::Float(*value)),
         RelationalValue::Text(value) => Ok(Value::String(value.clone())),
-        RelationalValue::Bytea(value) => Ok(Value::String(format!("bytea:{}", hex_encode(value)))),
+        RelationalValue::Bytea(value) => Ok(Value::Binary(value.clone())),
         RelationalValue::Overflow(_) => Err(SkeinError::Execution(
             "ORDER BY requires overflow hydration before qualification".to_string(),
         )),
@@ -3675,9 +3674,7 @@ fn relational_ref_to_value(value: RelationalValueRef<'_>) -> Result<Value> {
         RelationalValueRef::BigInt(value) => Ok(Value::Int(value)),
         RelationalValueRef::DoublePrecision(value) => Ok(Value::Float(value)),
         RelationalValueRef::Text(value) => Ok(Value::String(value.to_owned())),
-        RelationalValueRef::Bytea(_) => Err(SkeinError::Semantic(
-            "BYTEA result conversion requires a binary Value variant".to_string(),
-        )),
+        RelationalValueRef::Bytea(value) => Ok(Value::Binary(value.to_vec())),
         RelationalValueRef::Overflow(_) => Err(SkeinError::Execution(
             "overflow value reached projection without hydration".to_string(),
         )),
@@ -3890,6 +3887,7 @@ fn value_to_relational(value: Value) -> Result<RelationalValue> {
         Value::Int(value) => Ok(RelationalValue::BigInt(value)),
         Value::Float(value) => Ok(RelationalValue::DoublePrecision(value)),
         Value::String(value) => Ok(RelationalValue::Text(value)),
+        Value::Binary(value) => Ok(RelationalValue::Bytea(value)),
         Value::List(_) | Value::Map(_) => Err(SkeinError::Semantic(
             "relational SQL values must be scalar".to_string(),
         )),
@@ -3903,9 +3901,7 @@ fn relational_to_value(value: &RelationalValue) -> Result<Value> {
         RelationalValue::BigInt(value) => Ok(Value::Int(*value)),
         RelationalValue::DoublePrecision(value) => Ok(Value::Float(*value)),
         RelationalValue::Text(value) => Ok(Value::String(value.clone())),
-        RelationalValue::Bytea(_) => Err(SkeinError::Semantic(
-            "BYTEA result conversion requires a binary Value variant".to_string(),
-        )),
+        RelationalValue::Bytea(value) => Ok(Value::Binary(value.clone())),
         RelationalValue::Overflow(_) => Err(SkeinError::Execution(
             "overflow value reached projection without hydration".to_string(),
         )),

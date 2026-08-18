@@ -127,6 +127,7 @@ const VALUE_FIELD_FLOAT: u32 = 4;
 const VALUE_FIELD_STRING: u32 = 5;
 const VALUE_FIELD_ELEMENT: u32 = 6;
 const VALUE_FIELD_MAP_ENTRY: u32 = 7;
+const VALUE_FIELD_BINARY: u32 = 8;
 
 const ENTRY_FIELD_KEY: u32 = 1;
 const ENTRY_FIELD_VALUE: u32 = 2;
@@ -302,6 +303,7 @@ fn encode_value_message(value: &Value, out: &mut Vec<u8>) {
         Value::Int(value) => encode_varint_field(VALUE_FIELD_INT, zigzag_encode_i64(*value), out),
         Value::Float(value) => encode_fixed64_field(VALUE_FIELD_FLOAT, value.to_bits(), out),
         Value::String(value) => encode_string_field(VALUE_FIELD_STRING, value, out),
+        Value::Binary(value) => encode_len_field(VALUE_FIELD_BINARY, value, out),
         Value::List(values) => {
             for value in values {
                 let mut body = Vec::new();
@@ -355,6 +357,9 @@ fn decode_value_message(bytes: &[u8]) -> Result<Value> {
             }
             (VALUE_FIELD_STRING, WIRE_TYPE_LEN) => {
                 value = Some(Value::String(decode_string_body(bytes, &mut pos)?));
+            }
+            (VALUE_FIELD_BINARY, WIRE_TYPE_LEN) => {
+                value = Some(Value::Binary(decode_len_body(bytes, &mut pos)?.to_vec()));
             }
             (VALUE_FIELD_ELEMENT, WIRE_TYPE_LEN) => {
                 let body = decode_len_body(bytes, &mut pos)?;
@@ -959,6 +964,7 @@ mod tests {
             ("weight".to_string(), Value::Float(-0.5)),
             ("count".to_string(), Value::Int(i64::MIN)),
             ("missing".to_string(), Value::Null),
+            ("payload".to_string(), Value::Binary(vec![0, 1, 0xfe, 0xff])),
             (
                 "nested".to_string(),
                 Value::Map(BTreeMap::from([(

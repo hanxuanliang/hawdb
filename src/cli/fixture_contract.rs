@@ -224,6 +224,9 @@ fn value_json(value: &Value) -> serde_json::Value {
         Value::Int(value) => serde_json::json!(value),
         Value::Float(value) => serde_json::json!(value),
         Value::String(value) => serde_json::Value::String(value.clone()),
+        Value::Binary(value) => serde_json::json!({
+            "$binary": value.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+        }),
         Value::List(values) => {
             serde_json::Value::Array(values.iter().map(value_json).collect::<Vec<_>>())
         }

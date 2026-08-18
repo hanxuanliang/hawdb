@@ -703,6 +703,7 @@ impl ColumnGroupWriter {
                         Value::Float(_) => ChunkEncoding::PlainFloat,
                         Value::Bool(_) => ChunkEncoding::BoolBitmap,
                         Value::String(_) => ChunkEncoding::StringTable,
+                        Value::Binary(_) => ChunkEncoding::ByteTable,
                         Value::Null | Value::List(_) | Value::Map(_) => {
                             unreachable!("validated scalar cells")
                         }
@@ -721,6 +722,14 @@ impl ColumnGroupWriter {
                             // The borrowed string bytes stream straight to
                             // the file: no value-sized buffer exists.
                             sink.write_all(value.as_bytes())?;
+                        }
+                        Value::Binary(value) => {
+                            let length = u32::try_from(value.len()).map_err(|_| {
+                                unsupported("byte table chunk exceeds u32 bytes".to_string())
+                            })?;
+                            sink.write_all(&0u32.to_le_bytes())?;
+                            sink.write_all(&length.to_le_bytes())?;
+                            sink.write_all(value)?;
                         }
                         Value::Null | Value::List(_) | Value::Map(_) => {
                             unreachable!("validated scalar cells")

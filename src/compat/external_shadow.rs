@@ -285,11 +285,18 @@ pub fn external_shadow_value_from_json(value: &serde_json::Value) -> Result<Valu
             .map(external_shadow_value_from_json)
             .collect::<Result<Vec<_>>>()
             .map(Value::List),
-        serde_json::Value::Object(values) => values
-            .iter()
-            .map(|(key, value)| Ok((key.clone(), external_shadow_value_from_json(value)?)))
-            .collect::<Result<BTreeMap<_, _>>>()
-            .map(Value::Map),
+        serde_json::Value::Object(values) => {
+            if values.len() == 1
+                && let Some(serde_json::Value::String(encoded)) = values.get("$binary")
+            {
+                return decode_binary_hex(encoded).map(Value::Binary);
+            }
+            values
+                .iter()
+                .map(|(key, value)| Ok((key.clone(), external_shadow_value_from_json(value)?)))
+                .collect::<Result<BTreeMap<_, _>>>()
+                .map(Value::Map)
+        }
     }
 }
 
@@ -302,6 +309,7 @@ pub fn external_shadow_json_from_value(value: Value) -> serde_json::Value {
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
         Value::String(value) => serde_json::Value::String(value),
+        Value::Binary(value) => serde_json::json!({ "$binary": encode_binary_hex(&value) }),
         Value::List(values) => serde_json::Value::Array(
             values
                 .into_iter()
@@ -1190,6 +1198,7 @@ fn json_from_value(value: &Value) -> serde_json::Value {
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
         Value::String(value) => serde_json::Value::String(value.clone()),
+        Value::Binary(value) => serde_json::json!({ "$binary": encode_binary_hex(value) }),
         Value::List(values) => {
             serde_json::Value::Array(values.iter().map(json_from_value).collect())
         }
@@ -1199,6 +1208,45 @@ fn json_from_value(value: &Value) -> serde_json::Value {
                 .map(|(key, value)| (key.clone(), json_from_value(value)))
                 .collect(),
         ),
+    }
+}
+
+fn encode_binary_hex(value: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(value.len().saturating_mul(2));
+    for byte in value {
+        write!(encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
+}
+
+fn decode_binary_hex(encoded: &str) -> Result<Vec<u8>> {
+    if !encoded.len().is_multiple_of(2) {
+        return Err(SkeinError::Execution(
+            "external shadow binary has an odd number of hex digits".to_string(),
+        ));
+    }
+    encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|digits| {
+            let high = decode_binary_hex_digit(digits[0])?;
+            let low = decode_binary_hex_digit(digits[1])?;
+            Ok((high << 4) | low)
+        })
+        .collect()
+}
+
+fn decode_binary_hex_digit(digit: u8) -> Result<u8> {
+    match digit {
+        b'0'..=b'9' => Ok(digit - b'0'),
+        b'a'..=b'f' => Ok(digit - b'a' + 10),
+        b'A'..=b'F' => Ok(digit - b'A' + 10),
+        _ => Err(SkeinError::Execution(format!(
+            "external shadow binary contains invalid hex digit {:?}",
+            char::from(digit)
+        ))),
     }
 }
 

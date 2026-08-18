@@ -426,6 +426,7 @@ fn estimate_value_payload(input: &mut Cursor<&[u8]>, depth: usize) -> Result<usi
             Ok(payload_bytes)
         }
         6 => estimate_value_map_payload(input, depth + 1).map(|(bytes, _)| bytes),
+        7 => skip_binary(input),
         tag => Err(SkeinError::Execution(format!(
             "invalid value tag in spill record: {tag}"
         ))),
@@ -446,6 +447,22 @@ fn skip_string(input: &mut Cursor<&[u8]>) -> Result<usize> {
         .ok_or_else(|| SkeinError::Execution("truncated string in spill record".to_string()))?;
     std::str::from_utf8(bytes)
         .map_err(|error| SkeinError::Execution(format!("invalid spill string: {error}")))?;
+    input.set_position(end as u64);
+    Ok(len)
+}
+
+fn skip_binary(input: &mut Cursor<&[u8]>) -> Result<usize> {
+    let len = read_len(input)?;
+    let start = usize::try_from(input.position()).map_err(|_| {
+        SkeinError::Execution("spill cursor position does not fit in memory".to_string())
+    })?;
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| SkeinError::Execution("spill binary position overflow".to_string()))?;
+    input
+        .get_ref()
+        .get(start..end)
+        .ok_or_else(|| SkeinError::Execution("truncated binary in spill record".to_string()))?;
     input.set_position(end as u64);
     Ok(len)
 }
@@ -490,6 +507,7 @@ fn value_encoded_len(value: &Value, depth: usize) -> Result<usize> {
         Value::Bool(_) => Ok(2),
         Value::Int(_) | Value::Float(_) => Ok(9),
         Value::String(value) => encoded_len_add(1, string_encoded_len(value)?),
+        Value::Binary(value) => encoded_len_add(9, value.len()),
         Value::List(values) => values.iter().try_fold(9usize, |bytes, value| {
             encoded_len_add(bytes, value_encoded_len(value, depth + 1)?)
         }),
@@ -619,6 +637,11 @@ fn write_value(output: &mut Vec<u8>, value: &Value, depth: usize) -> Result<()> 
             output.push(4);
             write_string(output, value)?;
         }
+        Value::Binary(value) => {
+            output.push(7);
+            write_len(output, value.len())?;
+            output.extend_from_slice(value);
+        }
         Value::List(values) => {
             output.push(5);
             write_len(output, values.len())?;
@@ -658,6 +681,14 @@ fn read_value(input: &mut Cursor<&[u8]>, depth: usize) -> Result<Value> {
             Value::List(values)
         }
         6 => Value::Map(read_value_map(input, depth + 1)?),
+        7 => {
+            let len = read_len(input)?;
+            let mut bytes = vec![0; len];
+            input.read_exact(&mut bytes).map_err(|error| {
+                SkeinError::Execution(format!("truncated binary in spill record: {error}"))
+            })?;
+            Value::Binary(bytes)
+        }
         tag => {
             return Err(SkeinError::Execution(format!(
                 "invalid value tag in spill record: {tag}"
@@ -887,13 +918,16 @@ mod tests {
     #[test]
     fn spill_round_trip_preserves_bindings() {
         let binding = Binding {
-            values: BTreeMap::from([(
-                "nested".to_string(),
-                Value::Map(BTreeMap::from([(
-                    "items".to_string(),
-                    Value::List(vec![Value::Int(1), Value::String("two".to_string())]),
-                )])),
-            )]),
+            values: BTreeMap::from([
+                ("binary".to_string(), Value::Binary(vec![0, 1, 0xfe, 0xff])),
+                (
+                    "nested".to_string(),
+                    Value::Map(BTreeMap::from([(
+                        "items".to_string(),
+                        Value::List(vec![Value::Int(1), Value::String("two".to_string())]),
+                    )])),
+                ),
+            ]),
             nodes: BTreeMap::from([(
                 "n".to_string(),
                 NodeRecord {

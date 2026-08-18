@@ -2698,6 +2698,11 @@ fn validate_encoded_value(
             }
             Ok(())
         }
+        8 => {
+            let length = cursor.read_u32()? as usize;
+            cursor.read_exact(length)?;
+            Ok(())
+        }
         tag => Err(CanonicalSegmentError::Corrupt(format!(
             "unknown canonical value tag {tag}"
         ))),
@@ -3235,6 +3240,11 @@ fn encode_value(
             output.push(4);
             encode_string(value, output)?;
         }
+        Value::Binary(value) => {
+            output.push(8);
+            output.extend_from_slice(&u32_len(value.len(), "binary")?.to_le_bytes());
+            output.extend_from_slice(value);
+        }
         Value::List(values) => {
             output.push(5);
             output.extend_from_slice(&u32_len(values.len(), "value list")?.to_le_bytes());
@@ -3305,6 +3315,10 @@ fn encoded_value_len(value: &Value, depth: usize) -> Result<u64, CanonicalSegmen
             u32_len(value.len(), "string")?;
             1 + 4 + value.len() as u64
         }
+        Value::Binary(value) => {
+            u32_len(value.len(), "binary")?;
+            1 + 4 + value.len() as u64
+        }
         Value::List(values) => {
             u32_len(values.len(), "value list")?;
             let mut total = 1u64 + 4;
@@ -3352,6 +3366,11 @@ fn write_value_streaming<W: Write + ?Sized>(
             out.write_all(&[4])?;
             out.write_all(&u32_len(value.len(), "string")?.to_le_bytes())?;
             out.write_all(value.as_bytes())?;
+        }
+        Value::Binary(value) => {
+            out.write_all(&[8])?;
+            out.write_all(&u32_len(value.len(), "binary")?.to_le_bytes())?;
+            out.write_all(value)?;
         }
         Value::List(values) => {
             out.write_all(&[5])?;
@@ -3594,6 +3613,10 @@ fn decode_value_with_property_spills(
                 )));
             }
             Ok(value)
+        }
+        8 => {
+            let length = cursor.read_u32()? as usize;
+            Ok(Value::Binary(cursor.read_exact(length)?.to_vec()))
         }
         tag => Err(CanonicalSegmentError::Corrupt(format!(
             "unknown canonical value tag {tag}"
@@ -5060,13 +5083,14 @@ mod tests {
             (5, Value::Int(i64::MIN)),
             (6, Value::Float(-2.5)),
             (7, Value::String("列存".to_string())),
-            (8, Value::Null),
+            (8, Value::Binary(vec![0, 1, 0xfe, 0xff])),
+            (9, Value::Null),
             (
-                9,
+                10,
                 Value::List(vec![Value::Int(1), Value::String("x".to_string())]),
             ),
             (
-                10,
+                11,
                 Value::Map(BTreeMap::from([("k".to_string(), Value::Bool(true))])),
             ),
         ];

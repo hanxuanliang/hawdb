@@ -47,6 +47,7 @@ pub enum ScanScalar {
     Int(i64),
     Float(u64),
     String(String),
+    Binary(Vec<u8>),
 }
 
 impl ScanScalar {
@@ -56,6 +57,7 @@ impl ScanScalar {
             Value::Int(value) => Some(Self::Int(*value)),
             Value::Float(value) if value.is_finite() => Some(Self::Float(value.to_bits())),
             Value::String(value) => Some(Self::String(value.clone())),
+            Value::Binary(value) => Some(Self::Binary(value.clone())),
             Value::Null | Value::Float(_) | Value::List(_) | Value::Map(_) => None,
         }
     }
@@ -76,6 +78,11 @@ impl ScanScalar {
             Self::String(value) => {
                 let mut bytes = vec![3];
                 bytes.extend(value.as_bytes());
+                bytes
+            }
+            Self::Binary(value) => {
+                let mut bytes = vec![4];
+                bytes.extend(value);
                 bytes
             }
         }

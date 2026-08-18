@@ -112,6 +112,12 @@ and `BYTEA`, including nullability and deterministic defaults. Primary keys,
 unique constraints, ordered secondary indexes, and foreign keys are evaluated
 against the final staged transaction state.
 
+`BYTEA` binds to the shared `Value::Binary`/`ValueRef::Binary` logical value.
+Query projection, comparison, hashing, spill, WAL, checkpoint, and JSON result
+boundaries MUST preserve raw bytes without retyping them as text or integer
+lists. JSON surfaces use the unambiguous `{ "$binary": "<lowercase-hex>" }`
+envelope because JSON has no native byte-string scalar.
+
 Every relational table MUST declare exactly one primary-key constraint. The
 key may contain multiple columns, but multiple independent column-level
 `PRIMARY KEY` declarations are invalid and MUST NOT be reinterpreted as a

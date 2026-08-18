@@ -678,6 +678,9 @@ fn index_statistics_value_bytes(value: &Value) -> usize {
         Value::String(value) => 2usize
             .saturating_add(value.len().to_string().len())
             .saturating_add(value.len()),
+        Value::Binary(value) => 2usize
+            .saturating_add(value.len().to_string().len())
+            .saturating_add(value.len().saturating_mul(2)),
         Value::List(values) => values.iter().fold(
             2usize.saturating_add(values.len().to_string().len()),
             |bytes, value| {
@@ -723,6 +726,16 @@ fn append_index_statistics_value(encoded: &mut String, value: &Value) {
             encoded.push_str(&value.len().to_string());
             encoded.push(':');
             encoded.push_str(value);
+        }
+        Value::Binary(value) => {
+            use std::fmt::Write as _;
+
+            encoded.push('x');
+            encoded.push_str(&value.len().to_string());
+            encoded.push(':');
+            for byte in value {
+                write!(encoded, "{byte:02x}").expect("writing to a String cannot fail");
+            }
         }
         Value::List(values) => {
             encoded.push('l');

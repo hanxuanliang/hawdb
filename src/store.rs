@@ -3721,7 +3721,7 @@ fn compute_statistics_with_basic(
 fn property_value_supports_optimizer_statistics(value: &Value) -> bool {
     match value {
         Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::String(_) => true,
-        Value::List(_) | Value::Map(_) => false,
+        Value::Binary(_) | Value::List(_) | Value::Map(_) => false,
     }
 }
 
@@ -5533,6 +5533,13 @@ pub(crate) fn encode_value(value: &Value) -> String {
         Value::Int(value) => format!("i{value}"),
         Value::Float(value) => format!("f{}", value.to_bits()),
         Value::String(value) => format!("s{}", encode_string(value)),
+        Value::Binary(value) => format!(
+            "x{}",
+            value
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        ),
         Value::List(values) => format!(
             "l{}",
             values
@@ -5573,10 +5580,41 @@ pub(crate) fn decode_value(input: &str) -> Result<Value> {
             .map(f64::from_bits)
             .map(Value::Float),
         "s" => decode_string(rest).map(Value::String),
+        "x" => decode_hex_value(rest),
         "l" => decode_list_value(rest),
         "m" => decode_map_value(rest),
         _ => Err(SkeinError::Storage(format!(
             "invalid encoded value: {input}"
+        ))),
+    }
+}
+
+fn decode_hex_value(input: &str) -> Result<Value> {
+    if !input.len().is_multiple_of(2) {
+        return Err(SkeinError::Storage(
+            "binary value has an odd number of hex digits".to_string(),
+        ));
+    }
+    input
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|digits| {
+            let high = decode_hex_digit(digits[0])?;
+            let low = decode_hex_digit(digits[1])?;
+            Ok((high << 4) | low)
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Value::Binary)
+}
+
+fn decode_hex_digit(digit: u8) -> Result<u8> {
+    match digit {
+        b'0'..=b'9' => Ok(digit - b'0'),
+        b'a'..=b'f' => Ok(digit - b'a' + 10),
+        b'A'..=b'F' => Ok(digit - b'A' + 10),
+        _ => Err(SkeinError::Storage(format!(
+            "binary value contains invalid hex digit {:?}",
+            char::from(digit)
         ))),
     }
 }
@@ -5964,6 +6002,7 @@ fn estimated_value_bytes(value: &Value) -> u64 {
         Value::Bool(_) => 1,
         Value::Int(_) | Value::Float(_) => 8,
         Value::String(value) => value.len() as u64,
+        Value::Binary(value) => value.len() as u64,
         Value::List(values) => values.iter().fold(16u64, |bytes, value| {
             bytes.saturating_add(estimated_value_bytes(value))
         }),

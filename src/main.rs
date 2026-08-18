@@ -5287,6 +5287,9 @@ fn value_json(value: &Value) -> serde_json::Value {
         Value::Int(value) => serde_json::json!(value),
         Value::Float(value) => serde_json::json!(value),
         Value::String(value) => serde_json::Value::String(value.clone()),
+        Value::Binary(value) => serde_json::json!({
+            "$binary": value.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+        }),
         Value::List(values) => {
             serde_json::Value::Array(values.iter().map(value_json).collect::<Vec<_>>())
         }
@@ -5320,11 +5323,47 @@ fn value_from_json(value: &serde_json::Value) -> Result<Value> {
             .map(value_from_json)
             .collect::<Result<Vec<_>>>()
             .map(Value::List),
-        serde_json::Value::Object(values) => values
-            .iter()
-            .map(|(key, value)| Ok((key.clone(), value_from_json(value)?)))
-            .collect::<Result<BTreeMap<_, _>>>()
-            .map(Value::Map),
+        serde_json::Value::Object(values) => {
+            if values.len() == 1
+                && let Some(serde_json::Value::String(encoded)) = values.get("$binary")
+            {
+                return decode_json_binary(encoded).map(Value::Binary);
+            }
+            values
+                .iter()
+                .map(|(key, value)| Ok((key.clone(), value_from_json(value)?)))
+                .collect::<Result<BTreeMap<_, _>>>()
+                .map(Value::Map)
+        }
+    }
+}
+
+fn decode_json_binary(encoded: &str) -> Result<Vec<u8>> {
+    if !encoded.len().is_multiple_of(2) {
+        return Err(SkeinError::Semantic(
+            "$binary must contain an even number of hex digits".to_string(),
+        ));
+    }
+    encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|digits| {
+            let high = decode_json_hex_digit(digits[0])?;
+            let low = decode_json_hex_digit(digits[1])?;
+            Ok((high << 4) | low)
+        })
+        .collect()
+}
+
+fn decode_json_hex_digit(digit: u8) -> Result<u8> {
+    match digit {
+        b'0'..=b'9' => Ok(digit - b'0'),
+        b'a'..=b'f' => Ok(digit - b'a' + 10),
+        b'A'..=b'F' => Ok(digit - b'A' + 10),
+        _ => Err(SkeinError::Semantic(format!(
+            "$binary contains invalid hex digit {:?}",
+            char::from(digit)
+        ))),
     }
 }
 
@@ -5356,9 +5395,10 @@ mod tests {
         skein_lightning_verify_staging_usage, stable_identity_audit_json,
         stage_skein_lightning_bootstrap_export,
         stage_skein_lightning_bootstrap_export_with_storage_recovery, storage_recovery_report_json,
-        validate_canonical_snapshot_usage, value_json, verify_skein_lightning_published_manifest,
-        verify_skein_lightning_staging_catalog, BackgroundMaintenanceReportOptions,
-        PublishSkeinLightningOptions, StorageRecoveryRequirements,
+        validate_canonical_snapshot_usage, value_from_json, value_json,
+        verify_skein_lightning_published_manifest, verify_skein_lightning_staging_catalog,
+        BackgroundMaintenanceReportOptions, PublishSkeinLightningOptions,
+        StorageRecoveryRequirements,
     };
     use skein::{
         api::ExplainOutput,
@@ -8660,6 +8700,14 @@ mod tests {
                 "items": [null, 1, "two"]
             })
         );
+    }
+
+    #[test]
+    fn binary_json_is_typed_and_round_trips() {
+        let value = Value::Binary(vec![0, 1, 0xfe, 0xff]);
+        let json = value_json(&value);
+        assert_eq!(json, serde_json::json!({ "$binary": "0001feff" }));
+        assert_eq!(value_from_json(&json).unwrap(), value);
     }
 
     #[test]

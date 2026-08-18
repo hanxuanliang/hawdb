@@ -114,13 +114,7 @@ pub fn encode_chunk_body(
         ChunkEncoding::RunLength => encode_run_length(&dense)?,
         ChunkEncoding::BitPackedInt => encode_bit_packed_int(&dense)?,
         ChunkEncoding::StringTable => encode_string_table(&dense)?,
-        ChunkEncoding::ByteTable => {
-            return Err(unsupported(
-                "byte-table chunks encode through encode_byte_chunk, not the \
-                 Value chunk codec"
-                    .to_string(),
-            ))
-        }
+        ChunkEncoding::ByteTable => encode_binary_table(&dense)?,
     };
     let mut body = Vec::with_capacity(8 + validity_bytes(row_count) + payload.len());
     body.extend(row_count.to_le_bytes());
@@ -197,13 +191,7 @@ pub fn decode_chunk(
         ChunkEncoding::RunLength => decode_run_length(&mut cursor, value_count)?,
         ChunkEncoding::BitPackedInt => decode_bit_packed_int(&mut cursor, value_count)?,
         ChunkEncoding::StringTable => decode_string_table(&mut cursor, value_count)?,
-        ChunkEncoding::ByteTable => {
-            return Err(unsupported(
-                "byte-table chunks decode through decode_byte_chunk, not the \
-                 Value chunk codec"
-                    .to_string(),
-            ))
-        }
+        ChunkEncoding::ByteTable => decode_binary_table(&mut cursor, value_count)?,
     };
     cursor.expect_exhausted("chunk payload")?;
     debug_assert_eq!(dense.len(), value_count as usize);
@@ -435,6 +423,7 @@ fn candidate_encodings(values: &[Value]) -> Vec<ChunkEncoding> {
     let mut all_float = true;
     let mut all_bool = true;
     let mut all_string = true;
+    let mut all_binary = true;
     let mut all_scalar = true;
     let mut any = false;
     for value in values {
@@ -444,27 +433,38 @@ fn candidate_encodings(values: &[Value]) -> Vec<ChunkEncoding> {
                 all_float = false;
                 all_bool = false;
                 all_string = false;
+                all_binary = false;
             }
             Value::Float(_) => {
                 all_int = false;
                 all_bool = false;
                 all_string = false;
+                all_binary = false;
             }
             Value::Bool(_) => {
                 all_int = false;
                 all_float = false;
                 all_string = false;
+                all_binary = false;
             }
             Value::String(_) => {
                 all_int = false;
                 all_float = false;
                 all_bool = false;
+                all_binary = false;
+            }
+            Value::Binary(_) => {
+                all_int = false;
+                all_float = false;
+                all_bool = false;
+                all_string = false;
             }
             Value::List(_) | Value::Map(_) => {
                 all_int = false;
                 all_float = false;
                 all_bool = false;
                 all_string = false;
+                all_binary = false;
                 all_scalar = false;
             }
         }
@@ -490,6 +490,9 @@ fn candidate_encodings(values: &[Value]) -> Vec<ChunkEncoding> {
     }
     if all_string {
         candidates.push(ChunkEncoding::StringTable);
+    }
+    if all_binary {
+        candidates.push(ChunkEncoding::ByteTable);
     }
     candidates
 }
@@ -786,12 +789,61 @@ fn decode_string_table(
         .collect()
 }
 
+fn encode_binary_table(dense: &[&Value]) -> Result<Vec<u8>, ColumnGroupError> {
+    let mut offsets = Vec::with_capacity(dense.len() + 1);
+    let mut bytes: Vec<u8> = Vec::new();
+    offsets.push(0u32);
+    for value in dense {
+        let Value::Binary(value) = value else {
+            return Err(unsupported(format!(
+                "byte table encoding cannot hold {value:?}"
+            )));
+        };
+        bytes.extend(value.as_slice());
+        offsets.push(
+            u32::try_from(bytes.len())
+                .map_err(|_| unsupported("byte table chunk exceeds u32 bytes".to_string()))?,
+        );
+    }
+    let mut payload = Vec::with_capacity(4 * offsets.len() + bytes.len());
+    for offset in offsets {
+        payload.extend(offset.to_le_bytes());
+    }
+    payload.extend(bytes);
+    Ok(payload)
+}
+
+fn decode_binary_table(
+    cursor: &mut Cursor<'_>,
+    count: u32,
+) -> Result<Vec<Value>, ColumnGroupError> {
+    let mut offsets = Vec::with_capacity(count as usize + 1);
+    for _ in 0..=count {
+        offsets.push(cursor.read_u32("byte table offset")?);
+    }
+    let total = *offsets.last().expect("offsets holds count + 1 entries");
+    let bytes = cursor.read_bytes(total as usize, "byte table bytes")?;
+    offsets
+        .windows(2)
+        .map(|window| {
+            let (start, end) = (window[0] as usize, window[1] as usize);
+            if window[0] > window[1] || end > bytes.len() {
+                return Err(corrupt(
+                    "byte table offsets are not monotonically increasing".to_string(),
+                ));
+            }
+            Ok(Value::Binary(bytes[start..end].to_vec()))
+        })
+        .collect()
+}
+
 // --- tagged scalar codec ----------------------------------------------------
 
 const SCALAR_BOOL: u8 = 1;
 const SCALAR_INT: u8 = 2;
 const SCALAR_FLOAT: u8 = 3;
 const SCALAR_STRING: u8 = 4;
+const SCALAR_BINARY: u8 = 5;
 
 fn encode_scalar(value: &Value, out: &mut Vec<u8>) -> Result<(), ColumnGroupError> {
     match value {
@@ -813,6 +865,13 @@ fn encode_scalar(value: &Value, out: &mut Vec<u8>) -> Result<(), ColumnGroupErro
                 .map_err(|_| unsupported("scalar string exceeds u32 bytes".to_string()))?;
             out.extend(length.to_le_bytes());
             out.extend(value.as_bytes());
+        }
+        Value::Binary(value) => {
+            out.push(SCALAR_BINARY);
+            let length = u32::try_from(value.len())
+                .map_err(|_| unsupported("scalar binary exceeds u32 bytes".to_string()))?;
+            out.extend(length.to_le_bytes());
+            out.extend(value);
         }
         other => {
             return Err(unsupported(format!(
@@ -840,6 +899,11 @@ fn decode_scalar(cursor: &mut Cursor<'_>) -> Result<Value, ColumnGroupError> {
             String::from_utf8(bytes.to_vec())
                 .map(Value::String)
                 .map_err(|_| corrupt("scalar string bytes are not valid UTF-8".to_string()))
+        }
+        SCALAR_BINARY => {
+            let length = cursor.read_u32("scalar binary length")?;
+            let bytes = cursor.read_bytes(length as usize, "scalar binary bytes")?;
+            Ok(Value::Binary(bytes.to_vec()))
         }
         tag => Err(corrupt(format!("unknown scalar tag {tag}"))),
     }
@@ -1049,6 +1113,25 @@ mod tests {
     }
 
     #[test]
+    fn binary_table_round_trips_as_values_and_auto_selects_a_binary_encoding() {
+        let values = vec![
+            Value::Binary(Vec::new()),
+            Value::Null,
+            Value::Binary(vec![0, 1, 0xfe, 0xff]),
+            Value::Binary(vec![0x5a; 300]),
+        ];
+        every_flag(&values, ChunkEncoding::ByteTable);
+        every_flag(&values, ChunkEncoding::Dictionary);
+        every_flag(&values, ChunkEncoding::RunLength);
+
+        let auto = encode_chunk_auto(&values, true).unwrap();
+        assert_eq!(
+            decode_chunk(&auto.bytes, auto.encoding, auto.compressed).unwrap(),
+            values
+        );
+    }
+
+    #[test]
     fn bit_packed_int_covers_extreme_ranges() {
         let values = vec![
             Value::Int(i64::MIN),
@@ -1224,7 +1307,7 @@ mod tests {
     }
 
     #[test]
-    fn byte_table_rejects_truncation_tampering_and_value_codec_use() {
+    fn byte_table_rejects_truncation_tampering_and_non_binary_values() {
         let rows = vec![Some(vec![1u8, 2, 3]), None, Some(vec![4u8; 100])];
         let chunk = encode_byte_chunk(&rows, false).unwrap();
         for cut in [0, 1, 4, 7, chunk.bytes.len() - 1] {
@@ -1239,15 +1322,19 @@ mod tests {
             decode_byte_chunk(&padded, false),
             Err(ColumnGroupError::Corrupt(_))
         ));
-        // The Value chunk codec refuses byte-table chunks in both directions.
+        // Byte-table Value encoding accepts only binary values.
         assert!(matches!(
             encode_chunk_with(&[Value::Int(1)], ChunkEncoding::ByteTable, false),
             Err(ColumnGroupError::Unsupported(_))
         ));
-        assert!(matches!(
-            decode_chunk(&chunk.bytes, ChunkEncoding::ByteTable, false),
-            Err(ColumnGroupError::Unsupported(_))
-        ));
+        assert_eq!(
+            decode_chunk(&chunk.bytes, ChunkEncoding::ByteTable, false).unwrap(),
+            vec![
+                Value::Binary(vec![1, 2, 3]),
+                Value::Null,
+                Value::Binary(vec![4; 100]),
+            ]
+        );
         // Invalid zstd bytes are corrupt, not a panic.
         assert!(matches!(
             decode_byte_chunk(&chunk.bytes, true),

@@ -1669,6 +1669,10 @@ fn typed_value_json(value: &Value) -> JsonValue {
             "bits": format!("{:016x}", value.to_bits()),
         }),
         Value::String(value) => json!({"type": "string", "value": value}),
+        Value::Binary(value) => json!({
+            "type": "binary",
+            "hex": value.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+        }),
         Value::List(values) => json!({
             "type": "list",
             "values": values.iter().map(typed_value_json).collect::<Vec<_>>(),
