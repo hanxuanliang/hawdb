@@ -1883,7 +1883,10 @@ Point lookup retains at most one selected overlay row and otherwise delegates
 to one checkpoint point read. A tombstone suppresses the checkpoint without
 opening its row page. Range lookup treats every intersecting recovery run and
 non-empty live batch as one strictly ordered source. Source count is admitted
-before run files are opened. Each source contributes at most one projected head
+before run files are opened. Recovery sources share a configurable LRU handle
+pool, so retained run descriptors are bounded independently of the number of
+intersecting runs; eviction never changes positioned-read state or integrity
+hashing. Each source contributes at most one projected head
 to a min-heap, and advancing a source replaces that head instead of retaining
 the rest of the run or batch. Equal keys are coalesced at the heap frontier; a
 higher commit epoch replaces a lower one and an equal-epoch duplicate is
@@ -1911,8 +1914,9 @@ one hydration-row unit. Resolution stages all counters and values, so admission
 or reference mismatch publishes neither a partial row nor partial budget.
 The reported identity, selected point source, recovery runs and bytes, live
 entries, distinct overlay entries, replacements, merge-source count, peak
-buffered entries, peak overlay resident bytes, page reads, cache behavior,
-emitted rows, and hydration bytes make each read explainable.
+buffered entries, peak open recovery files, peak overlay resident bytes, page
+reads, cache behavior, emitted rows, and hydration bytes make each read
+explainable.
 
 Admission, cancellation, deadline, callback stop, and callback unwind do not
 poison the pinned reader. Checksum, binding, epoch, schema-shape, immutable

@@ -24,6 +24,7 @@ const RELATIONAL_ROW_DELTA_PUBLICATION_LOCK_FILE: &str = "relational-row-delta.l
 pub const DEFAULT_RELATIONAL_ROW_DELTA_DIRTY_ENTRIES: usize = 100_000;
 pub const DEFAULT_RELATIONAL_ROW_DELTA_DIRTY_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_RELATIONAL_ROW_DELTA_RUNS: usize = 4096;
+pub const DEFAULT_RELATIONAL_ROW_DELTA_RANGE_OPEN_FILES: usize = 32;
 pub const DEFAULT_RELATIONAL_ROW_DELTA_MANIFEST_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_RELATIONAL_ROW_DELTA_RUN_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const DEFAULT_RELATIONAL_ROW_DELTA_TABLES: usize = 4096;
@@ -48,6 +49,8 @@ pub struct RelationalRowDeltaConfig {
     pub max_dirty_entries: NonZeroUsize,
     pub max_dirty_bytes: NonZeroUsize,
     pub max_runs: NonZeroUsize,
+    /// Maximum recovery-run files retained by one streaming range merge.
+    pub max_range_open_files: NonZeroUsize,
     pub max_manifest_bytes: NonZeroUsize,
     pub max_run_bytes: NonZeroU64,
     pub max_tables: NonZeroUsize,
@@ -63,6 +66,8 @@ impl Default for RelationalRowDeltaConfig {
                 .expect("default row delta dirty byte limit is non-zero"),
             max_runs: NonZeroUsize::new(DEFAULT_RELATIONAL_ROW_DELTA_RUNS)
                 .expect("default row delta run limit is non-zero"),
+            max_range_open_files: NonZeroUsize::new(DEFAULT_RELATIONAL_ROW_DELTA_RANGE_OPEN_FILES)
+                .expect("default row delta range open-file limit is non-zero"),
             max_manifest_bytes: NonZeroUsize::new(DEFAULT_RELATIONAL_ROW_DELTA_MANIFEST_BYTES)
                 .expect("default row delta manifest limit is non-zero"),
             max_run_bytes: NonZeroU64::new(DEFAULT_RELATIONAL_ROW_DELTA_RUN_BYTES)
@@ -190,6 +195,7 @@ pub struct RelationalRowDeltaReadReport {
     pub runs_read: usize,
     pub bytes_read: u64,
     pub entries_visited: u64,
+    pub peak_open_files: usize,
     pub stopped_early: bool,
 }
 

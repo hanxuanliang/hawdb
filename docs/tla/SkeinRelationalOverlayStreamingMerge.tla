@@ -11,9 +11,10 @@ EXTENDS Integers, Naturals, Sequences, FiniteSets
 (* duplicate is corruption.                                                *)
 (***************************************************************************)
 
-CONSTANT MaxSources, MaxOverlayEntries, MaxOverlayBytes
+CONSTANT MaxSources, MaxOpenFiles, MaxOverlayEntries, MaxOverlayBytes
 
 ASSUME /\ MaxSources \in 1..3
+       /\ MaxOpenFiles \in 1..MaxSources
        /\ MaxOverlayEntries \in 1..4
        /\ MaxOverlayBytes \in 1..12
 
@@ -101,6 +102,7 @@ AdvanceSources(key, positions) ==
         ELSE positions[source]]
 
 Max(left, right) == IF left >= right THEN left ELSE right
+Min(left, right) == IF left <= right THEN left ELSE right
 
 VARIABLES
     readState,
@@ -110,6 +112,8 @@ VARIABLES
     positions,
     baseRemaining,
     residentBytes,
+    openFiles,
+    peakOpenFiles,
     peakResidentBytes,
     peakBufferedEntries,
     overlayEntries,
@@ -131,6 +135,8 @@ vars == <<
     positions,
     baseRemaining,
     residentBytes,
+    openFiles,
+    peakOpenFiles,
     peakResidentBytes,
     peakBufferedEntries,
     overlayEntries,
@@ -156,6 +162,8 @@ Init ==
     /\ positions = DonePositions
     /\ baseRemaining = BaseKeys
     /\ residentBytes = 0
+    /\ openFiles = 0
+    /\ peakOpenFiles = 0
     /\ peakResidentBytes = 0
     /\ peakBufferedEntries = 0
     /\ overlayEntries = 0
@@ -180,6 +188,8 @@ BeginRead(entries, bytes) ==
     /\ positions' = InitialPositions
     /\ baseRemaining' = BaseKeys
     /\ residentBytes' = BufferedBytes(InitialPositions)
+    /\ openFiles' = Min(Cardinality(ActiveSources(InitialPositions)), MaxOpenFiles)
+    /\ peakOpenFiles' = Min(Cardinality(ActiveSources(InitialPositions)), MaxOpenFiles)
     /\ peakResidentBytes' = BufferedBytes(InitialPositions)
     /\ peakBufferedEntries' = Cardinality(ActiveSources(InitialPositions))
     /\ overlayEntries' = 0
@@ -198,7 +208,7 @@ AcceptPrimedSources ==
     /\ readState' = "merging"
     /\ UNCHANGED <<
         outcome, entryBudget, byteBudget, positions, baseRemaining,
-        residentBytes, peakResidentBytes, peakBufferedEntries,
+        residentBytes, openFiles, peakOpenFiles, peakResidentBytes, peakBufferedEntries,
         overlayEntries, processedKeys, processedValues, selectedEpochs,
         emittedRows, resolvedOverflow, stoppedEarly, poisoned,
         pinnedEpoch, currentEpoch
@@ -212,7 +222,7 @@ RejectPrimedSources ==
     /\ outcome' = "admission"
     /\ UNCHANGED <<
         entryBudget, byteBudget, positions, baseRemaining,
-        residentBytes, peakResidentBytes, peakBufferedEntries,
+        residentBytes, openFiles, peakOpenFiles, peakResidentBytes, peakBufferedEntries,
         overlayEntries, processedKeys, processedValues, selectedEpochs,
         emittedRows, resolvedOverflow, stoppedEarly, poisoned,
         pinnedEpoch, currentEpoch
@@ -250,7 +260,7 @@ MergeNext ==
                 ELSE Append(emittedRows, key)
           /\ resolvedOverflow' = (resolvedOverflow \/ (value = OverflowValue))
           /\ UNCHANGED <<
-                readState, outcome, entryBudget, byteBudget,
+                readState, outcome, entryBudget, byteBudget, openFiles, peakOpenFiles,
                 stoppedEarly, poisoned, pinnedEpoch, currentEpoch
                 >>
 
@@ -271,7 +281,7 @@ RejectNextAdmission ==
     /\ outcome' = "admission"
     /\ UNCHANGED <<
         entryBudget, byteBudget, positions, baseRemaining,
-        residentBytes, peakResidentBytes, peakBufferedEntries,
+        residentBytes, openFiles, peakOpenFiles, peakResidentBytes, peakBufferedEntries,
         overlayEntries, processedKeys, processedValues, selectedEpochs,
         emittedRows, resolvedOverflow, stoppedEarly, poisoned,
         pinnedEpoch, currentEpoch
@@ -286,7 +296,7 @@ DetectDuplicateCorruption ==
     /\ poisoned' = TRUE
     /\ UNCHANGED <<
         entryBudget, byteBudget, positions, baseRemaining,
-        residentBytes, peakResidentBytes, peakBufferedEntries,
+        residentBytes, openFiles, peakOpenFiles, peakResidentBytes, peakBufferedEntries,
         overlayEntries, processedKeys, processedValues, selectedEpochs,
         emittedRows, resolvedOverflow, stoppedEarly,
         pinnedEpoch, currentEpoch
@@ -299,7 +309,7 @@ FinishRead ==
     /\ outcome' = "success"
     /\ UNCHANGED <<
         entryBudget, byteBudget, positions, baseRemaining,
-        residentBytes, peakResidentBytes, peakBufferedEntries,
+        residentBytes, openFiles, peakOpenFiles, peakResidentBytes, peakBufferedEntries,
         overlayEntries, processedKeys, processedValues, selectedEpochs,
         emittedRows, resolvedOverflow, stoppedEarly, poisoned,
         pinnedEpoch, currentEpoch
@@ -313,7 +323,7 @@ StopEarly ==
     /\ stoppedEarly' = TRUE
     /\ UNCHANGED <<
         entryBudget, byteBudget, positions, baseRemaining,
-        residentBytes, peakResidentBytes, peakBufferedEntries,
+        residentBytes, openFiles, peakOpenFiles, peakResidentBytes, peakBufferedEntries,
         overlayEntries, processedKeys, processedValues, selectedEpochs,
         emittedRows, resolvedOverflow, poisoned,
         pinnedEpoch, currentEpoch
@@ -325,7 +335,7 @@ CancelRead ==
     /\ outcome' = "cancel"
     /\ UNCHANGED <<
         entryBudget, byteBudget, positions, baseRemaining,
-        residentBytes, peakResidentBytes, peakBufferedEntries,
+        residentBytes, openFiles, peakOpenFiles, peakResidentBytes, peakBufferedEntries,
         overlayEntries, processedKeys, processedValues, selectedEpochs,
         emittedRows, resolvedOverflow, stoppedEarly, poisoned,
         pinnedEpoch, currentEpoch
@@ -336,7 +346,7 @@ AdvanceCurrentView ==
     /\ currentEpoch' = currentEpoch + 1
     /\ UNCHANGED <<
         readState, outcome, entryBudget, byteBudget, positions, baseRemaining,
-        residentBytes, peakResidentBytes, peakBufferedEntries,
+        residentBytes, openFiles, peakOpenFiles, peakResidentBytes, peakBufferedEntries,
         overlayEntries, processedKeys, processedValues, selectedEpochs,
         emittedRows, resolvedOverflow, stoppedEarly, poisoned, pinnedEpoch
         >>
@@ -364,6 +374,8 @@ TypeOK ==
     /\ positions \in [Sources -> 1..3]
     /\ baseRemaining \subseteq BaseKeys
     /\ residentBytes \in Nat
+    /\ openFiles \in Nat
+    /\ peakOpenFiles \in Nat
     /\ peakResidentBytes \in Nat
     /\ peakBufferedEntries \in Nat
     /\ overlayEntries \in Nat
@@ -378,11 +390,13 @@ TypeOK ==
     /\ currentEpoch \in 4..5
 
 StreamingStateIsBounded ==
-    readState \in {"merging", "succeeded"} =>
+    /\ openFiles <= MaxOpenFiles
+    /\ peakOpenFiles <= MaxOpenFiles
+    /\ (readState \in {"merging", "succeeded"} =>
         /\ residentBytes <= byteBudget
         /\ peakResidentBytes <= byteBudget
         /\ peakBufferedEntries <= MaxSources + 1
-        /\ overlayEntries <= entryBudget
+        /\ overlayEntries <= entryBudget)
 
 OneHeadPerSource ==
     Cardinality(ActiveSources(positions)) <= MaxSources

@@ -272,6 +272,41 @@ fn range_lookup_stops_without_reading_irrelevant_suffix_runs() {
 }
 
 #[test]
+fn streaming_range_sources_bound_retained_run_files() {
+    let directory = unique_test_dir("range-file-pool");
+    let base = publish_and_open_base(&directory);
+    let config = RelationalRowDeltaConfig {
+        max_dirty_entries: NonZeroUsize::new(1).unwrap(),
+        max_range_open_files: NonZeroUsize::new(2).unwrap(),
+        ..RelationalRowDeltaConfig::default()
+    };
+    let mut builder = builder(&directory, &base, 1, None, config);
+    for (epoch, id) in (2..=5).zip(2..=5) {
+        builder.record(epoch, capture(id, Some("value"))).unwrap();
+    }
+    builder.finish(5, None).unwrap();
+
+    let reader = RelationalRowDeltaReader::open_latest(&directory, &base, 5, config)
+        .unwrap()
+        .unwrap();
+    let (mut sources, report) = reader
+        .range_sources("documents", Bound::Unbounded, Bound::Unbounded, 8)
+        .unwrap();
+    assert_eq!(sources.len(), 4);
+    assert_eq!(report.runs_read, 4);
+    assert_eq!(report.peak_open_files, 2);
+
+    let mut keys = Vec::new();
+    for source in &mut sources {
+        keys.push(source.next().unwrap().unwrap().0);
+        assert!(source.next().unwrap().is_none());
+    }
+    assert_eq!(keys, vec![key(2), key(3), key(4), key(5)]);
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn cumulative_run_byte_admission_precedes_run_creation() {
     let directory = unique_test_dir("artifact-admission");
     let base = publish_and_open_base(&directory);
