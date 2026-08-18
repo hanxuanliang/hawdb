@@ -654,21 +654,25 @@ mod tests {
             TokioRuntimeAdapter::owned(governor(1), TokioRuntimeConfig::default()).unwrap();
         let token = RuntimeCancellationToken::new();
         let context = RuntimeTaskContext::without_deadline(token.clone());
-        let handle = adapter.handle().clone();
-        handle.spawn(async move {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            token.cancel();
+        let (operation_started, wait_for_operation) = std::sync::mpsc::channel();
+        let (cancellation_finished, wait_for_cancellation) = std::sync::mpsc::channel();
+        let canceller = std::thread::spawn(move || {
+            wait_for_operation.recv().unwrap();
+            assert!(token.cancel());
+            cancellation_finished.send(()).unwrap();
         });
         let result = adapter
             .block_on(adapter.execute_blocking(
                 RuntimeWorkRequest::foreground_mutation(0),
                 context,
-                |_| {
-                    std::thread::sleep(Duration::from_millis(20));
+                move |_| {
+                    operation_started.send(()).unwrap();
+                    wait_for_cancellation.recv().unwrap();
                     Ok::<_, Infallible>(42)
                 },
             ))
             .unwrap();
+        canceller.join().unwrap();
         assert_eq!(result.unwrap(), 42);
     }
 
