@@ -341,7 +341,7 @@ fn require_message_page(
 }
 
 fn require_message_identity(
-    row: &skein::Row,
+    row: &skein::QueryRow,
     content_message_id: &str,
     message_id: &str,
     order_index: i64,

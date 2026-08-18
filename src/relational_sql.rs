@@ -722,11 +722,13 @@ mod tests {
             .expect("query positional result");
         assert_eq!(output.schema().columns(), ["payload", "id"]);
         assert_eq!(
-            output.value_rows(),
-            &[vec![
-                Value::String("body-1".to_string()),
-                Value::String("doc-1".to_string()),
-            ]]
+            output.value_rows().collect::<Vec<_>>(),
+            vec![
+                &[
+                    Value::String("body-1".to_string()),
+                    Value::String("doc-1".to_string()),
+                ][..]
+            ]
         );
         assert_eq!(
             output.rows[0]["payload"],

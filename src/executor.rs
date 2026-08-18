@@ -89,7 +89,10 @@ use vector::*;
 
 pub type Row = skein_executor::Row;
 pub type RowRef<'a> = skein_executor::RowRef<'a>;
+pub type QueryRow = skein_executor::QueryRow;
+pub type QueryRowRef<'a> = skein_executor::QueryRowRef<'a>;
 pub type QueryRows = skein_executor::QueryRows;
+pub type QueryValueRows<'a> = skein_executor::QueryValueRows<'a>;
 pub type QuerySchema = skein_executor::QuerySchema;
 pub type ReadExecutionProfile = skein_executor::ReadExecutionProfile<ScanPruningReport>;
 pub type ProfiledQueryRows = skein_executor::ProfiledQueryRows<ScanPruningReport>;

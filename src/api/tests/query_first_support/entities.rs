@@ -244,7 +244,7 @@ fn build_entity_lookup_queries(entities: &[KnowledgeEntityRequest]) -> Vec<Entit
 
 fn decode_entity_lookup_rows(
     label: &str,
-    rows: &[Row],
+    rows: &executor::QueryRows,
     found: &mut BTreeMap<EntityKey, KnowledgeEntity>,
 ) -> Result<()> {
     for row in rows {
@@ -298,8 +298,8 @@ mod tests {
 
     #[test]
     fn rejects_invalid_query_result_rows() {
-        let error = decode_entity_lookup_rows("Memory", &[BTreeMap::new()], &mut BTreeMap::new())
-            .unwrap_err();
+        let rows = executor::QueryRows::from(vec![BTreeMap::new()]);
+        let error = decode_entity_lookup_rows("Memory", &rows, &mut BTreeMap::new()).unwrap_err();
 
         assert_eq!(
             error,

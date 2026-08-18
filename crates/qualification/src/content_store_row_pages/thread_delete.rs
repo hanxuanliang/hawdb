@@ -793,7 +793,9 @@ fn unrelated_state_sha256(database: &mut Database) -> Result<String> {
             &[Value::String(OTHER_THREAD_STORAGE_ID.to_string())],
             state_query_options(1),
         )?
-        .rows;
+        .rows
+        .into_iter()
+        .collect::<Vec<_>>();
     rows.extend(
         database
             .query_sql_with_params_options(

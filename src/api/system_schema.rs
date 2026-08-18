@@ -475,7 +475,7 @@ fn applied_migration_from_row(
 
 fn applied_migration_from_query_row(
     owner: &str,
-    row: &std::collections::BTreeMap<String, Value>,
+    row: crate::executor::QueryRowRef<'_>,
 ) -> Result<AppliedMigration> {
     let version = match row.get("version") {
         Some(Value::Int(version)) => u64::try_from(*version).map_err(|_| {

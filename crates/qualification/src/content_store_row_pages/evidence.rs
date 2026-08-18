@@ -44,12 +44,12 @@ pub(super) const fn message_point_options() -> QueryStreamOptions {
 }
 
 pub(super) fn require_one_message(
-    rows: &[skein::Row],
+    rows: &skein::QueryRows,
     content_message_id: &str,
     probe: &str,
 ) -> Result<()> {
     let matches_message = matches!(
-        rows.first().and_then(|row| row.get("content_message_id")),
+        rows.row(0).and_then(|row| row.get("content_message_id")),
         Some(Value::String(actual)) if actual == content_message_id
     );
     if rows.len() != 1 || !matches_message {

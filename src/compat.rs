@@ -1224,18 +1224,19 @@ impl ExpectedRows {
     ) -> Result<()> {
         match self {
             ExpectedRows::Exact(expected) => {
-                if !rows_match_ordered(expected, &output.rows, tolerance) {
+                let actual = output.rows.clone().into_rows();
+                if !rows_match_ordered(expected, &actual, tolerance) {
                     return Err(row_mismatch_error(
                         fixture_name,
                         check_name,
                         cypher,
                         expected,
-                        &output.rows,
+                        &actual,
                     ));
                 }
             }
             ExpectedRows::Unordered(expected) => {
-                let mut actual = output.rows.clone();
+                let mut actual = output.rows.clone().into_rows();
                 let expected_matches = rows_match_unordered(expected, &actual, tolerance);
                 if !expected_matches {
                     let mut expected = expected.clone();
@@ -1277,19 +1278,21 @@ impl ExpectedRows {
     ) -> Result<()> {
         match self {
             ExpectedRows::Exact(_) => {
-                if !rows_match_ordered(&primary.rows, &shadow.rows, tolerance) {
+                let primary_rows = primary.rows.clone().into_rows();
+                let shadow_rows = shadow.rows.clone().into_rows();
+                if !rows_match_ordered(&primary_rows, &shadow_rows, tolerance) {
                     return Err(shadow_mismatch_error(
                         fixture_name,
                         check_name,
                         shadow_engine,
-                        &primary.rows,
-                        &shadow.rows,
+                        &primary_rows,
+                        &shadow_rows,
                     ));
                 }
             }
             ExpectedRows::Unordered(_) => {
-                let mut primary_rows = primary.rows.clone();
-                let mut shadow_rows = shadow.rows.clone();
+                let mut primary_rows = primary.rows.clone().into_rows();
+                let mut shadow_rows = shadow.rows.clone().into_rows();
                 if !rows_match_unordered(&primary_rows, &shadow_rows, tolerance) {
                     primary_rows.sort();
                     shadow_rows.sort();

@@ -403,8 +403,13 @@ fn rows_json(output: QueryOutput) -> serde_json::Value {
             .into_iter()
             .map(|row| {
                 serde_json::Value::Object(
-                    row.into_iter()
-                        .map(|(key, value)| (key, external_shadow_json_from_value(value)))
+                    row.iter()
+                        .map(|(key, value)| {
+                            (
+                                key.to_string(),
+                                external_shadow_json_from_value(value.clone()),
+                            )
+                        })
                         .collect(),
                 )
             })

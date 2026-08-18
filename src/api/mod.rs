@@ -451,6 +451,25 @@ pub struct QueryOutput {
     pub rows: executor::QueryRows,
 }
 
+#[cfg(test)]
+pub(super) trait QueryRowLookup: Copy {
+    fn get(&self, column: &str) -> Option<&Value>;
+}
+
+#[cfg(test)]
+impl QueryRowLookup for &Row {
+    fn get(&self, column: &str) -> Option<&Value> {
+        (*self).get(column)
+    }
+}
+
+#[cfg(test)]
+impl QueryRowLookup for executor::QueryRowRef<'_> {
+    fn get(&self, column: &str) -> Option<&Value> {
+        (*self).get(column)
+    }
+}
+
 impl QueryOutput {
     pub fn from_rows(rows: Vec<Row>) -> Self {
         Self { rows: rows.into() }
@@ -469,7 +488,7 @@ impl QueryOutput {
         self.rows.schema()
     }
 
-    pub fn value_rows(&self) -> &[Vec<Value>] {
+    pub fn value_rows(&self) -> executor::QueryValueRows<'_> {
         self.rows.value_rows()
     }
 
@@ -6058,7 +6077,7 @@ pub(super) struct CommunityEntityVisibilityMemoryRow {
 
 #[cfg(test)]
 pub(super) fn community_entity_visibility_entity_row_from_query(
-    row: &Row,
+    row: impl QueryRowLookup,
 ) -> Result<CommunityEntityVisibilityEntityRow> {
     let community_id = row.get("community_id").cloned().ok_or_else(|| {
         SkeinError::Execution(
@@ -6084,7 +6103,7 @@ pub(super) fn community_entity_visibility_entity_row_from_query(
 
 #[cfg(test)]
 pub(super) fn community_entity_visibility_memory_row_from_query(
-    row: &Row,
+    row: impl QueryRowLookup,
 ) -> Result<CommunityEntityVisibilityMemoryRow> {
     let entity_node_id = row
         .get("entity_node_id")
@@ -6343,7 +6362,7 @@ pub(super) fn knowledge_community_memory_query_predicate(
 
 #[cfg(test)]
 pub(super) fn knowledge_community_memory_row_from_query(
-    row: &Row,
+    row: impl QueryRowLookup,
     source: KnowledgeCommunityMemoryRowSource,
 ) -> Result<KnowledgeCommunityMemoryRow> {
     let community_id = row.get("community_id").cloned().ok_or_else(|| {
@@ -6813,7 +6832,9 @@ pub(super) fn knowledge_crystal_community_query_predicate(
 }
 
 #[cfg(test)]
-pub(super) fn knowledge_crystal_community_row_from_query(row: &Row) -> Result<KnowledgeCrystalCommunityRow> {
+pub(super) fn knowledge_crystal_community_row_from_query(
+    row: impl QueryRowLookup,
+) -> Result<KnowledgeCrystalCommunityRow> {
     let crystal_memory_id = row
         .get("crystal_memory_id")
         .map(value_to_external_id)
@@ -6965,7 +6986,7 @@ pub(super) fn validate_knowledge_crystal_source_visibility_request(
 
 #[cfg(test)]
 pub(super) fn knowledge_crystal_source_visibility_row_from_query(
-    row: &Row,
+    row: impl QueryRowLookup,
 ) -> Result<KnowledgeCrystalSourceVisibilityRow> {
     let crystal = row
         .get("crystal")
@@ -9882,7 +9903,7 @@ pub(super) fn value_to_string_list(value: &Value) -> Option<Vec<String>> {
 }
 
 #[cfg(test)]
-pub(super) fn optional_string_cell(row: &Row, column: &str) -> Option<String> {
+pub(super) fn optional_string_cell(row: impl QueryRowLookup, column: &str) -> Option<String> {
     row.get(column)
         .filter(|value| !matches!(value, Value::Null))
         .map(value_to_external_id)
@@ -9890,7 +9911,7 @@ pub(super) fn optional_string_cell(row: &Row, column: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-pub(super) fn optional_value_cell(row: &Row, column: &str) -> Option<Value> {
+pub(super) fn optional_value_cell(row: impl QueryRowLookup, column: &str) -> Option<Value> {
     row.get(column)
         .filter(|value| !matches!(value, Value::Null))
         .cloned()
@@ -12740,7 +12761,9 @@ pub(super) fn entity_label_query_output_via_query_runtime(
 }
 
 #[cfg(test)]
-pub(super) fn entity_label_row_from_query_row(row: &Row) -> Result<KnowledgeEntityLabelRow> {
+pub(super) fn entity_label_row_from_query_row(
+    row: impl QueryRowLookup,
+) -> Result<KnowledgeEntityLabelRow> {
     let label = row
         .get("label")
         .and_then(knowledge_entity_from_value)
@@ -16825,7 +16848,7 @@ fn knowledge_relationship_rows_for_direction_via_query_runtime(
 
 #[cfg(test)]
 fn knowledge_context_path_from_query_row(
-    row: &Row,
+    row: impl QueryRowLookup,
     seed_hit_id: &str,
     direction: KnowledgeGraphPathDirection,
     relationship_id: u64,
@@ -18304,7 +18327,9 @@ fn knowledge_entity_id_property(entity: &KnowledgeEntity) -> Option<String> {
 }
 
 #[cfg(test)]
-fn knowledge_induced_edge_row_from_query_row(row: &Row) -> Result<KnowledgeInducedEdgeRow> {
+fn knowledge_induced_edge_row_from_query_row(
+    row: impl QueryRowLookup,
+) -> Result<KnowledgeInducedEdgeRow> {
     let source = row
         .get("source")
         .and_then(knowledge_entity_from_value)

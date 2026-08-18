@@ -2,7 +2,7 @@ use crate::binding::value_payload_bytes;
 use crate::columnar::ColumnarRowRef;
 use skein_core::{Result, SkeinError, Value, ValueRef};
 use std::collections::BTreeMap;
-use std::ops::Deref;
+use std::ops::Index;
 use std::sync::{Arc, OnceLock};
 
 pub type Row = BTreeMap<String, Value>;
@@ -53,13 +53,194 @@ impl QuerySchema {
     }
 }
 
-/// Schema-bearing result rows. Values are stored positionally; the legacy
-/// map representation is constructed only when a compatibility caller asks
-/// for it through the slice facade.
-pub struct QueryRows {
+#[derive(Debug)]
+struct QueryRowStorage {
     schema: QuerySchema,
-    values: Vec<Vec<Value>>,
-    compatibility_rows: OnceLock<Vec<Row>>,
+    values: Vec<Value>,
+    row_count: usize,
+}
+
+/// One owned handle into a query's immutable flat value buffer.
+#[derive(Clone)]
+pub struct QueryRow {
+    storage: Arc<QueryRowStorage>,
+    row: usize,
+}
+
+impl QueryRow {
+    pub fn schema(&self) -> &QuerySchema {
+        &self.storage.schema
+    }
+
+    pub fn len(&self) -> usize {
+        self.storage.schema.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn value(&self, column: usize) -> Option<&Value> {
+        row_values(&self.storage, self.row)?.get(column)
+    }
+
+    pub fn get(&self, column: &str) -> Option<&Value> {
+        self.value(self.storage.schema.position(column)?)
+    }
+
+    pub fn contains_key(&self, column: &str) -> bool {
+        self.storage.schema.position(column).is_some()
+    }
+
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (&str, &Value)> {
+        self.storage
+            .schema
+            .columns()
+            .iter()
+            .map(String::as_str)
+            .zip(row_values(&self.storage, self.row).unwrap_or_default())
+    }
+
+    pub fn keys(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.storage.schema.columns().iter().map(String::as_str)
+    }
+
+    pub fn values(&self) -> impl ExactSizeIterator<Item = &Value> {
+        row_values(&self.storage, self.row)
+            .unwrap_or_default()
+            .iter()
+    }
+
+    pub fn as_ref(&self) -> QueryRowRef<'_> {
+        QueryRowRef {
+            schema: &self.storage.schema,
+            values: row_values(&self.storage, self.row).unwrap_or_default(),
+        }
+    }
+
+    pub fn to_owned_row(&self) -> Row {
+        self.iter()
+            .map(|(name, value)| (name.to_owned(), value.clone()))
+            .collect()
+    }
+}
+
+impl std::fmt::Debug for QueryRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_map().entries(self.iter()).finish()
+    }
+}
+
+impl PartialEq for QueryRow {
+    fn eq(&self, other: &Self) -> bool {
+        self.schema() == other.schema()
+            && row_values(&self.storage, self.row) == row_values(&other.storage, other.row)
+    }
+}
+
+impl Eq for QueryRow {}
+
+impl PartialEq<Row> for QueryRow {
+    fn eq(&self, other: &Row) -> bool {
+        row_equals_map(self.as_ref(), other)
+    }
+}
+
+impl PartialEq<QueryRow> for Row {
+    fn eq(&self, other: &QueryRow) -> bool {
+        other == self
+    }
+}
+
+impl Index<&str> for QueryRow {
+    type Output = Value;
+
+    fn index(&self, column: &str) -> &Self::Output {
+        self.get(column)
+            .unwrap_or_else(|| panic!("query result has no column {column}"))
+    }
+}
+
+/// A borrowed row view over a query's immutable flat value buffer.
+#[derive(Debug, Clone, Copy)]
+pub struct QueryRowRef<'a> {
+    schema: &'a QuerySchema,
+    values: &'a [Value],
+}
+
+impl<'a> QueryRowRef<'a> {
+    pub fn schema(self) -> &'a QuerySchema {
+        self.schema
+    }
+
+    pub fn len(self) -> usize {
+        self.values.len()
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.values.is_empty()
+    }
+
+    pub fn value(self, column: usize) -> Option<&'a Value> {
+        self.values.get(column)
+    }
+
+    pub fn get(self, column: &str) -> Option<&'a Value> {
+        self.value(self.schema.position(column)?)
+    }
+
+    pub fn contains_key(self, column: &str) -> bool {
+        self.schema.position(column).is_some()
+    }
+
+    pub fn iter(self) -> impl ExactSizeIterator<Item = (&'a str, &'a Value)> {
+        self.schema
+            .columns()
+            .iter()
+            .map(String::as_str)
+            .zip(self.values)
+    }
+
+    pub fn keys(self) -> impl ExactSizeIterator<Item = &'a str> {
+        self.schema.columns().iter().map(String::as_str)
+    }
+
+    pub fn values(self) -> impl ExactSizeIterator<Item = &'a Value> {
+        self.values.iter()
+    }
+
+    pub fn to_owned_row(self) -> Row {
+        self.iter()
+            .map(|(name, value)| (name.to_owned(), value.clone()))
+            .collect()
+    }
+}
+
+impl PartialEq<Row> for QueryRowRef<'_> {
+    fn eq(&self, other: &Row) -> bool {
+        row_equals_map(*self, other)
+    }
+}
+
+impl PartialEq<QueryRowRef<'_>> for Row {
+    fn eq(&self, other: &QueryRowRef<'_>) -> bool {
+        other == self
+    }
+}
+
+impl Index<&str> for QueryRowRef<'_> {
+    type Output = Value;
+
+    fn index(&self, column: &str) -> &Self::Output {
+        self.get(column)
+            .unwrap_or_else(|| panic!("query result has no column {column}"))
+    }
+}
+
+/// Schema-bearing result rows backed by one flat, immutable value buffer.
+pub struct QueryRows {
+    storage: Arc<QueryRowStorage>,
+    indexed_rows: OnceLock<Vec<QueryRow>>,
 }
 
 impl QueryRows {
@@ -82,98 +263,129 @@ impl QueryRows {
     }
 
     fn from_value_rows_unchecked(schema: QuerySchema, values: Vec<Vec<Value>>) -> Self {
+        let row_count = values.len();
+        let value_count = row_count.saturating_mul(schema.len());
+        let mut flat_values = Vec::with_capacity(value_count);
+        flat_values.extend(values.into_iter().flatten());
         Self {
-            schema,
-            values,
-            compatibility_rows: OnceLock::new(),
+            storage: Arc::new(QueryRowStorage {
+                schema,
+                values: flat_values,
+                row_count,
+            }),
+            indexed_rows: OnceLock::new(),
         }
     }
 
     pub fn schema(&self) -> &QuerySchema {
-        &self.schema
+        &self.storage.schema
     }
 
-    pub fn value_rows(&self) -> &[Vec<Value>] {
-        &self.values
+    pub fn value_rows(&self) -> QueryValueRows<'_> {
+        QueryValueRows {
+            rows: self,
+            next: 0,
+        }
     }
 
     pub fn len(&self) -> usize {
-        self.values.len()
+        self.storage.row_count
     }
 
     pub fn is_empty(&self) -> bool {
-        self.values.is_empty()
+        self.storage.row_count == 0
     }
 
     pub fn value(&self, row: usize, column: usize) -> Option<ValueRef<'_>> {
-        self.values.get(row)?.get(column).map(Value::as_ref)
+        row_values(&self.storage, row)?
+            .get(column)
+            .map(Value::as_ref)
     }
 
     pub fn get(&self, row: usize, column: &str) -> Option<ValueRef<'_>> {
-        self.value(row, self.schema.position(column)?)
+        self.value(row, self.schema().position(column)?)
     }
 
     pub fn into_rows(self) -> Vec<Row> {
-        let Self {
-            schema,
-            values,
-            compatibility_rows,
-        } = self;
-        if let Some(rows) = compatibility_rows.into_inner() {
-            return rows;
-        }
-        let columns = schema.columns;
-        values
-            .into_iter()
-            .map(|values| columns.iter().cloned().zip(values).collect())
+        (0..self.len())
+            .map(|row| {
+                self.row(row)
+                    .expect("row ordinal is in range")
+                    .to_owned_row()
+            })
             .collect()
     }
 
-    pub fn retain(&mut self, mut keep: impl FnMut(&Row) -> bool) {
-        let mut rows = self
-            .compatibility_rows
-            .take()
-            .unwrap_or_else(|| materialize_rows(&self.schema, &self.values));
-        rows.retain(|row| keep(row));
-        *self = rows.into();
+    pub fn row(&self, row: usize) -> Option<QueryRowRef<'_>> {
+        if row >= self.len() {
+            return None;
+        }
+        Some(QueryRowRef {
+            schema: &self.storage.schema,
+            values: row_values(&self.storage, row)?,
+        })
     }
 
-    pub fn extend(&mut self, rows: impl IntoIterator<Item = Row>) {
-        let mut compatibility = self
-            .compatibility_rows
-            .take()
-            .unwrap_or_else(|| materialize_rows(&self.schema, &self.values));
-        compatibility.extend(rows);
-        *self = compatibility.into();
+    pub fn first(&self) -> Option<QueryRowRef<'_>> {
+        self.row(0)
     }
 
-    pub fn as_slice(&self) -> &[Row] {
-        self.compatibility_rows()
+    pub fn last(&self) -> Option<QueryRowRef<'_>> {
+        self.len().checked_sub(1).and_then(|row| self.row(row))
     }
 
-    pub fn sort(&mut self) {
-        let mut rows = self
-            .compatibility_rows
-            .take()
-            .unwrap_or_else(|| materialize_rows(&self.schema, &self.values));
-        rows.sort();
-        *self = rows.into();
+    pub fn iter(&self) -> QueryRowsIter<'_> {
+        QueryRowsIter {
+            rows: self,
+            next: 0,
+        }
+    }
+
+    pub fn retain(&mut self, mut keep: impl FnMut(QueryRowRef<'_>) -> bool) {
+        let width = self.schema().len();
+        let mut values = Vec::with_capacity(self.storage.values.len());
+        let mut row_count = 0usize;
+        for row in self.iter() {
+            if keep(row) {
+                values.extend_from_slice(row.values);
+                row_count = row_count.saturating_add(1);
+            }
+        }
+        let retained_row_count = values.len().checked_div(width).unwrap_or(row_count);
+        self.storage = Arc::new(QueryRowStorage {
+            schema: self.schema().clone(),
+            values,
+            row_count: retained_row_count,
+        });
+        self.indexed_rows = OnceLock::new();
+    }
+
+    /// Returns stable owned row handles for APIs that require slice pattern
+    /// matching or indexing. No map or value is copied.
+    pub fn as_slice(&self) -> &[QueryRow] {
+        self.indexed_rows()
     }
 
     pub fn payload_bytes(&self) -> usize {
         let names = self
-            .schema
+            .schema()
             .columns()
             .iter()
             .fold(0usize, |total, name| total.saturating_add(name.len()));
-        self.values.iter().flatten().fold(names, |total, value| {
+        self.storage.values.iter().fold(names, |total, value| {
             total.saturating_add(value_payload_bytes(value))
         })
     }
 
-    fn compatibility_rows(&self) -> &[Row] {
-        self.compatibility_rows
-            .get_or_init(|| materialize_rows(&self.schema, &self.values))
+    fn indexed_rows(&self) -> &[QueryRow] {
+        self.indexed_rows.get_or_init(|| {
+            (0..self.len())
+                .map(|row| QueryRow {
+                    storage: Arc::clone(&self.storage),
+                    row,
+                })
+                .collect()
+        })
     }
 }
 
@@ -202,11 +414,7 @@ impl From<Vec<Row>> for QueryRows {
                     .collect()
             })
             .collect();
-        Self {
-            schema,
-            values,
-            compatibility_rows: OnceLock::new(),
-        }
+        Self::from_value_rows_unchecked(schema, values)
     }
 }
 
@@ -219,9 +427,8 @@ impl FromIterator<Row> for QueryRows {
 impl Clone for QueryRows {
     fn clone(&self) -> Self {
         Self {
-            schema: self.schema.clone(),
-            values: self.values.clone(),
-            compatibility_rows: OnceLock::new(),
+            storage: Arc::clone(&self.storage),
+            indexed_rows: OnceLock::new(),
         }
     }
 }
@@ -229,15 +436,17 @@ impl Clone for QueryRows {
 impl std::fmt::Debug for QueryRows {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("QueryRows")
-            .field("schema", &self.schema)
-            .field("values", &self.values)
+            .field("schema", self.schema())
+            .field("values", &self.storage.values)
             .finish()
     }
 }
 
 impl PartialEq for QueryRows {
     fn eq(&self, other: &Self) -> bool {
-        self.schema == other.schema && self.values == other.values
+        self.schema() == other.schema()
+            && self.len() == other.len()
+            && self.storage.values == other.storage.values
     }
 }
 
@@ -245,54 +454,138 @@ impl Eq for QueryRows {}
 
 impl PartialEq<Vec<Row>> for QueryRows {
     fn eq(&self, other: &Vec<Row>) -> bool {
-        self.compatibility_rows() == other
+        self.len() == other.len() && self.iter().zip(other).all(|(left, right)| left == *right)
     }
 }
 
 impl PartialEq<QueryRows> for Vec<Row> {
     fn eq(&self, other: &QueryRows) -> bool {
-        self == other.compatibility_rows()
+        other == self
     }
 }
 
-impl Deref for QueryRows {
-    type Target = [Row];
+impl Index<usize> for QueryRows {
+    type Output = QueryRow;
 
-    fn deref(&self) -> &Self::Target {
-        self.compatibility_rows()
+    fn index(&self, row: usize) -> &Self::Output {
+        &self.indexed_rows()[row]
     }
 }
 
 impl<'a> IntoIterator for &'a QueryRows {
-    type Item = &'a Row;
-    type IntoIter = std::slice::Iter<'a, Row>;
+    type Item = QueryRowRef<'a>;
+    type IntoIter = QueryRowsIter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.compatibility_rows().iter()
+        self.iter()
     }
 }
 
 impl IntoIterator for QueryRows {
-    type Item = Row;
-    type IntoIter = std::vec::IntoIter<Row>;
+    type Item = QueryRow;
+    type IntoIter = QueryRowsIntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.into_rows().into_iter()
+        QueryRowsIntoIter {
+            storage: self.storage,
+            next: 0,
+        }
     }
 }
 
-fn materialize_rows(schema: &QuerySchema, values: &[Vec<Value>]) -> Vec<Row> {
-    values
-        .iter()
-        .map(|values| {
-            schema
-                .columns()
-                .iter()
-                .cloned()
-                .zip(values.iter().cloned())
-                .collect()
-        })
-        .collect()
+pub struct QueryRowsIter<'a> {
+    rows: &'a QueryRows,
+    next: usize,
+}
+
+impl<'a> Iterator for QueryRowsIter<'a> {
+    type Item = QueryRowRef<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let row = self.rows.row(self.next)?;
+        self.next = self.next.saturating_add(1);
+        Some(row)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.rows.len().saturating_sub(self.next);
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for QueryRowsIter<'_> {}
+
+pub struct QueryValueRows<'a> {
+    rows: &'a QueryRows,
+    next: usize,
+}
+
+impl QueryValueRows<'_> {
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl<'a> Iterator for QueryValueRows<'a> {
+    type Item = &'a [Value];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let values = self.rows.row(self.next)?.values;
+        self.next = self.next.saturating_add(1);
+        Some(values)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.rows.len().saturating_sub(self.next);
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for QueryValueRows<'_> {}
+
+pub struct QueryRowsIntoIter {
+    storage: Arc<QueryRowStorage>,
+    next: usize,
+}
+
+impl Iterator for QueryRowsIntoIter {
+    type Item = QueryRow;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next >= self.storage.row_count {
+            return None;
+        }
+        let row = QueryRow {
+            storage: Arc::clone(&self.storage),
+            row: self.next,
+        };
+        self.next = self.next.saturating_add(1);
+        Some(row)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.storage.row_count.saturating_sub(self.next);
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for QueryRowsIntoIter {}
+
+fn row_values(storage: &QueryRowStorage, row: usize) -> Option<&[Value]> {
+    if row >= storage.row_count {
+        return None;
+    }
+    let width = storage.schema.len();
+    let start = row.checked_mul(width)?;
+    let end = start.checked_add(width)?;
+    storage.values.get(start..end)
+}
+
+fn row_equals_map(row: QueryRowRef<'_>, other: &Row) -> bool {
+    row.len() == other.len()
+        && row
+            .iter()
+            .all(|(name, value)| other.get(name).is_some_and(|other| other == value))
 }
 
 /// A row view whose values remain valid only for the current consumer call.
@@ -535,7 +828,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_bearing_rows_keep_names_once_and_materialize_maps_lazily() {
+    fn schema_bearing_rows_keep_names_once_in_a_flat_value_buffer() {
         let schema = QuerySchema::try_new(["payload".to_string(), "id".to_string()]).unwrap();
         let rows = QueryRows::try_from_value_rows(
             schema,
@@ -546,18 +839,16 @@ mod tests {
         )
         .unwrap();
 
-        assert!(rows.compatibility_rows.get().is_none());
         assert_eq!(rows.schema().columns(), ["payload", "id"]);
         assert_eq!(rows.get(1, "payload").unwrap().as_str(), Some("two"));
         assert_eq!(rows.value(0, 1), Some(ValueRef::Int(1)));
         assert_eq!(rows.payload_bytes(), "payload".len() + "id".len() + 6 + 16);
-        assert!(rows.compatibility_rows.get().is_none());
         assert_eq!(rows.len(), 2);
         assert!(!rows.is_empty());
-        assert!(rows.compatibility_rows.get().is_none());
-
+        assert_eq!(rows.storage.values.len(), 4);
         assert_eq!(rows[0]["payload"], Value::String("one".to_string()));
-        assert!(rows.compatibility_rows.get().is_some());
+        assert_eq!(rows.iter().count(), 2);
+        assert_eq!(rows.storage.values.len(), 4);
     }
 
     #[test]

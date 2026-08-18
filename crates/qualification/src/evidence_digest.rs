@@ -1,17 +1,88 @@
 use sha2::{Digest, Sha256};
-use skein::{Row, Value};
+use skein::{QueryRow, QueryRows, Row, Value};
 
-pub(crate) fn rows_sha256(rows: &[Row]) -> String {
+pub(crate) trait EvidenceRows {
+    fn row_count(&self) -> usize;
+    fn hash_rows(&self, hasher: &mut Sha256);
+}
+
+pub(crate) fn rows_sha256(rows: &(impl EvidenceRows + ?Sized)) -> String {
     let mut hasher = Sha256::new();
-    hasher.update((rows.len() as u64).to_le_bytes());
-    for row in rows {
-        hasher.update((row.len() as u64).to_le_bytes());
-        for (name, value) in row {
-            hash_bytes(&mut hasher, name.as_bytes());
-            hash_value(&mut hasher, value);
+    hasher.update((rows.row_count() as u64).to_le_bytes());
+    rows.hash_rows(&mut hasher);
+    format!("{:x}", hasher.finalize())
+}
+
+impl EvidenceRows for QueryRows {
+    fn row_count(&self) -> usize {
+        self.len()
+    }
+
+    fn hash_rows(&self, hasher: &mut Sha256) {
+        for row in self {
+            hash_row(hasher, row.len(), row.iter());
         }
     }
-    format!("{:x}", hasher.finalize())
+}
+
+impl EvidenceRows for [Row] {
+    fn row_count(&self) -> usize {
+        self.len()
+    }
+
+    fn hash_rows(&self, hasher: &mut Sha256) {
+        for row in self {
+            hash_row(
+                hasher,
+                row.len(),
+                row.iter().map(|(name, value)| (name.as_str(), value)),
+            );
+        }
+    }
+}
+
+impl EvidenceRows for Vec<Row> {
+    fn row_count(&self) -> usize {
+        self.len()
+    }
+
+    fn hash_rows(&self, hasher: &mut Sha256) {
+        self.as_slice().hash_rows(hasher);
+    }
+}
+
+impl<const N: usize> EvidenceRows for [Row; N] {
+    fn row_count(&self) -> usize {
+        N
+    }
+
+    fn hash_rows(&self, hasher: &mut Sha256) {
+        self.as_slice().hash_rows(hasher);
+    }
+}
+
+impl EvidenceRows for Vec<QueryRow> {
+    fn row_count(&self) -> usize {
+        self.len()
+    }
+
+    fn hash_rows(&self, hasher: &mut Sha256) {
+        for row in self {
+            hash_row(hasher, row.len(), row.iter());
+        }
+    }
+}
+
+fn hash_row<'a>(
+    hasher: &mut Sha256,
+    len: usize,
+    fields: impl Iterator<Item = (&'a str, &'a Value)>,
+) {
+    hasher.update((len as u64).to_le_bytes());
+    for (name, value) in fields {
+        hash_bytes(hasher, name.as_bytes());
+        hash_value(hasher, value);
+    }
 }
 
 pub(crate) fn hash_value(hasher: &mut Sha256, value: &Value) {

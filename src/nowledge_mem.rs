@@ -3052,9 +3052,10 @@ pub struct NowledgeMemQueryOutputRowShape {
 impl NowledgeMemQueryOutputRowShape {
     fn from_output(output: &QueryOutput) -> Self {
         let columns = output
-            .rows
+            .schema()
+            .columns()
             .iter()
-            .flat_map(|row| row.keys().cloned())
+            .cloned()
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
