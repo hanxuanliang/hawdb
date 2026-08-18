@@ -98,17 +98,34 @@ pub(super) fn validate_ordered_relational_key(
 pub(super) fn decode_ordered_relational_key(
     encoded: &[u8],
 ) -> Result<RelationalKey, OrderedRelationalKeyError> {
+    let mut key = RelationalKey(Vec::new());
+    decode_ordered_relational_key_into(encoded, &mut key)?;
+    Ok(key)
+}
+
+pub(super) fn decode_ordered_relational_key_into(
+    encoded: &[u8],
+    key: &mut RelationalKey,
+) -> Result<(), OrderedRelationalKeyError> {
     let mut decoder = OrderedKeyDecoder::new(encoded);
-    let mut values = Vec::new();
+    let mut value_count = 0usize;
     while !decoder.is_empty() {
-        values.push(decoder.value()?);
+        if let Some(value) = key.0.get_mut(value_count) {
+            decoder.value_into(value)?;
+        } else {
+            key.0.push(decoder.value()?);
+        }
+        value_count = value_count.checked_add(1).ok_or_else(|| {
+            OrderedRelationalKeyError::Corrupt("value count overflow".to_string())
+        })?;
     }
-    if values.is_empty() {
+    if value_count == 0 {
         return Err(OrderedRelationalKeyError::Corrupt(
             "key contains no values".to_string(),
         ));
     }
-    Ok(RelationalKey(values))
+    key.0.truncate(value_count);
+    Ok(())
 }
 
 fn encode_escaped_bytes(encoded: &mut Vec<u8>, value: &[u8]) {
@@ -176,6 +193,65 @@ impl<'a> OrderedKeyDecoder<'a> {
         }
     }
 
+    fn value_into(
+        &mut self,
+        target: &mut RelationalValue,
+    ) -> Result<(), OrderedRelationalKeyError> {
+        match self.byte("value tag")? {
+            0 => *target = RelationalValue::Null,
+            1 => {
+                *target = match self.byte("boolean value")? {
+                    0 => RelationalValue::Boolean(false),
+                    1 => RelationalValue::Boolean(true),
+                    tag => {
+                        return Err(OrderedRelationalKeyError::Corrupt(format!(
+                            "invalid boolean tag {tag}"
+                        )))
+                    }
+                };
+            }
+            2 => {
+                let ordered = u64::from_be_bytes(self.fixed("BIGINT value")?);
+                *target = RelationalValue::BigInt((ordered ^ (1_u64 << 63)) as i64);
+            }
+            3 => {
+                let ordered = u64::from_be_bytes(self.fixed("DOUBLE PRECISION value")?);
+                let bits = if ordered >> 63 == 1 {
+                    ordered ^ (1_u64 << 63)
+                } else {
+                    !ordered
+                };
+                *target = RelationalValue::DoublePrecision(f64::from_bits(bits));
+            }
+            4 => {
+                let mut bytes = match std::mem::replace(target, RelationalValue::Null) {
+                    RelationalValue::Text(value) => value.into_bytes(),
+                    _ => Vec::new(),
+                };
+                self.escaped_bytes_into(&mut bytes)?;
+                *target = RelationalValue::Text(String::from_utf8(bytes).map_err(|error| {
+                    OrderedRelationalKeyError::Corrupt(format!(
+                        "TEXT key is not valid UTF-8: {error}"
+                    ))
+                })?);
+            }
+            5 => {
+                let mut bytes = match std::mem::replace(target, RelationalValue::Null) {
+                    RelationalValue::Bytea(value) => value,
+                    _ => Vec::new(),
+                };
+                self.escaped_bytes_into(&mut bytes)?;
+                *target = RelationalValue::Bytea(bytes);
+            }
+            tag => {
+                return Err(OrderedRelationalKeyError::Corrupt(format!(
+                    "invalid value tag {tag}"
+                )))
+            }
+        }
+        Ok(())
+    }
+
     fn skip_value(&mut self) -> Result<(), OrderedRelationalKeyError> {
         match self.byte("value tag")? {
             0 => Ok(()),
@@ -215,6 +291,29 @@ impl<'a> OrderedKeyDecoder<'a> {
                     return Err(OrderedRelationalKeyError::Corrupt(format!(
                         "invalid escaped key tag {tag}"
                     )));
+                }
+            }
+        }
+    }
+
+    fn escaped_bytes_into(
+        &mut self,
+        decoded: &mut Vec<u8>,
+    ) -> Result<(), OrderedRelationalKeyError> {
+        decoded.clear();
+        loop {
+            let byte = self.byte("escaped key value")?;
+            if byte != 0 {
+                decoded.push(byte);
+                continue;
+            }
+            match self.byte("escaped key terminator")? {
+                0 => return Ok(()),
+                255 => decoded.push(0),
+                tag => {
+                    return Err(OrderedRelationalKeyError::Corrupt(format!(
+                        "invalid escaped key tag {tag}"
+                    )))
                 }
             }
         }
@@ -336,6 +435,53 @@ mod tests {
         for (expected, encoded) in keys.iter().zip(&encoded) {
             assert_eq!(decode_ordered_relational_key(encoded).unwrap(), *expected);
         }
+    }
+
+    #[test]
+    fn in_place_decode_reuses_variable_width_key_storage() {
+        let first = RelationalKey(vec![
+            RelationalValue::Text("primary-key-with-capacity".to_string()),
+            RelationalValue::Bytea(vec![1; 64]),
+        ]);
+        let second = RelationalKey(vec![
+            RelationalValue::Text("short-key".to_string()),
+            RelationalValue::Bytea(vec![2; 16]),
+        ]);
+        let mut decoded = RelationalKey(Vec::new());
+        decode_ordered_relational_key_into(
+            &encode_ordered_relational_key(&first).unwrap(),
+            &mut decoded,
+        )
+        .unwrap();
+        let text_pointer = match &decoded.0[0] {
+            RelationalValue::Text(value) => value.as_ptr() as usize,
+            value => panic!("expected TEXT key, got {value:?}"),
+        };
+        let bytea_pointer = match &decoded.0[1] {
+            RelationalValue::Bytea(value) => value.as_ptr() as usize,
+            value => panic!("expected BYTEA key, got {value:?}"),
+        };
+
+        decode_ordered_relational_key_into(
+            &encode_ordered_relational_key(&second).unwrap(),
+            &mut decoded,
+        )
+        .unwrap();
+        assert_eq!(decoded, second);
+        assert_eq!(
+            match &decoded.0[0] {
+                RelationalValue::Text(value) => value.as_ptr() as usize,
+                value => panic!("expected TEXT key, got {value:?}"),
+            },
+            text_pointer
+        );
+        assert_eq!(
+            match &decoded.0[1] {
+                RelationalValue::Bytea(value) => value.as_ptr() as usize,
+                value => panic!("expected BYTEA key, got {value:?}"),
+            },
+            bytea_pointer
+        );
     }
 
     #[test]

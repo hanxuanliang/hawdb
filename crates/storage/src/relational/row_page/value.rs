@@ -166,6 +166,73 @@ pub(super) fn decode_row_fields(
     Ok(fields)
 }
 
+pub(super) fn decode_row_field_refs<'page>(
+    encoded: &'page [u8],
+    column_count: usize,
+    requested_fields: &[usize],
+    limits: RelationalRowPageLimits,
+    fields: &mut Vec<RelationalProjectedFieldRef<'page>>,
+) -> Result<(), RelationalRowPageError> {
+    if encoded.len() < 4 {
+        return Err(RelationalRowPageError::Corrupt(
+            "row is smaller than its value-count header".to_string(),
+        ));
+    }
+    let declared_columns = read_u32(&encoded[..4]) as usize;
+    if declared_columns != column_count {
+        return Err(RelationalRowPageError::Corrupt(format!(
+            "row declares {declared_columns} values, expected {column_count}"
+        )));
+    }
+    let directory_len = column_count.checked_mul(VALUE_SLOT_BYTES).ok_or_else(|| {
+        RelationalRowPageError::Corrupt("value slot directory length overflow".to_string())
+    })?;
+    let payload_start = 4usize.checked_add(directory_len).ok_or_else(|| {
+        RelationalRowPageError::Corrupt("row payload offset overflow".to_string())
+    })?;
+    if payload_start > encoded.len() {
+        return Err(RelationalRowPageError::Corrupt(
+            "row value directory exceeds its payload".to_string(),
+        ));
+    }
+    let directory = &encoded[4..payload_start];
+    let payload = &encoded[payload_start..];
+    fields.clear();
+    if fields.capacity() < requested_fields.len() {
+        fields.reserve(requested_fields.len());
+    }
+    let mut requested_index = 0usize;
+    let mut next_offset = 0usize;
+    for ordinal in 0..column_count {
+        let slot_offset = ordinal * VALUE_SLOT_BYTES;
+        let value_offset = read_u32(&directory[slot_offset..slot_offset + 4]);
+        let value_len = read_u32(&directory[slot_offset + 4..slot_offset + 8]);
+        if value_offset as usize != next_offset {
+            return Err(RelationalRowPageError::Corrupt(format!(
+                "column {ordinal} value offset is not contiguous"
+            )));
+        }
+        let value = bounded_slice(payload, value_offset, value_len, "row value")?;
+        validate_value(value, limits)?;
+        if requested_fields.get(requested_index).copied() == Some(ordinal) {
+            fields.push(RelationalProjectedFieldRef {
+                ordinal,
+                value: decode_validated_value_ref(value)?,
+            });
+            requested_index += 1;
+        }
+        next_offset = next_offset.checked_add(value.len()).ok_or_else(|| {
+            RelationalRowPageError::Corrupt("row value offset overflow".to_string())
+        })?;
+    }
+    if next_offset != payload.len() {
+        return Err(RelationalRowPageError::Corrupt(
+            "value slot directory does not cover the exact row payload".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_value(
     encoded: &[u8],
     limits: RelationalRowPageLimits,
@@ -253,6 +320,38 @@ fn decode_validated_value(encoded: &[u8]) -> Result<RelationalValue, RelationalR
         )),
         5 => Ok(RelationalValue::Bytea(encoded[5..].to_vec())),
         6 => Ok(RelationalValue::Overflow(RelationalOverflowRef {
+            digest: Sha256Digest::from_bytes(
+                encoded[18..50]
+                    .try_into()
+                    .expect("overflow digest has a fixed length"),
+            ),
+            scalar_type: scalar_type_from_tag(encoded[1])?,
+            compressed_bytes: read_u64(&encoded[2..10]),
+            uncompressed_bytes: read_u64(&encoded[10..18]),
+        })),
+        _ => unreachable!("validated row value tag"),
+    }
+}
+
+fn decode_validated_value_ref(
+    encoded: &[u8],
+) -> Result<RelationalValueRef<'_>, RelationalRowPageError> {
+    match encoded[0] {
+        0 => Ok(RelationalValueRef::Null),
+        1 => Ok(RelationalValueRef::Boolean(encoded[1] == 1)),
+        2 => Ok(RelationalValueRef::BigInt(i64::from_le_bytes(
+            encoded[1..9]
+                .try_into()
+                .expect("BIGINT value has a fixed length"),
+        ))),
+        3 => Ok(RelationalValueRef::DoublePrecision(f64::from_bits(
+            read_u64(&encoded[1..9]),
+        ))),
+        4 => Ok(RelationalValueRef::Text(
+            std::str::from_utf8(&encoded[5..]).expect("validated TEXT value is UTF-8"),
+        )),
+        5 => Ok(RelationalValueRef::Bytea(&encoded[5..])),
+        6 => Ok(RelationalValueRef::Overflow(RelationalOverflowRef {
             digest: Sha256Digest::from_bytes(
                 encoded[18..50]
                     .try_into()

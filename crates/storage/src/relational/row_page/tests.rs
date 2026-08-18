@@ -142,6 +142,50 @@ fn projected_decode_does_not_materialize_unrequested_large_inline_values() {
 }
 
 #[test]
+fn lending_projected_cursor_borrows_variable_values_and_matches_owned_decode() {
+    let page = page();
+    let limits = RelationalRowPageLimits::default();
+    let encoded = page.encode(limits).unwrap();
+    let view = RelationalRowPageView::open(&encoded, limits).unwrap();
+    let requested = [0, 1, 2, 3, 4, 5, 6];
+    let expected = (0..view.row_count())
+        .map(|ordinal| view.decode_projected_row(ordinal, &requested).unwrap())
+        .collect::<Vec<_>>();
+    let mut cursor = ProjectedRowPageCursor::new(view, 0, &requested).unwrap();
+
+    let first_fields_ptr = {
+        let row = cursor.next_row().unwrap().unwrap();
+        assert_eq!(row.primary_key(), &page.rows[0].primary_key);
+        assert_eq!(row.value(0), Some(RelationalValueRef::BigInt(1)));
+        assert_eq!(row.value(1), Some(RelationalValueRef::Text("first")));
+        assert_eq!(row.value(4), Some(RelationalValueRef::Bytea(&[0, 1, 2])));
+        assert_eq!(row.value(5), Some(RelationalValueRef::Null));
+        assert_eq!(
+            row.value(6),
+            Some(RelationalValueRef::Overflow(overflow_reference()))
+        );
+        assert_eq!(row.to_owned_row(), expected[0]);
+        let text = match row.value(1).unwrap() {
+            RelationalValueRef::Text(value) => value,
+            value => panic!("expected borrowed TEXT, got {value:?}"),
+        };
+        let encoded_start = encoded.as_ptr() as usize;
+        let encoded_end = encoded_start + encoded.len();
+        assert!((encoded_start..encoded_end).contains(&(text.as_ptr() as usize)));
+        row.fields().as_ptr() as usize
+    };
+
+    {
+        let row = cursor.next_row().unwrap().unwrap();
+        assert_eq!(row.primary_key(), &page.rows[1].primary_key);
+        assert_eq!(row.value(1), Some(RelationalValueRef::Text("third")));
+        assert_eq!(row.fields().as_ptr() as usize, first_fields_ptr);
+        assert_eq!(row.to_owned_row(), expected[1]);
+    }
+    assert!(cursor.next_row().unwrap().is_none());
+}
+
+#[test]
 fn encoder_rejects_invalid_shape_order_and_budget() {
     let limits = RelationalRowPageLimits::default();
     let mut empty = page();

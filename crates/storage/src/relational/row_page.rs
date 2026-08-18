@@ -1,10 +1,12 @@
 use super::ordered_key::{
-    decode_ordered_relational_key, encode_ordered_relational_key, validate_ordered_relational_key,
+    decode_ordered_relational_key, decode_ordered_relational_key_into,
+    encode_ordered_relational_key, validate_ordered_relational_key,
 };
 #[cfg(test)]
 use super::{RelationalColumnSchema, RelationalTableSchema};
 use super::{
     RelationalKey, RelationalOverflowRef, RelationalRow, RelationalScalarType, RelationalValue,
+    RelationalValueRef,
 };
 use skein_integrity::{IntegrityHasher, Sha256Digest, SHA256_BYTES};
 use std::fmt;
@@ -99,7 +101,7 @@ pub(crate) fn test_row_page_schema_digest(table: &str, column_count: usize) -> S
     super::index_shadow::relational_schema_digest(&test_row_page_schema(table, column_count))
         .expect("test row-page schema must encode")
 }
-use value::{decode_row_fields, encode_row, validate_requested_fields};
+use value::{decode_row_field_refs, decode_row_fields, encode_row, validate_requested_fields};
 
 const ROW_PAGE_MAGIC: &[u8; 8] = b"SKINROW1";
 const ROW_PAGE_VERSION: u16 = 1;
@@ -198,6 +200,93 @@ pub struct RelationalProjectedField {
 pub struct RelationalProjectedRow {
     pub primary_key: RelationalKey,
     pub fields: Vec<RelationalProjectedField>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RelationalProjectedFieldRef<'a> {
+    pub ordinal: usize,
+    pub value: RelationalValueRef<'a>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RelationalProjectedRowRef<'a> {
+    primary_key: &'a RelationalKey,
+    encoded_primary_key: &'a [u8],
+    fields: &'a [RelationalProjectedFieldRef<'a>],
+}
+
+impl<'a> RelationalProjectedRowRef<'a> {
+    pub fn primary_key(self) -> &'a RelationalKey {
+        self.primary_key
+    }
+
+    pub fn fields(self) -> &'a [RelationalProjectedFieldRef<'a>] {
+        self.fields
+    }
+
+    pub(crate) fn encoded_primary_key(self) -> &'a [u8] {
+        self.encoded_primary_key
+    }
+
+    pub fn value(self, ordinal: usize) -> Option<RelationalValueRef<'a>> {
+        self.fields
+            .binary_search_by_key(&ordinal, |field| field.ordinal)
+            .ok()
+            .map(|position| self.fields[position].value)
+    }
+
+    pub fn to_owned_row(self) -> RelationalProjectedRow {
+        RelationalProjectedRow {
+            primary_key: self.primary_key.clone(),
+            fields: self
+                .fields
+                .iter()
+                .map(|field| RelationalProjectedField {
+                    ordinal: field.ordinal,
+                    value: field.value.to_owned_value(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// A projected row that is either borrowed from the current immutable page or
+/// owned by a recovery/live overlay.
+#[derive(Debug, Clone, Copy)]
+pub enum RelationalProjectedRowView<'a> {
+    Borrowed(RelationalProjectedRowRef<'a>),
+    Owned(&'a RelationalProjectedRow),
+}
+
+impl<'a> RelationalProjectedRowView<'a> {
+    pub fn primary_key(self) -> &'a RelationalKey {
+        match self {
+            Self::Borrowed(row) => row.primary_key(),
+            Self::Owned(row) => &row.primary_key,
+        }
+    }
+
+    pub fn value(self, ordinal: usize) -> Option<RelationalValueRef<'a>> {
+        match self {
+            Self::Borrowed(row) => row.value(ordinal),
+            Self::Owned(row) => row
+                .fields
+                .binary_search_by_key(&ordinal, |field| field.ordinal)
+                .ok()
+                .map(|position| row.fields[position].value.as_ref()),
+        }
+    }
+
+    pub fn to_owned_row(self) -> RelationalProjectedRow {
+        match self {
+            Self::Borrowed(row) => row.to_owned_row(),
+            Self::Owned(row) => row.clone(),
+        }
+    }
+
+    pub const fn is_borrowed(self) -> bool {
+        matches!(self, Self::Borrowed(_))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -622,6 +711,35 @@ impl<'a> RelationalRowPageView<'a> {
         })
     }
 
+    fn decode_projected_row_ref_into<'row>(
+        &self,
+        ordinal: usize,
+        requested_fields: &[usize],
+        primary_key: &'row mut RelationalKey,
+        fields: &'row mut Vec<RelationalProjectedFieldRef<'a>>,
+    ) -> Result<RelationalProjectedRowRef<'row>, RelationalRowPageError>
+    where
+        'a: 'row,
+    {
+        let slot = self.slot(ordinal)?;
+        let encoded_primary_key = self.key_for_slot(slot)?;
+        decode_ordered_relational_key_into(encoded_primary_key, primary_key).map_err(|error| {
+            RelationalRowPageError::Corrupt(format!("row {ordinal} primary key: {error}"))
+        })?;
+        decode_row_field_refs(
+            self.row_for_slot(slot)?,
+            self.column_count,
+            requested_fields,
+            self.limits,
+            fields,
+        )?;
+        Ok(RelationalProjectedRowRef {
+            primary_key,
+            encoded_primary_key,
+            fields,
+        })
+    }
+
     pub fn find_projected_row(
         &self,
         primary_key: &RelationalKey,
@@ -755,6 +873,63 @@ impl<'a> RelationalRowPageView<'a> {
             slot.row_len,
             "row payload",
         )
+    }
+}
+
+/// A cursor whose row view remains valid only until its next mutable step.
+pub(super) trait LendingProjectedRowCursor {
+    type Row<'row>
+    where
+        Self: 'row;
+
+    fn next_row(&mut self) -> Result<Option<Self::Row<'_>>, RelationalRowPageError>;
+}
+
+pub(super) struct ProjectedRowPageCursor<'page> {
+    view: RelationalRowPageView<'page>,
+    next_ordinal: usize,
+    requested_fields: &'page [usize],
+    primary_key: RelationalKey,
+    fields: Vec<RelationalProjectedFieldRef<'page>>,
+}
+
+impl<'page> ProjectedRowPageCursor<'page> {
+    pub(super) fn new(
+        view: RelationalRowPageView<'page>,
+        next_ordinal: usize,
+        requested_fields: &'page [usize],
+    ) -> Result<Self, RelationalRowPageError> {
+        validate_requested_fields(requested_fields, view.column_count, view.limits)?;
+        Ok(Self {
+            view,
+            next_ordinal,
+            requested_fields,
+            primary_key: RelationalKey(Vec::new()),
+            fields: Vec::with_capacity(requested_fields.len()),
+        })
+    }
+}
+
+impl LendingProjectedRowCursor for ProjectedRowPageCursor<'_> {
+    type Row<'row>
+        = RelationalProjectedRowRef<'row>
+    where
+        Self: 'row;
+
+    fn next_row(&mut self) -> Result<Option<Self::Row<'_>>, RelationalRowPageError> {
+        if self.next_ordinal >= self.view.row_count() {
+            return Ok(None);
+        }
+        let ordinal = self.next_ordinal;
+        self.next_ordinal += 1;
+        self.view
+            .decode_projected_row_ref_into(
+                ordinal,
+                self.requested_fields,
+                &mut self.primary_key,
+                &mut self.fields,
+            )
+            .map(Some)
     }
 }
 

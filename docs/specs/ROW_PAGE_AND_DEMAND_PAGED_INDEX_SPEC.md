@@ -1819,14 +1819,33 @@ temporarily all-pinned cache falls back to the same one-operation slot buffer;
 it never expands cache capacity. At most one slot `Arc` is retained by a cursor
 wave, and cancellation, error, callback stop, or unwind drops it.
 
-Projected decode validates the selected row's complete slot layout but
-materializes only requested values. An overflow descriptor is resolved only if
-its field was selected, so unselected text, JSON, binary, or vector payloads are
-not read, decompressed, or cloned. All selected overflow values in one row stage
-against a private copy of the hydration ledger; a later field failure publishes
-neither partial row values nor partial budget charges. Reports separate
-descriptor reads, logical page and slot bytes, physical file reads, cache
-hits/misses/rejections, decoded and emitted rows, hydration bytes, peak pins,
+Projected decode validates the selected row's complete slot layout but decodes
+inline variable-width values as page-backed `RelationalValueRef` values. The
+row-page cursor is a lending GAT cursor: the row it returns borrows the cursor's
+reused primary-key and projected-field scratch and cannot survive the next
+mutable cursor step. Text and binary values borrow the verified page slot;
+fixed-width values are copied. Ordered-key decode reuses the existing key
+vector and same-typed variable-width value capacity. The callback boundary is
+higher-ranked and therefore cannot retain a row view after the callback.
+
+The lending boundary MUST reach residual predicate evaluation, projection, and
+`OFFSET`/`LIMIT` before selected output is materialized. Converting every row
+to an owned row immediately after borrowed decode is a compatibility path, not
+an optimized path. A checkpoint row remains borrowed when all required fields
+are inline. A row that requires overflow hydration is materialized exactly
+once before hydration. Recovery and live overlay rows remain owned because
+their values already cross page and generation boundaries. The common row
+view reports which representation reached the callback; an owned compatibility
+wrapper MUST report every emitted row as owned even if its implementation uses
+the lending decoder internally.
+
+An overflow descriptor is resolved only if its field was selected, so
+unselected text, JSON, binary, or vector payloads are not read, decompressed,
+or cloned. All selected overflow values in one row stage against a private copy
+of the hydration ledger; a later field failure publishes neither partial row
+values nor partial budget charges. Reports separate descriptor reads, logical
+page and slot bytes, physical file reads, cache hits/misses/rejections, decoded
+and emitted rows, borrowed and owned callback rows, hydration bytes, peak pins,
 and early stop.
 
 `RelationalRowPageDemandReader` remains the immutable checkpoint primitive. It
@@ -2001,6 +2020,16 @@ Scan, filter, project, expand, and limit SHOULD retain typed batches. Scalar
 `Binding` values remain compatibility and final-result boundaries. Sort,
 aggregate, distinct, and join MUST charge resident state and spill when their
 admitted workarea is exhausted.
+
+The row-page lending cursor is intentionally local to the synchronous
+scan-filter-project-limit fragment. It MUST NOT replace the object-safe storage
+facade or cross sort, aggregate, distinct, join, spill, or public result
+boundaries, all of which may retain values after the next input step. Existing
+closed numeric batches remain the typed primitive fast path. Variable-width or
+additional primitive batches MUST NOT be activated merely because a GAT can
+express them; activation requires a production-shaped differential benchmark
+that preserves semantics and demonstrates either at least 15% throughput gain
+or at least 50% allocated-byte reduction without a point-read regression.
 
 ## Resource governance
 

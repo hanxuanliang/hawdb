@@ -5,7 +5,7 @@ use crate::relational_sql::index_access::{
 };
 use crate::relational_sql::row_access::{
     expression_contains_aggregate, plan_requested_fields, plan_scan_fields,
-    plan_scan_hydration_fields, RelationalFieldPlan, RelationalReadRow,
+    plan_scan_hydration_fields, RelationalFieldPlan, RelationalReadRow, RelationalReadRowRef,
     RelationalRowExecutionEvidence, RelationalRowReadMode, RelationalRowRuntime,
 };
 use crate::sql::{
@@ -34,7 +34,7 @@ use skein_optimizer::{
 use skein_plan::{PhysicalPlan, SortDirection, SortItem, SortKey};
 use skein_storage::{
     relational_unique_index_name, RelationalHydrationBudget, RelationalKey, RelationalState,
-    RelationalTableSchema, RelationalValue,
+    RelationalTableSchema, RelationalValue, RelationalValueRef,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -861,7 +861,7 @@ fn explain_access_path(
         descriptor.requires_row_fetch
     );
     let row = format!(
-        "row_runtime_path={}, row_base_generation={}, row_delta_generation={}, row_base_epoch={}, row_visible_epoch={}, row_root_set_digest={}, row_descriptor_reads={}, row_logical_pages={}, row_logical_bytes={}, row_physical_pages={}, row_physical_bytes={}, row_cache_hits={}, row_cache_misses={}, row_cache_admission_rejections={}, row_overlay_entries={}, row_overlay_bytes={}, row_rows={}",
+        "row_runtime_path={}, row_base_generation={}, row_delta_generation={}, row_base_epoch={}, row_visible_epoch={}, row_root_set_digest={}, row_descriptor_reads={}, row_logical_pages={}, row_logical_bytes={}, row_physical_pages={}, row_physical_bytes={}, row_cache_hits={}, row_cache_misses={}, row_cache_admission_rejections={}, row_overlay_entries={}, row_overlay_bytes={}, row_rows={}, row_borrowed_rows={}, row_owned_rows={}",
         row_evidence.runtime_path,
         optional_u64_text(row_evidence.base_generation),
         optional_u64_text(row_evidence.delta_generation),
@@ -879,6 +879,8 @@ fn explain_access_path(
         row_evidence.overlay_entries,
         row_evidence.overlay_resident_bytes,
         row_evidence.rows_visited,
+        row_evidence.borrowed_rows_visited,
+        row_evidence.owned_rows_visited,
     );
     let Some(evidence) = evidence else {
         return format!("{planned}, {row}");
@@ -2444,6 +2446,17 @@ fn execute_streaming_projection<'a>(
     row_runtime: &RelationalRowRuntime<'a>,
     limits: RelationalQueryLimits,
 ) -> Result<StreamingProjectionOutput> {
+    if joins.is_empty() && matches!(base_access, RelationalBaseAccess::FullScan) {
+        return execute_borrowed_streaming_full_scan(
+            select,
+            parameters,
+            base_schema,
+            base_qualifier,
+            pipeline,
+            row_runtime,
+            limits,
+        );
+    }
     let mut offset = usize::try_from(bind_bound(select.offset, parameters, "OFFSET")?.unwrap_or(0))
         .map_err(|_| SkeinError::Semantic("SQL OFFSET is too large".to_string()))?;
     let requested = bind_bound(select.limit, parameters, "LIMIT")?
@@ -2493,6 +2506,78 @@ fn execute_streaming_projection<'a>(
                 Ok(output.len() < requested)
             },
         )?;
+    }
+    Ok(StreamingProjectionOutput {
+        rows: output,
+        blocking_operator_memory_reports: Vec::new(),
+    })
+}
+
+fn execute_borrowed_streaming_full_scan(
+    select: &SelectStatement,
+    parameters: &[Value],
+    schema: &RelationalTableSchema,
+    qualifier: &str,
+    pipeline: &mut RelationalPipelineState<'_>,
+    row_runtime: &RelationalRowRuntime<'_>,
+    limits: RelationalQueryLimits,
+) -> Result<StreamingProjectionOutput> {
+    let mut offset = usize::try_from(bind_bound(select.offset, parameters, "OFFSET")?.unwrap_or(0))
+        .map_err(|_| SkeinError::Semantic("SQL OFFSET is too large".to_string()))?;
+    let requested = bind_bound(select.limit, parameters, "LIMIT")?
+        .map(|value| {
+            usize::try_from(value)
+                .map_err(|_| SkeinError::Semantic("SQL LIMIT is too large".to_string()))
+        })
+        .transpose()?
+        .unwrap_or(usize::MAX);
+    let mut output = Vec::with_capacity(requested.min(limits.max_output_rows));
+    let mut payload_bytes = 0usize;
+    if requested != 0 {
+        row_runtime.visit_all_ref(&select.from.name, |row| {
+            pipeline.account_row()?;
+            if select
+                .selection
+                .as_ref()
+                .map(|predicate| {
+                    borrowed_predicate_truth(
+                        predicate,
+                        row,
+                        parameters,
+                        schema,
+                        &select.from.name,
+                        qualifier,
+                    )
+                })
+                .transpose()?
+                .is_some_and(|truth| truth != Some(true))
+            {
+                return Ok(true);
+            }
+            if offset != 0 {
+                offset -= 1;
+                return Ok(true);
+            }
+            if output.len() >= requested {
+                return Ok(false);
+            }
+            if output.len() >= limits.max_output_rows {
+                return Err(SkeinError::Execution(format!(
+                    "relational SQL output exceeds max_output_rows {}",
+                    limits.max_output_rows
+                )));
+            }
+            let projected = project_borrowed_row(row, schema, qualifier, &select.projection)?;
+            payload_bytes = payload_bytes.saturating_add(map_payload_bytes(&projected));
+            if payload_bytes > limits.max_output_payload_bytes {
+                return Err(SkeinError::Execution(format!(
+                    "relational SQL output exceeds max_output_payload_bytes {}",
+                    limits.max_output_payload_bytes
+                )));
+            }
+            output.push(projected);
+            Ok(output.len() < requested)
+        })?;
     }
     Ok(StreamingProjectionOutput {
         rows: output,
@@ -3545,6 +3630,188 @@ fn evaluate_row_expression(
     }
 }
 
+fn borrowed_predicate_truth(
+    predicate: &SqlPredicate,
+    row: RelationalReadRowRef<'_>,
+    parameters: &[Value],
+    schema: &RelationalTableSchema,
+    table: &str,
+    qualifier: &str,
+) -> Result<Option<bool>> {
+    match predicate {
+        SqlPredicate::And(left, right) => match (
+            borrowed_predicate_truth(left, row, parameters, schema, table, qualifier)?,
+            borrowed_predicate_truth(right, row, parameters, schema, table, qualifier)?,
+        ) {
+            (Some(false), _) | (_, Some(false)) => Ok(Some(false)),
+            (Some(true), Some(true)) => Ok(Some(true)),
+            _ => Ok(None),
+        },
+        SqlPredicate::Or(left, right) => match (
+            borrowed_predicate_truth(left, row, parameters, schema, table, qualifier)?,
+            borrowed_predicate_truth(right, row, parameters, schema, table, qualifier)?,
+        ) {
+            (Some(true), _) | (_, Some(true)) => Ok(Some(true)),
+            (Some(false), Some(false)) => Ok(Some(false)),
+            _ => Ok(None),
+        },
+        SqlPredicate::Not(predicate) => {
+            borrowed_predicate_truth(predicate, row, parameters, schema, table, qualifier)
+                .map(|truth| truth.map(|value| !value))
+        }
+        SqlPredicate::Compare { left, op, right } => compare_value_refs(
+            resolve_borrowed_column(row, schema, table, qualifier, left)?,
+            bind_relational_value_ref(right, parameters)?,
+            *op,
+        ),
+        SqlPredicate::CompareColumns { left, op, right } => compare_value_refs(
+            resolve_borrowed_column(row, schema, table, qualifier, left)?,
+            resolve_borrowed_column(row, schema, table, qualifier, right)?,
+            *op,
+        ),
+        SqlPredicate::InList {
+            left,
+            values,
+            negated,
+        } => {
+            let left = resolve_borrowed_column(row, schema, table, qualifier, left)?;
+            let mut has_unknown = false;
+            let mut matched = false;
+            for value in values {
+                match compare_value_refs(
+                    left,
+                    bind_relational_value_ref(value, parameters)?,
+                    SqlComparisonOp::Eq,
+                )? {
+                    Some(true) => matched = true,
+                    None => has_unknown = true,
+                    Some(false) => {}
+                }
+            }
+            let result = if matched {
+                Some(true)
+            } else if has_unknown {
+                None
+            } else {
+                Some(false)
+            };
+            Ok(result.map(|value| value != *negated))
+        }
+        SqlPredicate::IsNull { column, negated } => Ok(Some(
+            matches!(
+                resolve_borrowed_column(row, schema, table, qualifier, column)?,
+                RelationalValueRef::Null
+            ) != *negated,
+        )),
+    }
+}
+
+fn compare_value_refs(
+    left: RelationalValueRef<'_>,
+    right: RelationalValueRef<'_>,
+    op: SqlComparisonOp,
+) -> Result<Option<bool>> {
+    if matches!(left, RelationalValueRef::Overflow(_))
+        || matches!(right, RelationalValueRef::Overflow(_))
+    {
+        return Err(SkeinError::Execution(
+            "relational filter or join requires overflow hydration before qualification"
+                .to_string(),
+        ));
+    }
+    if matches!(left, RelationalValueRef::Null) || matches!(right, RelationalValueRef::Null) {
+        return Ok(None);
+    }
+    if left.scalar_type() != right.scalar_type() {
+        return Err(SkeinError::Semantic(
+            "relational comparison has incompatible scalar types".to_string(),
+        ));
+    }
+    Ok(Some(match op {
+        SqlComparisonOp::Eq => left == right,
+        SqlComparisonOp::NotEq => left != right,
+        SqlComparisonOp::Lt => left < right,
+        SqlComparisonOp::Lte => left <= right,
+        SqlComparisonOp::Gt => left > right,
+        SqlComparisonOp::Gte => left >= right,
+    }))
+}
+
+fn resolve_borrowed_column<'row>(
+    row: RelationalReadRowRef<'row>,
+    schema: &RelationalTableSchema,
+    table: &str,
+    qualifier: &str,
+    column: &SqlColumnRef,
+) -> Result<RelationalValueRef<'row>> {
+    if column
+        .qualifier
+        .as_deref()
+        .is_some_and(|candidate| candidate != qualifier && candidate != table)
+    {
+        return Err(SkeinError::Semantic(format!(
+            "column {} is unknown or ambiguous",
+            column.name
+        )));
+    }
+    let position = schema.column_position(&column.name).ok_or_else(|| {
+        SkeinError::Semantic(format!("column {} is unknown or ambiguous", column.name))
+    })?;
+    row.value(position)
+}
+
+fn project_borrowed_row(
+    row: RelationalReadRowRef<'_>,
+    schema: &RelationalTableSchema,
+    qualifier: &str,
+    projection: &[SelectProjection],
+) -> Result<Row> {
+    let mut output = Row::new();
+    for item in projection {
+        match item {
+            SelectProjection::Wildcard => {
+                for (position, column) in schema.columns.iter().enumerate() {
+                    insert_output(
+                        &mut output,
+                        column.name.clone(),
+                        relational_ref_to_value(row.value(position)?)?,
+                    )?;
+                }
+            }
+            SelectProjection::Column { name, alias } => {
+                let value = resolve_borrowed_column(row, schema, &schema.name, qualifier, name)?;
+                insert_output(
+                    &mut output,
+                    alias.clone().unwrap_or_else(|| name.name.clone()),
+                    relational_ref_to_value(value)?,
+                )?;
+            }
+            SelectProjection::Expression { .. } => {
+                return Err(SkeinError::Semantic(
+                    "non-aggregate relational projection expressions are not supported".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn relational_ref_to_value(value: RelationalValueRef<'_>) -> Result<Value> {
+    match value {
+        RelationalValueRef::Null => Ok(Value::Null),
+        RelationalValueRef::Boolean(value) => Ok(Value::Bool(value)),
+        RelationalValueRef::BigInt(value) => Ok(Value::Int(value)),
+        RelationalValueRef::DoublePrecision(value) => Ok(Value::Float(value)),
+        RelationalValueRef::Text(value) => Ok(Value::String(value.to_owned())),
+        RelationalValueRef::Bytea(_) => Err(SkeinError::Semantic(
+            "BYTEA result conversion requires a binary Value variant".to_string(),
+        )),
+        RelationalValueRef::Overflow(_) => Err(SkeinError::Execution(
+            "overflow value reached projection without hydration".to_string(),
+        )),
+    }
+}
+
 fn predicate_truth(
     predicate: &SqlPredicate,
     row: &BoundRow<'_>,
@@ -3617,29 +3884,7 @@ fn compare_values(
     right: &RelationalValue,
     op: SqlComparisonOp,
 ) -> Result<Option<bool>> {
-    if matches!(left, RelationalValue::Overflow(_)) || matches!(right, RelationalValue::Overflow(_))
-    {
-        return Err(SkeinError::Execution(
-            "relational filter or join requires overflow hydration before qualification"
-                .to_string(),
-        ));
-    }
-    if matches!(left, RelationalValue::Null) || matches!(right, RelationalValue::Null) {
-        return Ok(None);
-    }
-    if left.scalar_type() != right.scalar_type() {
-        return Err(SkeinError::Semantic(
-            "relational comparison has incompatible scalar types".to_string(),
-        ));
-    }
-    Ok(Some(match op {
-        SqlComparisonOp::Eq => left == right,
-        SqlComparisonOp::NotEq => left != right,
-        SqlComparisonOp::Lt => left < right,
-        SqlComparisonOp::Lte => left <= right,
-        SqlComparisonOp::Gt => left > right,
-        SqlComparisonOp::Gte => left >= right,
-    }))
+    compare_value_refs(left.as_ref(), right.as_ref(), op)
 }
 
 fn resolve_column<'a>(row: &'a BoundRow<'a>, column: &SqlColumnRef) -> Result<&'a RelationalValue> {
@@ -3763,6 +4008,30 @@ fn bind_sql_value(value: &SqlValue, parameters: &[Value]) -> Result<Value> {
             .ok_or_else(|| {
                 SkeinError::Semantic(format!("missing PostgreSQL parameter ${position}"))
             }),
+    }
+}
+
+fn bind_relational_value_ref<'a>(
+    value: &'a SqlValue,
+    parameters: &'a [Value],
+) -> Result<RelationalValueRef<'a>> {
+    let value = match value {
+        SqlValue::Literal(value) => value,
+        SqlValue::Parameter(position) => {
+            parameters.get(position.saturating_sub(1)).ok_or_else(|| {
+                SkeinError::Semantic(format!("missing PostgreSQL parameter ${position}"))
+            })?
+        }
+    };
+    match value {
+        Value::Null => Ok(RelationalValueRef::Null),
+        Value::Bool(value) => Ok(RelationalValueRef::Boolean(*value)),
+        Value::Int(value) => Ok(RelationalValueRef::BigInt(*value)),
+        Value::Float(value) => Ok(RelationalValueRef::DoublePrecision(*value)),
+        Value::String(value) => Ok(RelationalValueRef::Text(value)),
+        Value::List(_) | Value::Map(_) => Err(SkeinError::Semantic(
+            "relational SQL values must be scalar".to_string(),
+        )),
     }
 }
 

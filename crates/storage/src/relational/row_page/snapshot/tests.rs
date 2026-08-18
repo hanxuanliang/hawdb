@@ -100,6 +100,8 @@ fn range_reads_merge_ordered_rows_and_keep_overlay_after_the_base_tail() {
     assert_eq!(report.overlay_entries, 6);
     assert_eq!(report.overlay_replacements, 1);
     assert_eq!(report.demand.rows_emitted, 4);
+    assert_eq!(report.demand.borrowed_rows_emitted, 0);
+    assert_eq!(report.demand.owned_rows_emitted, 4);
 
     let mut hydration = RelationalHydrationBudget::default();
     let mut tail = Vec::new();

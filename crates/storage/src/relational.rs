@@ -77,7 +77,8 @@ pub use row_page::{
     relational_row_delta_manifest_generation_file, relational_row_delta_run_file,
     relational_row_page_artifact_file, relational_row_page_manifest_generation_file,
     relational_row_page_root_descriptor_file, relational_row_page_root_key_file,
-    ImmutableRelationalRowPage, RelationalProjectedField, RelationalProjectedRow,
+    ImmutableRelationalRowPage, RelationalProjectedField, RelationalProjectedFieldRef,
+    RelationalProjectedRow, RelationalProjectedRowRef, RelationalProjectedRowView,
     RelationalRowDeltaBaseBinding, RelationalRowDeltaBuilder, RelationalRowDeltaConfig,
     RelationalRowDeltaError, RelationalRowDeltaGeneration, RelationalRowDeltaManifest,
     RelationalRowDeltaPublicationPhase, RelationalRowDeltaReadReport, RelationalRowDeltaReader,
@@ -227,7 +228,27 @@ pub enum RelationalValue {
     Overflow(RelationalOverflowRef),
 }
 
+/// An allocation-free view over a relational scalar.
+///
+/// Variable-width inline values borrow their backing row page or resident row.
+/// Call [`RelationalValueRef::to_owned_value`] only when the value must outlive
+/// the current scan callback.
+#[derive(Debug, Clone, Copy)]
+pub enum RelationalValueRef<'a> {
+    Null,
+    Boolean(bool),
+    BigInt(i64),
+    DoublePrecision(f64),
+    Text(&'a str),
+    Bytea(&'a [u8]),
+    Overflow(RelationalOverflowRef),
+}
+
 impl RelationalValue {
+    pub fn as_ref(&self) -> RelationalValueRef<'_> {
+        self.into()
+    }
+
     pub fn scalar_type(&self) -> Option<RelationalScalarType> {
         match self {
             Self::Null => None,
@@ -265,6 +286,109 @@ impl RelationalValue {
             Self::Bytea(_) => 5,
             Self::Overflow(_) => 6,
         }
+    }
+}
+
+impl<'a> RelationalValueRef<'a> {
+    pub const fn scalar_type(self) -> Option<RelationalScalarType> {
+        match self {
+            Self::Null => None,
+            Self::Boolean(_) => Some(RelationalScalarType::Boolean),
+            Self::BigInt(_) => Some(RelationalScalarType::BigInt),
+            Self::DoublePrecision(_) => Some(RelationalScalarType::DoublePrecision),
+            Self::Text(_) => Some(RelationalScalarType::Text),
+            Self::Bytea(_) => Some(RelationalScalarType::Bytea),
+            Self::Overflow(reference) => Some(reference.scalar_type),
+        }
+    }
+
+    pub const fn logical_type(self) -> Option<LogicalType> {
+        match self.scalar_type() {
+            Some(scalar_type) => Some(scalar_type.logical_type()),
+            None => None,
+        }
+    }
+
+    pub const fn estimated_payload_bytes(self) -> usize {
+        match self {
+            Self::Null => 0,
+            Self::Boolean(_) => 1,
+            Self::BigInt(_) | Self::DoublePrecision(_) => 8,
+            Self::Text(value) => value.len(),
+            Self::Bytea(value) => value.len(),
+            Self::Overflow(_) => std::mem::size_of::<RelationalOverflowRef>(),
+        }
+    }
+
+    pub fn to_owned_value(self) -> RelationalValue {
+        match self {
+            Self::Null => RelationalValue::Null,
+            Self::Boolean(value) => RelationalValue::Boolean(value),
+            Self::BigInt(value) => RelationalValue::BigInt(value),
+            Self::DoublePrecision(value) => RelationalValue::DoublePrecision(value),
+            Self::Text(value) => RelationalValue::Text(value.to_owned()),
+            Self::Bytea(value) => RelationalValue::Bytea(value.to_vec()),
+            Self::Overflow(reference) => RelationalValue::Overflow(reference),
+        }
+    }
+
+    const fn kind_rank(self) -> u8 {
+        match self {
+            Self::Null => 0,
+            Self::Boolean(_) => 1,
+            Self::BigInt(_) => 2,
+            Self::DoublePrecision(_) => 3,
+            Self::Text(_) => 4,
+            Self::Bytea(_) => 5,
+            Self::Overflow(_) => 6,
+        }
+    }
+}
+
+impl<'a> From<&'a RelationalValue> for RelationalValueRef<'a> {
+    fn from(value: &'a RelationalValue) -> Self {
+        match value {
+            RelationalValue::Null => Self::Null,
+            RelationalValue::Boolean(value) => Self::Boolean(*value),
+            RelationalValue::BigInt(value) => Self::BigInt(*value),
+            RelationalValue::DoublePrecision(value) => Self::DoublePrecision(*value),
+            RelationalValue::Text(value) => Self::Text(value),
+            RelationalValue::Bytea(value) => Self::Bytea(value),
+            RelationalValue::Overflow(reference) => Self::Overflow(*reference),
+        }
+    }
+}
+
+impl PartialEq for RelationalValueRef<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for RelationalValueRef<'_> {}
+
+impl PartialOrd for RelationalValueRef<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RelationalValueRef<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.kind_rank()
+            .cmp(&other.kind_rank())
+            .then_with(|| match (*self, *other) {
+                (Self::Null, Self::Null) => Ordering::Equal,
+                (Self::Boolean(left), Self::Boolean(right)) => left.cmp(&right),
+                (Self::BigInt(left), Self::BigInt(right)) => left.cmp(&right),
+                (Self::DoublePrecision(left), Self::DoublePrecision(right)) => {
+                    left.total_cmp(&right)
+                }
+                (Self::Text(left), Self::Text(right)) => left.cmp(right),
+                (Self::Bytea(left), Self::Bytea(right)) => left.cmp(right),
+                (Self::Overflow(left), Self::Overflow(right)) => left.cmp(&right),
+                _ => Ordering::Equal,
+            })
     }
 }
 

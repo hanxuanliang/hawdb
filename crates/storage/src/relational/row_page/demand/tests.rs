@@ -151,6 +151,8 @@ fn range_cursor_is_ordered_bounded_and_applies_lower_bound_once() {
     assert_eq!(visited, vec![key(2), key(3)]);
     assert_eq!(report.pages_read, 2);
     assert_eq!(report.rows_emitted, 2);
+    assert_eq!(report.borrowed_rows_emitted, 0);
+    assert_eq!(report.owned_rows_emitted, 2);
     assert!(!report.stopped_early);
 
     let mut hydration = RelationalHydrationBudget::default();
@@ -205,6 +207,111 @@ fn range_cursor_is_ordered_bounded_and_applies_lower_bound_once() {
     assert_eq!(report.pages_read, 1);
     assert_eq!(report.rows_emitted, 1);
     assert!(report.stopped_early);
+    assert_eq!(fixture.cache.snapshot().pinned_bytes, 0);
+
+    fixture.remove();
+}
+
+#[test]
+fn lending_range_keeps_base_rows_borrowed_and_overlay_rows_owned() {
+    let fixture = DemandFixture::new("lending-range");
+    let requested = [0, 3];
+    let mut overlay = BTreeMap::new();
+    overlay.insert(
+        key(2),
+        RelationalRowPageProjectedOverlayValue::Present {
+            fields: vec![
+                RelationalProjectedField {
+                    ordinal: 0,
+                    value: RelationalValue::BigInt(2),
+                },
+                RelationalProjectedField {
+                    ordinal: 3,
+                    value: RelationalValue::Text("overlay-2".to_string()),
+                },
+            ]
+            .into_boxed_slice(),
+            binds_overlay_overflow: false,
+        },
+    );
+    let mut hydration = RelationalHydrationBudget::default();
+    let mut resolve = |_: &mut RelationalProjectedRow,
+                       _: &mut RelationalHydrationBudget,
+                       _: &RuntimeTaskContext| { Ok(()) };
+    let mut visited = Vec::new();
+    let report = fixture
+        .reader
+        .visit_projected_range_with_overlay_ref(
+            RelationalRowPageOverlayRead {
+                range: projected_range(Bound::Unbounded, Bound::Unbounded, &requested),
+                limits: RelationalRowPageDemandReadLimits::default(),
+                overlay: RelationalRowPageOverlayRange {
+                    rows: overlay,
+                    overflow_root: None,
+                },
+            },
+            &mut hydration,
+            &RuntimeTaskContext::default(),
+            Some(&requested),
+            &mut resolve,
+            |row, _| {
+                let value = row
+                    .value(3)
+                    .expect("projected inline value")
+                    .to_owned_value();
+                visited.push((row.is_borrowed(), row.primary_key().clone(), value));
+                true
+            },
+        )
+        .expect("lending range read");
+
+    assert_eq!(
+        visited,
+        vec![
+            (true, key(1), RelationalValue::Text("inline-1".to_string())),
+            (
+                false,
+                key(2),
+                RelationalValue::Text("overlay-2".to_string())
+            ),
+            (true, key(3), RelationalValue::Text("inline-3".to_string())),
+            (true, key(4), RelationalValue::Text("inline-4".to_string())),
+        ]
+    );
+    assert_eq!(report.borrowed_rows_emitted, 3);
+    assert_eq!(report.owned_rows_emitted, 1);
+    assert_eq!(report.rows_emitted, 4);
+    assert_eq!(report.peak_pins, 1);
+    assert_eq!(fixture.cache.snapshot().pinned_bytes, 0);
+
+    let mut hydration = RelationalHydrationBudget::default();
+    let mut resolve = |_: &mut RelationalProjectedRow,
+                       _: &mut RelationalHydrationBudget,
+                       _: &RuntimeTaskContext| { Ok(()) };
+    let report = fixture
+        .reader
+        .visit_projected_range_with_overlay_ref(
+            RelationalRowPageOverlayRead {
+                range: projected_range(Bound::Unbounded, Bound::Unbounded, &requested),
+                limits: RelationalRowPageDemandReadLimits::default(),
+                overlay: RelationalRowPageOverlayRange {
+                    rows: BTreeMap::new(),
+                    overflow_root: None,
+                },
+            },
+            &mut hydration,
+            &RuntimeTaskContext::default(),
+            Some(&requested),
+            &mut resolve,
+            |row, _| {
+                assert!(row.is_borrowed());
+                false
+            },
+        )
+        .expect("early lending range stop");
+    assert!(report.stopped_early);
+    assert_eq!(report.borrowed_rows_emitted, 1);
+    assert_eq!(report.owned_rows_emitted, 0);
     assert_eq!(fixture.cache.snapshot().pinned_bytes, 0);
 
     fixture.remove();

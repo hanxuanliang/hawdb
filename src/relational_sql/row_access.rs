@@ -7,12 +7,13 @@ use crate::store::{GraphStore, RelationalTransactionRowView};
 use skein_core::RuntimeTaskContext;
 use skein_storage::{
     RelationalError, RelationalHydrationBudget, RelationalKey, RelationalProjectedField,
-    RelationalProjectedRow, RelationalRow, RelationalRowPageDemandReadError,
-    RelationalRowPageProjectedFields, RelationalRowPageProjectedRangeFields,
-    RelationalRowPageReadViewIdentity, RelationalRowPageSnapshotPointReport,
-    RelationalRowPageSnapshotRangeReport, RelationalRowPageSnapshotReadError,
-    RelationalRowPageSnapshotReadLimits, RelationalRowPageSnapshotReader,
-    RelationalRowPageSnapshotRowSource, RelationalState, RelationalTableSchema,
+    RelationalProjectedRow, RelationalProjectedRowView, RelationalRow,
+    RelationalRowPageDemandReadError, RelationalRowPageProjectedFields,
+    RelationalRowPageProjectedRangeFields, RelationalRowPageReadViewIdentity,
+    RelationalRowPageSnapshotPointReport, RelationalRowPageSnapshotRangeReport,
+    RelationalRowPageSnapshotReadError, RelationalRowPageSnapshotReadLimits,
+    RelationalRowPageSnapshotReader, RelationalRowPageSnapshotRowSource, RelationalState,
+    RelationalTableSchema, RelationalValueRef,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -47,6 +48,8 @@ pub(crate) struct RelationalRowExecutionEvidence {
     pub cache_misses: usize,
     pub cache_admission_rejections: usize,
     pub rows_visited: usize,
+    pub borrowed_rows_visited: usize,
+    pub owned_rows_visited: usize,
     pub overlay_entries: usize,
     pub overlay_resident_bytes: usize,
 }
@@ -57,6 +60,12 @@ pub(super) struct RelationalReadRow {
 }
 
 impl RelationalReadRow {
+    pub(super) fn as_ref(&self) -> RelationalReadRowRef<'_> {
+        RelationalReadRowRef {
+            row: RelationalProjectedRowView::Owned(&self.row),
+        }
+    }
+
     pub(super) fn primary_key(&self) -> &RelationalKey {
         &self.row.primary_key
     }
@@ -74,6 +83,21 @@ impl RelationalReadRow {
                 ))
             })?;
         Ok(&field.value)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RelationalReadRowRef<'a> {
+    row: RelationalProjectedRowView<'a>,
+}
+
+impl<'a> RelationalReadRowRef<'a> {
+    pub(super) fn value(self, ordinal: usize) -> Result<RelationalValueRef<'a>> {
+        self.row.value(ordinal).ok_or_else(|| {
+            SkeinError::StorageIntegrity(format!(
+                "relational row projection omitted required field {ordinal}"
+            ))
+        })
     }
 }
 
@@ -314,6 +338,84 @@ impl<'a> RelationalRowRuntime<'a> {
         }
     }
 
+    pub(crate) fn visit_all_ref(
+        &self,
+        table: &str,
+        mut visit: impl for<'row> FnMut(RelationalReadRowRef<'row>) -> Result<bool>,
+    ) -> Result<bool> {
+        let fields = self.fields(&self.fields.scan_fields, table)?;
+        let hydration_fields = self.fields(&self.fields.scan_hydration_fields, table)?;
+        match &self.backend {
+            RelationalRowBackend::CanonicalMemory => {
+                for (key, row) in self.state.rows(table) {
+                    self.task.checkpoint().map_err(|reason| {
+                        SkeinError::Execution(format!("runtime task stopped: {reason}"))
+                    })?;
+                    self.admit_memory_row()?;
+                    let projected =
+                        self.project_memory_row(table, key, row, fields, hydration_fields)?;
+                    if !visit(projected.as_ref())? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            RelationalRowBackend::Snapshot(reader) => {
+                let remaining = self.remaining_limits()?;
+                let mut hydration = *self.hydration.borrow();
+                let state = self.state;
+                let task = self.task;
+                let mut callback_error = None;
+                let read_result = reader
+                    .visit_projected_range_fields_resolving_ref(
+                        RelationalRowPageProjectedRangeFields {
+                            range: skein_storage::RelationalRowPageProjectedRange {
+                                table,
+                                lower: Bound::Unbounded,
+                                upper: Bound::Unbounded,
+                                requested_fields: fields,
+                            },
+                            hydration_fields,
+                        },
+                        remaining,
+                        &mut hydration,
+                        task,
+                        |row, budget, task| {
+                            state
+                                .hydrate_projected_row_fields_with_context(
+                                    table,
+                                    row,
+                                    hydration_fields,
+                                    budget,
+                                    Some(task),
+                                )
+                                .map_err(map_state_to_demand_error)
+                        },
+                        |row, range_hydration| {
+                            self.hydration.replace(*range_hydration);
+                            let keep_going = match visit(RelationalReadRowRef { row }) {
+                                Ok(keep_going) => keep_going,
+                                Err(error) => {
+                                    callback_error = Some(error);
+                                    false
+                                }
+                            };
+                            *range_hydration = *self.hydration.borrow();
+                            keep_going
+                        },
+                    )
+                    .map_err(map_snapshot_error);
+                self.hydration.replace(hydration);
+                let report = read_result?;
+                self.record_range(&report)?;
+                match callback_error {
+                    Some(error) => Err(error),
+                    None => Ok(!report.demand.stopped_early),
+                }
+            }
+        }
+    }
+
     fn fields<'fields>(
         &self,
         plan: &'fields BTreeMap<String, Arc<[usize]>>,
@@ -370,17 +472,21 @@ impl<'a> RelationalRowRuntime<'a> {
 
     fn admit_memory_row(&self) -> Result<()> {
         let mut evidence = self.evidence.borrow_mut();
-        let next = evidence
+        let next_rows = evidence
             .rows_visited
             .checked_add(1)
             .ok_or_else(|| SkeinError::Execution("relational row count overflow".to_string()))?;
-        if next > self.limits.demand.max_rows.get() {
+        if next_rows > self.limits.demand.max_rows.get() {
             return Err(SkeinError::Execution(format!(
                 "relational row scan exceeds row limit {}",
                 self.limits.demand.max_rows
             )));
         }
-        evidence.rows_visited = next;
+        let next_owned_rows = evidence.owned_rows_visited.checked_add(1).ok_or_else(|| {
+            SkeinError::Execution("relational owned row count overflow".to_string())
+        })?;
+        evidence.rows_visited = next_rows;
+        evidence.owned_rows_visited = next_owned_rows;
         Ok(())
     }
 
@@ -512,6 +618,16 @@ impl<'a> RelationalRowRuntime<'a> {
             "cache rejection",
         )?;
         add_counter(&mut evidence.rows_visited, demand.rows_emitted, "row")?;
+        add_counter(
+            &mut evidence.borrowed_rows_visited,
+            demand.borrowed_rows_emitted,
+            "borrowed row",
+        )?;
+        add_counter(
+            &mut evidence.owned_rows_visited,
+            demand.owned_rows_emitted,
+            "owned row",
+        )?;
         add_counter(
             &mut evidence.overlay_entries,
             overlay_entries,

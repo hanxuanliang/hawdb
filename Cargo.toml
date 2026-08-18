@@ -190,5 +190,9 @@ name = "relational_oltp_mix"
 harness = false
 
 [[bench]]
+name = "relational_row_page_lending"
+harness = false
+
+[[bench]]
 name = "wal_group_commit"
 harness = false

@@ -790,6 +790,12 @@ mod tests {
                 .query_sql("EXPLAIN ANALYZE SELECT id FROM documents WHERE id = 'doc-large'")
                 .expect("project no large value from a row page");
             assert!(relational_explain_execution_info(&id_only).contains("hydrated_rows=0"));
+            let lending_scan = database
+                .query_sql("EXPLAIN ANALYZE SELECT id FROM documents WHERE body = 'body-1' LIMIT 1")
+                .expect("filter and project from a borrowed row-page view");
+            let lending_info = relational_explain_operator_info(&lending_scan, "TableFullScanExec");
+            assert!(lending_info.contains("row_borrowed_rows=1"));
+            assert!(lending_info.contains("row_owned_rows=0"));
             let late_hydration = database
                 .query_sql(
                     "EXPLAIN ANALYZE SELECT body FROM documents ORDER BY id ASC LIMIT 1 OFFSET 1",

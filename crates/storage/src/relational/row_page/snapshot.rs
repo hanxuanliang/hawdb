@@ -5,8 +5,8 @@ use super::demand::{
     RelationalRowPageProjectedOverlayValue,
 };
 use super::{
-    RelationalProjectedField, RelationalProjectedRow, RelationalRowDeltaError,
-    RelationalRowDeltaReadReport, RelationalRowPageDemandReadError,
+    RelationalProjectedField, RelationalProjectedRow, RelationalProjectedRowView,
+    RelationalRowDeltaError, RelationalRowDeltaReadReport, RelationalRowPageDemandReadError,
     RelationalRowPageDemandReadLimits, RelationalRowPageDemandReadReport,
     RelationalRowPageDemandReader, RelationalRowPageProjectedFields,
     RelationalRowPageProjectedRange, RelationalRowPageProjectedRangeFields,
@@ -495,6 +495,39 @@ impl RelationalRowPageSnapshotReader {
         )
     }
 
+    pub fn visit_projected_range_fields_resolving_ref(
+        &self,
+        projected: RelationalRowPageProjectedRangeFields<'_>,
+        limits: RelationalRowPageSnapshotReadLimits,
+        hydration: &mut RelationalHydrationBudget,
+        task: &RuntimeTaskContext,
+        mut resolve: impl FnMut(
+            &mut RelationalProjectedRow,
+            &mut RelationalHydrationBudget,
+            &RuntimeTaskContext,
+        ) -> Result<(), RelationalRowPageDemandReadError>,
+        visit: impl for<'row> FnMut(
+            RelationalProjectedRowView<'row>,
+            &mut RelationalHydrationBudget,
+        ) -> bool,
+    ) -> Result<RelationalRowPageSnapshotRangeReport, RelationalRowPageSnapshotReadError> {
+        let RelationalRowPageProjectedRangeFields {
+            range,
+            hydration_fields,
+        } = projected;
+        self.visit_projected_range_with_hydration_mode_ref(
+            ProjectedRangeVisitContext {
+                range,
+                limits,
+                hydration,
+                task,
+                hydration_fields: Some(hydration_fields),
+            },
+            &mut resolve,
+            visit,
+        )
+    }
+
     /// Visits the exact snapshot row shape without reading overflow payloads.
     /// Overflow fields remain typed content-addressed references in both base
     /// and overlay rows. This is reserved for storage maintenance that needs
@@ -531,7 +564,29 @@ impl RelationalRowPageSnapshotReader {
             &mut RelationalHydrationBudget,
             &RuntimeTaskContext,
         ) -> Result<(), RelationalRowPageDemandReadError>,
-        visit: impl FnMut(RelationalProjectedRow, &mut RelationalHydrationBudget) -> bool,
+        mut visit: impl FnMut(RelationalProjectedRow, &mut RelationalHydrationBudget) -> bool,
+    ) -> Result<RelationalRowPageSnapshotRangeReport, RelationalRowPageSnapshotReadError> {
+        let mut report =
+            self.visit_projected_range_with_hydration_mode_ref(context, resolve, |row, budget| {
+                visit(row.to_owned_row(), budget)
+            })?;
+        report.demand.borrowed_rows_emitted = 0;
+        report.demand.owned_rows_emitted = report.demand.rows_emitted;
+        Ok(report)
+    }
+
+    fn visit_projected_range_with_hydration_mode_ref(
+        &self,
+        context: ProjectedRangeVisitContext<'_>,
+        resolve: &mut impl FnMut(
+            &mut RelationalProjectedRow,
+            &mut RelationalHydrationBudget,
+            &RuntimeTaskContext,
+        ) -> Result<(), RelationalRowPageDemandReadError>,
+        visit: impl for<'row> FnMut(
+            RelationalProjectedRowView<'row>,
+            &mut RelationalHydrationBudget,
+        ) -> bool,
     ) -> Result<RelationalRowPageSnapshotRangeReport, RelationalRowPageSnapshotReadError> {
         let ProjectedRangeVisitContext {
             range,
@@ -545,7 +600,7 @@ impl RelationalRowPageSnapshotReader {
         self.checkpoint(task)?;
         let demand = self
             .demand
-            .visit_projected_range_with_overlay(
+            .visit_projected_range_with_overlay_ref(
                 RelationalRowPageOverlayRead {
                     range,
                     limits: limits.demand,
