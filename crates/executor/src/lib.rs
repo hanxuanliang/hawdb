@@ -62,8 +62,8 @@ pub use morsel::{
 };
 pub use profile::{
     BlockingOperatorMemoryReport, PipelineMemoryReport, ProfiledQueryRows, ProfiledQueryStream,
-    QueryRow, QueryRowRef, QueryRows, QueryRowsIntoIter, QueryRowsIter, QuerySchema,
-    QueryValueRows, ReadExecutionProfile, Row, RowRef, RowRefIter,
+    QueryRow, QueryRowRef, QueryRows, QueryRowsBuilder, QueryRowsIntoIter, QueryRowsIter,
+    QuerySchema, QueryValueRows, ReadExecutionProfile, Row, RowRef, RowRefIter,
 };
 pub use spill::SpillPoolSnapshot;
 pub use vector::{

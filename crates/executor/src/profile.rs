@@ -245,7 +245,7 @@ pub struct QueryRows {
 
 impl QueryRows {
     pub fn empty() -> Self {
-        Self::from_value_rows_unchecked(QuerySchema::empty(), Vec::new())
+        Self::from_flat_values_unchecked(QuerySchema::empty(), Vec::new(), 0)
     }
 
     pub fn try_from_value_rows(schema: QuerySchema, values: Vec<Vec<Value>>) -> Result<Self> {
@@ -267,10 +267,18 @@ impl QueryRows {
         let value_count = row_count.saturating_mul(schema.len());
         let mut flat_values = Vec::with_capacity(value_count);
         flat_values.extend(values.into_iter().flatten());
+        Self::from_flat_values_unchecked(schema, flat_values, row_count)
+    }
+
+    fn from_flat_values_unchecked(
+        schema: QuerySchema,
+        values: Vec<Value>,
+        row_count: usize,
+    ) -> Self {
         Self {
             storage: Arc::new(QueryRowStorage {
                 schema,
-                values: flat_values,
+                values,
                 row_count,
             }),
             indexed_rows: OnceLock::new(),
@@ -421,6 +429,110 @@ impl From<Vec<Row>> for QueryRows {
 impl FromIterator<Row> for QueryRows {
     fn from_iter<T: IntoIterator<Item = Row>>(iter: T) -> Self {
         iter.into_iter().collect::<Vec<_>>().into()
+    }
+}
+
+/// Builds immutable query results without retaining one map or vector per row.
+///
+/// The first named row binds column names to stable ordinals. Later rows are
+/// consumed in the same deterministic `BTreeMap` order and their values move
+/// directly into one flat buffer.
+pub struct QueryRowsBuilder {
+    schema: Option<QuerySchema>,
+    values: Vec<Value>,
+    row_count: usize,
+    row_capacity_hint: usize,
+}
+
+impl QueryRowsBuilder {
+    pub fn new() -> Self {
+        Self::with_row_capacity(0)
+    }
+
+    pub fn with_row_capacity(row_capacity: usize) -> Self {
+        Self {
+            schema: None,
+            values: Vec::new(),
+            row_count: 0,
+            row_capacity_hint: row_capacity,
+        }
+    }
+
+    pub fn with_schema(schema: QuerySchema, row_capacity: usize) -> Self {
+        Self {
+            values: Vec::with_capacity(row_capacity.saturating_mul(schema.len())),
+            schema: Some(schema),
+            row_count: 0,
+            row_capacity_hint: row_capacity,
+        }
+    }
+
+    pub fn push_values(&mut self, values: impl IntoIterator<Item = Value>) -> Result<()> {
+        let schema = self.schema.as_ref().ok_or_else(|| {
+            SkeinError::Execution(
+                "query result values require a schema before ordinal insertion".to_string(),
+            )
+        })?;
+        let start = self.values.len();
+        self.values.extend(values);
+        let width = self.values.len().saturating_sub(start);
+        if width != schema.len() {
+            self.values.truncate(start);
+            return Err(SkeinError::Execution(format!(
+                "query result row {} has width {width}, expected {}",
+                self.row_count,
+                schema.len()
+            )));
+        }
+        self.row_count = self.row_count.saturating_add(1);
+        Ok(())
+    }
+
+    pub fn push_named_row(&mut self, row: Row) -> Result<()> {
+        if self.schema.is_none() {
+            self.schema = Some(QuerySchema::try_new(row.keys().cloned())?);
+            self.values.reserve(
+                row.len()
+                    .saturating_mul(self.row_capacity_hint.max(self.row_count.saturating_add(1))),
+            );
+        }
+        let schema = self.schema.as_ref().expect("query result schema is bound");
+        if row.len() != schema.len() {
+            return Err(SkeinError::Execution(format!(
+                "query result row {} has width {}, expected {}",
+                self.row_count,
+                row.len(),
+                schema.len()
+            )));
+        }
+        if let Some((ordinal, (name, expected))) = row
+            .keys()
+            .zip(schema.columns())
+            .enumerate()
+            .find(|(_, (name, expected))| *name != *expected)
+        {
+            return Err(SkeinError::Execution(format!(
+                "query result row {} column {ordinal} is {name}, expected {expected}",
+                self.row_count
+            )));
+        }
+        self.values.extend(row.into_values());
+        self.row_count = self.row_count.saturating_add(1);
+        Ok(())
+    }
+
+    pub fn finish(self) -> QueryRows {
+        QueryRows::from_flat_values_unchecked(
+            self.schema.unwrap_or_else(QuerySchema::empty),
+            self.values,
+            self.row_count,
+        )
+    }
+}
+
+impl Default for QueryRowsBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -775,7 +887,7 @@ impl<TScanPruningReport> ReadExecutionProfile<TScanPruningReport> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfiledQueryRows<TScanPruningReport> {
-    pub rows: Vec<Row>,
+    pub rows: QueryRows,
     pub profile: ReadExecutionProfile<TScanPruningReport>,
 }
 
@@ -868,6 +980,44 @@ mod tests {
         )
         .unwrap();
         assert_ne!(left, right);
+    }
+
+    #[test]
+    fn named_row_builder_binds_schema_once_and_moves_values_by_ordinal() {
+        let mut builder = QueryRowsBuilder::with_row_capacity(2);
+        builder
+            .push_named_row(Row::from([
+                ("id".to_string(), Value::Int(1)),
+                ("payload".to_string(), Value::String("one".to_string())),
+            ]))
+            .unwrap();
+        builder
+            .push_named_row(Row::from([
+                ("id".to_string(), Value::Int(2)),
+                ("payload".to_string(), Value::String("two".to_string())),
+            ]))
+            .unwrap();
+        let rows = builder.finish();
+
+        assert_eq!(rows.schema().columns(), ["id", "payload"]);
+        assert_eq!(rows.value(1, 0), Some(ValueRef::Int(2)));
+        assert_eq!(rows.get(0, "payload").unwrap().as_str(), Some("one"));
+        assert_eq!(rows.storage.values.len(), 4);
+    }
+
+    #[test]
+    fn named_row_builder_rejects_schema_drift_without_partial_append() {
+        let mut builder = QueryRowsBuilder::new();
+        builder
+            .push_named_row(Row::from([("id".to_string(), Value::Int(1))]))
+            .unwrap();
+        assert!(builder
+            .push_named_row(Row::from([("name".to_string(), Value::Int(2))]))
+            .is_err());
+        let rows = builder.finish();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.get(0, "id"), Some(ValueRef::Int(1)));
     }
 
     #[test]

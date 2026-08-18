@@ -1,5 +1,7 @@
 use serde_json::json;
-use skein::executor::{execute_with_row_limit_profile, ExecutionMemoryConfig};
+use skein::executor::{
+    execute_with_row_limit_profile, ExecutionMemoryConfig, QueryRowRef, QueryRows,
+};
 use skein::optimizer::PhysicalPlan;
 use skein::planner::{ComparisonOp, Predicate, Projection, ProjectionExpression};
 use skein::schema::{Catalog, PropertyType, TableKind};
@@ -558,13 +560,22 @@ fn projection_plan(predicate: Predicate) -> PhysicalPlan {
     }
 }
 
-fn output_checksum(rows: &[BTreeMap<String, Value>]) -> u64 {
-    rows.iter()
-        .fold(0u64, |total, row| total.wrapping_add(output_row_score(row)))
+fn output_checksum(rows: &QueryRows) -> u64 {
+    rows.iter().fold(0u64, |total, row| {
+        total.wrapping_add(output_query_row_score(row))
+    })
+}
+
+fn output_query_row_score(row: QueryRowRef<'_>) -> u64 {
+    output_score(row.get("score"))
 }
 
 fn output_row_score(row: &BTreeMap<String, Value>) -> u64 {
-    match row.get("score") {
+    output_score(row.get("score"))
+}
+
+fn output_score(value: Option<&Value>) -> u64 {
+    match value {
         Some(Value::Int(value)) => *value as u64,
         _ => panic!("benchmark output score must be an integer"),
     }

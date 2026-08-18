@@ -126,6 +126,14 @@ validity bitmap and selected-row buffers MUST be reused across batches. A
 completed projection MUST NOT retain hidden node bindings that are outside the
 projected result scope.
 
+Materialized query output MUST bind its column names once and retain values in
+one schema-ordered flat buffer. The final result boundary MUST NOT retain a
+`BTreeMap` or a nested value vector per row. Compatibility consumers that ask
+for owned named rows MAY materialize maps explicitly; streaming consumers MAY
+continue to receive owned named rows when ownership must cross the callback.
+This ordinal result boundary does not extend the lending GAT cursor across
+joins, blocking operators, spill, callbacks, or public object-safe interfaces.
+
 An eligible parallel worker MUST place a bounded sequence of typed
 `ColumnarBatch` values and their selections into the ordinal stream for each
 production numeric morsel. It MUST NOT construct per-row `Binding` maps while

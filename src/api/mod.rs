@@ -1188,7 +1188,7 @@ impl Database {
         let profiled = profiled?;
         Ok(ExplainAnalyzeOutput {
             output: QueryOutput {
-                rows: profiled.rows.into(),
+                rows: profiled.rows,
             },
             execution_profile: profiled.profile,
             physical_plan: optimized.physical_plan,
@@ -19290,7 +19290,7 @@ fn execute_graph_transaction_statement(
             &runtime.config.execution_memory,
         )
         .map(|profiled| QueryOutput {
-            rows: profiled.rows.into(),
+            rows: profiled.rows,
         })
     };
     transaction.store().poison_on_storage_error(&query_result);
@@ -20385,7 +20385,7 @@ impl DatabaseReadTransaction {
         query_runtime::query_runtime_checkpoint(task_context)?;
         Ok(BoundedReadQueryOutput {
             output: QueryOutput {
-                rows: profiled.rows.into(),
+                rows: profiled.rows,
             },
             execution_profile: profiled.profile,
         })

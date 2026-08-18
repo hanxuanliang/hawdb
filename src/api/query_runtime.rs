@@ -572,7 +572,8 @@ impl Database {
                         &mut self.store,
                         self.config.mutation_limits,
                         task_context,
-                    )?,
+                    )?
+                    .into(),
                     None,
                 )
             } else {
@@ -607,7 +608,7 @@ impl Database {
                 query_runtime_checkpoint(task_context)?;
             }
             Ok((
-                QueryOutput { rows: rows.into() },
+                QueryOutput { rows },
                 QueryExecutionTrace {
                     statement,
                     optimizer_trace: capture_trace.then_some(optimized.trace),

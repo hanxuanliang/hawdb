@@ -92,6 +92,7 @@ pub type RowRef<'a> = skein_executor::RowRef<'a>;
 pub type QueryRow = skein_executor::QueryRow;
 pub type QueryRowRef<'a> = skein_executor::QueryRowRef<'a>;
 pub type QueryRows = skein_executor::QueryRows;
+pub type QueryRowsBuilder = skein_executor::QueryRowsBuilder;
 pub type QueryValueRows<'a> = skein_executor::QueryValueRows<'a>;
 pub type QuerySchema = skein_executor::QuerySchema;
 pub type ReadExecutionProfile = skein_executor::ReadExecutionProfile<ScanPruningReport>;
@@ -696,7 +697,7 @@ fn execute_with_row_limit_profile_and_external_and_memory_internal(
         max_rows,
         max_payload_bytes,
     } = output_limits;
-    let mut rows = Vec::new();
+    let mut rows = QueryRowsBuilder::new();
     let streamed = execute_with_row_consumer_profile_internal(
         plan,
         catalog,
@@ -705,14 +706,11 @@ fn execute_with_row_limit_profile_and_external_and_memory_internal(
         external,
         max_rows,
         max_payload_bytes,
-        &mut |row| {
-            rows.push(row);
-            Ok(())
-        },
+        &mut |row| rows.push_named_row(row),
         runtime,
     )?;
     Ok(ProfiledQueryRows {
-        rows,
+        rows: rows.finish(),
         profile: streamed.profile,
     })
 }
