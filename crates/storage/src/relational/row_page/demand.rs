@@ -361,16 +361,16 @@ impl RelationalRowPageDemandReader {
         context
             .validate_requested_fields(requested_fields, table_root.column_count.get() as usize)?;
         context.admit_descriptor_search(table_root.page_count)?;
+        let encoded_key = encode_ordered_relational_key(primary_key)
+            .map_err(|error| RelationalRowPageDemandReadError::Admission(error.to_string()))?;
         let (descriptor, descriptor_reads) = self
             .root
-            .find_table_page_descriptor_accounted(table, primary_key)
+            .find_table_page_descriptor_accounted_encoded(table, &encoded_key)
             .map_err(|error| context.map_row_publication_error(error))?;
         context.add_descriptor_reads(descriptor_reads)?;
         let Some((_ordinal, descriptor)) = descriptor else {
             return Ok((None, context.finish()));
         };
-        let encoded_key = encode_ordered_relational_key(primary_key)
-            .map_err(|error| RelationalRowPageDemandReadError::Admission(error.to_string()))?;
         if encoded_key.as_slice() < descriptor.lower_bound.as_slice()
             || encoded_key.as_slice() > descriptor.upper_bound.as_slice()
         {
@@ -380,7 +380,7 @@ impl RelationalRowPageDemandReader {
         let view = page.view();
         context.validate_column_count(&table_root, &view)?;
         let Some(mut row) = view
-            .find_projected_row(primary_key, requested_fields)
+            .find_projected_row_encoded(&encoded_key, requested_fields)
             .map_err(|error| context.map_page_error(error))?
         else {
             context.checkpoint()?;

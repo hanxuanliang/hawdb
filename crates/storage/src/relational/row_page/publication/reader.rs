@@ -179,6 +179,17 @@ impl RelationalRowPageRootReader {
                 "row-page lookup key cannot be encoded: {error}"
             ))
         })?;
+        self.find_table_page_descriptor_accounted_encoded(table, &encoded_key)
+    }
+
+    pub(crate) fn find_table_page_descriptor_accounted_encoded(
+        &self,
+        table: &str,
+        encoded_key: &[u8],
+    ) -> Result<
+        (Option<(u64, RelationalRowPageRootDescriptor)>, usize),
+        RelationalRowPagePublicationError,
+    > {
         if encoded_key.len() > self.config.page_limits.max_key_bytes.get() {
             return Err(RelationalRowPagePublicationError::Admission(format!(
                 "row-page lookup key contains {} bytes, exceeding limit {}",
@@ -212,7 +223,7 @@ impl RelationalRowPageRootReader {
                     "row-page descriptor read counter overflow".to_string(),
                 )
             })?;
-            if descriptor.upper_bound.as_slice() < encoded_key.as_slice() {
+            if descriptor.upper_bound.as_slice() < encoded_key {
                 lower = middle.checked_add(1).ok_or_else(|| {
                     RelationalRowPagePublicationError::Corrupt(
                         "row-page descriptor search overflow".to_string(),

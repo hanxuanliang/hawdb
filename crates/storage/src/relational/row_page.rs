@@ -733,6 +733,13 @@ impl<'a> RelationalRowPageView<'a> {
     ) -> Result<Option<usize>, RelationalRowPageError> {
         let encoded = encode_ordered_relational_key(primary_key)
             .map_err(|error| RelationalRowPageError::Admission(error.to_string()))?;
+        self.find_row_encoded(&encoded)
+    }
+
+    pub(crate) fn find_row_encoded(
+        &self,
+        encoded: &[u8],
+    ) -> Result<Option<usize>, RelationalRowPageError> {
         if encoded.len() > self.limits.max_key_bytes.get() {
             return Err(RelationalRowPageError::Admission(format!(
                 "lookup key contains {} bytes, exceeding limit {}",
@@ -744,7 +751,7 @@ impl<'a> RelationalRowPageView<'a> {
         let mut upper = self.row_count;
         while lower < upper {
             let middle = lower + (upper - lower) / 2;
-            match self.key(middle)?.cmp(encoded.as_slice()) {
+            match self.key(middle)?.cmp(encoded) {
                 std::cmp::Ordering::Less => lower = middle + 1,
                 std::cmp::Ordering::Greater => upper = middle,
                 std::cmp::Ordering::Equal => return Ok(Some(middle)),
@@ -849,6 +856,16 @@ impl<'a> RelationalRowPageView<'a> {
         requested_fields: &[usize],
     ) -> Result<Option<RelationalProjectedRow>, RelationalRowPageError> {
         self.find_row(primary_key)?
+            .map(|ordinal| self.decode_projected_row(ordinal, requested_fields))
+            .transpose()
+    }
+
+    pub(crate) fn find_projected_row_encoded(
+        &self,
+        encoded_primary_key: &[u8],
+        requested_fields: &[usize],
+    ) -> Result<Option<RelationalProjectedRow>, RelationalRowPageError> {
+        self.find_row_encoded(encoded_primary_key)?
             .map(|ordinal| self.decode_projected_row(ordinal, requested_fields))
             .transpose()
     }

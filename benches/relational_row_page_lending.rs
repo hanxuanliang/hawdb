@@ -88,6 +88,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
 fn main() {
     let fixture = Fixture::new();
+    let point_cache_evidence = measure_point_cache(&fixture);
     let scan_evidence = SHAPES
         .into_iter()
         .map(|selectivity_percent| measure_scan(&fixture.reader, selectivity_percent))
@@ -97,12 +98,13 @@ fn main() {
         .iter()
         .filter(|evidence| evidence.selectivity_percent < 100)
         .all(|evidence| evidence.admitted);
-    let admitted = selective_gate_admitted && point_evidence.admitted;
+    let admitted =
+        point_cache_evidence.admitted && selective_gate_admitted && point_evidence.admitted;
 
     println!(
         "relational_row_page_lending {}",
         json!({
-            "protocol": "skein-relational-row-page-lending-evidence-v1",
+            "protocol": "skein-relational-row-page-lending-evidence-v2",
             "rows": ROWS,
             "body_bytes": BODY_BYTES,
             "output_limit": OUTPUT_LIMIT,
@@ -112,12 +114,60 @@ fn main() {
             "required_allocation_reduction": REQUIRED_ALLOCATION_REDUCTION,
             "scan_shapes": scan_evidence.iter().map(ScanEvidence::json).collect::<Vec<_>>(),
             "point_lookup": point_evidence.json(),
+            "point_cache": point_cache_evidence.json(),
             "selective_gate_admitted": selective_gate_admitted,
             "evidence_admitted": admitted,
         })
     );
     assert!(admitted, "relational row-page lending evidence rejected");
     fixture.remove();
+}
+
+fn measure_point_cache(fixture: &Fixture) -> PointCacheEvidence {
+    let (reader, cache) = fixture.fresh_reader();
+    let key = skein_storage::RelationalKey(vec![RelationalValue::Text(row_id(0))]);
+    let cold = run_point_cache_probe(&reader, &key);
+    let warm = run_point_cache_probe(&reader, &key);
+    let resident_bytes = cache.snapshot().resident_bytes;
+    let admitted = cold.cache_hits == 0
+        && cold.cache_misses == 1
+        && cold.file_pages_read == 1
+        && warm.cache_hits == 1
+        && warm.cache_misses == 0
+        && warm.file_pages_read == 0
+        && resident_bytes > 0;
+    PointCacheEvidence {
+        cold,
+        warm,
+        resident_bytes,
+        admitted,
+    }
+}
+
+fn run_point_cache_probe(
+    reader: &RelationalRowPageSnapshotReader,
+    key: &skein_storage::RelationalKey,
+) -> PointCacheProbe {
+    let mut hydration = RelationalHydrationBudget::default();
+    let (row, report) = reader
+        .point_projected_fields(
+            "messages",
+            key,
+            RelationalRowPageProjectedFields {
+                requested_fields: POINT_FIELDS,
+                hydration_fields: &[],
+            },
+            RelationalRowPageSnapshotReadLimits::default(),
+            &mut hydration,
+            &RuntimeTaskContext::default(),
+        )
+        .expect("point cache evidence read");
+    assert!(row.is_some());
+    PointCacheProbe {
+        cache_hits: report.demand.cache_hits,
+        cache_misses: report.demand.cache_misses,
+        file_pages_read: report.demand.file_pages_read,
+    }
 }
 
 fn measure_scan(
@@ -523,32 +573,12 @@ impl Fixture {
                 .as_nanos()
         ));
         seed_database(&directory);
-        let row_root = Arc::new(
-            RelationalRowPageRootReader::open_generation(
-                &directory,
-                1,
-                RelationalRowPagePublicationConfig::default(),
-            )
-            .expect("open benchmark row root"),
-        );
-        let overflow_root = Arc::new(
-            RelationalOverflowRootReader::open_generation(
-                &directory,
-                1,
-                RelationalOverflowPublicationConfig::default(),
-            )
-            .expect("open benchmark overflow root"),
-        );
-        let view = Arc::new(RelationalRowPageReadView::from_base(row_root));
-        let reader = RelationalRowPageSnapshotReader::new(
-            view,
-            overflow_root,
-            None,
-            Arc::new(SegmentCache::new(CACHE_BYTES)),
-            StoreId(990),
-        )
-        .expect("open benchmark snapshot reader");
+        let (reader, _) = open_reader(&directory, StoreId(990));
         Self { directory, reader }
+    }
+
+    fn fresh_reader(&self) -> (RelationalRowPageSnapshotReader, Arc<SegmentCache>) {
+        open_reader(&self.directory, StoreId(991))
     }
 
     fn remove(self) {
@@ -556,6 +586,39 @@ impl Fixture {
         drop(self);
         std::fs::remove_dir_all(directory).expect("remove lending benchmark fixture");
     }
+}
+
+fn open_reader(
+    directory: &Path,
+    store_id: StoreId,
+) -> (RelationalRowPageSnapshotReader, Arc<SegmentCache>) {
+    let row_root = Arc::new(
+        RelationalRowPageRootReader::open_generation(
+            directory,
+            1,
+            RelationalRowPagePublicationConfig::default(),
+        )
+        .expect("open benchmark row root"),
+    );
+    let overflow_root = Arc::new(
+        RelationalOverflowRootReader::open_generation(
+            directory,
+            1,
+            RelationalOverflowPublicationConfig::default(),
+        )
+        .expect("open benchmark overflow root"),
+    );
+    let view = Arc::new(RelationalRowPageReadView::from_base(row_root));
+    let cache = Arc::new(SegmentCache::new(CACHE_BYTES));
+    let reader = RelationalRowPageSnapshotReader::new(
+        view,
+        overflow_root,
+        None,
+        Arc::clone(&cache),
+        store_id,
+    )
+    .expect("open benchmark snapshot reader");
+    (reader, cache)
 }
 
 fn seed_database(directory: &Path) {
@@ -690,6 +753,34 @@ struct PointEvidence {
     allowed_allocated_regression_bytes: u128,
     checksum: u64,
     admitted: bool,
+}
+
+struct PointCacheProbe {
+    cache_hits: usize,
+    cache_misses: usize,
+    file_pages_read: usize,
+}
+
+struct PointCacheEvidence {
+    cold: PointCacheProbe,
+    warm: PointCacheProbe,
+    resident_bytes: u64,
+    admitted: bool,
+}
+
+impl PointCacheEvidence {
+    fn json(&self) -> serde_json::Value {
+        json!({
+            "cold_cache_hits": self.cold.cache_hits,
+            "cold_cache_misses": self.cold.cache_misses,
+            "cold_file_pages_read": self.cold.file_pages_read,
+            "warm_cache_hits": self.warm.cache_hits,
+            "warm_cache_misses": self.warm.cache_misses,
+            "warm_file_pages_read": self.warm.file_pages_read,
+            "resident_bytes": self.resident_bytes,
+            "admitted": self.admitted,
+        })
+    }
 }
 
 impl PointEvidence {

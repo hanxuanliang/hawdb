@@ -40,10 +40,16 @@ Both paths must produce the same checksum. This is a gross-regression guard for
 the unchanged point path, not a claim that exact-range lookup is its historical
 latency baseline.
 
+A separate fresh-cache point probe is a behavioral gate rather than a timing
+comparison. Its first lookup must report exactly one page-cache miss and one
+file page read. Repeating the same lookup must report exactly one page-cache hit
+with no miss or file page read. This makes the compact verified cache path part
+of the evidence instead of relying on process-wide cache counters.
+
 Debug execution uses 4,096 rows and three samples so `cargo test --benches`
 remains bounded. Release evidence uses 32,768 rows, eleven alternating samples,
 and 2,048 point probes. The emitted JSON protocol is
-`skein-relational-row-page-lending-evidence-v1`; a rejected gate exits
+`skein-relational-row-page-lending-evidence-v2`; a rejected gate exits
 non-zero.
 
 ## Recorded release evidence
@@ -60,6 +66,8 @@ portable latency targets:
 | 100% | 32 | 43,386 B | 34,426 B | 20.7% | 1.00x |
 
 All checksums matched. The three selective shapes were admitted through the
-allocated-byte criterion. The 2,048-probe direct point path was within 0.4% of
-the owned exact-range latency and allocated slightly fewer bytes, so the point
-safety net was admitted.
+allocated-byte criterion. The 2,048-probe direct point path took 63.8 ms and
+allocated 6,055,104 B, while the owned exact-range path took 65.0 ms and
+allocated 6,808,768 B. The fresh-cache probe reported one cold miss and file
+read followed by one warm hit and no file read; its compact resident page used
+287,410 B. Both point gates were admitted.
