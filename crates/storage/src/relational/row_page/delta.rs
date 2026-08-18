@@ -16,6 +16,7 @@ mod reader;
 
 pub use builder::RelationalRowDeltaBuilder;
 pub use reader::RelationalRowDeltaReader;
+pub(super) use reader::RelationalRowDeltaRunRangeCursor;
 
 pub const RELATIONAL_ROW_DELTA_MANIFEST_FILE: &str = "relational-row-delta.manifest.skein";
 const RELATIONAL_ROW_DELTA_PUBLICATION_LOCK_FILE: &str = "relational-row-delta.lock";

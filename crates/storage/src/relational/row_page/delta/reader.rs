@@ -13,9 +13,8 @@ use crate::relational::{
     RelationalKey, RelationalOverflowRootReader, RelationalRecoveryFence, RelationalRow,
     RelationalRowPageRootReader, RelationalValue,
 };
-use skein_integrity::IntegrityHasher;
+use skein_integrity::{IntegrityDigest, IntegrityHasher};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -254,6 +253,120 @@ impl RelationalRowDeltaReader {
             self.poisoned.store(true, Ordering::Release);
         }
         result
+    }
+
+    pub(crate) fn range_sources(
+        &self,
+        table: &str,
+        lower: Bound<&RelationalKey>,
+        upper: Bound<&RelationalKey>,
+        max_sources: usize,
+    ) -> Result<
+        (
+            Vec<RelationalRowDeltaRunRangeCursor<'_>>,
+            RelationalRowDeltaReadReport,
+        ),
+        RelationalRowDeltaError,
+    > {
+        if self.is_poisoned() {
+            return Err(RelationalRowDeltaError::Corrupt(
+                "row delta reader is poisoned".to_string(),
+            ));
+        }
+        let result = self.range_sources_inner(table, lower, upper, max_sources);
+        if result.as_ref().is_err_and(should_poison) {
+            self.poisoned.store(true, Ordering::Release);
+        }
+        result
+    }
+
+    fn range_sources_inner(
+        &self,
+        table: &str,
+        lower: Bound<&RelationalKey>,
+        upper: Bound<&RelationalKey>,
+        max_sources: usize,
+    ) -> Result<
+        (
+            Vec<RelationalRowDeltaRunRangeCursor<'_>>,
+            RelationalRowDeltaReadReport,
+        ),
+        RelationalRowDeltaError,
+    > {
+        let Ok(table_ordinal) = self
+            .manifest
+            .tables
+            .binary_search_by(|candidate| candidate.table.as_str().cmp(table))
+        else {
+            return Ok((Vec::new(), RelationalRowDeltaReadReport::default()));
+        };
+        let table_ordinal = u32::try_from(table_ordinal).map_err(|_| {
+            RelationalRowDeltaError::Corrupt("row delta table ordinal does not fit u32".to_string())
+        })?;
+        let encoded_lower = encode_range_bound(lower, self.config)?;
+        let encoded_upper = encode_range_bound(upper, self.config)?;
+        if encoded_bounds_are_empty(encoded_lower.as_ref(), encoded_upper.as_ref()) {
+            return Ok((Vec::new(), RelationalRowDeltaReadReport::default()));
+        }
+        let matching = self
+            .manifest
+            .runs
+            .iter()
+            .filter(|run| {
+                run_intersects_range(
+                    run,
+                    table_ordinal,
+                    encoded_lower.as_ref(),
+                    encoded_upper.as_ref(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if matching.len() > max_sources {
+            return Err(RelationalRowDeltaError::Admission(format!(
+                "row delta range needs {} merge sources, exceeding remaining source limit {max_sources}",
+                matching.len()
+            )));
+        }
+
+        let context = RowDeltaRunContext {
+            directory: &self.directory,
+            base: self.manifest.base,
+            delta_generation: self.manifest.delta_generation,
+            schema_set_digest: self.manifest.schema_set_digest,
+            tables: &self.manifest.tables,
+            config: self.config,
+        };
+        let encoded_lower =
+            encoded_lower.map(|(key, inclusive)| (Arc::<[u8]>::from(key), inclusive));
+        let encoded_upper =
+            encoded_upper.map(|(key, inclusive)| (Arc::<[u8]>::from(key), inclusive));
+        let mut sources = Vec::with_capacity(matching.len());
+        let mut report = RelationalRowDeltaReadReport::default();
+        for run in matching {
+            report.runs_read = report.runs_read.checked_add(1).ok_or_else(|| {
+                RelationalRowDeltaError::Admission(
+                    "row delta range run counter overflow".to_string(),
+                )
+            })?;
+            report.bytes_read =
+                report
+                    .bytes_read
+                    .checked_add(run.encoded_len)
+                    .ok_or_else(|| {
+                        RelationalRowDeltaError::Admission(
+                            "row delta range byte counter overflow".to_string(),
+                        )
+                    })?;
+            sources.push(RelationalRowDeltaRunRangeCursor {
+                reader: self,
+                run: RowDeltaRunCursor::open(context, run)?,
+                table_ordinal,
+                lower: encoded_lower.clone(),
+                upper: encoded_upper.clone(),
+                exhausted: false,
+            });
+        }
+        Ok((sources, report))
     }
 
     fn visit_range_entries_inner(
@@ -704,62 +817,118 @@ fn visit_run(
         u64,
     ) -> Result<bool, RelationalRowDeltaError>,
 ) -> Result<bool, RelationalRowDeltaError> {
-    let path = context.directory.join(relational_row_delta_run_file(
-        context.base.generation,
-        context.delta_generation,
-        run.ordinal,
-    ));
-    codec::validate_artifact_length(&path, run.encoded_len)?;
-    let mut descriptor_file = File::open(&path).map_err(durability("open row delta run"))?;
-    let mut header = [0u8; codec::RUN_HEADER_BYTES];
-    descriptor_file
-        .read_exact(&mut header)
-        .map_err(durability("read row delta run header"))?;
-    let decoded_header = codec::decode_run_header(
-        &header,
-        context.base,
-        context.delta_generation,
-        context.schema_set_digest,
-        run,
-    )?;
-    let mut content_hasher = IntegrityHasher::new();
-    content_hasher.update(codec::run_integrity_prefix(&header));
-    let mut artifact_hasher = IntegrityHasher::new();
-    artifact_hasher.update(&header);
-    let mut descriptor = [0u8; codec::ENTRY_DESCRIPTOR_BYTES];
-    for _ in 0..run.entry_count {
-        descriptor_file
-            .read_exact(&mut descriptor)
-            .map_err(durability("read row delta entry descriptor"))?;
-        codec::decode_entry_descriptor(&descriptor)?;
-        content_hasher.update(&descriptor);
-        artifact_hasher.update(&descriptor);
+    let mut cursor = RowDeltaRunCursor::open(context, run)?;
+    while let Some(entry) = cursor.next_entry()? {
+        if !visit(
+            &context.tables[entry.table_ordinal as usize].table,
+            &entry.primary_key,
+            &entry.value,
+            entry.last_modified_epoch,
+        )? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+struct RowDeltaRunEntry {
+    table_ordinal: u32,
+    encoded_primary_key: Vec<u8>,
+    primary_key: RelationalKey,
+    value: RelationalRowPageRecoveredValue,
+    last_modified_epoch: u64,
+}
+
+struct RowDeltaRunCursor<'a> {
+    context: RowDeltaRunContext<'a>,
+    run: &'a RowDeltaRunDescriptor,
+    file: File,
+    payload_start: u64,
+    entry_ordinal: u32,
+    expected_payload_offset: u64,
+    previous_key: Option<(u32, Vec<u8>)>,
+    expected_content_digest: IntegrityDigest,
+    content_hasher: Option<IntegrityHasher>,
+    artifact_hasher: Option<IntegrityHasher>,
+    completed: bool,
+}
+
+impl<'a> RowDeltaRunCursor<'a> {
+    fn open(
+        context: RowDeltaRunContext<'a>,
+        run: &'a RowDeltaRunDescriptor,
+    ) -> Result<Self, RelationalRowDeltaError> {
+        let path = context.directory.join(relational_row_delta_run_file(
+            context.base.generation,
+            context.delta_generation,
+            run.ordinal,
+        ));
+        codec::validate_artifact_length(&path, run.encoded_len)?;
+        let file = File::open(&path).map_err(durability("open row delta run"))?;
+        let mut header = [0u8; codec::RUN_HEADER_BYTES];
+        read_exact_at(&file, &mut header, 0).map_err(durability("read row delta run header"))?;
+        let decoded_header = codec::decode_run_header(
+            &header,
+            context.base,
+            context.delta_generation,
+            context.schema_set_digest,
+            run,
+        )?;
+        let mut content_hasher = IntegrityHasher::new();
+        content_hasher.update(codec::run_integrity_prefix(&header));
+        let mut artifact_hasher = IntegrityHasher::new();
+        artifact_hasher.update(&header);
+        let mut descriptor = [0u8; codec::ENTRY_DESCRIPTOR_BYTES];
+        for entry_ordinal in 0..run.entry_count {
+            let offset = descriptor_offset(entry_ordinal)?;
+            read_exact_at(&file, &mut descriptor, offset)
+                .map_err(durability("read row delta entry descriptor"))?;
+            codec::decode_entry_descriptor(&descriptor)?;
+            content_hasher.update(&descriptor);
+            artifact_hasher.update(&descriptor);
+        }
+        let payload_start = (codec::RUN_HEADER_BYTES as u64)
+            .checked_add(run.descriptor_bytes)
+            .ok_or_else(|| {
+                RelationalRowDeltaError::Corrupt("row delta payload offset overflow".to_string())
+            })?;
+        Ok(Self {
+            context,
+            run,
+            file,
+            payload_start,
+            entry_ordinal: 0,
+            expected_payload_offset: 0,
+            previous_key: None,
+            expected_content_digest: decoded_header.content_digest,
+            content_hasher: Some(content_hasher),
+            artifact_hasher: Some(artifact_hasher),
+            completed: false,
+        })
     }
 
-    descriptor_file
-        .seek(SeekFrom::Start(codec::RUN_HEADER_BYTES as u64))
-        .map_err(durability("seek row delta descriptor directory"))?;
-    let payload_start = (codec::RUN_HEADER_BYTES as u64)
-        .checked_add(run.descriptor_bytes)
-        .ok_or_else(|| {
-            RelationalRowDeltaError::Corrupt("row delta payload offset overflow".to_string())
-        })?;
-    let mut payload_file = File::open(&path).map_err(durability("open row delta payload"))?;
-    payload_file
-        .seek(SeekFrom::Start(payload_start))
-        .map_err(durability("seek row delta payload"))?;
-    let mut expected_payload_offset = 0u64;
-    let mut previous_key: Option<(u32, Vec<u8>)> = None;
-    for entry_ordinal in 0..run.entry_count {
-        descriptor_file
-            .read_exact(&mut descriptor)
-            .map_err(durability("read row delta entry descriptor"))?;
+    fn next_entry(&mut self) -> Result<Option<RowDeltaRunEntry>, RelationalRowDeltaError> {
+        if self.completed {
+            return Ok(None);
+        }
+        if self.entry_ordinal == self.run.entry_count {
+            self.finish()?;
+            return Ok(None);
+        }
+        let entry_ordinal = self.entry_ordinal;
+        let mut descriptor = [0u8; codec::ENTRY_DESCRIPTOR_BYTES];
+        read_exact_at(
+            &self.file,
+            &mut descriptor,
+            descriptor_offset(entry_ordinal)?,
+        )
+        .map_err(durability("read row delta entry descriptor"))?;
         let decoded = codec::decode_entry_descriptor(&descriptor)?;
-        if decoded.table_ordinal as usize >= context.tables.len()
-            || decoded.last_modified_epoch <= context.base.source_commit_epoch
-            || decoded.last_modified_epoch < run.start_epoch
-            || decoded.last_modified_epoch > run.end_epoch
-            || decoded.key_offset != expected_payload_offset
+        if decoded.table_ordinal as usize >= self.context.tables.len()
+            || decoded.last_modified_epoch <= self.context.base.source_commit_epoch
+            || decoded.last_modified_epoch < self.run.start_epoch
+            || decoded.last_modified_epoch > self.run.end_epoch
+            || decoded.key_offset != self.expected_payload_offset
             || decoded.row_offset
                 != decoded
                     .key_offset
@@ -770,8 +939,8 @@ fn visit_run(
                         )
                     })?
             || decoded.key_len == 0
-            || decoded.key_len as usize > context.config.row_limits.max_key_bytes.get()
-            || decoded.row_len as usize > context.config.row_limits.max_row_bytes.get()
+            || decoded.key_len as usize > self.context.config.row_limits.max_key_bytes.get()
+            || decoded.row_len as usize > self.context.config.row_limits.max_row_bytes.get()
             || (decoded.kind == 0) != (decoded.row_len == 0)
         {
             return Err(RelationalRowDeltaError::Corrupt(format!(
@@ -780,30 +949,52 @@ fn visit_run(
         }
         let mut encoded_key = vec![0u8; decoded.key_len as usize];
         let mut encoded_row = vec![0u8; decoded.row_len as usize];
-        payload_file
-            .read_exact(&mut encoded_key)
+        let key_offset = self
+            .payload_start
+            .checked_add(decoded.key_offset)
+            .ok_or_else(|| {
+                RelationalRowDeltaError::Corrupt("row delta key offset overflow".to_string())
+            })?;
+        let row_offset = self
+            .payload_start
+            .checked_add(decoded.row_offset)
+            .ok_or_else(|| {
+                RelationalRowDeltaError::Corrupt("row delta row offset overflow".to_string())
+            })?;
+        read_exact_at(&self.file, &mut encoded_key, key_offset)
             .map_err(durability("read row delta primary key"))?;
-        payload_file
-            .read_exact(&mut encoded_row)
+        read_exact_at(&self.file, &mut encoded_row, row_offset)
             .map_err(durability("read row delta row"))?;
-        expected_payload_offset = decoded
+        self.expected_payload_offset = decoded
             .row_offset
             .checked_add(decoded.row_len as u64)
             .ok_or_else(|| {
                 RelationalRowDeltaError::Corrupt("row delta payload range overflow".to_string())
             })?;
-        content_hasher.update(&encoded_key);
-        content_hasher.update(&encoded_row);
-        artifact_hasher.update(&encoded_key);
-        artifact_hasher.update(&encoded_row);
+        self.content_hasher
+            .as_mut()
+            .expect("active run has a content hasher")
+            .update(&encoded_key);
+        self.content_hasher
+            .as_mut()
+            .expect("active run has a content hasher")
+            .update(&encoded_row);
+        self.artifact_hasher
+            .as_mut()
+            .expect("active run has an artifact hasher")
+            .update(&encoded_key);
+        self.artifact_hasher
+            .as_mut()
+            .expect("active run has an artifact hasher")
+            .update(&encoded_row);
         let mut entry_hasher = IntegrityHasher::new();
         entry_hasher.update(&encoded_key);
         entry_hasher.update(&encoded_row);
         let entry_crc32c = entry_hasher.finish().crc32c.get();
         let expected_binding = codec::entry_binding(
-            context.base,
-            context.delta_generation,
-            run.ordinal,
+            self.context.base,
+            self.context.delta_generation,
+            self.run.ordinal,
             entry_ordinal,
             &descriptor[..48],
             &encoded_key,
@@ -814,7 +1005,7 @@ fn visit_run(
                 "row delta entry {entry_ordinal} checksum or binding mismatch"
             )));
         }
-        if previous_key.as_ref().is_some_and(|(table, key)| {
+        if self.previous_key.as_ref().is_some_and(|(table, key)| {
             *table > decoded.table_ordinal
                 || (*table == decoded.table_ordinal && key >= &encoded_key)
         }) {
@@ -823,22 +1014,21 @@ fn visit_run(
             ));
         }
         if entry_ordinal == 0
-            && (decoded.table_ordinal != run.lower_bound.table_ordinal
-                || encoded_key != run.lower_bound.encoded_primary_key)
+            && (decoded.table_ordinal != self.run.lower_bound.table_ordinal
+                || encoded_key != self.run.lower_bound.encoded_primary_key)
         {
             return Err(RelationalRowDeltaError::Corrupt(
                 "row delta lower key bound mismatch".to_string(),
             ));
         }
-        if entry_ordinal + 1 == run.entry_count
-            && (decoded.table_ordinal != run.upper_bound.table_ordinal
-                || encoded_key != run.upper_bound.encoded_primary_key)
+        if entry_ordinal + 1 == self.run.entry_count
+            && (decoded.table_ordinal != self.run.upper_bound.table_ordinal
+                || encoded_key != self.run.upper_bound.encoded_primary_key)
         {
             return Err(RelationalRowDeltaError::Corrupt(
                 "row delta upper key bound mismatch".to_string(),
             ));
         }
-
         let primary_key = decode_ordered_relational_key(&encoded_key).map_err(|error| {
             RelationalRowDeltaError::Corrupt(format!(
                 "row delta primary key cannot be decoded: {error}"
@@ -847,35 +1037,170 @@ fn visit_run(
         let value = decode_value(
             decoded.kind,
             &encoded_row,
-            &context.tables[decoded.table_ordinal as usize],
-            context.config,
+            &self.context.tables[decoded.table_ordinal as usize],
+            self.context.config,
         )?;
-        previous_key = Some((decoded.table_ordinal, encoded_key));
-        if !visit(
-            &context.tables[decoded.table_ordinal as usize].table,
-            &primary_key,
-            &value,
-            decoded.last_modified_epoch,
-        )? {
-            return Ok(false);
+        self.previous_key = Some((decoded.table_ordinal, encoded_key.clone()));
+        self.entry_ordinal += 1;
+        Ok(Some(RowDeltaRunEntry {
+            table_ordinal: decoded.table_ordinal,
+            encoded_primary_key: encoded_key,
+            primary_key,
+            value,
+            last_modified_epoch: decoded.last_modified_epoch,
+        }))
+    }
+
+    fn finish(&mut self) -> Result<(), RelationalRowDeltaError> {
+        if self.expected_payload_offset != self.run.payload_bytes {
+            return Err(RelationalRowDeltaError::Corrupt(
+                "row delta payload coverage mismatch".to_string(),
+            ));
         }
+        if self
+            .content_hasher
+            .take()
+            .expect("active run has a content hasher")
+            .finish()
+            != self.expected_content_digest
+        {
+            return Err(RelationalRowDeltaError::Corrupt(
+                "row delta run content checksum mismatch".to_string(),
+            ));
+        }
+        if self
+            .artifact_hasher
+            .take()
+            .expect("active run has an artifact hasher")
+            .finish()
+            != self.run.digest
+        {
+            return Err(RelationalRowDeltaError::Corrupt(
+                "row delta run artifact checksum mismatch".to_string(),
+            ));
+        }
+        self.completed = true;
+        Ok(())
     }
-    if expected_payload_offset != run.payload_bytes {
-        return Err(RelationalRowDeltaError::Corrupt(
-            "row delta payload coverage mismatch".to_string(),
-        ));
+}
+
+pub(crate) struct RelationalRowDeltaRunRangeCursor<'a> {
+    reader: &'a RelationalRowDeltaReader,
+    run: RowDeltaRunCursor<'a>,
+    table_ordinal: u32,
+    lower: Option<(Arc<[u8]>, bool)>,
+    upper: Option<(Arc<[u8]>, bool)>,
+    exhausted: bool,
+}
+
+impl RelationalRowDeltaRunRangeCursor<'_> {
+    pub(crate) fn next(
+        &mut self,
+    ) -> Result<
+        Option<(RelationalKey, RelationalRowPageRecoveredValue, u64)>,
+        RelationalRowDeltaError,
+    > {
+        let result = self.next_inner();
+        if result.as_ref().is_err_and(should_poison) {
+            self.reader.poisoned.store(true, Ordering::Release);
+        }
+        result
     }
-    if content_hasher.finish() != decoded_header.content_digest {
-        return Err(RelationalRowDeltaError::Corrupt(
-            "row delta run content checksum mismatch".to_string(),
-        ));
+
+    fn next_inner(
+        &mut self,
+    ) -> Result<
+        Option<(RelationalKey, RelationalRowPageRecoveredValue, u64)>,
+        RelationalRowDeltaError,
+    > {
+        if self.exhausted {
+            return Ok(None);
+        }
+        while let Some(entry) = self.run.next_entry()? {
+            match entry.table_ordinal.cmp(&self.table_ordinal) {
+                std::cmp::Ordering::Less => continue,
+                std::cmp::Ordering::Greater => {
+                    self.exhausted = true;
+                    return Ok(None);
+                }
+                std::cmp::Ordering::Equal => {}
+            }
+            if self.lower.as_ref().is_some_and(|(lower, inclusive)| {
+                entry.encoded_primary_key.as_slice() < lower.as_ref()
+                    || (!inclusive && entry.encoded_primary_key.as_slice() == lower.as_ref())
+            }) {
+                continue;
+            }
+            if self.upper.as_ref().is_some_and(|(upper, inclusive)| {
+                entry.encoded_primary_key.as_slice() > upper.as_ref()
+                    || (!inclusive && entry.encoded_primary_key.as_slice() == upper.as_ref())
+            }) {
+                self.exhausted = true;
+                return Ok(None);
+            }
+            return Ok(Some((
+                entry.primary_key,
+                entry.value,
+                entry.last_modified_epoch,
+            )));
+        }
+        self.exhausted = true;
+        Ok(None)
     }
-    if artifact_hasher.finish() != run.digest {
-        return Err(RelationalRowDeltaError::Corrupt(
-            "row delta run artifact checksum mismatch".to_string(),
-        ));
+
+    pub(crate) const fn is_exhausted(&self) -> bool {
+        self.exhausted
     }
-    Ok(true)
+}
+
+fn descriptor_offset(entry_ordinal: u32) -> Result<u64, RelationalRowDeltaError> {
+    (codec::RUN_HEADER_BYTES as u64)
+        .checked_add(
+            u64::from(entry_ordinal)
+                .checked_mul(codec::ENTRY_DESCRIPTOR_BYTES as u64)
+                .ok_or_else(|| {
+                    RelationalRowDeltaError::Corrupt(
+                        "row delta descriptor offset overflow".to_string(),
+                    )
+                })?,
+        )
+        .ok_or_else(|| {
+            RelationalRowDeltaError::Corrupt("row delta descriptor offset overflow".to_string())
+        })
+}
+
+#[cfg(unix)]
+fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    file.read_exact_at(buffer, offset)
+}
+
+#[cfg(windows)]
+fn read_exact_at(file: &File, mut buffer: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    use std::os::windows::fs::FileExt;
+    while !buffer.is_empty() {
+        let read = file.seek_read(buffer, offset)?;
+        if read == 0 {
+            return Err(Error::new(
+                ErrorKind::UnexpectedEof,
+                "failed to fill buffer",
+            ));
+        }
+        offset = offset
+            .checked_add(read as u64)
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "read offset overflow"))?;
+        buffer = &mut buffer[read..];
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = file.try_clone()?;
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(buffer)
 }
 
 pub(super) fn decode_staged_value(

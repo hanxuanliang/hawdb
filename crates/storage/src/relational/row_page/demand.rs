@@ -14,7 +14,6 @@ use crate::relational::{
 };
 use crate::{SegmentCache, StoreId};
 use skein_core::{RuntimeCancellationReason, RuntimeTaskContext};
-use std::collections::{btree_map, BTreeMap};
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::Bound;
@@ -63,15 +62,83 @@ pub(super) struct RelationalRowPageOverlayPoint<'a> {
     pub overflow_root: Option<&'a RelationalOverflowRootReader>,
 }
 
-pub(super) struct RelationalRowPageOverlayRange<'a> {
-    pub rows: BTreeMap<RelationalKey, RelationalRowPageProjectedOverlayValue>,
+pub(super) trait RelationalRowPageOverlayCursor {
+    fn peek_key(&mut self) -> Result<Option<&RelationalKey>, RelationalRowPageDemandReadError>;
+
+    fn next_row(
+        &mut self,
+    ) -> Result<
+        Option<(RelationalKey, RelationalRowPageProjectedOverlayValue)>,
+        RelationalRowPageDemandReadError,
+    >;
+}
+
+impl<Cursor: RelationalRowPageOverlayCursor + ?Sized> RelationalRowPageOverlayCursor
+    for &mut Cursor
+{
+    fn peek_key(&mut self) -> Result<Option<&RelationalKey>, RelationalRowPageDemandReadError> {
+        (**self).peek_key()
+    }
+
+    fn next_row(
+        &mut self,
+    ) -> Result<
+        Option<(RelationalKey, RelationalRowPageProjectedOverlayValue)>,
+        RelationalRowPageDemandReadError,
+    > {
+        (**self).next_row()
+    }
+}
+
+#[cfg(test)]
+impl RelationalRowPageOverlayCursor
+    for std::iter::Peekable<
+        std::collections::btree_map::IntoIter<
+            RelationalKey,
+            RelationalRowPageProjectedOverlayValue,
+        >,
+    >
+{
+    fn peek_key(&mut self) -> Result<Option<&RelationalKey>, RelationalRowPageDemandReadError> {
+        Ok(self.peek().map(|(key, _)| key))
+    }
+
+    fn next_row(
+        &mut self,
+    ) -> Result<
+        Option<(RelationalKey, RelationalRowPageProjectedOverlayValue)>,
+        RelationalRowPageDemandReadError,
+    > {
+        Ok(self.next())
+    }
+}
+
+struct EmptyOverlayCursor;
+
+impl RelationalRowPageOverlayCursor for EmptyOverlayCursor {
+    fn peek_key(&mut self) -> Result<Option<&RelationalKey>, RelationalRowPageDemandReadError> {
+        Ok(None)
+    }
+
+    fn next_row(
+        &mut self,
+    ) -> Result<
+        Option<(RelationalKey, RelationalRowPageProjectedOverlayValue)>,
+        RelationalRowPageDemandReadError,
+    > {
+        Ok(None)
+    }
+}
+
+pub(super) struct RelationalRowPageOverlayRange<'a, Cursor> {
+    pub cursor: Cursor,
     pub overflow_root: Option<&'a RelationalOverflowRootReader>,
 }
 
-pub(super) struct RelationalRowPageOverlayRead<'a> {
+pub(super) struct RelationalRowPageOverlayRead<'a, Cursor> {
     pub range: RelationalRowPageProjectedRange<'a>,
     pub limits: RelationalRowPageDemandReadLimits,
-    pub overlay: RelationalRowPageOverlayRange<'a>,
+    pub overlay: RelationalRowPageOverlayRange<'a, Cursor>,
 }
 
 struct ProjectedPointReadRequest<'a> {
@@ -459,7 +526,7 @@ impl RelationalRowPageDemandReader {
                 range,
                 limits,
                 overlay: RelationalRowPageOverlayRange {
-                    rows: BTreeMap::new(),
+                    cursor: EmptyOverlayCursor,
                     overflow_root: None,
                 },
             },
@@ -471,9 +538,9 @@ impl RelationalRowPageDemandReader {
         )
     }
 
-    pub(super) fn visit_projected_range_with_overlay(
+    pub(super) fn visit_projected_range_with_overlay<Cursor: RelationalRowPageOverlayCursor>(
         &self,
-        read: RelationalRowPageOverlayRead<'_>,
+        read: RelationalRowPageOverlayRead<'_, Cursor>,
         hydration: &mut RelationalHydrationBudget,
         task: &RuntimeTaskContext,
         hydration_fields: Option<&[usize]>,
@@ -493,9 +560,9 @@ impl RelationalRowPageDemandReader {
         Ok(report)
     }
 
-    pub(super) fn visit_projected_range_with_overlay_ref(
+    pub(super) fn visit_projected_range_with_overlay_ref<Cursor: RelationalRowPageOverlayCursor>(
         &self,
-        read: RelationalRowPageOverlayRead<'_>,
+        read: RelationalRowPageOverlayRead<'_, Cursor>,
         hydration: &mut RelationalHydrationBudget,
         task: &RuntimeTaskContext,
         hydration_fields: Option<&[usize]>,
@@ -524,9 +591,9 @@ impl RelationalRowPageDemandReader {
         let table_root = context.table_root(table)?;
         let column_count = table_root.column_count.get() as usize;
         context.validate_requested_fields(requested_fields, column_count)?;
-        let has_overlay = !overlay.rows.is_empty();
         let overlay_overflow = overlay.overflow_root;
-        let mut overlay = overlay.rows.into_iter().peekable();
+        let mut overlay = overlay.cursor;
+        let has_overlay = overlay.peek_key()?.is_some();
         if table_root.page_count == 0 {
             emit_remaining_overlay(
                 &mut context,
@@ -652,11 +719,14 @@ impl RelationalRowPageDemandReader {
                     return Ok(context.finish());
                 }
                 if overlay
-                    .peek()
-                    .is_some_and(|(overlay_key, _)| overlay_key == primary_key)
+                    .peek_key()?
+                    .is_some_and(|overlay_key| overlay_key == primary_key)
                 {
-                    let (overlay_key, overlay_value) =
-                        overlay.next().expect("peeked overlay entry exists");
+                    let (overlay_key, overlay_value) = overlay.next_row()?.ok_or_else(|| {
+                        RelationalRowPageDemandReadError::Corrupt(
+                            "overlay cursor lost a matching row".to_string(),
+                        )
+                    })?;
                     if !emit_overlay_row(
                         &mut context,
                         overlay_key,
@@ -1045,9 +1115,6 @@ fn validate_table_column_count(
     Ok(())
 }
 
-type OverlayIterator =
-    std::iter::Peekable<btree_map::IntoIter<RelationalKey, RelationalRowPageProjectedOverlayValue>>;
-
 fn emit_base_row(
     context: &mut DemandReadContext<'_>,
     row: RelationalProjectedRowRef<'_>,
@@ -1081,9 +1148,9 @@ fn emit_base_row(
     Ok(keep_going)
 }
 
-fn emit_overlay_before(
+fn emit_overlay_before<Cursor: RelationalRowPageOverlayCursor>(
     context: &mut DemandReadContext<'_>,
-    overlay: &mut OverlayIterator,
+    overlay: &mut Cursor,
     base_key: &RelationalKey,
     overflow_root: Option<&RelationalOverflowRootReader>,
     hydration_fields: Option<&[usize]>,
@@ -1094,10 +1161,14 @@ fn emit_overlay_before(
     ) -> bool,
 ) -> Result<bool, RelationalRowPageDemandReadError> {
     while overlay
-        .peek()
-        .is_some_and(|(overlay_key, _)| overlay_key < base_key)
+        .peek_key()?
+        .is_some_and(|overlay_key| overlay_key < base_key)
     {
-        let (key, value) = overlay.next().expect("peeked overlay entry exists");
+        let (key, value) = overlay.next_row()?.ok_or_else(|| {
+            RelationalRowPageDemandReadError::Corrupt(
+                "overlay cursor lost a peeked row".to_string(),
+            )
+        })?;
         if !emit_overlay_row(
             context,
             key,
@@ -1113,9 +1184,9 @@ fn emit_overlay_before(
     Ok(true)
 }
 
-fn emit_remaining_overlay(
+fn emit_remaining_overlay<Cursor: RelationalRowPageOverlayCursor>(
     context: &mut DemandReadContext<'_>,
-    overlay: &mut OverlayIterator,
+    overlay: &mut Cursor,
     overflow_root: Option<&RelationalOverflowRootReader>,
     hydration_fields: Option<&[usize]>,
     resolve: &mut ProjectedRowResolver<'_>,
@@ -1124,7 +1195,7 @@ fn emit_remaining_overlay(
         &mut RelationalHydrationBudget,
     ) -> bool,
 ) -> Result<bool, RelationalRowPageDemandReadError> {
-    for (key, value) in overlay.by_ref() {
+    while let Some((key, value)) = overlay.next_row()? {
         if !emit_overlay_row(
             context,
             key,

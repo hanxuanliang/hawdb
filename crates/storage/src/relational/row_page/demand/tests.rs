@@ -9,6 +9,7 @@ use crate::relational::{
 };
 use skein_core::{RuntimeCancellationToken, RuntimeTaskContext};
 use skein_integrity::{integrity_digest, Sha256Digest};
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
@@ -255,7 +256,7 @@ fn lending_range_keeps_base_rows_borrowed_and_overlay_rows_owned() {
                 range: projected_range(Bound::Unbounded, Bound::Unbounded, &requested),
                 limits: RelationalRowPageDemandReadLimits::default(),
                 overlay: RelationalRowPageOverlayRange {
-                    rows: overlay,
+                    cursor: overlay.into_iter().peekable(),
                     overflow_root: None,
                 },
             },
@@ -304,7 +305,7 @@ fn lending_range_keeps_base_rows_borrowed_and_overlay_rows_owned() {
                 range: projected_range(Bound::Unbounded, Bound::Unbounded, &requested),
                 limits: RelationalRowPageDemandReadLimits::default(),
                 overlay: RelationalRowPageOverlayRange {
-                    rows: BTreeMap::new(),
+                    cursor: BTreeMap::new().into_iter().peekable(),
                     overflow_root: None,
                 },
             },

@@ -1881,19 +1881,27 @@ newer state, the checkpoint overflow root, or a latest-generation selector.
 
 Point lookup retains at most one selected overlay row and otherwise delegates
 to one checkpoint point read. A tombstone suppresses the checkpoint without
-opening its row page. Range lookup reads only intersecting recovery runs,
-visits only in-range live entries, and coalesces them into a primary-key-ordered
-map where a higher commit epoch replaces a lower one. Equal-epoch duplicate
-versions are corruption. The collector validates the complete row shape and
-retains only requested fields; an unselected large value is dropped after its
-one bounded decode/callback wave. Distinct projected
-overlay entries and conservative resident bytes are admitted from borrowed
-values before cloning or checkpoint streaming begins. The range then performs
-an ordered merge with the checkpoint cursor and moves projected values into the
-callback; it never materializes checkpoint rows or clones a selected overlay
-value twice, and an insertion after the final checkpoint page remains visible.
+opening its row page. Range lookup treats every intersecting recovery run and
+non-empty live batch as one strictly ordered source. Source count is admitted
+before run files are opened. Each source contributes at most one projected head
+to a min-heap, and advancing a source replaces that head instead of retaining
+the rest of the run or batch. Equal keys are coalesced at the heap frontier; a
+higher commit epoch replaces a lower one and an equal-epoch duplicate is
+corruption. The selected head then merges directly with the checkpoint page
+cursor. A tombstone consumes the matching checkpoint key, and an insertion
+after the final checkpoint page remains visible.
 
-Overlay collection has explicit entry and resident-byte limits in addition to
+The merge validates the complete source row shape but clones only requested
+fields into a head. An unselected large value is dropped after its one bounded
+decode wave. Its resident envelope is therefore one projected head per source,
+one selected/working head, and one pinned checkpoint page; it is independent of
+the total number of overlay rows in the requested range. A callback may observe
+the first ordered row after source heads are primed, without consuming the
+complete overlay. Recovery entry bindings remain demand-verified, and a fully
+consumed run additionally verifies its complete content and artifact digests.
+
+Overlay streaming has explicit distinct-entry, merge-source, and peak
+resident-byte limits in addition to
 the shared descriptor-height, page, slot-byte, decoded-row, pin, hydration,
 cancellation, and deadline limits of the demand reader. Large inline values are
 conservatively charged when selected even if their source row is `Arc`-shared.
@@ -1902,9 +1910,9 @@ Every projected row that resolves one or more overflow values consumes exactly
 one hydration-row unit. Resolution stages all counters and values, so admission
 or reference mismatch publishes neither a partial row nor partial budget.
 The reported identity, selected point source, recovery runs and bytes, live
-entries,
-distinct overlay entries, replacements, overlay resident bytes, page reads,
-cache behavior, emitted rows, and hydration bytes make each read explainable.
+entries, distinct overlay entries, replacements, merge-source count, peak
+buffered entries, peak overlay resident bytes, page reads, cache behavior,
+emitted rows, and hydration bytes make each read explainable.
 
 Admission, cancellation, deadline, callback stop, and callback unwind do not
 poison the pinned reader. Checksum, binding, epoch, schema-shape, immutable
@@ -2091,7 +2099,9 @@ and serving activation are separate lower-level obligations composed by the
 snapshot runtime. The bounded base-plus-WAL recovery view refines
 `SkeinRowRecovery.tla`; its SQL authority, pre-checkpoint exception,
 schema-checkpoint barrier, and unavailable-reader rejection refine
-`SkeinRelationalRowSnapshotRead.tla`.
+`SkeinRelationalRowSnapshotRead.tla`. Its physical one-head-per-source range
+merge, newest-epoch coalescing, and peak buffer admission refine
+`SkeinRelationalOverlayStreamingMerge.tla`.
 Immutable disk-backed row-delta publication refines `SkeinRowDeltaRuns.tla`;
 it remains outside the recovery mount and therefore does not discharge
 checkpoint binding, demand-read, lifecycle, or serving obligations.

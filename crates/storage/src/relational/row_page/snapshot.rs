@@ -1,9 +1,10 @@
 //! Snapshot-correct relational reads over checkpoint, recovery, and live rows.
 
 use super::demand::{
-    RelationalRowPageOverlayPoint, RelationalRowPageOverlayRange, RelationalRowPageOverlayRead,
-    RelationalRowPageProjectedOverlayValue,
+    RelationalRowPageOverlayCursor, RelationalRowPageOverlayPoint, RelationalRowPageOverlayRange,
+    RelationalRowPageOverlayRead, RelationalRowPageProjectedOverlayValue,
 };
+use super::live::RelationalRowPageOverlayRangeSources;
 use super::{
     RelationalProjectedField, RelationalProjectedRow, RelationalProjectedRowView,
     RelationalRowDeltaError, RelationalRowDeltaReadReport, RelationalRowPageDemandReadError,
@@ -18,7 +19,8 @@ use crate::relational::{
 };
 use crate::{SegmentCache, StoreId};
 use skein_core::{RuntimeCancellationReason, RuntimeTaskContext};
-use std::collections::BTreeMap;
+use std::cmp::Ordering as CmpOrdering;
+use std::collections::BinaryHeap;
 use std::fmt;
 use std::mem::size_of;
 use std::num::NonZeroUsize;
@@ -75,6 +77,8 @@ pub struct RelationalRowPageSnapshotRangeReport {
     pub overlay_entries: usize,
     pub overlay_resident_bytes: usize,
     pub overlay_replacements: usize,
+    pub overlay_merge_sources: usize,
+    pub overlay_peak_buffered_entries: usize,
 }
 
 struct ProjectedRangeVisitContext<'a> {
@@ -596,7 +600,7 @@ impl RelationalRowPageSnapshotReader {
             hydration_fields,
         } = context;
         self.checkpoint(task)?;
-        let (overlay, overlay_report) = self.collect_overlay(range, limits, task)?;
+        let mut overlay = StreamingOverlayCursor::new(self, range, limits, task)?;
         self.checkpoint(task)?;
         let demand = self
             .demand
@@ -605,7 +609,7 @@ impl RelationalRowPageSnapshotReader {
                     range,
                     limits: limits.demand,
                     overlay: RelationalRowPageOverlayRange {
-                        rows: overlay,
+                        cursor: &mut overlay,
                         overflow_root: self.overlay_overflow.as_deref(),
                     },
                 },
@@ -616,6 +620,7 @@ impl RelationalRowPageSnapshotReader {
                 visit,
             )
             .map_err(|error| self.map_demand_error(error))?;
+        let overlay_report = overlay.report();
         Ok(RelationalRowPageSnapshotRangeReport {
             identity: self.identity(),
             demand,
@@ -624,87 +629,9 @@ impl RelationalRowPageSnapshotReader {
             overlay_entries: overlay_report.overlay_entries,
             overlay_resident_bytes: overlay_report.overlay_resident_bytes,
             overlay_replacements: overlay_report.overlay_replacements,
+            overlay_merge_sources: overlay_report.overlay_merge_sources,
+            overlay_peak_buffered_entries: overlay_report.overlay_peak_buffered_entries,
         })
-    }
-
-    fn collect_overlay(
-        &self,
-        range: RelationalRowPageProjectedRange<'_>,
-        limits: RelationalRowPageSnapshotReadLimits,
-        task: &RuntimeTaskContext,
-    ) -> Result<
-        (
-            BTreeMap<RelationalKey, RelationalRowPageProjectedOverlayValue>,
-            OverlayCollectionReport,
-        ),
-        RelationalRowPageSnapshotReadError,
-    > {
-        let table_root = self
-            .view
-            .base()
-            .table_root(range.table)
-            .map_err(|error| self.map_row_publication_error(error))?;
-        let column_count = table_root.column_count.get() as usize;
-        super::validate_requested_fields(
-            range.requested_fields,
-            column_count,
-            self.view.base().publication_config().page_limits,
-        )
-        .map_err(|error| self.map_row_error(error))?;
-        let mut collector = OverlayCollector::new(
-            self.identity(),
-            self.overlay_overflow.as_ref().and_then(|_| {
-                self.view
-                    .recovery_delta()
-                    .map(|delta| delta.manifest().visible_commit_epoch)
-            }),
-            column_count,
-            range.requested_fields,
-            limits,
-        );
-        let mut collection_error = None;
-        let visited = self
-            .view
-            .visit_overlay_range_entries(
-                range.table,
-                range.lower,
-                range.upper,
-                |key, value, epoch| {
-                    if let Err(reason) = task.checkpoint() {
-                        collection_error =
-                            Some(RelationalRowPageSnapshotReadError::Stopped(reason));
-                        return false;
-                    }
-                    if let Err(error) = collector.insert(key, value, epoch) {
-                        collection_error = Some(error);
-                        return false;
-                    }
-                    true
-                },
-            )
-            .map_err(|error| self.map_delta_error(error))?;
-        if let Some(error) = collection_error {
-            self.poison_if_needed(&error);
-            return Err(error);
-        }
-        if visited.stopped_early {
-            let error = RelationalRowPageSnapshotReadError::Corrupt(
-                "overlay traversal stopped without a typed read error".to_string(),
-            );
-            self.poison_if_needed(&error);
-            return Err(error);
-        }
-        let (entries, overlay_entries, resident_bytes, replacements) = collector.finish();
-        Ok((
-            entries,
-            OverlayCollectionReport {
-                recovery: visited.recovery,
-                live_entries_visited: visited.live_entries_visited,
-                overlay_entries,
-                overlay_resident_bytes: resident_bytes,
-                overlay_replacements: replacements,
-            },
-        ))
     }
 
     fn checkpoint(
@@ -764,11 +691,36 @@ impl RelationalRowPageSnapshotReader {
     }
 }
 
-#[derive(Debug)]
-struct OverlayVersion {
+struct StreamingOverlayHead {
+    key: RelationalKey,
     epoch: u64,
     value: RelationalRowPageProjectedOverlayValue,
-    value_resident_bytes: usize,
+    source: usize,
+    resident_bytes: usize,
+}
+
+impl PartialEq for StreamingOverlayHead {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key && self.epoch == other.epoch && self.source == other.source
+    }
+}
+
+impl Eq for StreamingOverlayHead {}
+
+impl PartialOrd for StreamingOverlayHead {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for StreamingOverlayHead {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        other
+            .key
+            .cmp(&self.key)
+            .then_with(|| other.epoch.cmp(&self.epoch))
+            .then_with(|| other.source.cmp(&self.source))
+    }
 }
 
 #[derive(Debug)]
@@ -778,111 +730,120 @@ struct OverlayCollectionReport {
     overlay_entries: usize,
     overlay_resident_bytes: usize,
     overlay_replacements: usize,
+    overlay_merge_sources: usize,
+    overlay_peak_buffered_entries: usize,
 }
 
-struct OverlayCollector<'a> {
-    rows: BTreeMap<RelationalKey, OverlayVersion>,
-    resident_bytes: usize,
-    replacements: usize,
+struct StreamingOverlayCursor<'a> {
+    owner: &'a RelationalRowPageSnapshotReader,
+    sources: RelationalRowPageOverlayRangeSources<'a>,
+    heap: BinaryHeap<StreamingOverlayHead>,
     identity: RelationalRowPageReadViewIdentity,
     recovery_visible_epoch: Option<u64>,
     column_count: usize,
     requested_fields: &'a [usize],
     limits: RelationalRowPageSnapshotReadLimits,
+    task: &'a RuntimeTaskContext,
+    initialized: bool,
+    buffered_bytes: usize,
+    emitted_bytes: usize,
+    peak_resident_bytes: usize,
+    peak_buffered_entries: usize,
+    entries: usize,
+    replacements: usize,
 }
 
-impl<'a> OverlayCollector<'a> {
+impl<'a> StreamingOverlayCursor<'a> {
     fn new(
-        identity: RelationalRowPageReadViewIdentity,
-        recovery_visible_epoch: Option<u64>,
-        column_count: usize,
-        requested_fields: &'a [usize],
+        owner: &'a RelationalRowPageSnapshotReader,
+        range: RelationalRowPageProjectedRange<'a>,
         limits: RelationalRowPageSnapshotReadLimits,
-    ) -> Self {
-        Self {
-            rows: BTreeMap::new(),
-            resident_bytes: 0,
-            replacements: 0,
-            identity,
-            recovery_visible_epoch,
+        task: &'a RuntimeTaskContext,
+    ) -> Result<Self, RelationalRowPageSnapshotReadError> {
+        let table_root = owner
+            .view
+            .base()
+            .table_root(range.table)
+            .map_err(|error| owner.map_row_publication_error(error))?;
+        let column_count = table_root.column_count.get() as usize;
+        super::validate_requested_fields(
+            range.requested_fields,
             column_count,
-            requested_fields,
+            owner.view.base().publication_config().page_limits,
+        )
+        .map_err(|error| owner.map_row_error(error))?;
+        let sources = owner
+            .view
+            .overlay_range_sources(
+                range.table,
+                range.lower,
+                range.upper,
+                limits.max_overlay_entries.get(),
+            )
+            .map_err(|error| owner.map_delta_error(error))?;
+        Ok(Self {
+            owner,
+            identity: owner.identity(),
+            recovery_visible_epoch: owner.overlay_overflow.as_ref().and_then(|_| {
+                owner
+                    .view
+                    .recovery_delta()
+                    .map(|delta| delta.manifest().visible_commit_epoch)
+            }),
+            column_count,
+            requested_fields: range.requested_fields,
             limits,
-        }
+            task,
+            heap: BinaryHeap::with_capacity(sources.len()),
+            sources,
+            initialized: false,
+            buffered_bytes: 0,
+            emitted_bytes: 0,
+            peak_resident_bytes: 0,
+            peak_buffered_entries: 0,
+            entries: 0,
+            replacements: 0,
+        })
     }
 
-    fn insert(
+    fn initialize(&mut self) -> Result<(), RelationalRowPageSnapshotReadError> {
+        if self.initialized {
+            return Ok(());
+        }
+        self.initialized = true;
+        for source in 0..self.sources.len() {
+            self.advance_source(source, 0)?;
+        }
+        Ok(())
+    }
+
+    fn advance_source(
         &mut self,
-        key: &RelationalKey,
-        value: &RelationalRowPageRecoveredValue,
-        epoch: u64,
+        source: usize,
+        working_bytes: usize,
     ) -> Result<(), RelationalRowPageSnapshotReadError> {
+        self.task
+            .checkpoint()
+            .map_err(RelationalRowPageSnapshotReadError::Stopped)?;
+        let Some(entry) = self
+            .sources
+            .next(source)
+            .map_err(|error| self.owner.map_delta_error(error))?
+        else {
+            return Ok(());
+        };
+        let super::live::RelationalRowPageOverlayRangeEntry { key, value, epoch } = entry;
         if epoch <= self.identity.base_commit_epoch || epoch > self.identity.visible_commit_epoch {
             return Err(RelationalRowPageSnapshotReadError::Corrupt(format!(
                 "overlay row epoch {epoch} is outside ({}, {}]",
                 self.identity.base_commit_epoch, self.identity.visible_commit_epoch
             )));
         }
-        if let Some(current_epoch) = self.rows.get(key).map(|current| current.epoch) {
-            if epoch == current_epoch {
-                return Err(RelationalRowPageSnapshotReadError::Corrupt(format!(
-                    "overlay contains duplicate row version at epoch {epoch}"
-                )));
-            }
-            if epoch < current_epoch {
-                return Ok(());
-            }
-        }
-        validate_overlay_row(value, self.column_count)?;
-        let value_resident_bytes = projected_overlay_resident_bytes(value, self.requested_fields)?;
-        if let Some(current) = self.rows.get_mut(key) {
-            let next_bytes = self
-                .resident_bytes
-                .checked_sub(current.value_resident_bytes)
-                .and_then(|bytes| bytes.checked_add(value_resident_bytes))
-                .ok_or_else(|| {
-                    RelationalRowPageSnapshotReadError::Admission(
-                        "overlay replacement byte accounting overflow".to_string(),
-                    )
-                })?;
-            if next_bytes > self.limits.max_overlay_bytes.get() {
-                return Err(RelationalRowPageSnapshotReadError::Admission(format!(
-                    "overlay requires {next_bytes} bytes, exceeding limit {}",
-                    self.limits.max_overlay_bytes
-                )));
-            }
-            let value = project_overlay_value(
-                value,
-                self.requested_fields,
-                self.recovery_visible_epoch
-                    .is_some_and(|recovery_epoch| epoch <= recovery_epoch),
-            );
-            current.epoch = epoch;
-            current.value = value;
-            current.value_resident_bytes = value_resident_bytes;
-            self.resident_bytes = next_bytes;
-            self.replacements = self.replacements.checked_add(1).ok_or_else(|| {
-                RelationalRowPageSnapshotReadError::Admission(
-                    "overlay replacement counter overflow".to_string(),
-                )
-            })?;
-            return Ok(());
-        }
-
-        let next_entries = self.rows.len().checked_add(1).ok_or_else(|| {
-            RelationalRowPageSnapshotReadError::Admission(
-                "overlay entry counter overflow".to_string(),
-            )
-        })?;
-        if next_entries > self.limits.max_overlay_entries.get() {
-            return Err(RelationalRowPageSnapshotReadError::Admission(format!(
-                "overlay contains {next_entries} entries, exceeding limit {}",
-                self.limits.max_overlay_entries
-            )));
-        }
-        let entry_bytes = overlay_key_resident_bytes(key)?
+        validate_overlay_row(&value, self.column_count)?;
+        let value_resident_bytes = projected_overlay_resident_bytes(&value, self.requested_fields)?;
+        let entry_bytes = overlay_key_resident_bytes(&key)?
             .checked_add(value_resident_bytes)
-            .and_then(|bytes| bytes.checked_add(size_of::<OverlayVersion>()))
+            .and_then(|bytes| bytes.checked_add(size_of::<StreamingOverlayHead>()))
             .and_then(|bytes| bytes.checked_add(4 * size_of::<usize>()))
             .ok_or_else(|| {
                 RelationalRowPageSnapshotReadError::Admission(
@@ -890,8 +851,10 @@ impl<'a> OverlayCollector<'a> {
                 )
             })?;
         let next_bytes = self
-            .resident_bytes
-            .checked_add(entry_bytes)
+            .buffered_bytes
+            .checked_add(self.emitted_bytes)
+            .and_then(|bytes| bytes.checked_add(working_bytes))
+            .and_then(|bytes| bytes.checked_add(entry_bytes))
             .ok_or_else(|| {
                 RelationalRowPageSnapshotReadError::Admission(
                     "overlay resident-byte accounting overflow".to_string(),
@@ -904,38 +867,185 @@ impl<'a> OverlayCollector<'a> {
             )));
         }
         let value = project_overlay_value(
-            value,
+            &value,
             self.requested_fields,
             self.recovery_visible_epoch
                 .is_some_and(|recovery_epoch| epoch <= recovery_epoch),
         );
-        self.rows.insert(
-            key.clone(),
-            OverlayVersion {
-                epoch,
-                value,
-                value_resident_bytes,
-            },
-        );
-        self.resident_bytes = next_bytes;
+        self.heap.push(StreamingOverlayHead {
+            key,
+            epoch,
+            value,
+            source,
+            resident_bytes: entry_bytes,
+        });
+        self.buffered_bytes = self
+            .buffered_bytes
+            .checked_add(entry_bytes)
+            .ok_or_else(|| {
+                RelationalRowPageSnapshotReadError::Admission(
+                    "overlay resident-byte accounting overflow".to_string(),
+                )
+            })?;
+        self.observe_peak(next_bytes, working_bytes)?;
         Ok(())
     }
 
-    fn finish(
-        self,
-    ) -> (
-        BTreeMap<RelationalKey, RelationalRowPageProjectedOverlayValue>,
-        usize,
-        usize,
-        usize,
-    ) {
+    fn observe_peak(
+        &mut self,
+        resident_bytes: usize,
+        working_bytes: usize,
+    ) -> Result<(), RelationalRowPageSnapshotReadError> {
+        self.peak_resident_bytes = self.peak_resident_bytes.max(resident_bytes);
         let entries = self
-            .rows
-            .into_iter()
-            .map(|(key, version)| (key, version.value))
-            .collect::<BTreeMap<_, _>>();
-        let entry_count = entries.len();
-        (entries, entry_count, self.resident_bytes, self.replacements)
+            .heap
+            .len()
+            .checked_add(usize::from(self.emitted_bytes != 0))
+            .and_then(|entries| entries.checked_add(usize::from(working_bytes != 0)))
+            .ok_or_else(|| {
+                RelationalRowPageSnapshotReadError::Admission(
+                    "overlay buffered-entry accounting overflow".to_string(),
+                )
+            })?;
+        self.peak_buffered_entries = self.peak_buffered_entries.max(entries);
+        Ok(())
+    }
+
+    fn pop_head(&mut self) -> Result<StreamingOverlayHead, RelationalRowPageSnapshotReadError> {
+        let head = self.heap.pop().ok_or_else(|| {
+            RelationalRowPageSnapshotReadError::Corrupt(
+                "overlay merge heap lost a peeked row".to_string(),
+            )
+        })?;
+        self.buffered_bytes = self
+            .buffered_bytes
+            .checked_sub(head.resident_bytes)
+            .ok_or_else(|| {
+                RelationalRowPageSnapshotReadError::Corrupt(
+                    "overlay merge resident-byte accounting underflow".to_string(),
+                )
+            })?;
+        Ok(head)
+    }
+
+    fn next_projected(
+        &mut self,
+    ) -> Result<
+        Option<(RelationalKey, RelationalRowPageProjectedOverlayValue)>,
+        RelationalRowPageSnapshotReadError,
+    > {
+        self.emitted_bytes = 0;
+        self.initialize()?;
+        let Some(_) = self.heap.peek() else {
+            return Ok(None);
+        };
+        let mut selected = self.pop_head()?;
+        let deferred_source = selected.source;
+        while self
+            .heap
+            .peek()
+            .is_some_and(|candidate| candidate.key == selected.key)
+        {
+            let candidate = self.pop_head()?;
+            let candidate_source = candidate.source;
+            if candidate.epoch == selected.epoch {
+                return Err(RelationalRowPageSnapshotReadError::Corrupt(format!(
+                    "overlay contains duplicate row version at epoch {}",
+                    candidate.epoch
+                )));
+            }
+            if candidate.epoch > selected.epoch {
+                selected = candidate;
+            }
+            self.advance_source(candidate_source, selected.resident_bytes)?;
+            self.replacements = self.replacements.checked_add(1).ok_or_else(|| {
+                RelationalRowPageSnapshotReadError::Admission(
+                    "overlay replacement counter overflow".to_string(),
+                )
+            })?;
+        }
+        self.advance_source(deferred_source, selected.resident_bytes)?;
+        self.entries = self.entries.checked_add(1).ok_or_else(|| {
+            RelationalRowPageSnapshotReadError::Admission(
+                "overlay entry counter overflow".to_string(),
+            )
+        })?;
+        if self.entries > self.limits.max_overlay_entries.get() {
+            return Err(RelationalRowPageSnapshotReadError::Admission(format!(
+                "overlay contains {} entries, exceeding limit {}",
+                self.entries, self.limits.max_overlay_entries
+            )));
+        }
+        self.emitted_bytes = selected.resident_bytes;
+        let resident_bytes = self
+            .buffered_bytes
+            .checked_add(self.emitted_bytes)
+            .ok_or_else(|| {
+                RelationalRowPageSnapshotReadError::Admission(
+                    "overlay resident-byte accounting overflow".to_string(),
+                )
+            })?;
+        if resident_bytes > self.limits.max_overlay_bytes.get() {
+            return Err(RelationalRowPageSnapshotReadError::Admission(format!(
+                "overlay requires {resident_bytes} bytes, exceeding limit {}",
+                self.limits.max_overlay_bytes
+            )));
+        }
+        self.observe_peak(resident_bytes, 0)?;
+        Ok(Some((selected.key, selected.value)))
+    }
+
+    fn report(&self) -> OverlayCollectionReport {
+        OverlayCollectionReport {
+            recovery: self.sources.recovery_report(),
+            live_entries_visited: self.sources.live_entries_visited(),
+            overlay_entries: self.entries,
+            overlay_resident_bytes: self.peak_resident_bytes,
+            overlay_replacements: self.replacements,
+            overlay_merge_sources: self.sources.len(),
+            overlay_peak_buffered_entries: self.peak_buffered_entries,
+        }
+    }
+
+    fn map_error(
+        &self,
+        error: RelationalRowPageSnapshotReadError,
+    ) -> RelationalRowPageDemandReadError {
+        self.owner.poison_if_needed(&error);
+        match error {
+            RelationalRowPageSnapshotReadError::Admission(message) => {
+                RelationalRowPageDemandReadError::Admission(message)
+            }
+            RelationalRowPageSnapshotReadError::Corrupt(message) => {
+                RelationalRowPageDemandReadError::Corrupt(message)
+            }
+            RelationalRowPageSnapshotReadError::Durability(message) => {
+                RelationalRowPageDemandReadError::Durability(message)
+            }
+            RelationalRowPageSnapshotReadError::MissingTable(table) => {
+                RelationalRowPageDemandReadError::MissingTable(table)
+            }
+            RelationalRowPageSnapshotReadError::Stopped(reason) => {
+                RelationalRowPageDemandReadError::Stopped(reason)
+            }
+        }
+    }
+}
+
+impl RelationalRowPageOverlayCursor for StreamingOverlayCursor<'_> {
+    fn peek_key(&mut self) -> Result<Option<&RelationalKey>, RelationalRowPageDemandReadError> {
+        self.emitted_bytes = 0;
+        self.initialize().map_err(|error| self.map_error(error))?;
+        Ok(self.heap.peek().map(|head| &head.key))
+    }
+
+    fn next_row(
+        &mut self,
+    ) -> Result<
+        Option<(RelationalKey, RelationalRowPageProjectedOverlayValue)>,
+        RelationalRowPageDemandReadError,
+    > {
+        self.next_projected().map_err(|error| self.map_error(error))
     }
 }
 

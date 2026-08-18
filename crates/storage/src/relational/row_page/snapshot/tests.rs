@@ -99,6 +99,8 @@ fn range_reads_merge_ordered_rows_and_keep_overlay_after_the_base_tail() {
     );
     assert_eq!(report.overlay_entries, 6);
     assert_eq!(report.overlay_replacements, 1);
+    assert_eq!(report.overlay_merge_sources, 5);
+    assert!(report.overlay_peak_buffered_entries <= report.overlay_merge_sources + 1);
     assert_eq!(report.demand.rows_emitted, 4);
     assert_eq!(report.demand.borrowed_rows_emitted, 0);
     assert_eq!(report.demand.owned_rows_emitted, 4);
@@ -119,6 +121,34 @@ fn range_reads_merge_ordered_rows_and_keep_overlay_after_the_base_tail() {
         )
         .expect("read overlay beyond base tail");
     assert_eq!(tail, vec![key(6)]);
+    fixture.remove();
+}
+
+#[test]
+fn range_callback_starts_before_the_complete_overlay_is_consumed() {
+    let fixture = SnapshotFixture::new("range-streaming-start");
+    let mut hydration = RelationalHydrationBudget::default();
+    let mut rows = Vec::new();
+    let report = fixture
+        .reader
+        .visit_projected_range(
+            projected_range(Bound::Unbounded, Bound::Unbounded),
+            RelationalRowPageSnapshotReadLimits::default(),
+            &mut hydration,
+            &RuntimeTaskContext::default(),
+            |row| {
+                rows.push(row.primary_key);
+                false
+            },
+        )
+        .expect("stop the streaming merge after its first row");
+
+    assert_eq!(rows, vec![key(0)]);
+    assert_eq!(report.overlay_entries, 0);
+    assert_eq!(report.overlay_merge_sources, 5);
+    assert_eq!(report.live_entries_visited, 2);
+    assert!(report.recovery.stopped_early);
+    assert!(report.overlay_peak_buffered_entries <= report.overlay_merge_sources + 1);
     fixture.remove();
 }
 

@@ -36,6 +36,7 @@ STORAGE_MODELS = [
     "SkeinQueryMemoryLedger",
     "SkeinRelationalIndexDemandRead",
     "SkeinRelationalIndexShadowPublication",
+    "SkeinRelationalOverlayStreamingMerge",
     "SkeinRelationalRowDemandRead",
     "SkeinRelationalRowSnapshotRead",
     "SkeinRelationalWalReplayAccess",

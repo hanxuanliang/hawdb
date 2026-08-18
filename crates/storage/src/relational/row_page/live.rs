@@ -5,6 +5,7 @@
 //! complete next-epoch view before its WAL append and installs the returned
 //! `Arc` only after that WAL batch is durable.
 
+use super::delta::RelationalRowDeltaRunRangeCursor;
 use super::{
     RelationalRowDeltaError, RelationalRowDeltaReader, RelationalRowPageRecoveredValue,
     RelationalRowPageRootReader,
@@ -125,13 +126,12 @@ impl RelationalRowPageLiveBatch {
             })
     }
 
-    fn visit_range_entries(
+    fn range_cursor(
         &self,
         table: &str,
         lower: Bound<&RelationalKey>,
         upper: Bound<&RelationalKey>,
-        mut visit: impl FnMut(&RelationalKey, &RelationalRowPageRecoveredValue) -> bool,
-    ) -> (usize, bool) {
+    ) -> Option<RelationalRowPageLiveRangeCursor<'_>> {
         let start = self
             .changes
             .partition_point(|change| match change.table.as_str().cmp(table) {
@@ -139,28 +139,19 @@ impl RelationalRowPageLiveBatch {
                 std::cmp::Ordering::Greater => false,
                 std::cmp::Ordering::Equal => key_precedes_lower(&change.primary_key, lower),
             });
-        let mut visited = 0usize;
-        for change in &self.changes[start..] {
+        let width = self.changes[start..].partition_point(|change| {
             match change.table.as_str().cmp(table) {
-                std::cmp::Ordering::Less => continue,
-                std::cmp::Ordering::Greater => break,
-                std::cmp::Ordering::Equal => {}
+                std::cmp::Ordering::Less => true,
+                std::cmp::Ordering::Greater => false,
+                std::cmp::Ordering::Equal => !key_exceeds_upper(&change.primary_key, upper),
             }
-            if key_exceeds_upper(&change.primary_key, upper) {
-                break;
-            }
-            visited = visited.saturating_add(1);
-            let value = change
-                .row
-                .clone()
-                .map_or(RelationalRowPageRecoveredValue::Deleted, |row| {
-                    RelationalRowPageRecoveredValue::Present(row)
-                });
-            if !visit(&change.primary_key, &value) {
-                return (visited, false);
-            }
-        }
-        (visited, true)
+        });
+        let end = start.saturating_add(width);
+        (start < end).then_some(RelationalRowPageLiveRangeCursor {
+            batch: self,
+            next: start,
+            end,
+        })
     }
 }
 
@@ -292,11 +283,111 @@ impl RelationalRowPageLiveOverlay {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct RelationalRowPageOverlayRangeReport {
-    pub recovery: super::RelationalRowDeltaReadReport,
-    pub live_entries_visited: usize,
-    pub stopped_early: bool,
+pub(super) struct RelationalRowPageOverlayRangeEntry {
+    pub key: RelationalKey,
+    pub value: RelationalRowPageRecoveredValue,
+    pub epoch: u64,
+}
+
+struct RelationalRowPageLiveRangeCursor<'a> {
+    batch: &'a RelationalRowPageLiveBatch,
+    next: usize,
+    end: usize,
+}
+
+impl RelationalRowPageLiveRangeCursor<'_> {
+    fn next(&mut self) -> Option<RelationalRowPageOverlayRangeEntry> {
+        let change = self.batch.changes.get(self.next..self.end)?.first()?;
+        self.next += 1;
+        Some(RelationalRowPageOverlayRangeEntry {
+            key: change.primary_key.clone(),
+            value: change
+                .row
+                .clone()
+                .map_or(RelationalRowPageRecoveredValue::Deleted, |row| {
+                    RelationalRowPageRecoveredValue::Present(row)
+                }),
+            epoch: self.batch.commit_epoch,
+        })
+    }
+}
+
+enum RelationalRowPageOverlayRangeSource<'a> {
+    Recovery(Box<RelationalRowDeltaRunRangeCursor<'a>>),
+    Live(RelationalRowPageLiveRangeCursor<'a>),
+}
+
+pub(super) struct RelationalRowPageOverlayRangeSources<'a> {
+    sources: Vec<RelationalRowPageOverlayRangeSource<'a>>,
+    recovery: super::RelationalRowDeltaReadReport,
+    live_entries_visited: usize,
+}
+
+impl RelationalRowPageOverlayRangeSources<'_> {
+    pub(super) fn len(&self) -> usize {
+        self.sources.len()
+    }
+
+    pub(super) fn next(
+        &mut self,
+        source: usize,
+    ) -> Result<Option<RelationalRowPageOverlayRangeEntry>, RelationalRowDeltaError> {
+        match self.sources.get_mut(source).ok_or_else(|| {
+            RelationalRowDeltaError::Corrupt(format!(
+                "overlay merge source {source} is out of range"
+            ))
+        })? {
+            RelationalRowPageOverlayRangeSource::Recovery(cursor) => {
+                let next =
+                    cursor
+                        .next()?
+                        .map(|(key, value, epoch)| RelationalRowPageOverlayRangeEntry {
+                            key,
+                            value,
+                            epoch,
+                        });
+                if next.is_some() {
+                    self.recovery.entries_visited = self
+                        .recovery
+                        .entries_visited
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            RelationalRowDeltaError::Admission(
+                                "row delta range entry counter overflow".to_string(),
+                            )
+                        })?;
+                }
+                Ok(next)
+            }
+            RelationalRowPageOverlayRangeSource::Live(cursor) => {
+                let next = cursor.next();
+                if next.is_some() {
+                    self.live_entries_visited =
+                        self.live_entries_visited.checked_add(1).ok_or_else(|| {
+                            RelationalRowDeltaError::Admission(
+                                "live row range entry counter overflow".to_string(),
+                            )
+                        })?;
+                }
+                Ok(next)
+            }
+        }
+    }
+
+    pub(super) fn recovery_report(&self) -> super::RelationalRowDeltaReadReport {
+        let mut report = self.recovery.clone();
+        report.stopped_early = self.sources.iter().any(|source| {
+            matches!(
+                source,
+                RelationalRowPageOverlayRangeSource::Recovery(cursor) if !cursor.is_exhausted()
+            )
+        });
+        report
+    }
+
+    pub(super) const fn live_entries_visited(&self) -> usize {
+        self.live_entries_visited
+    }
 }
 
 /// One immutable row view pinned to an exact base generation and visible epoch.
@@ -532,46 +623,47 @@ impl RelationalRowPageReadView {
         )
     }
 
-    pub(super) fn visit_overlay_range_entries(
+    pub(super) fn overlay_range_sources(
         &self,
         table: &str,
         lower: Bound<&RelationalKey>,
         upper: Bound<&RelationalKey>,
-        mut visit: impl FnMut(&RelationalKey, &RelationalRowPageRecoveredValue, u64) -> bool,
-    ) -> Result<RelationalRowPageOverlayRangeReport, RelationalRowDeltaError> {
-        let mut report = RelationalRowPageOverlayRangeReport::default();
-        if let Some(delta) = self.recovery_delta.as_ref() {
-            report.recovery =
-                delta.visit_range_entries(table, lower, upper, |key, value, epoch| {
-                    visit(key, value, epoch)
-                })?;
-            if report.recovery.stopped_early {
-                report.stopped_early = true;
-                return Ok(report);
-            }
-        }
-
+        max_sources: usize,
+    ) -> Result<RelationalRowPageOverlayRangeSources<'_>, RelationalRowDeltaError> {
+        let mut live = Vec::new();
         let mut current = self.live.head.as_deref();
         while let Some(batch) = current {
-            let (visited, completed) =
-                batch.visit_range_entries(table, lower, upper, |key, value| {
-                    visit(key, value, batch.commit_epoch)
-                });
-            report.live_entries_visited = report
-                .live_entries_visited
-                .checked_add(visited)
-                .ok_or_else(|| {
-                    RelationalRowDeltaError::Admission(
-                        "live row range entry counter overflow".to_string(),
-                    )
-                })?;
-            if !completed {
-                report.stopped_early = true;
-                break;
+            if let Some(cursor) = batch.range_cursor(table, lower, upper) {
+                if live.len() == max_sources {
+                    return Err(RelationalRowDeltaError::Admission(format!(
+                        "row snapshot range needs more than {max_sources} live merge sources"
+                    )));
+                }
+                live.push(cursor);
             }
             current = batch.previous.as_deref();
         }
-        Ok(report)
+        let remaining_sources = max_sources.saturating_sub(live.len());
+        let (recovery, recovery_report) = self.recovery_delta.as_ref().map_or_else(
+            || Ok((Vec::new(), super::RelationalRowDeltaReadReport::default())),
+            |delta| delta.range_sources(table, lower, upper, remaining_sources),
+        )?;
+        let mut sources = Vec::with_capacity(recovery.len().saturating_add(live.len()));
+        sources.extend(
+            recovery
+                .into_iter()
+                .map(Box::new)
+                .map(RelationalRowPageOverlayRangeSource::Recovery),
+        );
+        sources.extend(
+            live.into_iter()
+                .map(RelationalRowPageOverlayRangeSource::Live),
+        );
+        Ok(RelationalRowPageOverlayRangeSources {
+            sources,
+            recovery: recovery_report,
+            live_entries_visited: 0,
+        })
     }
 
     pub fn latest_live_commit_epoch(&self) -> Option<u64> {
