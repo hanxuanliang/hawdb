@@ -1,0 +1,339 @@
+use super::{bind_sql_value, compare_value_refs, relational_ref_to_value, value_to_relational};
+use crate::error::{Result, SkeinError};
+use crate::executor::Row;
+use crate::relational_sql::row_access::RelationalReadRowRef;
+use crate::sql::{SelectProjection, SqlColumnRef, SqlComparisonOp, SqlPredicate};
+use crate::value::Value;
+use skein_storage::{RelationalTableSchema, RelationalValue, RelationalValueRef};
+
+pub(super) enum BoundStreamingPredicate {
+    And(Box<Self>, Box<Self>),
+    Or(Box<Self>, Box<Self>),
+    Not(Box<Self>),
+    CompareValue {
+        left: usize,
+        op: SqlComparisonOp,
+        right: RelationalValue,
+    },
+    CompareColumns {
+        left: usize,
+        op: SqlComparisonOp,
+        right: usize,
+    },
+    InList {
+        left: usize,
+        values: Box<[RelationalValue]>,
+        negated: bool,
+    },
+    IsNull {
+        column: usize,
+        negated: bool,
+    },
+}
+
+impl BoundStreamingPredicate {
+    pub(super) fn bind(
+        predicate: &SqlPredicate,
+        parameters: &[Value],
+        schema: &RelationalTableSchema,
+        table: &str,
+        qualifier: &str,
+    ) -> Result<Self> {
+        match predicate {
+            SqlPredicate::And(left, right) => Ok(Self::And(
+                Box::new(Self::bind(left, parameters, schema, table, qualifier)?),
+                Box::new(Self::bind(right, parameters, schema, table, qualifier)?),
+            )),
+            SqlPredicate::Or(left, right) => Ok(Self::Or(
+                Box::new(Self::bind(left, parameters, schema, table, qualifier)?),
+                Box::new(Self::bind(right, parameters, schema, table, qualifier)?),
+            )),
+            SqlPredicate::Not(predicate) => Ok(Self::Not(Box::new(Self::bind(
+                predicate, parameters, schema, table, qualifier,
+            )?))),
+            SqlPredicate::Compare { left, op, right } => {
+                let left = bind_column(left, schema, table, qualifier)?;
+                let right = value_to_relational(bind_sql_value(right, parameters)?)?;
+                validate_value_type(schema, left, &right)?;
+                Ok(Self::CompareValue {
+                    left,
+                    op: *op,
+                    right,
+                })
+            }
+            SqlPredicate::CompareColumns { left, op, right } => {
+                let left = bind_column(left, schema, table, qualifier)?;
+                let right = bind_column(right, schema, table, qualifier)?;
+                if schema.columns[left].scalar_type != schema.columns[right].scalar_type {
+                    return Err(SkeinError::Semantic(format!(
+                        "relational comparison between {} and {} has incompatible scalar types",
+                        schema.columns[left].name, schema.columns[right].name
+                    )));
+                }
+                Ok(Self::CompareColumns {
+                    left,
+                    op: *op,
+                    right,
+                })
+            }
+            SqlPredicate::InList {
+                left,
+                values,
+                negated,
+            } => {
+                let left = bind_column(left, schema, table, qualifier)?;
+                let values = values
+                    .iter()
+                    .map(|value| {
+                        let value = value_to_relational(bind_sql_value(value, parameters)?)?;
+                        validate_value_type(schema, left, &value)?;
+                        Ok(value)
+                    })
+                    .collect::<Result<Box<[_]>>>()?;
+                Ok(Self::InList {
+                    left,
+                    values,
+                    negated: *negated,
+                })
+            }
+            SqlPredicate::IsNull { column, negated } => Ok(Self::IsNull {
+                column: bind_column(column, schema, table, qualifier)?,
+                negated: *negated,
+            }),
+        }
+    }
+
+    pub(super) fn truth(&self, row: RelationalReadRowRef<'_>) -> Result<Option<bool>> {
+        match self {
+            Self::And(left, right) => match left.truth(row)? {
+                Some(false) => Ok(Some(false)),
+                Some(true) => right.truth(row),
+                None => match right.truth(row)? {
+                    Some(false) => Ok(Some(false)),
+                    Some(true) | None => Ok(None),
+                },
+            },
+            Self::Or(left, right) => match left.truth(row)? {
+                Some(true) => Ok(Some(true)),
+                Some(false) => right.truth(row),
+                None => match right.truth(row)? {
+                    Some(true) => Ok(Some(true)),
+                    Some(false) | None => Ok(None),
+                },
+            },
+            Self::Not(predicate) => predicate.truth(row).map(|truth| truth.map(|value| !value)),
+            Self::CompareValue { left, op, right } => {
+                compare_value_refs(row.value(*left)?, right.as_ref(), *op)
+            }
+            Self::CompareColumns { left, op, right } => {
+                compare_value_refs(row.value(*left)?, row.value(*right)?, *op)
+            }
+            Self::InList {
+                left,
+                values,
+                negated,
+            } => {
+                let left = row.value(*left)?;
+                let mut has_unknown = false;
+                for value in values {
+                    match compare_value_refs(left, value.as_ref(), SqlComparisonOp::Eq)? {
+                        Some(true) => return Ok(Some(!*negated)),
+                        None => has_unknown = true,
+                        Some(false) => {}
+                    }
+                }
+                Ok(if has_unknown { None } else { Some(*negated) })
+            }
+            Self::IsNull { column, negated } => Ok(Some(
+                matches!(row.value(*column)?, RelationalValueRef::Null) != *negated,
+            )),
+        }
+    }
+}
+
+pub(super) struct BoundStreamingProjection {
+    columns: Box<[BoundStreamingColumn]>,
+}
+
+struct BoundStreamingColumn {
+    ordinal: usize,
+    output_name: String,
+}
+
+impl BoundStreamingProjection {
+    pub(super) fn bind(
+        projection: &[SelectProjection],
+        schema: &RelationalTableSchema,
+        table: &str,
+        qualifier: &str,
+    ) -> Result<Self> {
+        let mut columns = Vec::new();
+        for item in projection {
+            match item {
+                SelectProjection::Wildcard => {
+                    columns.extend(schema.columns.iter().enumerate().map(|(ordinal, column)| {
+                        BoundStreamingColumn {
+                            ordinal,
+                            output_name: column.name.clone(),
+                        }
+                    }));
+                }
+                SelectProjection::Column { name, alias } => {
+                    columns.push(BoundStreamingColumn {
+                        ordinal: bind_column(name, schema, table, qualifier)?,
+                        output_name: alias.clone().unwrap_or_else(|| name.name.clone()),
+                    });
+                }
+                SelectProjection::Expression { .. } => {
+                    return Err(SkeinError::Semantic(
+                        "non-aggregate relational projection expressions are not supported"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+        let mut names = std::collections::BTreeSet::new();
+        if let Some(duplicate) = columns
+            .iter()
+            .find(|column| !names.insert(column.output_name.as_str()))
+        {
+            return Err(SkeinError::Semantic(format!(
+                "relational projection contains duplicate output column {}",
+                duplicate.output_name
+            )));
+        }
+        Ok(Self {
+            columns: columns.into_boxed_slice(),
+        })
+    }
+
+    pub(super) fn project(&self, row: RelationalReadRowRef<'_>) -> Result<Row> {
+        let mut output = Row::new();
+        for column in &self.columns {
+            let previous = output.insert(
+                column.output_name.clone(),
+                relational_ref_to_value(row.value(column.ordinal)?)?,
+            );
+            debug_assert!(previous.is_none(), "projection names were bound uniquely");
+        }
+        Ok(output)
+    }
+}
+
+fn bind_column(
+    column: &SqlColumnRef,
+    schema: &RelationalTableSchema,
+    table: &str,
+    qualifier: &str,
+) -> Result<usize> {
+    if column
+        .qualifier
+        .as_deref()
+        .is_some_and(|candidate| candidate != qualifier && candidate != table)
+    {
+        return Err(SkeinError::Semantic(format!(
+            "column {} is unknown or ambiguous",
+            column.name
+        )));
+    }
+    schema.column_position(&column.name).ok_or_else(|| {
+        SkeinError::Semantic(format!("column {} is unknown or ambiguous", column.name))
+    })
+}
+
+fn validate_value_type(
+    schema: &RelationalTableSchema,
+    ordinal: usize,
+    value: &RelationalValue,
+) -> Result<()> {
+    if value
+        .scalar_type()
+        .is_some_and(|scalar_type| scalar_type != schema.columns[ordinal].scalar_type)
+    {
+        return Err(SkeinError::Semantic(format!(
+            "relational comparison on {} has an incompatible scalar type",
+            schema.columns[ordinal].name
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sql::SqlStatement;
+    use skein_storage::{
+        RelationalColumnSchema, RelationalKey, RelationalProjectedField, RelationalProjectedRow,
+        RelationalScalarType,
+    };
+
+    #[test]
+    fn boolean_short_circuit_does_not_read_the_unneeded_ordinal() {
+        let schema = schema();
+        let row = RelationalProjectedRow {
+            primary_key: RelationalKey(vec![RelationalValue::Text("row-1".to_string())]),
+            fields: vec![RelationalProjectedField {
+                ordinal: 1,
+                value: RelationalValue::Boolean(false),
+            }],
+        };
+        let row = RelationalReadRowRef::from_projected(&row);
+
+        let and = bind_predicate(
+            "SELECT id FROM logic_rows WHERE flag = TRUE AND body = 'unused'",
+            &schema,
+        );
+        assert_eq!(and.truth(row).unwrap(), Some(false));
+
+        let or = bind_predicate(
+            "SELECT id FROM logic_rows WHERE flag = FALSE OR body = 'unused'",
+            &schema,
+        );
+        assert_eq!(or.truth(row).unwrap(), Some(true));
+    }
+
+    fn bind_predicate(sql: &str, schema: &RelationalTableSchema) -> BoundStreamingPredicate {
+        let prepared = skein_sql::prepare_postgres_sql(sql).unwrap();
+        let SqlStatement::Select(select) = prepared.statement else {
+            panic!("expected SELECT")
+        };
+        BoundStreamingPredicate::bind(
+            select.selection.as_ref().expect("selection"),
+            &[],
+            schema,
+            "logic_rows",
+            "logic_rows",
+        )
+        .unwrap()
+    }
+
+    fn schema() -> RelationalTableSchema {
+        RelationalTableSchema {
+            name: "logic_rows".to_string(),
+            columns: vec![
+                RelationalColumnSchema {
+                    name: "id".to_string(),
+                    scalar_type: RelationalScalarType::Text,
+                    nullable: false,
+                    default: None,
+                },
+                RelationalColumnSchema {
+                    name: "flag".to_string(),
+                    scalar_type: RelationalScalarType::Boolean,
+                    nullable: false,
+                    default: None,
+                },
+                RelationalColumnSchema {
+                    name: "body".to_string(),
+                    scalar_type: RelationalScalarType::Text,
+                    nullable: false,
+                    default: None,
+                },
+            ],
+            primary_key: vec!["id".to_string()],
+            unique_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+            indexes: Vec::new(),
+        }
+    }
+}

@@ -682,6 +682,88 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_streaming_binding_matches_owned_three_valued_execution() {
+        let mut database = Database::new();
+        database
+            .query_sql("CREATE TABLE logic_groups (id TEXT PRIMARY KEY)")
+            .expect("create logic groups table");
+        database
+            .query_sql(
+                "CREATE TABLE logic_rows (id TEXT PRIMARY KEY, flag BOOLEAN NOT NULL, marker BIGINT, body TEXT NOT NULL, group_id TEXT NOT NULL)",
+            )
+            .expect("create logic rows table");
+        database
+            .query_sql("INSERT INTO logic_groups (id) VALUES ('group-1')")
+            .expect("insert group");
+        for parameters in [
+            vec![
+                Value::String("row-a".to_string()),
+                Value::Bool(true),
+                Value::Null,
+                Value::String("body-a".to_string()),
+            ],
+            vec![
+                Value::String("row-b".to_string()),
+                Value::Bool(false),
+                Value::Int(7),
+                Value::String("body-b".to_string()),
+            ],
+            vec![
+                Value::String("row-c".to_string()),
+                Value::Bool(false),
+                Value::Null,
+                Value::String("body-c".to_string()),
+            ],
+        ] {
+            database
+                .query_sql_with_params(
+                    "INSERT INTO logic_rows (id, flag, marker, body, group_id) VALUES ($1, $2, $3, $4, 'group-1')",
+                    &parameters,
+                )
+                .expect("insert logic row");
+        }
+
+        let parameters = [
+            Value::Bool(false),
+            Value::Int(7),
+            Value::Null,
+            Value::Int(7),
+        ];
+        let borrowed = database
+            .query_sql_with_params(
+                "SELECT id AS item_id, body AS payload FROM logic_rows \
+                 WHERE (flag = $1 OR marker IN ($2, $3)) \
+                   AND (marker IS NULL OR marker >= $4)",
+                &parameters,
+            )
+            .expect("execute ordinal-bound borrowed scan");
+        let owned = database
+            .query_sql_with_params(
+                "SELECT r.id AS item_id, r.body AS payload FROM logic_rows AS r \
+                 INNER JOIN logic_groups AS g ON g.id = r.group_id \
+                 WHERE (r.flag = $1 OR r.marker IN ($2, $3)) \
+                   AND (r.marker IS NULL OR r.marker >= $4)",
+                &parameters,
+            )
+            .expect("execute owned join oracle");
+
+        assert_eq!(borrowed.rows, owned.rows);
+        assert_eq!(borrowed.rows.len(), 2);
+        assert_eq!(
+            borrowed.rows[0]["item_id"],
+            Value::String("row-b".to_string())
+        );
+        assert_eq!(
+            borrowed.rows[1]["item_id"],
+            Value::String("row-c".to_string())
+        );
+        assert!(borrowed
+            .rows
+            .iter()
+            .all(|row| row.contains_key("payload") && !row.contains_key("body")));
+    }
+
+    #[test]
     fn relational_explain_keeps_estimated_rows_non_zero_for_empty_results() {
         let mut database = Database::new();
         database
@@ -1208,7 +1290,7 @@ mod tests {
                 DurabilityPolicy::default(),
                 DatabaseConfig {
                     relational_index_mode: skein_storage::RelationalIndexMode::Authoritative,
-                    segment_cache_capacity_bytes: 32 * 1024,
+                    segment_cache_capacity_bytes: 1,
                     ..DatabaseConfig::default()
                 },
             )

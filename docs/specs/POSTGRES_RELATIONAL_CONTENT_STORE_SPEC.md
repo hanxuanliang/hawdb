@@ -237,6 +237,16 @@ offset, and limit run as a pull-through visitor pipeline. The pipeline checks
 the runtime cancellation token after every admitted batch and never constructs
 a complete intermediate `Vec` of qualified rows.
 
+Before a borrowed full-table scan starts, its residual predicate and projection
+MUST bind table-qualified column references to schema ordinals exactly once.
+Parameters and literals MUST become typed relational values before the first
+row callback. Per-row execution follows PostgreSQL three-valued logic and MUST
+short-circuit `AND` after `FALSE` and `OR` after `TRUE`; an `UNKNOWN` left side
+still evaluates the right side because `UNKNOWN AND FALSE` is `FALSE` and
+`UNKNOWN OR TRUE` is `TRUE`. Projection aliases and wildcard expansion are also
+bound once, while the compatibility `Row` conversion remains the final owned
+output boundary.
+
 Planning separates fields required to decode a scan from fields whose payloads
 must be hydrated. An aggregate-only `OCTET_LENGTH(TEXT|BYTEA)` operand or
 non-distinct `COUNT(column)` retains an overflow value as a compact reference;

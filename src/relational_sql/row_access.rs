@@ -92,6 +92,13 @@ pub(super) struct RelationalReadRowRef<'a> {
 }
 
 impl<'a> RelationalReadRowRef<'a> {
+    #[cfg(test)]
+    pub(super) fn from_projected(row: &'a RelationalProjectedRow) -> Self {
+        Self {
+            row: RelationalProjectedRowView::Owned(row),
+        }
+    }
+
     pub(super) fn value(self, ordinal: usize) -> Result<RelationalValueRef<'a>> {
         self.row.value(ordinal).ok_or_else(|| {
             SkeinError::StorageIntegrity(format!(
