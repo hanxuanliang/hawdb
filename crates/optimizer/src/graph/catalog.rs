@@ -870,6 +870,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn range_cardinality_honors_half_open_histogram_bounds() {
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::default(),
+            OptimizerCatalogStatistics::new(
+                [("Memory".to_string(), 1_000)],
+                [],
+                [],
+                [],
+                [],
+                [],
+                [(
+                    ("Memory".to_string(), "created_at".to_string()),
+                    (0..100).map(Value::Int).collect::<Vec<_>>(),
+                )],
+            ),
+        );
+
+        assert_eq!(
+            catalog.estimate_range_bounds_rows(
+                "Memory",
+                "created_at",
+                Some(&(Value::Int(10), true)),
+                Some(&(Value::Int(20), false)),
+            ),
+            100
+        );
+    }
+
+    #[test]
     fn index_cardinality_uses_sparse_index_size_and_joint_ndv() {
         let statistics = OptimizerCatalogStatistics {
             label_counts: BTreeMap::from([("Memory".to_string(), 100)]),

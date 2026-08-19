@@ -230,7 +230,7 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           RUSTFLAGS: -Zsanitizer=address
         run: >-
-          cargo test -p skein-vector-projection
+          cargo +nightly test -p skein-vector-projection
           -Zbuild-std
           --target x86_64-unknown-linux-gnu
           kernel::tests

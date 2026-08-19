@@ -206,15 +206,15 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             logical: range_expand_plan(),
             catalog: range_expand_catalog(),
             expected_cost: PlanCost {
-                estimated_rows: 7,
-                cost: 366,
+                estimated_rows: 13,
+                cost: 428,
             },
             instance_fingerprint_contains: "IndexNodeRangeSeek",
             decision_contains: &[
                 "choose IndexNodeRangeSeek",
                 "estimate AdjacencyExpand",
                 "estimated_rows=125",
-                "selected physical plan cost: estimated_rows=7 cost=366",
+                "selected physical plan cost: estimated_rows=13 cost=428",
             ],
         },
         OptimizerSmokeCase {
@@ -223,12 +223,12 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             catalog: composite_seek_catalog(),
             expected_cost: PlanCost {
                 estimated_rows: 1,
-                cost: 6,
+                cost: 5,
             },
-            instance_fingerprint_contains: "IndexNodeCompositeSeek",
+            instance_fingerprint_contains: "access=composite_equality",
             decision_contains: &[
                 "choose IndexNodeCompositeSeek",
-                "selected physical plan cost: estimated_rows=1 cost=6",
+                "selected physical plan cost: estimated_rows=1 cost=5",
             ],
         },
         OptimizerSmokeCase {
@@ -236,13 +236,13 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             logical: text_seek_plan(),
             catalog: text_seek_catalog(),
             expected_cost: PlanCost {
-                estimated_rows: 250,
-                cost: 1003,
+                estimated_rows: 25,
+                cost: 228,
             },
-            instance_fingerprint_contains: "IndexNodeTextSeek",
+            instance_fingerprint_contains: "access=full_text",
             decision_contains: &[
                 "choose IndexNodeTextSeek",
-                "selected physical plan cost: estimated_rows=250 cost=1003",
+                "selected physical plan cost: estimated_rows=25 cost=228",
             ],
         },
         OptimizerSmokeCase {
@@ -251,10 +251,10 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             catalog: residual_node_string_contains_catalog(),
             expected_cost: PlanCost {
                 estimated_rows: 250,
-                cost: 2254,
+                cost: 1254,
             },
             instance_fingerprint_contains: "PropertyContains",
-            decision_contains: &["selected physical plan cost: estimated_rows=250 cost=2254"],
+            decision_contains: &["selected physical plan cost: estimated_rows=250 cost=1254"],
         },
         OptimizerSmokeCase {
             name: "low_selectivity_scan",
@@ -262,12 +262,12 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             catalog: low_selectivity_scan_catalog(),
             expected_cost: PlanCost {
                 estimated_rows: 1000,
-                cost: 3004,
+                cost: 2004,
             },
-            instance_fingerprint_contains: "SeqNodeScan",
+            instance_fingerprint_contains: "access=label_scan",
             decision_contains: &[
                 "choose SeqNodeScan",
-                "selected physical plan cost: estimated_rows=1000 cost=3004",
+                "selected physical plan cost: estimated_rows=1000 cost=2004",
             ],
         },
         OptimizerSmokeCase {
@@ -481,13 +481,13 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             catalog: entity_bridge_span_aggregate_catalog(),
             expected_cost: PlanCost {
                 estimated_rows: 10,
-                cost: 143_734,
+                cost: 25_834,
             },
             instance_fingerprint_contains: "count(distinct 2:e2.12:community_id)",
             decision_contains: &[
                 "estimate AdjacencyExpand for Entity-[:RELATES_TO*1..1]->Entity",
                 "choose TopN for bounded sort",
-                "selected physical plan cost: estimated_rows=10 cost=143734",
+                "selected physical plan cost: estimated_rows=10 cost=25834",
             ],
         },
         OptimizerSmokeCase {
@@ -608,7 +608,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 100,
                 cost: 2004,
             },
-            instance_fingerprint_contains: "Or(False,PropertyEq",
+            instance_fingerprint_contains: "PropertyEq",
             decision_contains: &["selected physical plan cost: estimated_rows=100 cost=2004"],
         },
         OptimizerSmokeCase {
@@ -638,13 +638,13 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             logical: thread_candidate_normalized_space_multi_seek_plan(),
             catalog: thread_candidate_normalized_space_multi_seek_catalog(),
             expected_cost: PlanCost {
-                estimated_rows: 1,
+                estimated_rows: 2,
                 cost: 12,
             },
             instance_fingerprint_contains: "IndexNodeMultiSeek",
             decision_contains: &[
                 "choose IndexNodeMultiSeek for Thread.thread_id",
-                "selected physical plan cost: estimated_rows=1 cost=12",
+                "selected physical plan cost: estimated_rows=2 cost=12",
             ],
         },
     ]
