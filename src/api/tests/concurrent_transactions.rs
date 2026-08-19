@@ -868,11 +868,11 @@ fn wal_group_commit_shares_one_sync_without_changing_record_order() {
     )
     .unwrap();
     let db = ConcurrentDatabase::new_with_wal_group_commit(database, group_commit);
-    let barrier = Arc::new(Barrier::new(WRITERS));
+    db.set_group_commit_post_enqueue_barrier(Arc::new(Barrier::new(WRITERS)))
+        .unwrap();
     let writers = (0..WRITERS)
         .map(|id| {
             let db = db.clone();
-            let barrier = Arc::clone(&barrier);
             std::thread::spawn(move || {
                 let mut transaction = db
                     .begin_transaction(ConcurrentTransactionOptions::pessimistic(
@@ -884,7 +884,6 @@ fn wal_group_commit_shares_one_sync_without_changing_record_order() {
                         "INSERT INTO public.messages (id, body) VALUES ({id}, 'writer-{id}')"
                     ))
                     .unwrap();
-                barrier.wait();
                 transaction.commit().unwrap();
             })
         })

@@ -35,6 +35,8 @@ use skein_storage::{
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::path::Path;
+#[cfg(test)]
+use std::sync::Barrier;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -153,6 +155,16 @@ impl ConcurrentDatabase {
 
     pub fn wal_group_commit_snapshot(&self) -> Result<WalGroupCommitSnapshot> {
         self.inner.commits.group_commit_snapshot()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_group_commit_post_enqueue_barrier(
+        &self,
+        barrier: Arc<Barrier>,
+    ) -> Result<()> {
+        self.inner
+            .commits
+            .set_group_commit_post_enqueue_barrier(barrier)
     }
 
     /// Returns storage debt and cache accounting from the same serialized

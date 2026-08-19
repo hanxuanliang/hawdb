@@ -8,6 +8,8 @@ use std::collections::VecDeque;
 use std::fmt::{self, Debug, Formatter};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::Barrier;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -58,6 +60,8 @@ impl CommitSequencer {
             state.queue.push_back(Arc::clone(&request));
             self.group_commit.available.notify_all();
         }
+        #[cfg(test)]
+        self.group_commit.wait_after_enqueue()?;
         loop {
             if let Some(result) = request.take_result()? {
                 return result;
@@ -94,6 +98,14 @@ impl CommitSequencer {
         let mut state = self.group_commit.lock_state()?;
         state.refresh_fsync_estimate(Instant::now());
         Ok(state.metrics)
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_group_commit_post_enqueue_barrier(
+        &self,
+        barrier: Arc<Barrier>,
+    ) -> Result<()> {
+        self.group_commit.set_post_enqueue_barrier(barrier)
     }
 
     fn run_group_commit(&self) -> Result<()> {
@@ -373,6 +385,8 @@ struct GroupCommitCoordinator {
     config: WalGroupCommitConfig,
     state: Mutex<GroupCommitState>,
     available: Condvar,
+    #[cfg(test)]
+    post_enqueue_barrier: Mutex<Option<Arc<Barrier>>>,
 }
 
 impl GroupCommitCoordinator {
@@ -381,7 +395,31 @@ impl GroupCommitCoordinator {
             config,
             state: Mutex::new(GroupCommitState::new(config, Instant::now())),
             available: Condvar::new(),
+            #[cfg(test)]
+            post_enqueue_barrier: Mutex::new(None),
         }
+    }
+
+    #[cfg(test)]
+    fn set_post_enqueue_barrier(&self, barrier: Arc<Barrier>) -> Result<()> {
+        *self
+            .post_enqueue_barrier
+            .lock()
+            .map_err(|_| group_commit_coordinator_poisoned_error())? = Some(barrier);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn wait_after_enqueue(&self) -> Result<()> {
+        let barrier = self
+            .post_enqueue_barrier
+            .lock()
+            .map_err(|_| group_commit_coordinator_poisoned_error())?
+            .clone();
+        if let Some(barrier) = barrier {
+            barrier.wait();
+        }
+        Ok(())
     }
 
     fn lock_state(&self) -> Result<MutexGuard<'_, GroupCommitState>> {
