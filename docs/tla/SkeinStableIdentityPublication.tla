@@ -3,12 +3,11 @@ EXTENDS FiniteSets, Naturals
 
 (***************************************************************************)
 (* The physical-id to stable-identity mapping is an independently published *)
-(* export/import artifact, not a canonical query index. Every fixed-size     *)
-(* mapping page becomes durable before its small selected header. Initial    *)
-(* import may append its graph WAL batch only after one complete mapping      *)
-(* generation declares coverage for that target graph epoch. Readers pin one *)
-(* immutable generation and corruption of a selected page fails closed. Full *)
-(* scrub succeeds only after validating every page of the pinned generation. *)
+(* export/import artifact, not a canonical query index. Fixed-size pages     *)
+(* first become durable in an immutable generation artifact. A bounded       *)
+(* selector is published last and names exactly one complete generation.     *)
+(* Readers pin the selected generation, and reclamation can remove only an   *)
+(* unselected, unpinned artifact. Corruption of a selected page fails closed. *)
 (***************************************************************************)
 
 CONSTANTS Pages, Epochs, Generations
@@ -20,12 +19,14 @@ ReaderStates == {
 PageCopies == Generations \X Pages
 
 VARIABLES
-    publishedGeneration,
+    selectedGeneration,
     generationCoverage,
     completeGenerations,
+    retainedGenerations,
     candidateGeneration,
     candidateCoverage,
     candidatePages,
+    candidateDurable,
     graphWalEpoch,
     graphWalMappingGeneration,
     graphVisibleEpoch,
@@ -38,12 +39,14 @@ VARIABLES
     poisoned
 
 vars == <<
-    publishedGeneration,
+    selectedGeneration,
     generationCoverage,
     completeGenerations,
+    retainedGenerations,
     candidateGeneration,
     candidateCoverage,
     candidatePages,
+    candidateDurable,
     graphWalEpoch,
     graphWalMappingGeneration,
     graphVisibleEpoch,
@@ -57,12 +60,14 @@ vars == <<
 >>
 
 Init ==
-    /\ publishedGeneration = 0
+    /\ selectedGeneration = 0
     /\ generationCoverage = [generation \in Generations |-> 0]
     /\ completeGenerations = {}
+    /\ retainedGenerations = {}
     /\ candidateGeneration = 0
     /\ candidateCoverage = 0
     /\ candidatePages = {}
+    /\ candidateDurable = FALSE
     /\ graphWalEpoch = 0
     /\ graphWalMappingGeneration = 0
     /\ graphVisibleEpoch = 0
@@ -76,41 +81,62 @@ Init ==
 
 StartCandidate ==
     /\ candidateGeneration = 0
-    /\ publishedGeneration < Cardinality(Generations)
-    /\ candidateGeneration' = publishedGeneration + 1
+    /\ {generation \in Generations \ retainedGenerations:
+            generation > selectedGeneration} # {}
+    /\ candidateGeneration' \in
+          {generation \in Generations \ retainedGenerations:
+              generation > selectedGeneration}
     /\ candidateCoverage' \in Epochs
     /\ candidatePages' = {}
+    /\ candidateDurable' = FALSE
     /\ UNCHANGED <<
-        publishedGeneration, generationCoverage, completeGenerations,
-        graphWalEpoch, graphWalMappingGeneration, graphVisibleEpoch,
-        graphVisibleMappingGeneration, readerGeneration, readerState,
-        selectedPage, scrubbedPages, corruptCopies, poisoned
+        selectedGeneration, generationCoverage, completeGenerations,
+        retainedGenerations, graphWalEpoch, graphWalMappingGeneration,
+        graphVisibleEpoch, graphVisibleMappingGeneration, readerGeneration,
+        readerState, selectedPage, scrubbedPages, corruptCopies, poisoned
        >>
 
 WriteCandidatePage ==
     /\ candidateGeneration \in Generations
+    /\ ~candidateDurable
     /\ candidatePages # Pages
     /\ \E page \in Pages \ candidatePages:
           candidatePages' = candidatePages \union {page}
     /\ UNCHANGED <<
-        publishedGeneration, generationCoverage, completeGenerations,
-        candidateGeneration, candidateCoverage, graphWalEpoch,
-        graphWalMappingGeneration, graphVisibleEpoch,
-        graphVisibleMappingGeneration, readerGeneration, readerState,
-        selectedPage, scrubbedPages, corruptCopies, poisoned
+        selectedGeneration, generationCoverage, completeGenerations,
+        retainedGenerations, candidateGeneration, candidateCoverage,
+        candidateDurable, graphWalEpoch, graphWalMappingGeneration,
+        graphVisibleEpoch, graphVisibleMappingGeneration, readerGeneration,
+        readerState, selectedPage, scrubbedPages, corruptCopies, poisoned
        >>
 
-PublishCandidateHeader ==
+CompleteCandidateArtifact ==
     /\ candidateGeneration \in Generations
+    /\ ~candidateDurable
     /\ candidatePages = Pages
-    /\ publishedGeneration' = candidateGeneration
     /\ generationCoverage' =
           [generationCoverage EXCEPT ![candidateGeneration] = candidateCoverage]
     /\ completeGenerations' = completeGenerations \union {candidateGeneration}
+    /\ retainedGenerations' = retainedGenerations \union {candidateGeneration}
+    /\ candidateDurable' = TRUE
+    /\ UNCHANGED <<
+        selectedGeneration, candidateGeneration, candidateCoverage,
+        candidatePages, graphWalEpoch, graphWalMappingGeneration,
+        graphVisibleEpoch, graphVisibleMappingGeneration, readerGeneration,
+        readerState, selectedPage, scrubbedPages, corruptCopies, poisoned
+       >>
+
+PublishCandidateSelector ==
+    /\ candidateGeneration \in Generations
+    /\ candidateDurable
+    /\ candidateGeneration \in retainedGenerations
+    /\ selectedGeneration' = candidateGeneration
     /\ candidateGeneration' = 0
     /\ candidateCoverage' = 0
     /\ candidatePages' = {}
+    /\ candidateDurable' = FALSE
     /\ UNCHANGED <<
+        generationCoverage, completeGenerations, retainedGenerations,
         graphWalEpoch, graphWalMappingGeneration, graphVisibleEpoch,
         graphVisibleMappingGeneration, readerGeneration, readerState,
         selectedPage, scrubbedPages, corruptCopies, poisoned
@@ -121,24 +147,40 @@ CrashCandidate ==
     /\ candidateGeneration' = 0
     /\ candidateCoverage' = 0
     /\ candidatePages' = {}
+    /\ candidateDurable' = FALSE
     /\ UNCHANGED <<
-        publishedGeneration, generationCoverage, completeGenerations,
-        graphWalEpoch, graphWalMappingGeneration, graphVisibleEpoch,
-        graphVisibleMappingGeneration, readerGeneration, readerState,
-        selectedPage, scrubbedPages, corruptCopies, poisoned
+        selectedGeneration, generationCoverage, completeGenerations,
+        retainedGenerations, graphWalEpoch, graphWalMappingGeneration,
+        graphVisibleEpoch, graphVisibleMappingGeneration, readerGeneration,
+        readerState, selectedPage, scrubbedPages, corruptCopies, poisoned
+       >>
+
+ReclaimUnselectedGeneration ==
+    /\ \E generation \in retainedGenerations:
+          /\ generation # selectedGeneration
+          /\ generation # candidateGeneration
+          /\ generation # readerGeneration
+          /\ retainedGenerations' = retainedGenerations \ {generation}
+    /\ UNCHANGED <<
+        selectedGeneration, generationCoverage, completeGenerations,
+        candidateGeneration, candidateCoverage, candidatePages,
+        candidateDurable, graphWalEpoch, graphWalMappingGeneration,
+        graphVisibleEpoch, graphVisibleMappingGeneration, readerGeneration,
+        readerState, selectedPage, scrubbedPages, corruptCopies, poisoned
        >>
 
 AppendInitialImportWal ==
     /\ graphWalEpoch = 0
-    /\ publishedGeneration \in completeGenerations
-    /\ generationCoverage[publishedGeneration] \in Epochs
-    /\ graphWalEpoch' = generationCoverage[publishedGeneration]
-    /\ graphWalMappingGeneration' = publishedGeneration
+    /\ selectedGeneration \in completeGenerations
+    /\ generationCoverage[selectedGeneration] \in Epochs
+    /\ graphWalEpoch' = generationCoverage[selectedGeneration]
+    /\ graphWalMappingGeneration' = selectedGeneration
     /\ UNCHANGED <<
-        publishedGeneration, generationCoverage, completeGenerations,
-        candidateGeneration, candidateCoverage, candidatePages,
-        graphVisibleEpoch, graphVisibleMappingGeneration, readerGeneration,
-        readerState, selectedPage, scrubbedPages, corruptCopies, poisoned
+        selectedGeneration, generationCoverage, completeGenerations,
+        retainedGenerations, candidateGeneration, candidateCoverage,
+        candidatePages, candidateDurable, graphVisibleEpoch,
+        graphVisibleMappingGeneration, readerGeneration, readerState,
+        selectedPage, scrubbedPages, corruptCopies, poisoned
        >>
 
 PublishImportedGraph ==
@@ -147,24 +189,27 @@ PublishImportedGraph ==
     /\ graphVisibleEpoch' = graphWalEpoch
     /\ graphVisibleMappingGeneration' = graphWalMappingGeneration
     /\ UNCHANGED <<
-        publishedGeneration, generationCoverage, completeGenerations,
-        candidateGeneration, candidateCoverage, candidatePages,
-        graphWalEpoch, graphWalMappingGeneration, readerGeneration,
-        readerState, selectedPage, scrubbedPages, corruptCopies, poisoned
+        selectedGeneration, generationCoverage, completeGenerations,
+        retainedGenerations, candidateGeneration, candidateCoverage,
+        candidatePages, candidateDurable, graphWalEpoch,
+        graphWalMappingGeneration, readerGeneration, readerState,
+        selectedPage, scrubbedPages, corruptCopies, poisoned
        >>
 
 OpenPinnedReader ==
     /\ readerState = "closed"
     /\ ~poisoned
-    /\ publishedGeneration \in completeGenerations
-    /\ readerGeneration' = publishedGeneration
+    /\ selectedGeneration \in completeGenerations
+    /\ selectedGeneration \in retainedGenerations
+    /\ readerGeneration' = selectedGeneration
     /\ readerState' = "open"
     /\ selectedPage' = 0
     /\ scrubbedPages' = {}
     /\ UNCHANGED <<
-        publishedGeneration, generationCoverage, completeGenerations,
-        candidateGeneration, candidateCoverage, candidatePages,
-        graphWalEpoch, graphWalMappingGeneration, graphVisibleEpoch,
+        selectedGeneration, generationCoverage, completeGenerations,
+        retainedGenerations, candidateGeneration, candidateCoverage,
+        candidatePages, candidateDurable, graphWalEpoch,
+        graphWalMappingGeneration, graphVisibleEpoch,
         graphVisibleMappingGeneration, corruptCopies, poisoned
        >>
 
@@ -174,9 +219,10 @@ BeginDemandLookup ==
     /\ selectedPage' \in Pages
     /\ readerState' = "reading"
     /\ UNCHANGED <<
-        publishedGeneration, generationCoverage, completeGenerations,
-        candidateGeneration, candidateCoverage, candidatePages,
-        graphWalEpoch, graphWalMappingGeneration, graphVisibleEpoch,
+        selectedGeneration, generationCoverage, completeGenerations,
+        retainedGenerations, candidateGeneration, candidateCoverage,
+        candidatePages, candidateDurable, graphWalEpoch,
+        graphWalMappingGeneration, graphVisibleEpoch,
         graphVisibleMappingGeneration, readerGeneration, scrubbedPages,
         corruptCopies, poisoned
        >>
@@ -186,9 +232,10 @@ ReadSelectedPage ==
     /\ <<readerGeneration, selectedPage>> \notin corruptCopies
     /\ readerState' = "lookup_succeeded"
     /\ UNCHANGED <<
-        publishedGeneration, generationCoverage, completeGenerations,
-        candidateGeneration, candidateCoverage, candidatePages,
-        graphWalEpoch, graphWalMappingGeneration, graphVisibleEpoch,
+        selectedGeneration, generationCoverage, completeGenerations,
+        retainedGenerations, candidateGeneration, candidateCoverage,
+        candidatePages, candidateDurable, graphWalEpoch,
+        graphWalMappingGeneration, graphVisibleEpoch,
         graphVisibleMappingGeneration, readerGeneration, selectedPage,
         scrubbedPages, corruptCopies, poisoned
        >>
@@ -199,9 +246,10 @@ RejectCorruptSelectedPage ==
     /\ readerState' = "failed"
     /\ poisoned' = TRUE
     /\ UNCHANGED <<
-        publishedGeneration, generationCoverage, completeGenerations,
-        candidateGeneration, candidateCoverage, candidatePages,
-        graphWalEpoch, graphWalMappingGeneration, graphVisibleEpoch,
+        selectedGeneration, generationCoverage, completeGenerations,
+        retainedGenerations, candidateGeneration, candidateCoverage,
+        candidatePages, candidateDurable, graphWalEpoch,
+        graphWalMappingGeneration, graphVisibleEpoch,
         graphVisibleMappingGeneration, readerGeneration, selectedPage,
         scrubbedPages, corruptCopies
        >>
@@ -213,9 +261,10 @@ BeginDeepScrub ==
     /\ scrubbedPages' = {}
     /\ selectedPage' = 0
     /\ UNCHANGED <<
-        publishedGeneration, generationCoverage, completeGenerations,
-        candidateGeneration, candidateCoverage, candidatePages,
-        graphWalEpoch, graphWalMappingGeneration, graphVisibleEpoch,
+        selectedGeneration, generationCoverage, completeGenerations,
+        retainedGenerations, candidateGeneration, candidateCoverage,
+        candidatePages, candidateDurable, graphWalEpoch,
+        graphWalMappingGeneration, graphVisibleEpoch,
         graphVisibleMappingGeneration, readerGeneration, corruptCopies,
         poisoned
        >>
@@ -226,9 +275,10 @@ ScrubCleanPage ==
           /\ <<readerGeneration, page>> \notin corruptCopies
           /\ scrubbedPages' = scrubbedPages \union {page}
     /\ UNCHANGED <<
-        publishedGeneration, generationCoverage, completeGenerations,
-        candidateGeneration, candidateCoverage, candidatePages,
-        graphWalEpoch, graphWalMappingGeneration, graphVisibleEpoch,
+        selectedGeneration, generationCoverage, completeGenerations,
+        retainedGenerations, candidateGeneration, candidateCoverage,
+        candidatePages, candidateDurable, graphWalEpoch,
+        graphWalMappingGeneration, graphVisibleEpoch,
         graphVisibleMappingGeneration, readerGeneration, readerState,
         selectedPage, corruptCopies, poisoned
        >>
@@ -240,9 +290,10 @@ RejectCorruptScrubPage ==
     /\ readerState' = "failed"
     /\ poisoned' = TRUE
     /\ UNCHANGED <<
-        publishedGeneration, generationCoverage, completeGenerations,
-        candidateGeneration, candidateCoverage, candidatePages,
-        graphWalEpoch, graphWalMappingGeneration, graphVisibleEpoch,
+        selectedGeneration, generationCoverage, completeGenerations,
+        retainedGenerations, candidateGeneration, candidateCoverage,
+        candidatePages, candidateDurable, graphWalEpoch,
+        graphWalMappingGeneration, graphVisibleEpoch,
         graphVisibleMappingGeneration, readerGeneration, selectedPage,
         scrubbedPages, corruptCopies
        >>
@@ -252,21 +303,23 @@ CompleteDeepScrub ==
     /\ scrubbedPages = Pages
     /\ readerState' = "scrub_succeeded"
     /\ UNCHANGED <<
-        publishedGeneration, generationCoverage, completeGenerations,
-        candidateGeneration, candidateCoverage, candidatePages,
-        graphWalEpoch, graphWalMappingGeneration, graphVisibleEpoch,
+        selectedGeneration, generationCoverage, completeGenerations,
+        retainedGenerations, candidateGeneration, candidateCoverage,
+        candidatePages, candidateDurable, graphWalEpoch,
+        graphWalMappingGeneration, graphVisibleEpoch,
         graphVisibleMappingGeneration, readerGeneration, selectedPage,
         scrubbedPages, corruptCopies, poisoned
        >>
 
-CorruptPublishedPage ==
-    /\ publishedGeneration \in completeGenerations
+CorruptSelectedPage ==
+    /\ selectedGeneration \in retainedGenerations
     /\ \E page \in Pages:
-          corruptCopies' = corruptCopies \union {<<publishedGeneration, page>>}
+          corruptCopies' = corruptCopies \union {<<selectedGeneration, page>>}
     /\ UNCHANGED <<
-        publishedGeneration, generationCoverage, completeGenerations,
-        candidateGeneration, candidateCoverage, candidatePages,
-        graphWalEpoch, graphWalMappingGeneration, graphVisibleEpoch,
+        selectedGeneration, generationCoverage, completeGenerations,
+        retainedGenerations, candidateGeneration, candidateCoverage,
+        candidatePages, candidateDurable, graphWalEpoch,
+        graphWalMappingGeneration, graphVisibleEpoch,
         graphVisibleMappingGeneration, readerGeneration, readerState,
         selectedPage, scrubbedPages, poisoned
        >>
@@ -278,17 +331,20 @@ CloseReader ==
     /\ selectedPage' = 0
     /\ scrubbedPages' = {}
     /\ UNCHANGED <<
-        publishedGeneration, generationCoverage, completeGenerations,
-        candidateGeneration, candidateCoverage, candidatePages,
-        graphWalEpoch, graphWalMappingGeneration, graphVisibleEpoch,
+        selectedGeneration, generationCoverage, completeGenerations,
+        retainedGenerations, candidateGeneration, candidateCoverage,
+        candidatePages, candidateDurable, graphWalEpoch,
+        graphWalMappingGeneration, graphVisibleEpoch,
         graphVisibleMappingGeneration, corruptCopies, poisoned
        >>
 
 Next ==
     \/ StartCandidate
     \/ WriteCandidatePage
-    \/ PublishCandidateHeader
+    \/ CompleteCandidateArtifact
+    \/ PublishCandidateSelector
     \/ CrashCandidate
+    \/ ReclaimUnselectedGeneration
     \/ AppendInitialImportWal
     \/ PublishImportedGraph
     \/ OpenPinnedReader
@@ -299,18 +355,20 @@ Next ==
     \/ ScrubCleanPage
     \/ RejectCorruptScrubPage
     \/ CompleteDeepScrub
-    \/ CorruptPublishedPage
+    \/ CorruptSelectedPage
     \/ CloseReader
 
 Spec == Init /\ [][Next]_vars
 
 TypeOK ==
-    /\ publishedGeneration \in {0} \union Generations
+    /\ selectedGeneration \in {0} \union Generations
     /\ generationCoverage \in [Generations -> {0} \union Epochs]
     /\ completeGenerations \subseteq Generations
+    /\ retainedGenerations \subseteq completeGenerations
     /\ candidateGeneration \in {0} \union Generations
     /\ candidateCoverage \in {0} \union Epochs
     /\ candidatePages \subseteq Pages
+    /\ candidateDurable \in BOOLEAN
     /\ graphWalEpoch \in {0} \union Epochs
     /\ graphWalMappingGeneration \in {0} \union Generations
     /\ graphVisibleEpoch \in {0} \union Epochs
@@ -322,8 +380,17 @@ TypeOK ==
     /\ corruptCopies \subseteq PageCopies
     /\ poisoned \in BOOLEAN
 
-PublishedHeaderSelectsCompletePages ==
-    publishedGeneration # 0 => publishedGeneration \in completeGenerations
+SelectorSelectsCompleteGeneration ==
+    selectedGeneration # 0 => selectedGeneration \in completeGenerations
+
+SelectorRetainsSelectedGeneration ==
+    selectedGeneration # 0 => selectedGeneration \in retainedGenerations
+
+DurableCandidatePrecedesSelector ==
+    candidateDurable =>
+        /\ candidateGeneration \in completeGenerations
+        /\ candidateGeneration \in retainedGenerations
+        /\ candidatePages = Pages
 
 WalNeverLeadsStableIdentity ==
     graphWalEpoch # 0 =>
@@ -335,8 +402,10 @@ VisibleGraphNeverLeadsStableIdentity ==
         /\ graphVisibleMappingGeneration \in completeGenerations
         /\ generationCoverage[graphVisibleMappingGeneration] = graphVisibleEpoch
 
-PinnedReaderUsesCompleteGeneration ==
-    readerState # "closed" => readerGeneration \in completeGenerations
+PinnedReaderUsesRetainedCompleteGeneration ==
+    readerState # "closed" =>
+        /\ readerGeneration \in completeGenerations
+        /\ readerGeneration \in retainedGenerations
 
 SuccessfulLookupHasSelectedPage ==
     readerState = "lookup_succeeded" => selectedPage \in Pages

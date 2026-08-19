@@ -271,10 +271,11 @@ pub use snapshot::{
     SnapshotCommitError, SnapshotCoordinator, SnapshotReadGuard, VersionedSnapshot,
 };
 pub use stable_identity::{
-    StableIdentityKey, StableIdentityKind, StableIdentityMappingConfig, StableIdentityMappingError,
-    StableIdentityMappingHeader, StableIdentityMappingReader, StableIdentityMappingWriteOutput,
-    StableIdentityMappingWriter, StableIdentityMaterializeLimits, StableIdentityReadLimits,
-    StableIdentityReadReport, StableIdentityScrubReport, DEFAULT_STABLE_IDENTITY_ARTIFACT_BYTES,
+    stable_identity_generation_artifact_path, StableIdentityKey, StableIdentityKind,
+    StableIdentityMappingConfig, StableIdentityMappingError, StableIdentityMappingHeader,
+    StableIdentityMappingReader, StableIdentityMappingWriteOutput, StableIdentityMappingWriter,
+    StableIdentityMaterializeLimits, StableIdentityReadLimits, StableIdentityReadReport,
+    StableIdentityScrubReport, DEFAULT_STABLE_IDENTITY_ARTIFACT_BYTES,
     DEFAULT_STABLE_IDENTITY_LOOKUP_BYTES, DEFAULT_STABLE_IDENTITY_LOOKUP_PAGES,
     DEFAULT_STABLE_IDENTITY_MATERIALIZED_BYTES, DEFAULT_STABLE_IDENTITY_MATERIALIZED_ENTRIES,
     DEFAULT_STABLE_IDENTITY_PAGE_BYTES, DEFAULT_STABLE_IDENTITY_PAGE_ENTRIES,

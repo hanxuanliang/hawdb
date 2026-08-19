@@ -873,16 +873,42 @@ impl DurableStore {
                     sources.insert(name.clone(), self.root_path.join(name));
                 }
             }
-            let mut files = Vec::with_capacity(sources.len().saturating_add(1));
+            match (
+                self.stable_id_mapping_path.exists(),
+                self.stable_id_mapping_reader.as_ref(),
+            ) {
+                (true, Some(reader)) => {
+                    let artifact_path = reader.artifact_path();
+                    let artifact_name = artifact_path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .ok_or_else(|| {
+                            SkeinError::Storage(
+                                "stable identity generation artifact name is not UTF-8".to_string(),
+                            )
+                        })?
+                        .to_string();
+                    sources.insert(
+                        STABLE_ID_MAPPING_FILE.to_string(),
+                        self.stable_id_mapping_path.clone(),
+                    );
+                    sources.insert(artifact_name, artifact_path.to_path_buf());
+                }
+                (true, None) => {
+                    return Err(SkeinError::Storage(
+                        "stable identity selector exists without a pinned generation".to_string(),
+                    ));
+                }
+                (false, Some(_)) => {
+                    return Err(SkeinError::Storage(
+                        "pinned stable identity generation has no selector".to_string(),
+                    ));
+                }
+                (false, None) => {}
+            }
+            let mut files = Vec::with_capacity(sources.len());
             for (name, source) in sources {
                 files.push(copy_backup_file(&source, &destination.join(&name), &name)?);
-            }
-            if self.stable_id_mapping_path.exists() {
-                files.push(copy_backup_file(
-                    &self.stable_id_mapping_path,
-                    &destination.join(STABLE_ID_MAPPING_FILE),
-                    STABLE_ID_MAPPING_FILE,
-                )?);
             }
             files.sort_by(|left, right| left.name.cmp(&right.name));
             validate_backup_files(destination, &files, generation)?;
@@ -1430,10 +1456,10 @@ impl DurableStore {
         ) {
             (true, Some(reader)) => {
                 let report = reader.deep_scrub().map_err(stable_identity_error)?;
-                scrub.checked_file_count = scrub.checked_file_count.saturating_add(1);
+                scrub.checked_file_count = scrub.checked_file_count.saturating_add(2);
                 scrub.checked_bytes = scrub.checked_bytes.saturating_add(report.checked_bytes);
                 scrub.sha256_verified_file_count =
-                    scrub.sha256_verified_file_count.saturating_add(1);
+                    scrub.sha256_verified_file_count.saturating_add(2);
             }
             (true, None) => {
                 return Err(SkeinError::Storage(

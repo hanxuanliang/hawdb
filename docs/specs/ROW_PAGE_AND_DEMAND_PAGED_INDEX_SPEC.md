@@ -1325,21 +1325,27 @@ generation-bound property projection. `stable_ids.skein` exists only for
 records that need a durable export/import identity because their canonical
 property is missing or non-unique. A persisted overlay replaces the ambiguous
 property value for that physical export; mappings that are no longer required
-are removed by the next explicit export publication.
+are removed after the next explicit export publication and the final reader
+pin on their immutable generation has been released.
 
 1. The mapping MUST use its own monotonic generation because initial import
    publishes it before appending the graph WAL batch. It MUST NOT be falsely
    bound to a checkpoint generation that does not yet contain the imported
    graph.
-2. Publication MUST write and synchronize every fixed-size mapping page before
-   atomically replacing the small checksummed header. A crash before header
-   replacement leaves the prior complete generation selected.
-3. The header records generation, covered graph commit epoch, page size, page
-   count, and node/relationship entry counts. Initial-import WAL append is
-   permitted only after a complete selected mapping declares coverage for the
-   target graph epoch.
-4. Normal open reads only the bounded header and validates the exact artifact
-   length. It MUST NOT decode every stable identity or warm mapping pages.
+2. Publication MUST write and synchronize every fixed-size mapping page into
+   an immutable generation-named artifact before atomically replacing the
+   small checksummed selector. A crash before selector replacement leaves the
+   prior complete generation selected; a complete but unselected artifact is
+   ignored and may be reclaimed or replaced by a retry.
+3. The generation header records generation, covered graph commit epoch, page
+   size, page count, and node/relationship entry counts. The selector embeds
+   that complete header plus the exact artifact length under CRC32C and
+   SHA-256. Initial-import WAL append is permitted only after a complete
+   selected mapping declares coverage for the target graph epoch.
+4. Normal open reads only the bounded selector and selected generation header,
+   validates their exact agreement and the exact artifact length, closes the
+   selector handle, and pins the generation artifact. It MUST NOT decode every
+   stable identity or warm mapping pages.
 5. Pages are strictly ordered by `(entity kind, physical id)`, independently
    checksummed, fixed-size, and demand-read through the shared segment cache.
    Point lookup uses bounded page and storage-byte admission. A selected corrupt
@@ -1356,6 +1362,13 @@ are removed by the next explicit export publication.
    relationship-property, composite, full-text, and adjacency projections keep
    their canonical generation fences and cannot use this sidecar as a query
    fallback.
+9. Publication MUST NOT replace an opened generation artifact. A reader keeps
+   its exact immutable generation across later selector publication on every
+   supported platform. Reclamation may remove only an unselected generation
+   with no in-process reader pin. Backup MUST copy the selector and exactly the
+   generation artifact bound by its pinned reader; a selector without that
+   artifact, an unreferenced generation, or a cross-generation header mismatch
+   fails validation closed.
 
 ### Large values
 

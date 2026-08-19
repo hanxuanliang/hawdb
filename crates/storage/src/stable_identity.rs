@@ -1,25 +1,33 @@
 use crate::cache::SegmentCacheIdentity;
 use crate::{
     content_digest, decode_residual_row_properties, durable_replace_file,
-    encode_residual_row_properties, ManifestGeneration, RepresentationKind, SegmentCache,
-    SegmentCacheError, SegmentCacheKey, StoreId, StoreStableIdMapping,
+    encode_residual_row_properties, sync_parent_directory, ManifestGeneration, RepresentationKind,
+    SegmentCache, SegmentCacheError, SegmentCacheKey, StoreId, StoreStableIdMapping,
 };
 use skein_core::Value;
 use skein_integrity::{IntegrityHasher, SHA256_BYTES};
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::fmt;
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 const FILE_MAGIC: &[u8; 8] = b"SKSIDMP1";
 const PAGE_MAGIC: &[u8; 8] = b"SKSIDPG1";
+const SELECTOR_MAGIC: &[u8; 8] = b"SKSIDSL1";
 const FORMAT_VERSION: u16 = 1;
 const FILE_HEADER_BYTES: usize = 96;
 const PAGE_HEADER_BYTES: usize = 96;
+const SELECTOR_BYTES: usize = 160;
+const SELECTOR_HEADER_OFFSET: usize = 12;
+const SELECTOR_HEADER_END: usize = SELECTOR_HEADER_OFFSET + FILE_HEADER_BYTES;
+const SELECTOR_LENGTH_END: usize = SELECTOR_HEADER_END + 8;
+const SELECTOR_CRC_END: usize = SELECTOR_LENGTH_END + 4;
+const SELECTOR_SHA_END: usize = SELECTOR_CRC_END + SHA256_BYTES;
 const ENCODED_KEY_BYTES: usize = 9;
 const ENTRY_HEADER_BYTES: usize = ENCODED_KEY_BYTES + 4;
 
@@ -182,6 +190,25 @@ pub struct StableIdentityMappingWriteOutput {
     pub encoded_len: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StableIdentitySelector {
+    header: StableIdentityMappingHeader,
+    encoded_len: u64,
+}
+
+#[derive(Debug)]
+struct StableIdentityGenerationPin {
+    selector_path: PathBuf,
+    artifact_path: PathBuf,
+    config: StableIdentityMappingConfig,
+}
+
+fn generation_pins() -> &'static Mutex<BTreeMap<PathBuf, Weak<StableIdentityGenerationPin>>> {
+    static PINS: OnceLock<Mutex<BTreeMap<PathBuf, Weak<StableIdentityGenerationPin>>>> =
+        OnceLock::new();
+    PINS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
 #[derive(Debug)]
 pub enum StableIdentityMappingError {
     Admission(String),
@@ -226,19 +253,23 @@ impl StableIdentityMappingWriter {
         I: IntoIterator<Item = (StableIdentityKey, &'a Value)>,
     {
         validate_config(config)?;
-        let generation = if path.exists() {
-            read_header(path, config)?
-                .generation
-                .checked_add(1)
-                .ok_or_else(|| {
-                    StableIdentityMappingError::Admission(
-                        "stable identity generation overflow".to_string(),
-                    )
-                })?
+        let previous = if path.exists() {
+            Some(read_selector(path, config)?)
+        } else {
+            None
+        };
+        let generation = if let Some(previous) = previous {
+            previous.header.generation.checked_add(1).ok_or_else(|| {
+                StableIdentityMappingError::Admission(
+                    "stable identity generation overflow".to_string(),
+                )
+            })?
         } else {
             1
         };
-        let temporary = path.with_extension("skein.tmp");
+        let artifact_path = stable_identity_generation_artifact_path(path, generation)?;
+        let temporary = temporary_path(&artifact_path, ".tmp")?;
+        remove_abandoned_candidate(path, &artifact_path, config)?;
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(true)
@@ -280,11 +311,39 @@ impl StableIdentityMappingWriter {
             )));
         }
         drop(file);
-        durable_replace_file(&temporary, path).map_err(|error| {
+        durable_replace_file(&temporary, &artifact_path).map_err(|error| {
             StableIdentityMappingError::Durability(format!(
-                "publish stable identity mapping: {error}"
+                "publish stable identity generation artifact: {error}"
             ))
         })?;
+        let selector = StableIdentitySelector {
+            header,
+            encoded_len,
+        };
+        let selector_temporary = temporary_path(path, ".selector.tmp")?;
+        let mut selector_file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&selector_temporary)
+            .map_err(durability("create stable identity selector candidate"))?;
+        selector_file
+            .write_all(&encode_selector(selector))
+            .map_err(durability("write stable identity selector candidate"))?;
+        selector_file
+            .sync_all()
+            .map_err(durability("sync stable identity selector candidate"))?;
+        drop(selector_file);
+        durable_replace_file(&selector_temporary, path).map_err(|error| {
+            StableIdentityMappingError::Durability(format!(
+                "publish stable identity selector: {error}"
+            ))
+        })?;
+        if let Some(previous) = previous {
+            let previous_artifact =
+                stable_identity_generation_artifact_path(path, previous.header.generation)?;
+            reclaim_generation_if_unpinned(path, &previous_artifact, config);
+        }
         Ok(StableIdentityMappingWriteOutput {
             header,
             encoded_len,
@@ -293,12 +352,14 @@ impl StableIdentityMappingWriter {
 }
 
 pub struct StableIdentityMappingReader {
-    path: PathBuf,
+    selector_path: PathBuf,
+    artifact_path: PathBuf,
     header: StableIdentityMappingHeader,
     config: StableIdentityMappingConfig,
     page_cache: Option<Arc<SegmentCache>>,
     store_id: StoreId,
     file: OnceLock<File>,
+    generation_pin: Option<Arc<StableIdentityGenerationPin>>,
     poisoned: AtomicBool,
 }
 
@@ -306,7 +367,8 @@ impl fmt::Debug for StableIdentityMappingReader {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("StableIdentityMappingReader")
-            .field("path", &self.path)
+            .field("selector_path", &self.selector_path)
+            .field("artifact_path", &self.artifact_path)
             .field("header", &self.header)
             .field("config", &self.config)
             .field("poisoned", &self.is_poisoned())
@@ -338,22 +400,50 @@ impl StableIdentityMappingReader {
         store_id: StoreId,
     ) -> Result<Self, StableIdentityMappingError> {
         validate_config(config)?;
-        let (opened, header) = open_and_read_header(path, config)?;
+        let mut selector = read_selector(path, config)?;
+        let mut retries = 0usize;
+        let (artifact_path, generation_pin, opened, header) = loop {
+            let artifact_path =
+                stable_identity_generation_artifact_path(path, selector.header.generation)?;
+            match pin_and_open_generation(path, &artifact_path, selector, config) {
+                Ok((generation_pin, opened, header)) => {
+                    break (artifact_path, generation_pin, opened, header);
+                }
+                Err(error) => {
+                    if retries == 2 {
+                        return Err(error);
+                    }
+                    let current = read_selector(path, config)?;
+                    if current == selector {
+                        return Err(error);
+                    }
+                    selector = current;
+                    retries = retries.saturating_add(1);
+                }
+            }
+        };
         let file = OnceLock::new();
         let _ = file.set(opened);
         Ok(Self {
-            path: path.to_path_buf(),
+            selector_path: path.to_path_buf(),
+            artifact_path,
             header,
             config,
             page_cache,
             store_id,
             file,
+            generation_pin: Some(generation_pin),
             poisoned: AtomicBool::new(false),
         })
     }
 
     pub const fn header(&self) -> StableIdentityMappingHeader {
         self.header
+    }
+
+    /// Returns the immutable generation artifact pinned by this reader.
+    pub fn artifact_path(&self) -> &Path {
+        &self.artifact_path
     }
 
     pub fn is_poisoned(&self) -> bool {
@@ -503,7 +593,7 @@ impl StableIdentityMappingReader {
 
     fn deep_scrub_inner(&self) -> Result<StableIdentityScrubReport, StableIdentityMappingError> {
         let mut report = StableIdentityScrubReport {
-            checked_bytes: FILE_HEADER_BYTES as u64,
+            checked_bytes: (SELECTOR_BYTES + FILE_HEADER_BYTES) as u64,
             ..StableIdentityScrubReport::default()
         };
         let mut previous_key = None;
@@ -571,7 +661,8 @@ impl StableIdentityMappingReader {
         if report.checked_pages != self.header.page_count
             || node_count != self.header.node_count
             || relationship_count != self.header.relationship_count
-            || report.checked_bytes != expected_file_len(self.header)?
+            || report.checked_bytes
+                != expected_file_len(self.header)?.saturating_add(SELECTOR_BYTES as u64)
         {
             return Err(StableIdentityMappingError::Corrupt(format!(
                 "scrubbed pages/counts/bytes {}/{}/{}/{} do not match header {}/{}/{}/{}",
@@ -582,7 +673,7 @@ impl StableIdentityMappingReader {
                 self.header.page_count,
                 self.header.node_count,
                 self.header.relationship_count,
-                expected_file_len(self.header)?
+                expected_file_len(self.header)?.saturating_add(SELECTOR_BYTES as u64)
             )));
         }
         Ok(report)
@@ -681,7 +772,8 @@ impl StableIdentityMappingReader {
         if let Some(file) = self.file.get() {
             return Ok(file);
         }
-        let opened = File::open(&self.path).map_err(durability("open stable identity mapping"))?;
+        let opened = File::open(&self.artifact_path)
+            .map_err(durability("open stable identity generation artifact"))?;
         let _ = self.file.set(opened);
         self.file.get().ok_or_else(|| {
             StableIdentityMappingError::Durability(
@@ -707,6 +799,28 @@ impl StableIdentityMappingReader {
         ) {
             self.poisoned.store(true, AtomicOrdering::Release);
         }
+    }
+}
+
+impl Drop for StableIdentityMappingReader {
+    fn drop(&mut self) {
+        let _ = self.file.take();
+        let Some(pin) = self.generation_pin.take() else {
+            return;
+        };
+        let mut pins = generation_pins()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if Arc::strong_count(&pin) != 1 {
+            return;
+        }
+        pins.remove(&pin.artifact_path);
+        drop(pins);
+        let selector_path = pin.selector_path.clone();
+        let artifact_path = pin.artifact_path.clone();
+        let config = pin.config;
+        drop(pin);
+        reclaim_generation_if_unpinned(&selector_path, &artifact_path, config);
     }
 }
 
@@ -1014,6 +1128,71 @@ fn encode_header(header: StableIdentityMappingHeader) -> [u8; FILE_HEADER_BYTES]
     encoded
 }
 
+fn encode_selector(selector: StableIdentitySelector) -> [u8; SELECTOR_BYTES] {
+    let mut encoded = [0u8; SELECTOR_BYTES];
+    encoded[..8].copy_from_slice(SELECTOR_MAGIC);
+    encoded[8..10].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+    encoded[SELECTOR_HEADER_OFFSET..SELECTOR_HEADER_END]
+        .copy_from_slice(&encode_header(selector.header));
+    encoded[SELECTOR_HEADER_END..SELECTOR_LENGTH_END]
+        .copy_from_slice(&selector.encoded_len.to_le_bytes());
+    let mut hasher = IntegrityHasher::new();
+    hasher.update(&encoded[..SELECTOR_LENGTH_END]);
+    let digest = hasher.finish();
+    encoded[SELECTOR_LENGTH_END..SELECTOR_CRC_END]
+        .copy_from_slice(&digest.crc32c.get().to_le_bytes());
+    encoded[SELECTOR_CRC_END..SELECTOR_SHA_END].copy_from_slice(digest.sha256.as_bytes());
+    encoded
+}
+
+fn decode_selector(
+    encoded: &[u8],
+    config: StableIdentityMappingConfig,
+) -> Result<StableIdentitySelector, StableIdentityMappingError> {
+    if encoded.len() != SELECTOR_BYTES || &encoded[..8] != SELECTOR_MAGIC {
+        return Err(StableIdentityMappingError::Corrupt(
+            "invalid stable identity selector".to_string(),
+        ));
+    }
+    let version = read_u16(&encoded[8..10]);
+    let flags = read_u16(&encoded[10..12]);
+    if version != FORMAT_VERSION || flags != 0 {
+        return Err(StableIdentityMappingError::Corrupt(format!(
+            "unsupported stable identity selector version {version} or flags {flags}"
+        )));
+    }
+    if encoded[SELECTOR_SHA_END..].iter().any(|byte| *byte != 0) {
+        return Err(StableIdentityMappingError::Corrupt(
+            "stable identity selector reserved bytes are non-zero".to_string(),
+        ));
+    }
+    let mut hasher = IntegrityHasher::new();
+    hasher.update(&encoded[..SELECTOR_LENGTH_END]);
+    let digest = hasher.finish();
+    if digest.crc32c.get() != read_u32(&encoded[SELECTOR_LENGTH_END..SELECTOR_CRC_END])
+        || digest.sha256.as_bytes() != &encoded[SELECTOR_CRC_END..SELECTOR_SHA_END]
+    {
+        return Err(StableIdentityMappingError::Corrupt(
+            "stable identity selector checksum mismatch".to_string(),
+        ));
+    }
+    let header = decode_header(
+        &encoded[SELECTOR_HEADER_OFFSET..SELECTOR_HEADER_END],
+        config,
+    )?;
+    let encoded_len = read_u64(&encoded[SELECTOR_HEADER_END..SELECTOR_LENGTH_END]);
+    let expected_len = expected_file_len(header)?;
+    if encoded_len != expected_len {
+        return Err(StableIdentityMappingError::Corrupt(format!(
+            "stable identity selector length {encoded_len} does not match header length {expected_len}"
+        )));
+    }
+    Ok(StableIdentitySelector {
+        header,
+        encoded_len,
+    })
+}
+
 fn decode_header(
     encoded: &[u8],
     config: StableIdentityMappingConfig,
@@ -1072,11 +1251,24 @@ fn decode_header(
     Ok(header)
 }
 
-fn read_header(
+fn read_selector(
     path: &Path,
     config: StableIdentityMappingConfig,
-) -> Result<StableIdentityMappingHeader, StableIdentityMappingError> {
-    open_and_read_header(path, config).map(|(_, header)| header)
+) -> Result<StableIdentitySelector, StableIdentityMappingError> {
+    let mut file = File::open(path).map_err(durability("open stable identity selector"))?;
+    let actual_len = file
+        .metadata()
+        .map_err(durability("inspect stable identity selector"))?
+        .len();
+    if actual_len != SELECTOR_BYTES as u64 {
+        return Err(StableIdentityMappingError::Corrupt(format!(
+            "stable identity selector length mismatch: expected {SELECTOR_BYTES}, got {actual_len}"
+        )));
+    }
+    let mut encoded = [0u8; SELECTOR_BYTES];
+    file.read_exact(&mut encoded)
+        .map_err(durability("read stable identity selector"))?;
+    decode_selector(&encoded, config)
 }
 
 fn open_and_read_header(
@@ -1105,6 +1297,164 @@ fn open_and_read_header(
         )));
     }
     Ok((file, header))
+}
+
+/// Returns the immutable data artifact selected for one mapping generation.
+pub fn stable_identity_generation_artifact_path(
+    selector_path: &Path,
+    generation: u64,
+) -> Result<PathBuf, StableIdentityMappingError> {
+    if generation == 0 {
+        return Err(StableIdentityMappingError::Admission(
+            "stable identity generation must be non-zero".to_string(),
+        ));
+    }
+    let stem = selector_path.file_stem().ok_or_else(|| {
+        StableIdentityMappingError::Admission(
+            "stable identity selector path must have a file stem".to_string(),
+        )
+    })?;
+    let mut name = stem.to_os_string();
+    name.push(format!(".{generation}"));
+    if let Some(extension) = selector_path.extension() {
+        name.push(".");
+        name.push(extension);
+    }
+    Ok(selector_path.with_file_name(name))
+}
+
+fn temporary_path(path: &Path, suffix: &str) -> Result<PathBuf, StableIdentityMappingError> {
+    let file_name = path.file_name().ok_or_else(|| {
+        StableIdentityMappingError::Admission(
+            "stable identity path must have a file name".to_string(),
+        )
+    })?;
+    let mut temporary_name = file_name.to_os_string();
+    temporary_name.push(suffix);
+    Ok(path.with_file_name(temporary_name))
+}
+
+fn pin_and_open_generation(
+    selector_path: &Path,
+    artifact_path: &Path,
+    selector: StableIdentitySelector,
+    config: StableIdentityMappingConfig,
+) -> Result<
+    (
+        Arc<StableIdentityGenerationPin>,
+        File,
+        StableIdentityMappingHeader,
+    ),
+    StableIdentityMappingError,
+> {
+    let mut pins = generation_pins()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let pin = pins
+        .get(artifact_path)
+        .and_then(Weak::upgrade)
+        .unwrap_or_else(|| {
+            let pin = Arc::new(StableIdentityGenerationPin {
+                selector_path: selector_path.to_path_buf(),
+                artifact_path: artifact_path.to_path_buf(),
+                config,
+            });
+            pins.insert(artifact_path.to_path_buf(), Arc::downgrade(&pin));
+            pin
+        });
+    let opened = open_and_read_header(artifact_path, config);
+    let (file, header) = match opened {
+        Ok(opened) => opened,
+        Err(error) => {
+            if Arc::strong_count(&pin) == 1 {
+                pins.remove(artifact_path);
+            }
+            return Err(error);
+        }
+    };
+    if header != selector.header {
+        if Arc::strong_count(&pin) == 1 {
+            pins.remove(artifact_path);
+        }
+        return Err(StableIdentityMappingError::Corrupt(
+            "stable identity selector does not match generation artifact header".to_string(),
+        ));
+    }
+    let actual_len = file
+        .metadata()
+        .map_err(durability("inspect selected stable identity generation"))?
+        .len();
+    if actual_len != selector.encoded_len {
+        if Arc::strong_count(&pin) == 1 {
+            pins.remove(artifact_path);
+        }
+        return Err(StableIdentityMappingError::Corrupt(format!(
+            "selected stable identity generation length mismatch: expected {}, got {actual_len}",
+            selector.encoded_len
+        )));
+    }
+    Ok((pin, file, header))
+}
+
+fn remove_abandoned_candidate(
+    selector_path: &Path,
+    artifact_path: &Path,
+    config: StableIdentityMappingConfig,
+) -> Result<(), StableIdentityMappingError> {
+    if !artifact_path.exists() {
+        return Ok(());
+    }
+    if read_selector(selector_path, config)
+        .ok()
+        .is_some_and(|selector| {
+            stable_identity_generation_artifact_path(selector_path, selector.header.generation)
+                .is_ok_and(|selected| selected == artifact_path)
+        })
+    {
+        return Err(StableIdentityMappingError::Durability(
+            "refusing to replace the selected stable identity generation artifact".to_string(),
+        ));
+    }
+    let pins = generation_pins()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if pins.get(artifact_path).and_then(Weak::upgrade).is_some() {
+        return Err(StableIdentityMappingError::Durability(
+            "refusing to replace a pinned stable identity generation artifact".to_string(),
+        ));
+    }
+    drop(pins);
+    fs::remove_file(artifact_path)
+        .map_err(durability("remove abandoned stable identity generation"))?;
+    sync_parent_directory(artifact_path).map_err(durability(
+        "sync abandoned stable identity generation removal",
+    ))
+}
+
+fn reclaim_generation_if_unpinned(
+    selector_path: &Path,
+    artifact_path: &Path,
+    config: StableIdentityMappingConfig,
+) {
+    let selected_path = read_selector(selector_path, config)
+        .ok()
+        .and_then(|selector| {
+            stable_identity_generation_artifact_path(selector_path, selector.header.generation).ok()
+        });
+    if selected_path.as_deref() == Some(artifact_path) {
+        return;
+    }
+    let mut pins = generation_pins()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if pins.get(artifact_path).and_then(Weak::upgrade).is_some() {
+        return;
+    }
+    pins.remove(artifact_path);
+    drop(pins);
+    if fs::remove_file(artifact_path).is_ok() {
+        let _ = sync_parent_directory(artifact_path);
+    }
 }
 
 fn expected_file_len(
@@ -1442,6 +1792,21 @@ mod tests {
             )
     }
 
+    fn artifact_path(path: &Path, generation: u64) -> PathBuf {
+        stable_identity_generation_artifact_path(path, generation)
+            .expect("derive stable identity generation path")
+    }
+
+    fn remove_mapping_fixture(path: &Path, generations: &[u64]) {
+        for generation in generations {
+            let artifact = artifact_path(path, *generation);
+            let _ = fs::remove_file(&artifact);
+            let _ = fs::remove_file(temporary_path(&artifact, ".tmp").unwrap());
+        }
+        let _ = fs::remove_file(temporary_path(path, ".selector.tmp").unwrap());
+        let _ = fs::remove_file(path);
+    }
+
     #[test]
     fn cold_open_reads_only_header_and_lookup_is_demand_paged() {
         let path = test_path("cold-open");
@@ -1482,7 +1847,8 @@ mod tests {
         assert!(report.storage_bytes_read <= DEFAULT_STABLE_IDENTITY_LOOKUP_BYTES);
         assert!(cache.snapshot().resident_bytes > 0);
 
-        fs::remove_file(&path).expect("remove stable identity fixture");
+        drop(reader);
+        remove_mapping_fixture(&path, &[output.header.generation]);
     }
 
     #[test]
@@ -1514,7 +1880,9 @@ mod tests {
         assert!(matches!(error, StableIdentityMappingError::Admission(_)));
         assert!(!reader.is_poisoned());
 
-        fs::remove_file(path).expect("remove stable identity fixture");
+        let generation = reader.header().generation;
+        drop(reader);
+        remove_mapping_fixture(&path, &[generation]);
     }
 
     #[test]
@@ -1528,9 +1896,10 @@ mod tests {
             StableIdentityMappingConfig::default(),
         )
         .expect("publish stable identity mapping");
-        let mut bytes = fs::read(&path).expect("read stable identity fixture");
+        let artifact = artifact_path(&path, 1);
+        let mut bytes = fs::read(&artifact).expect("read stable identity fixture");
         bytes[FILE_HEADER_BYTES + PAGE_HEADER_BYTES] ^= 0x80;
-        fs::write(&path, bytes).expect("corrupt stable identity fixture");
+        fs::write(&artifact, bytes).expect("corrupt stable identity fixture");
         let reader =
             StableIdentityMappingReader::open(&path, StableIdentityMappingConfig::default())
                 .expect("header remains valid");
@@ -1552,7 +1921,8 @@ mod tests {
             .to_string()
             .contains("poisoned"));
 
-        fs::remove_file(path).expect("remove stable identity fixture");
+        drop(reader);
+        remove_mapping_fixture(&path, &[1]);
     }
 
     #[test]
@@ -1568,11 +1938,12 @@ mod tests {
         let output = StableIdentityMappingWriter::publish(&path, 4, entries(&expected), config)
             .expect("publish stable identity mapping");
         assert!(output.header.page_count > 2);
-        let mut bytes = fs::read(&path).expect("read stable identity fixture");
+        let artifact = artifact_path(&path, output.header.generation);
+        let mut bytes = fs::read(&artifact).expect("read stable identity fixture");
         let last_page_offset = FILE_HEADER_BYTES
             + usize::try_from(output.header.page_count - 1).unwrap() * config.page_bytes.get();
         bytes[last_page_offset + PAGE_HEADER_BYTES] ^= 0x80;
-        fs::write(&path, bytes).expect("corrupt an unvisited stable identity page");
+        fs::write(&artifact, bytes).expect("corrupt an unvisited stable identity page");
         let reader = StableIdentityMappingReader::open(&path, config)
             .expect("open mapping with valid header and length");
 
@@ -1593,7 +1964,8 @@ mod tests {
         assert!(matches!(error, StableIdentityMappingError::Corrupt(_)));
         assert!(reader.is_poisoned());
 
-        fs::remove_file(path).expect("remove stable identity fixture");
+        drop(reader);
+        remove_mapping_fixture(&path, &[output.header.generation]);
     }
 
     #[test]
@@ -1633,7 +2005,88 @@ mod tests {
             second
         );
 
-        fs::remove_file(path).expect("remove stable identity fixture");
+        drop(reader);
+        remove_mapping_fixture(
+            &path,
+            &[
+                first_output.header.generation,
+                second_output.header.generation,
+            ],
+        );
+    }
+
+    #[test]
+    fn failed_selector_publication_keeps_the_previous_generation_selected() {
+        let path = test_path("selector-failure");
+        let config = StableIdentityMappingConfig::default();
+        let first = mapping(1);
+        let first_output = StableIdentityMappingWriter::publish(
+            &path,
+            1,
+            entries(&first),
+            StableIdentityMappingConfig::default(),
+        )
+        .expect("publish first stable identity mapping");
+        let original_selector = fs::read(&path).expect("read original selector");
+        let second = mapping(2);
+        let failure = crate::durability::fail_durable_replace_for_destination(
+            path.file_name().expect("selector has a file name"),
+        );
+        let error = StableIdentityMappingWriter::publish(&path, 2, entries(&second), config)
+            .expect_err("selector publication must fail");
+        drop(failure);
+
+        assert!(matches!(error, StableIdentityMappingError::Durability(_)));
+        assert_eq!(fs::read(&path).unwrap(), original_selector);
+        let previous = StableIdentityMappingReader::open(&path, config)
+            .expect("previous selector must remain readable");
+        assert_eq!(previous.header(), first_output.header);
+        assert_eq!(
+            previous
+                .materialize(StableIdentityMaterializeLimits::default())
+                .expect("materialize previous generation")
+                .0,
+            first
+        );
+        drop(previous);
+
+        let replacement = StableIdentityMappingWriter::publish(&path, 2, entries(&second), config)
+            .expect("retry must reclaim the unpublished artifact and publish generation two");
+        assert_eq!(replacement.header.generation, 2);
+        let latest = StableIdentityMappingReader::open(&path, config)
+            .expect("open replacement after publication retry");
+        assert_eq!(
+            latest
+                .materialize(StableIdentityMaterializeLimits::default())
+                .expect("materialize replacement generation")
+                .0,
+            second
+        );
+        drop(latest);
+        remove_mapping_fixture(&path, &[1, 2]);
+    }
+
+    #[test]
+    fn corrupt_selector_fails_closed_before_opening_generation_data() {
+        let path = test_path("corrupt-selector");
+        let mapping = mapping(1);
+        StableIdentityMappingWriter::publish(
+            &path,
+            1,
+            entries(&mapping),
+            StableIdentityMappingConfig::default(),
+        )
+        .expect("publish stable identity mapping");
+        let mut selector = fs::read(&path).expect("read stable identity selector");
+        selector[SELECTOR_HEADER_OFFSET] ^= 0x80;
+        fs::write(&path, selector).expect("corrupt stable identity selector");
+
+        let error =
+            StableIdentityMappingReader::open(&path, StableIdentityMappingConfig::default())
+                .expect_err("corrupt selector must fail closed");
+        assert!(matches!(error, StableIdentityMappingError::Corrupt(_)));
+
+        remove_mapping_fixture(&path, &[1]);
     }
 
     #[test]
@@ -1647,10 +2100,11 @@ mod tests {
             )]),
             ..StoreStableIdMapping::default()
         };
-        StableIdentityMappingWriter::publish(&path, 1, entries(&first), config)
+        let first_output = StableIdentityMappingWriter::publish(&path, 1, entries(&first), config)
             .expect("publish first mapping");
         let pinned = StableIdentityMappingReader::open(&path, config)
             .expect("open pinned stable identity reader");
+        let pinned_artifact = pinned.artifact_path().to_path_buf();
         let second = StoreStableIdMapping {
             node_stable_ids: BTreeMap::from([(
                 crate::NodeId(1),
@@ -1658,8 +2112,9 @@ mod tests {
             )]),
             ..StoreStableIdMapping::default()
         };
-        StableIdentityMappingWriter::publish(&path, 2, entries(&second), config)
-            .expect("publish replacement mapping");
+        let second_output =
+            StableIdentityMappingWriter::publish(&path, 2, entries(&second), config)
+                .expect("publish replacement mapping");
         let latest = StableIdentityMappingReader::open(&path, config)
             .expect("open latest stable identity reader");
 
@@ -1683,8 +2138,23 @@ mod tests {
                 .0,
             Some(Value::String("second".to_string()))
         );
-
-        fs::remove_file(path).expect("remove stable identity fixture");
+        assert!(
+            pinned_artifact.exists(),
+            "the previous generation must remain while a reader pins it"
+        );
+        drop(pinned);
+        assert!(
+            !pinned_artifact.exists(),
+            "the previous generation must be reclaimed after its final pin drops"
+        );
+        drop(latest);
+        remove_mapping_fixture(
+            &path,
+            &[
+                first_output.header.generation,
+                second_output.header.generation,
+            ],
+        );
     }
 
     #[test]
@@ -1713,11 +2183,7 @@ mod tests {
         .is_err());
         assert_eq!(fs::read(&path).unwrap(), original_bytes);
 
-        fs::remove_file(&path).expect("remove stable identity fixture");
-        let temporary = path.with_extension("skein.tmp");
-        if temporary.exists() {
-            fs::remove_file(temporary).expect("remove rejected candidate");
-        }
+        remove_mapping_fixture(&path, &[1, 2]);
     }
 
     #[test]
@@ -1755,10 +2221,6 @@ mod tests {
         assert!(matches!(error, StableIdentityMappingError::Admission(_)));
         assert_eq!(fs::read(&path).unwrap(), original_bytes);
 
-        fs::remove_file(&path).expect("remove stable identity fixture");
-        let temporary = path.with_extension("skein.tmp");
-        if temporary.exists() {
-            fs::remove_file(temporary).expect("remove rejected candidate");
-        }
+        remove_mapping_fixture(&path, &[1, 2]);
     }
 }

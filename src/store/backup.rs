@@ -31,7 +31,8 @@ use skein_storage::{
     PersistentPropertyProjectionReader, PersistentPropertySpillDescriptorTree, PropertySpillConfig,
     PropertySpillManifest, PropertySpillReader, RelationalDecodeLimits,
     RelationalIndexArtifactMetadata, RelationalIndexGenerationIdentity,
-    RelationalIndexShadowConfig, RelationalIndexShadowReader, SegmentCache, StorageRestoreReport,
+    RelationalIndexShadowConfig, RelationalIndexShadowReader, SegmentCache,
+    StableIdentityMappingConfig, StableIdentityMappingReader, StorageRestoreReport,
 };
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
@@ -199,6 +200,7 @@ fn split_backup_manifest_checksum(text: &str) -> Result<(&str, u64)> {
 fn validate_backup_file_name(name: &str) -> Result<()> {
     let allowed = name == MANIFEST_FILE
         || name == STABLE_ID_MAPPING_FILE
+        || parse_generation_file(name, "stable_ids.").is_some()
         || parse_generation_file(name, "checkpoint.").is_some()
         || parse_generation_file(name, "wal.").is_some()
         || parse_generation_file(name, "relational.").is_some()
@@ -365,6 +367,7 @@ pub(super) fn validate_backup_files(
     }
     validate_backup_relational_roots(root, files, manifest)?;
     validate_backup_relational_index_generation(root, files, manifest)?;
+    validate_backup_stable_identity(root, &names)?;
     let checkpoint_text = read_durable_text_bytes_with_limit(
         &fs::read(root.join(&checkpoint_name))?,
         "checkpoint",
@@ -758,6 +761,43 @@ pub(super) fn validate_backup_files(
         )
         .and_then(|reader| reader.deep_scrub())
         .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn validate_backup_stable_identity(root: &Path, names: &BTreeSet<&str>) -> Result<()> {
+    let selector_present = names.contains(STABLE_ID_MAPPING_FILE);
+    let generation_files = names
+        .iter()
+        .copied()
+        .filter(|name| parse_generation_file(name, "stable_ids.").is_some())
+        .collect::<Vec<_>>();
+    if !selector_present {
+        if generation_files.is_empty() {
+            return Ok(());
+        }
+        return Err(SkeinError::Storage(
+            "backup contains a stable identity generation without its selector".to_string(),
+        ));
+    }
+    let reader = StableIdentityMappingReader::open(
+        &root.join(STABLE_ID_MAPPING_FILE),
+        StableIdentityMappingConfig::default(),
+    )
+    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+    let selected_name = reader
+        .artifact_path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            SkeinError::Storage(
+                "backup stable identity generation artifact name is not UTF-8".to_string(),
+            )
+        })?;
+    if generation_files.as_slice() != [selected_name] {
+        return Err(SkeinError::Storage(format!(
+            "backup stable identity selector must bind exactly one generation: selected {selected_name}, found {generation_files:?}"
+        )));
     }
     Ok(())
 }

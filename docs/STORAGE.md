@@ -56,10 +56,14 @@ Files:
 - `projected_graphs.skein`: checksummed, checkpoint-generated CSR/CSC
   projection artifacts derived from persisted projected graph definitions,
   written through the default zstd compression envelope.
-- `stable_ids.skein`: independently generated stable-ID export/import mapping
-  for records whose `id` property is missing or non-unique. A small checksummed
-  header is opened eagerly; fixed-size, independently checksummed mapping pages
-  remain cold and are demand-read through the shared segment cache.
+- `stable_ids.skein`: small checksummed selector for the independently
+  generated stable-ID export/import mapping used by records whose `id`
+  property is missing or non-unique. It binds one immutable
+  `stable_ids.<generation>.skein` artifact. Only the selected generation header
+  is opened eagerly; fixed-size, independently checksummed mapping pages remain
+  cold and are demand-read through the shared segment cache. Old generations
+  remain available while pinned and are reclaimed only after the final pin is
+  released.
 
 Recovery:
 
@@ -486,7 +490,8 @@ The CLI command `skein skein-lightning-bootstrap-manifest [--require-ready]
 `stable_ids.skein`, and prints the bootstrap manifest as JSON. `--require-ready`
 returns a non-zero status if the manifest's embedded validation is not
 import-ready or the relational stream is invalid.
-Normal open validates only the stable-identity header and exact file length;
+Normal open validates only the stable-identity selector, selected generation
+header, their exact agreement, and the generation artifact length;
 mapping pages remain cold and are read through the shared bounded page cache.
 An explicit storage scrub streams every page without cache insertion and
 validates page checksums, global key order, counts, and value encodings while

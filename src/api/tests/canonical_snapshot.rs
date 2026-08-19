@@ -590,9 +590,11 @@ fn storage_scrub_detects_cold_stable_id_mapping_corruption() {
         "stable identity pages must remain cold before scrub"
     );
     let mapping_path = path.join("stable_ids.skein");
-    let mut bytes = std::fs::read(&mapping_path).unwrap();
+    let artifact_path =
+        skein_storage::stable_identity_generation_artifact_path(&mapping_path, 1).unwrap();
+    let mut bytes = std::fs::read(&artifact_path).unwrap();
     *bytes.last_mut().expect("mapping contains one page") ^= 0x80;
-    std::fs::write(&mapping_path, bytes).unwrap();
+    std::fs::write(&artifact_path, bytes).unwrap();
 
     let error = db
         .scrub_storage()
