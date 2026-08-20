@@ -41,7 +41,10 @@ pub(super) fn quarantine_corrupt_wal(path: &Path, generation: u64, read_only: bo
         nonce
     ));
     fs::copy(path, &quarantine_path)?;
-    File::open(&quarantine_path)?.sync_all()?;
+    File::options()
+        .write(true)
+        .open(&quarantine_path)?
+        .sync_all()?;
     sync_parent_dir(&quarantine_path)
 }
 
@@ -309,6 +312,9 @@ pub(super) enum WalOp {
     RelationalSnapshot {
         record: Arc<[u8]>,
     },
+    Append {
+        record: Arc<[u8]>,
+    },
     Batch(Vec<WalOp>),
 }
 
@@ -488,6 +494,9 @@ impl WalEntry {
             }
             WalOp::RelationalSnapshot { record } => {
                 format!("relational_snapshot\t{}", encode_bytes_base64(record))
+            }
+            WalOp::Append { record } => {
+                format!("append\t{}", encode_bytes_base64(record))
             }
             WalOp::Batch(ops) => format!(
                 "batch\t{}",
@@ -696,6 +705,9 @@ fn encode_wal_op_for_batch(op: &WalOp) -> String {
         }
         WalOp::RelationalSnapshot { record } => {
             format!("relational_snapshot,{}", encode_bytes_base64(record))
+        }
+        WalOp::Append { record } => {
+            format!("append,{}", encode_bytes_base64(record))
         }
         WalOp::Batch(_) => unreachable!("nested wal batches are not encoded"),
     }

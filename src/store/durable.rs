@@ -11,8 +11,8 @@ use super::{
     encode_property_type, encode_schema_object_state,
     encode_search_projection_relational_primary_key_changes, encode_string, encode_string_vec,
     encode_table_kind, encode_u64_vec, encode_value_vec, file_checksum, frame_binary_wal_record,
-    has_storage_artifacts, parse_optional_sha256, parse_optional_u64,
-    parse_relational_overflow_extent_generation_file,
+    has_storage_artifacts, parse_append_segment_generation_file, parse_optional_sha256,
+    parse_optional_u64, parse_relational_overflow_extent_generation_file,
     parse_relational_row_page_artifact_generation_file, parse_u64, process_crash_failpoint,
     property_projection_artifact_generation_file, property_projection_manifest_generation_file,
     property_spill_artifact_generation_file, property_spill_manifest_generation_file,
@@ -34,13 +34,15 @@ use crate::telemetry::{KernelTelemetry, KernelTelemetryOperation, TelemetrySink}
 use crate::value::Value;
 use skein_integrity::{integrity_digest, Sha256Digest};
 use skein_storage::{
-    decode_relational_checkpoint_file, durable_replace_file,
-    encode_relational_checkpoint_to_writer, CanonicalAdjacencyArtifactMetadata,
-    CanonicalAdjacencyConfig, CanonicalAdjacencyGenerationArtifacts, CanonicalAdjacencyReader,
-    CanonicalAdjacencyWriter, CanonicalSegmentConfig, CanonicalSegmentError,
-    CanonicalSegmentManifest, CanonicalSegmentReader, CanonicalSegmentWriter,
-    DatabaseDirectoryLease, DurabilityPolicy, DurableCompression, FileSegmentRangeReader,
-    GraphDescriptorKind, GraphDescriptorTreeArtifactMetadata, GraphDescriptorTreeBuildConfig,
+    append_generation_manifest_file, append_segment_file, decode_relational_checkpoint_file,
+    durable_replace_file, encode_relational_checkpoint_to_writer, AppendGenerationArtifacts,
+    AppendGenerationReader, AppendPublicationConfig, AppendSegmentArtifactMetadata,
+    CanonicalAdjacencyArtifactMetadata, CanonicalAdjacencyConfig,
+    CanonicalAdjacencyGenerationArtifacts, CanonicalAdjacencyReader, CanonicalAdjacencyWriter,
+    CanonicalSegmentConfig, CanonicalSegmentError, CanonicalSegmentManifest,
+    CanonicalSegmentReader, CanonicalSegmentWriter, DatabaseDirectoryLease, DurabilityPolicy,
+    DurableCompression, FileSegmentRangeReader, GraphDescriptorKind,
+    GraphDescriptorTreeArtifactMetadata, GraphDescriptorTreeBuildConfig,
     GraphDescriptorTreeGenerationArtifacts, GraphDescriptorTreePaths,
     GraphDescriptorTreeRootReader, ManifestGeneration, NodeId, NodeRecord,
     PersistentPropertyProjectionConfig, PersistentPropertyProjectionDefinition,
@@ -99,6 +101,7 @@ pub(super) struct DurableStore {
     pub(super) relational_overflow_generation_artifacts:
         Option<RelationalOverflowGenerationArtifacts>,
     pub(super) relational_index_generation_artifacts: Option<RelationalIndexGenerationArtifacts>,
+    pub(super) append_generation_artifacts: Option<AppendGenerationArtifacts>,
     pub(super) wal_generation: u64,
     pub(super) checkpoint_epoch: u64,
     pub(super) checkpoint_commit_epoch: u64,
@@ -200,6 +203,7 @@ pub(crate) struct PreparedCheckpoint {
     pub(super) source_scan_publication: Option<source_scan::SourceScanPublication>,
     pub(super) checkpoint_statistics: GraphStatistics,
     pub(super) checkpoint_relational_state: Option<RelationalState>,
+    pub(super) checkpoint_append_reader: AppendGenerationReader,
     pub(super) relational_index_candidate:
         Option<super::relational_index_shadow::PreparedRelationalIndexCandidate>,
     pub(super) relational_overflow_compaction_report:
@@ -292,6 +296,7 @@ pub(super) struct CheckpointManifestArtifacts {
     pub(super) relational_row: RelationalRowPageGenerationArtifacts,
     pub(super) relational_overflow: RelationalOverflowGenerationArtifacts,
     pub(super) relational_index: Option<RelationalIndexGenerationArtifacts>,
+    pub(super) append: AppendGenerationArtifacts,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -551,6 +556,7 @@ impl DurableStore {
             relational_overflow_generation_artifacts: manifest
                 .relational_overflow_generation_artifacts,
             relational_index_generation_artifacts: manifest.relational_index_generation_artifacts,
+            append_generation_artifacts: manifest.append_generation_artifacts,
             wal_generation: manifest.wal_generation,
             checkpoint_epoch: manifest.checkpoint_epoch,
             checkpoint_commit_epoch: manifest.checkpoint_commit_epoch,
@@ -770,6 +776,20 @@ impl DurableStore {
                     skein_storage::relational_overflow_descriptor_file(binding.generation),
                     skein_storage::relational_overflow_manifest_generation_file(binding.generation),
                 ] {
+                    sources.insert(name.clone(), self.root_path.join(name));
+                }
+            }
+            if let Some(binding) = self.append_generation_artifacts {
+                let reader = AppendGenerationReader::open_bound(
+                    &self.root_path,
+                    binding,
+                    AppendPublicationConfig::default(),
+                )
+                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                let manifest_name = append_generation_manifest_file(binding.generation);
+                sources.insert(manifest_name.clone(), self.root_path.join(manifest_name));
+                for segment in reader.segment_bindings() {
+                    let name = append_segment_file(segment.generation);
                     sources.insert(name.clone(), self.root_path.join(name));
                 }
             }
@@ -1029,6 +1049,36 @@ impl DurableStore {
                         .to_string(),
                 ));
             }
+        }
+
+        if let Some(binding) = manifest.append_generation_artifacts {
+            scrub.verify_path(
+                &self
+                    .root_path
+                    .join(append_generation_manifest_file(binding.generation)),
+                binding.manifest_artifact.encoded_len,
+                u64::from(binding.manifest_artifact.encoded_crc32c),
+                binding.manifest_artifact.encoded_sha256,
+                "append generation manifest",
+            )?;
+            let reader = AppendGenerationReader::open_bound(
+                &self.root_path,
+                binding,
+                AppendPublicationConfig::default(),
+            )
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            for segment in reader.segment_bindings() {
+                scrub.verify_path(
+                    &self.root_path.join(append_segment_file(segment.generation)),
+                    segment.artifact.encoded_len,
+                    u64::from(segment.artifact.encoded_crc32c),
+                    segment.artifact.encoded_sha256,
+                    "append segment",
+                )?;
+            }
+            reader
+                .deep_scrub()
+                .map_err(|error| SkeinError::Storage(error.to_string()))?;
         }
 
         let overflow_root = self.open_bound_relational_overflow()?;
@@ -2748,6 +2798,7 @@ impl DurableStore {
             relational_row,
             relational_overflow,
             relational_index,
+            append,
         } = artifacts;
         let manifest = DurableManifest {
             checkpoint_generation: Some(generation),
@@ -2775,6 +2826,7 @@ impl DurableStore {
             relational_row_generation_artifacts: Some(relational_row),
             relational_overflow_generation_artifacts: Some(relational_overflow),
             relational_index_generation_artifacts: relational_index,
+            append_generation_artifacts: Some(append),
             wal_generation: generation,
             checkpoint_epoch: generation,
             checkpoint_commit_epoch,
@@ -2820,6 +2872,7 @@ impl DurableStore {
         self.relational_overflow_generation_artifacts =
             manifest.relational_overflow_generation_artifacts;
         self.relational_index_generation_artifacts = manifest.relational_index_generation_artifacts;
+        self.append_generation_artifacts = manifest.append_generation_artifacts;
         self.wal_generation = manifest.wal_generation;
         self.checkpoint_epoch = manifest.checkpoint_epoch;
         self.checkpoint_commit_epoch = manifest.checkpoint_commit_epoch;
@@ -2881,6 +2934,7 @@ impl DurableStore {
         let retain_from = current_generation.saturating_sub(1);
         let (retained_row_page_generations, retained_overflow_extent_generations) =
             self.retained_relational_physical_generations(current_generation)?;
+        let retained_append_segment_generations = self.retained_append_physical_generations()?;
         for entry in fs::read_dir(&self.root_path)? {
             let entry = entry?;
             let name = entry.file_name();
@@ -2894,6 +2948,9 @@ impl DurableStore {
                     || parse_relational_overflow_extent_generation_file(name).is_some_and(
                         |generation| retained_overflow_extent_generations.contains(&generation),
                     )
+                    || parse_append_segment_generation_file(name).is_some_and(|generation| {
+                        retained_append_segment_generations.contains(&generation)
+                    })
                 {
                     continue;
                 }
@@ -2962,6 +3019,23 @@ impl DurableStore {
 
         Ok((row_page_generations, overflow_extent_generations))
     }
+
+    fn retained_append_physical_generations(&self) -> Result<BTreeSet<u64>> {
+        let Some(binding) = self.append_generation_artifacts else {
+            return Ok(BTreeSet::new());
+        };
+        let reader = AppendGenerationReader::open_bound(
+            &self.root_path,
+            binding,
+            AppendPublicationConfig::default(),
+        )
+        .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        Ok(reader
+            .segment_bindings()
+            .iter()
+            .map(|segment| segment.generation)
+            .collect())
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2985,6 +3059,7 @@ pub(super) struct DurableManifest {
     pub(super) relational_overflow_generation_artifacts:
         Option<RelationalOverflowGenerationArtifacts>,
     pub(super) relational_index_generation_artifacts: Option<RelationalIndexGenerationArtifacts>,
+    pub(super) append_generation_artifacts: Option<AppendGenerationArtifacts>,
     pub(super) wal_generation: u64,
     pub(super) checkpoint_epoch: u64,
     pub(super) checkpoint_commit_epoch: u64,
@@ -3155,6 +3230,36 @@ impl RelationalRootManifestFields {
         }))
     }
 
+    fn finish_append(self) -> Result<Option<AppendGenerationArtifacts>> {
+        if !self.require_complete("append")? {
+            return Ok(None);
+        }
+        Ok(Some(AppendGenerationArtifacts {
+            generation: self.generation.expect("complete binding has generation"),
+            source_commit_epoch: self
+                .source_commit_epoch
+                .expect("complete binding has source commit epoch"),
+            root_set_digest: self
+                .root_set_digest
+                .expect("complete binding has root-set digest"),
+            manifest_artifact: AppendSegmentArtifactMetadata {
+                encoded_len: self
+                    .manifest_encoded_len
+                    .expect("complete binding has manifest length"),
+                encoded_crc32c: u32::try_from(
+                    self.manifest_encoded_checksum
+                        .expect("complete binding has manifest checksum"),
+                )
+                .map_err(|_| {
+                    SkeinError::Storage("append manifest checksum exceeds CRC32C range".to_string())
+                })?,
+                encoded_sha256: self
+                    .manifest_encoded_sha256
+                    .expect("complete binding has manifest SHA-256"),
+            },
+        }))
+    }
+
     fn finish_overflow(self) -> Result<Option<RelationalOverflowGenerationArtifacts>> {
         if !self.require_complete("relational overflow")? {
             return Ok(None);
@@ -3282,6 +3387,7 @@ impl DurableManifest {
             relational_row_generation_artifacts: None,
             relational_overflow_generation_artifacts: None,
             relational_index_generation_artifacts: None,
+            append_generation_artifacts: None,
             wal_generation: 0,
             checkpoint_epoch: 0,
             checkpoint_commit_epoch: 0,
@@ -3426,6 +3532,16 @@ impl DurableManifest {
                         )
                     }),
             ),
+            (
+                "append",
+                self.append_generation_artifacts.map(|binding| {
+                    (
+                        binding.generation,
+                        binding.source_commit_epoch,
+                        binding.manifest_artifact.encoded_len,
+                    )
+                }),
+            ),
         ] {
             if let Some((generation, source_commit_epoch, manifest_bytes)) = binding {
                 if generation == 0 {
@@ -3521,6 +3637,7 @@ impl DurableManifest {
                     || self.relational_row_generation_artifacts.is_some()
                     || self.relational_overflow_generation_artifacts.is_some()
                     || self.relational_index_generation_artifacts.is_some()
+                    || self.append_generation_artifacts.is_some()
                 {
                     return Err(SkeinError::Storage(
                         "manifest without a checkpoint must describe generation zero".to_string(),
@@ -3550,6 +3667,7 @@ impl DurableManifest {
         let mut canonical_adjacency = CanonicalAdjacencyGenerationFields::default();
         let mut relational_row = RelationalRootManifestFields::default();
         let mut relational_overflow = RelationalRootManifestFields::default();
+        let mut append = RelationalRootManifestFields::default();
         let mut relational_index = RelationalIndexManifestFields::default();
         let mut seen_fields = BTreeSet::new();
         for line in lines {
@@ -3707,6 +3825,28 @@ impl DurableManifest {
                     relational_overflow.manifest_encoded_sha256 =
                         parse_optional_sha256(raw, "relational overflow manifest encoded SHA-256")?;
                 }
+                ["append_generation", raw] => {
+                    append.generation = parse_optional_u64(raw, "append generation")?;
+                }
+                ["append_source_commit_epoch", raw] => {
+                    append.source_commit_epoch =
+                        parse_optional_u64(raw, "append source commit epoch")?;
+                }
+                ["append_root_set_sha256", raw] => {
+                    append.root_set_digest = parse_optional_sha256(raw, "append root-set SHA-256")?;
+                }
+                ["append_manifest_encoded_len", raw] => {
+                    append.manifest_encoded_len =
+                        parse_optional_u64(raw, "append manifest encoded length")?;
+                }
+                ["append_manifest_encoded_checksum", raw] => {
+                    append.manifest_encoded_checksum =
+                        parse_optional_u64(raw, "append manifest encoded checksum")?;
+                }
+                ["append_manifest_encoded_sha256", raw] => {
+                    append.manifest_encoded_sha256 =
+                        parse_optional_sha256(raw, "append manifest encoded SHA-256")?;
+                }
                 ["relational_index_generation", raw] => {
                     relational_index.generation =
                         parse_optional_u64(raw, "relational index generation")?;
@@ -3853,6 +3993,7 @@ impl DurableManifest {
         manifest.relational_overflow_generation_artifacts =
             relational_overflow.finish_overflow()?;
         manifest.relational_index_generation_artifacts = relational_index.finish()?;
+        manifest.append_generation_artifacts = append.finish_append()?;
         if manifest.safe_reclaim_commit_epoch == 0 && manifest.checkpoint_commit_epoch > 0 {
             manifest.safe_reclaim_commit_epoch = safe_reclaim_commit_epoch(
                 manifest.checkpoint_commit_epoch,
@@ -4035,6 +4176,33 @@ impl DurableManifest {
             encode_optional_sha256(
                 relational_overflow.map(|binding| binding.manifest_artifact.encoded_sha256)
             )
+        ));
+        let append = self.append_generation_artifacts;
+        body.push_str(&format!(
+            "append_generation\t{}\n",
+            encode_optional_u64(append.map(|binding| binding.generation))
+        ));
+        body.push_str(&format!(
+            "append_source_commit_epoch\t{}\n",
+            encode_optional_u64(append.map(|binding| binding.source_commit_epoch))
+        ));
+        body.push_str(&format!(
+            "append_root_set_sha256\t{}\n",
+            encode_optional_sha256(append.map(|binding| binding.root_set_digest))
+        ));
+        body.push_str(&format!(
+            "append_manifest_encoded_len\t{}\n",
+            encode_optional_u64(append.map(|binding| binding.manifest_artifact.encoded_len))
+        ));
+        body.push_str(&format!(
+            "append_manifest_encoded_checksum\t{}\n",
+            encode_optional_u64(
+                append.map(|binding| u64::from(binding.manifest_artifact.encoded_crc32c))
+            )
+        ));
+        body.push_str(&format!(
+            "append_manifest_encoded_sha256\t{}\n",
+            encode_optional_sha256(append.map(|binding| binding.manifest_artifact.encoded_sha256))
         ));
         let relational_index = self.relational_index_generation_artifacts;
         body.push_str(&format!(
