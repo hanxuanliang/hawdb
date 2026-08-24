@@ -705,7 +705,7 @@ impl TopK {
     }
 }
 
-fn compare_best(left: &ProjectionHit, right: &ProjectionHit) -> Ordering {
+pub(crate) fn compare_best(left: &ProjectionHit, right: &ProjectionHit) -> Ordering {
     left.score
         .total_cmp(&right.score)
         .then_with(|| right.id.cmp(&left.id))
