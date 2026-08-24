@@ -1,3 +1,4 @@
+mod advisor;
 mod artifact;
 mod build;
 mod codec;
@@ -8,6 +9,10 @@ mod quantizer;
 mod scan;
 mod transform;
 
+pub use advisor::{
+    AutoIndexPolicy, IndexAction, IndexAdvisor, IndexPlanner, IndexRecommendation, QueryPath,
+    WorkloadSample,
+};
 pub use artifact::{FileProjection, ProjectionWriter};
 pub use build::{source_digest, ProjectionBuilder};
 pub use error::{ProjectionError, Result};
