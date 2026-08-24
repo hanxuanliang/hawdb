@@ -300,66 +300,87 @@ where
         .max(1);
     let admitted_working_bytes = global_bytes.saturating_add(worker_count * per_worker_bytes);
 
-    let top_k_state = Mutex::new(TopK::new(top_k));
     let report = Mutex::new(ReportAccumulator::default());
     let first_error = Mutex::new(None);
     let stopped = AtomicBool::new(false);
     let next_segment = AtomicUsize::new(0);
 
-    let run_worker = || loop {
-        if stopped.load(AtomicOrdering::Acquire) {
-            break;
-        }
-        if let Some(context) = options.task_context
-            && let Err(reason) = context.checkpoint()
-        {
-            store_error(&first_error, &stopped, ProjectionError::Cancelled(reason));
-            break;
-        }
-        let segment_index = next_segment.fetch_add(1, AtomicOrdering::Relaxed);
-        if segment_index >= segment_count {
-            break;
-        }
-        match operation(
-            segment_index,
-            &transformed_query,
-            kernel,
-            codebook,
-            options.allowed_ids,
-            options.task_context,
-        ) {
-            Ok(segment_result) => {
-                report
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .add(&segment_result);
-                top_k_state
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .extend(segment_result.hits);
-            }
-            Err(error) => {
-                store_error(&first_error, &stopped, error);
+    // Each worker accumulates its own bounded top-k with no cross-thread
+    // locking on the scan hot path; the per-worker heaps are merged into one
+    // final top-k only once, after every worker has finished.
+    let run_worker = || -> TopK {
+        let mut local_top_k = TopK::new(top_k);
+        loop {
+            if stopped.load(AtomicOrdering::Acquire) {
                 break;
             }
+            if let Some(context) = options.task_context
+                && let Err(reason) = context.checkpoint()
+            {
+                store_error(&first_error, &stopped, ProjectionError::Cancelled(reason));
+                break;
+            }
+            let segment_index = next_segment.fetch_add(1, AtomicOrdering::Relaxed);
+            if segment_index >= segment_count {
+                break;
+            }
+            match operation(
+                segment_index,
+                &transformed_query,
+                kernel,
+                codebook,
+                options.allowed_ids,
+                options.task_context,
+            ) {
+                Ok(segment_result) => {
+                    report
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .add(&segment_result);
+                    local_top_k.extend(segment_result.hits);
+                }
+                Err(error) => {
+                    store_error(&first_error, &stopped, error);
+                    break;
+                }
+            }
         }
+        local_top_k
     };
 
+    let mut merged_top_k = TopK::new(top_k);
     if worker_count == 1 {
-        run_worker();
+        merged_top_k = run_worker();
     } else {
-        std::thread::scope(|scope| {
+        let panic_payload = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(worker_count);
             for worker in 0..worker_count {
-                if let Err(error) = std::thread::Builder::new()
+                match std::thread::Builder::new()
                     .name(format!("skein-turboquant-scan-{worker}"))
                     .stack_size(WORKER_STACK_BYTES)
                     .spawn_scoped(scope, run_worker)
                 {
-                    store_error(&first_error, &stopped, ProjectionError::Io(error));
-                    break;
+                    Ok(handle) => handles.push(handle),
+                    Err(error) => {
+                        store_error(&first_error, &stopped, ProjectionError::Io(error));
+                        break;
+                    }
                 }
             }
+            let mut panic_payload = None;
+            for handle in handles {
+                match handle.join() {
+                    Ok(local_top_k) => merged_top_k.extend(local_top_k.hits),
+                    Err(payload) => {
+                        panic_payload.get_or_insert(payload);
+                    }
+                }
+            }
+            panic_payload
         });
+        if let Some(payload) = panic_payload {
+            std::panic::resume_unwind(payload);
+        }
     }
 
     if let Some(error) = first_error
@@ -371,10 +392,7 @@ where
     if let Some(context) = options.task_context {
         context.checkpoint()?;
     }
-    let hits = top_k_state
-        .into_inner()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .finish();
+    let hits = merged_top_k.finish();
     let accumulated = report
         .into_inner()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
