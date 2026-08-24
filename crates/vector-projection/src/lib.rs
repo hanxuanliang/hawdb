@@ -2,6 +2,7 @@ mod artifact;
 mod build;
 mod codec;
 mod error;
+mod hnsw;
 mod kernel;
 mod model;
 mod quantizer;
@@ -11,6 +12,7 @@ mod transform;
 pub use artifact::{FileProjection, ProjectionWriter};
 pub use build::{source_digest, ProjectionBuilder};
 pub use error::{ProjectionError, Result};
+pub use hnsw::{HnswBuildConfig, HnswIndex};
 pub use kernel::{KernelPreference, ScanKernel};
 pub use model::{
     InMemoryProjection, ProjectionBuildAdmission, ProjectionBuildConfig, ProjectionBuildReport,
