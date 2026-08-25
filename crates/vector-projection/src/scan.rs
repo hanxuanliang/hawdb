@@ -130,6 +130,129 @@ pub struct ProjectionSearchOutput {
     pub report: ProjectionSearchReport,
 }
 
+/// The physical data plane a query scans: given a segment index, produce
+/// that segment's scored candidates. `InMemoryProjection` and
+/// `FileProjection` are today's only two backends; a future mmap-range or
+/// remote-object backend would implement this same boundary rather than
+/// growing another bespoke `search` method.
+trait SegmentReader: Sync {
+    fn manifest(&self) -> &ProjectionManifest;
+
+    /// Upper bound on any single segment's row count, used to size the
+    /// per-worker allowlist mask budget before scanning starts.
+    fn max_segment_rows(&self) -> usize;
+
+    /// Upper bound on any single segment's on-disk payload size, used to
+    /// size the per-worker read-buffer budget. Zero for backends (e.g.
+    /// in-memory) that do not materialize a transient per-read buffer.
+    fn max_segment_payload_bytes(&self) -> usize;
+
+    #[allow(clippy::too_many_arguments)]
+    fn scan_segment(
+        &self,
+        segment_index: usize,
+        query: &[f32],
+        top_k: usize,
+        kernel: ScanKernel,
+        allowed_ids: Option<&[u64]>,
+        context: Option<&RuntimeTaskContext>,
+    ) -> Result<SegmentSearchResult>;
+}
+
+impl SegmentReader for InMemoryProjection {
+    fn manifest(&self) -> &ProjectionManifest {
+        &self.manifest
+    }
+
+    fn max_segment_rows(&self) -> usize {
+        self.segments
+            .iter()
+            .map(|segment| segment.row_count())
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn max_segment_payload_bytes(&self) -> usize {
+        0
+    }
+
+    fn scan_segment(
+        &self,
+        segment_index: usize,
+        query: &[f32],
+        top_k: usize,
+        kernel: ScanKernel,
+        allowed_ids: Option<&[u64]>,
+        context: Option<&RuntimeTaskContext>,
+    ) -> Result<SegmentSearchResult> {
+        let segment = &self.segments[segment_index];
+        scan_segment(
+            segment.row_count(),
+            self.manifest.dimension,
+            |row| segment.ids[row],
+            |row| segment.renormalizations[row],
+            &segment.codes,
+            query,
+            top_k,
+            kernel,
+            &self.codebook,
+            allowed_ids,
+            context,
+            0,
+        )
+    }
+}
+
+impl SegmentReader for FileProjection {
+    fn manifest(&self) -> &ProjectionManifest {
+        FileProjection::manifest(self)
+    }
+
+    fn max_segment_rows(&self) -> usize {
+        self.manifest()
+            .segments
+            .iter()
+            .map(|segment| segment.row_count)
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn max_segment_payload_bytes(&self) -> usize {
+        self.manifest()
+            .segments
+            .iter()
+            .map(|segment| usize::try_from(segment.payload_bytes).unwrap_or(usize::MAX))
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn scan_segment(
+        &self,
+        segment_index: usize,
+        query: &[f32],
+        top_k: usize,
+        kernel: ScanKernel,
+        allowed_ids: Option<&[u64]>,
+        context: Option<&RuntimeTaskContext>,
+    ) -> Result<SegmentSearchResult> {
+        let descriptor = &self.manifest().segments[segment_index];
+        let buffer = self.read_segment(segment_index)?;
+        let parts = buffer.parts(self.manifest().dimension, descriptor.row_count)?;
+        scan_file_segment(
+            parts,
+            descriptor.row_count,
+            self.manifest().dimension,
+            query,
+            top_k,
+            kernel,
+            &self.codebook,
+            allowed_ids,
+            context,
+            descriptor.payload_bytes,
+        )
+    }
+}
+
 impl InMemoryProjection {
     pub fn search(
         &self,
@@ -137,38 +260,7 @@ impl InMemoryProjection {
         top_k: usize,
         options: ProjectionSearchOptions<'_>,
     ) -> Result<ProjectionSearchOutput> {
-        let max_rows = self
-            .segments
-            .iter()
-            .map(|segment| segment.row_count())
-            .max()
-            .unwrap_or(0);
-        search_projection(
-            &self.manifest,
-            query,
-            top_k,
-            options,
-            max_rows,
-            0,
-            &self.codebook,
-            |segment_index, transformed_query, kernel, codebook, allowed_ids, context| {
-                let segment = &self.segments[segment_index];
-                scan_segment(
-                    segment.row_count(),
-                    self.manifest.dimension,
-                    |row| segment.ids[row],
-                    |row| segment.renormalizations[row],
-                    &segment.codes,
-                    transformed_query,
-                    top_k,
-                    kernel,
-                    codebook,
-                    allowed_ids,
-                    context,
-                    0,
-                )
-            },
-        )
+        search_projection(self, query, top_k, options)
     }
 }
 
@@ -179,71 +271,19 @@ impl FileProjection {
         top_k: usize,
         options: ProjectionSearchOptions<'_>,
     ) -> Result<ProjectionSearchOutput> {
-        let max_rows = self
-            .manifest()
-            .segments
-            .iter()
-            .map(|segment| segment.row_count)
-            .max()
-            .unwrap_or(0);
-        let max_payload_bytes = self
-            .manifest()
-            .segments
-            .iter()
-            .map(|segment| usize::try_from(segment.payload_bytes).unwrap_or(usize::MAX))
-            .max()
-            .unwrap_or(0);
-        search_projection(
-            self.manifest(),
-            query,
-            top_k,
-            options,
-            max_rows,
-            max_payload_bytes,
-            &self.codebook,
-            |segment_index, transformed_query, kernel, codebook, allowed_ids, context| {
-                let descriptor = &self.manifest().segments[segment_index];
-                let buffer = self.read_segment(segment_index)?;
-                let parts = buffer.parts(self.manifest().dimension, descriptor.row_count)?;
-                scan_file_segment(
-                    parts,
-                    descriptor.row_count,
-                    self.manifest().dimension,
-                    transformed_query,
-                    top_k,
-                    kernel,
-                    codebook,
-                    allowed_ids,
-                    context,
-                    descriptor.payload_bytes,
-                )
-            },
-        )
+        search_projection(self, query, top_k, options)
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn search_projection<F>(
-    manifest: &ProjectionManifest,
+fn search_projection<R: SegmentReader>(
+    reader: &R,
     query: &[f32],
     top_k: usize,
     options: ProjectionSearchOptions<'_>,
-    max_segment_rows: usize,
-    max_segment_payload_bytes: usize,
-    codebook: &TurboQuantCodebook,
-    operation: F,
-) -> Result<ProjectionSearchOutput>
-where
-    F: Fn(
-            usize,
-            &[f32],
-            ScanKernel,
-            &TurboQuantCodebook,
-            Option<&[u64]>,
-            Option<&RuntimeTaskContext>,
-        ) -> Result<SegmentSearchResult>
-        + Sync,
-{
+) -> Result<ProjectionSearchOutput> {
+    let manifest = reader.manifest();
+    let max_segment_rows = reader.max_segment_rows();
+    let max_segment_payload_bytes = reader.max_segment_payload_bytes();
     if query.len() != manifest.dimension {
         return Err(ProjectionError::InvalidVector(format!(
             "expected query dimension {}, got {}",
@@ -356,11 +396,11 @@ where
             if segment_index >= segment_count {
                 break;
             }
-            match operation(
+            match reader.scan_segment(
                 segment_index,
                 &transformed_query,
+                top_k,
                 kernel,
-                codebook,
                 allowed_ids,
                 options.task_context,
             ) {
