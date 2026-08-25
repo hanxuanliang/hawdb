@@ -99,8 +99,10 @@ fn measure(
     let mut observed_delta_fraction = 0.0;
     for _ in 0..SAMPLES {
         let started = Instant::now();
-        let output = search_with_delta(query, TOP_K, options, &delta, |q, k, o| base.search(q, k, o))
-            .expect("benchmark merged search must succeed");
+        let output = search_with_delta(query, TOP_K, options, &delta, |q, k, o| {
+            base.search(q, k, o)
+        })
+        .expect("benchmark merged search must succeed");
         let elapsed = started.elapsed();
         observed_delta_fraction = output.delta_fraction;
         black_box(&output.hits);
