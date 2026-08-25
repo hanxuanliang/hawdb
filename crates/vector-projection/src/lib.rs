@@ -22,5 +22,6 @@ pub use model::{
     PROJECTION_QUANTIZER, PROJECTION_TRANSFORM,
 };
 pub use scan::{
-    ProjectionHit, ProjectionSearchOptions, ProjectionSearchOutput, ProjectionSearchReport,
+    CandidateSet, ProjectionHit, ProjectionSearchOptions, ProjectionSearchOutput,
+    ProjectionSearchReport,
 };

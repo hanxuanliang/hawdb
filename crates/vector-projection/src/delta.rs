@@ -206,8 +206,9 @@ where
     // filtering out ids the delta shadows still leaves up to top_k results
     // whenever the base has that many non-shadowed candidates.
     let base_top_k = top_k.saturating_add(delta.len());
+    let allowed_ids = options.candidates.map(|candidates| candidates.ids);
     let base_output = base_search(query, base_top_k, options)?;
-    let delta_hits = delta.scan(query, top_k, options.allowed_ids)?;
+    let delta_hits = delta.scan(query, top_k, allowed_ids)?;
 
     let delta_ids: HashSet<u64> = delta.entries.iter().map(|entry| entry.id).collect();
     let mut hits: Vec<ProjectionHit> = base_output
