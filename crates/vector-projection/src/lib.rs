@@ -2,7 +2,9 @@ mod advisor;
 mod artifact;
 mod build;
 mod codec;
+mod delta;
 mod error;
+mod hnsw;
 mod kernel;
 mod model;
 mod quantizer;
@@ -15,7 +17,9 @@ pub use advisor::{
 };
 pub use artifact::{FileProjection, ProjectionWriter};
 pub use build::{source_digest, ProjectionBuilder};
+pub use delta::{search_with_delta, DeltaBuffer, DeltaMergedSearchOutput};
 pub use error::{ProjectionError, Result};
+pub use hnsw::{HnswBuildConfig, HnswIndex};
 pub use kernel::{KernelPreference, ScanKernel};
 pub use model::{
     InMemoryProjection, ProjectionBuildAdmission, ProjectionBuildConfig, ProjectionBuildReport,
@@ -25,5 +29,6 @@ pub use model::{
     PROJECTION_QUANTIZER, PROJECTION_TRANSFORM,
 };
 pub use scan::{
-    ProjectionHit, ProjectionSearchOptions, ProjectionSearchOutput, ProjectionSearchReport,
+    CandidateSet, ProjectionHit, ProjectionSearchOptions, ProjectionSearchOutput,
+    ProjectionSearchReport,
 };
