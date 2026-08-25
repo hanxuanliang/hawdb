@@ -18,12 +18,35 @@ const WORKER_STACK_BYTES: usize = 512 * 1024;
 const SEARCH_FIXED_BYTES: usize = 1_024;
 const MIN_ALLOWLIST_DOCUMENTS_PER_WORKER: usize = 1_024;
 
+/// A pre-computed set of document IDs that candidate generation has already
+/// narrowed the search to, e.g. an ACL/tenant/time-range filter compiled
+/// upstream of the scan.
+///
+/// Today this always wraps a sorted, deduplicated ID slice (`exact: true`):
+/// membership in `ids` is the final answer, not a hint. The `exact` flag
+/// exists so a future approximate pre-filter -- an IVF/HNSW candidate list,
+/// for instance -- can flow through the same `ProjectionSearchOptions` slot
+/// and be distinguished in `ProjectionSearchReport` from today's exact
+/// allowlists, without another options field or call-site change.
+#[derive(Debug, Clone, Copy)]
+pub struct CandidateSet<'a> {
+    pub ids: &'a [u64],
+    pub exact: bool,
+}
+
+impl<'a> CandidateSet<'a> {
+    /// Wrap a sorted, deduplicated, exact ID allowlist.
+    pub fn exact(ids: &'a [u64]) -> Self {
+        Self { ids, exact: true }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ProjectionSearchOptions<'a> {
     pub max_parallelism: NonZeroUsize,
     pub max_working_bytes: usize,
     pub kernel: KernelPreference,
-    pub allowed_ids: Option<&'a [u64]>,
+    pub candidates: Option<CandidateSet<'a>>,
     pub task_context: Option<&'a RuntimeTaskContext>,
 }
 
@@ -33,7 +56,7 @@ impl<'a> ProjectionSearchOptions<'a> {
             max_parallelism: NonZeroUsize::MIN,
             max_working_bytes: DEFAULT_SEARCH_MEMORY_BYTES,
             kernel: KernelPreference::Auto,
-            allowed_ids: None,
+            candidates: None,
             task_context: None,
         }
     }
@@ -53,8 +76,14 @@ impl<'a> ProjectionSearchOptions<'a> {
         self
     }
 
+    /// Restrict the search to an exact, sorted, deduplicated ID allowlist.
     pub fn with_allowed_ids(mut self, allowed_ids: &'a [u64]) -> Self {
-        self.allowed_ids = Some(allowed_ids);
+        self.candidates = Some(CandidateSet::exact(allowed_ids));
+        self
+    }
+
+    pub fn with_candidate_set(mut self, candidates: CandidateSet<'a>) -> Self {
+        self.candidates = Some(candidates);
         self
     }
 
@@ -90,6 +119,9 @@ pub struct ProjectionSearchReport {
     pub payload_bytes_read: u64,
     pub admitted_working_bytes: usize,
     pub candidate_count: usize,
+    /// `None` when no candidate set was supplied; otherwise mirrors
+    /// `CandidateSet::exact` for the set that was actually applied.
+    pub candidate_set_exact: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -219,10 +251,9 @@ where
             query.len()
         )));
     }
-    if options
-        .allowed_ids
-        .is_some_and(|ids| ids.windows(2).any(|pair| pair[0] >= pair[1]))
-    {
+    let allowed_ids: Option<&[u64]> = options.candidates.map(|candidates| candidates.ids);
+    let candidate_set_exact = options.candidates.map(|candidates| candidates.exact);
+    if allowed_ids.is_some_and(|ids| ids.windows(2).any(|pair| pair[0] >= pair[1])) {
         return Err(ProjectionError::InvalidConfiguration(
             "allowed ids must be sorted and unique".to_string(),
         ));
@@ -234,7 +265,7 @@ where
     let mut transformed_query = vec![0.0; manifest.dimension];
     normalize_and_transform(query, manifest.transform_seed, &mut transformed_query)?;
     let segment_count = manifest.segments.len();
-    if top_k == 0 || segment_count == 0 || options.allowed_ids.is_some_and(<[u64]>::is_empty) {
+    if top_k == 0 || segment_count == 0 || allowed_ids.is_some_and(<[u64]>::is_empty) {
         return Ok(ProjectionSearchOutput {
             hits: Vec::new(),
             report: ProjectionSearchReport {
@@ -252,6 +283,7 @@ where
                     .len()
                     .saturating_mul(std::mem::size_of::<f32>()),
                 candidate_count: 0,
+                candidate_set_exact,
             },
         });
     }
@@ -259,7 +291,7 @@ where
     let query_bytes = transformed_query
         .len()
         .saturating_mul(std::mem::size_of::<f32>());
-    let mask_bytes = options.allowed_ids.map_or(0, |_| {
+    let mask_bytes = allowed_ids.map_or(0, |_| {
         max_segment_rows.div_ceil(u64::BITS as usize) * std::mem::size_of::<u64>()
     });
     let top_k_bytes = top_k.saturating_mul(std::mem::size_of::<ProjectionHit>());
@@ -280,7 +312,7 @@ where
             available: options.max_working_bytes,
         });
     }
-    let admitted_by_allowlist = options.allowed_ids.map_or(usize::MAX, |allowed| {
+    let admitted_by_allowlist = allowed_ids.map_or(usize::MAX, |allowed| {
         allowed
             .len()
             .div_ceil(MIN_ALLOWLIST_DOCUMENTS_PER_WORKER)
@@ -329,7 +361,7 @@ where
                 &transformed_query,
                 kernel,
                 codebook,
-                options.allowed_ids,
+                allowed_ids,
                 options.task_context,
             ) {
                 Ok(segment_result) => {
@@ -410,6 +442,7 @@ where
             payload_bytes_read: accumulated.payload_bytes_read,
             admitted_working_bytes,
             candidate_count: hits.len(),
+            candidate_set_exact,
         },
         hits,
     })
