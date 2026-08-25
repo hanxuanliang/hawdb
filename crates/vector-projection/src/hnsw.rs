@@ -345,6 +345,11 @@ impl HnswIndex {
                 query.len()
             )));
         }
+        if !query.iter().all(|value| value.is_finite()) {
+            return Err(ProjectionError::InvalidVector(
+                "query coordinates must be finite".to_string(),
+            ));
+        }
         let Some(entry_point) = self.entry_point else {
             return Ok(Vec::new());
         };
@@ -478,6 +483,14 @@ mod tests {
     fn build_rejects_dimension_mismatch() {
         let entries = vec![(1, vec![0.0, 1.0])];
         let result = HnswIndex::build(&entries, 4, HnswBuildConfig::new());
+        assert!(matches!(result, Err(ProjectionError::InvalidVector(_))));
+    }
+
+    #[test]
+    fn search_rejects_non_finite_query() {
+        let entries = vec![(1, axis_vector(4, 0))];
+        let index = HnswIndex::build(&entries, 4, HnswBuildConfig::new()).unwrap();
+        let result = index.search(&[f32::NAN, 0.0, 0.0, 0.0], 1, 10);
         assert!(matches!(result, Err(ProjectionError::InvalidVector(_))));
     }
 
