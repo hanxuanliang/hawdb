@@ -1,17 +1,12 @@
-name: CI
+name: Weekly Platform CI
 
 on:
-  pull_request:
-  push:
-    branches:
-      - main
   schedule:
     # Scheduled workflows run the latest revision of the default branch (main).
     - cron: "37 3 * * 1"
 
 concurrency:
-  # A main push must not cancel the weekly platform sweep for the same ref.
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -21,8 +16,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Pull requests keep the macOS gate. Windows runs weekly from main.
-        os: ${{ fromJSON(github.event_name == 'schedule' && '["windows-latest"]' || '["macos-latest"]') }}
+        # Linux coverage is authoritative in the Prow Bazel build and crate-test jobs.
+        os: [macos-latest, windows-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -60,9 +55,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Prow remains the Linux gate. Actions retain weekly native Linux and
-        # Windows evidence while pull requests keep the macOS native target.
-        include: ${{ fromJSON(github.event_name == 'schedule' && '[{"target":"linux-x86_64","runner":"ubuntu-24.04"},{"target":"linux-aarch64","runner":"ubuntu-24.04-arm"},{"target":"windows-x86_64","runner":"windows-2025"}]' || '[{"target":"macos-aarch64","runner":"macos-15"}]') }}
+        include:
+          - target: linux-x86_64
+            runner: ubuntu-24.04
+          - target: linux-aarch64
+            runner: ubuntu-24.04-arm
+          - target: macos-aarch64
+            runner: macos-15
+          - target: windows-x86_64
+            runner: windows-2025
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -102,7 +103,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(github.event_name == 'schedule' && '["windows-latest"]' || '["macos-latest"]') }}
+        os: [macos-latest, windows-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -160,8 +161,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Linux crash evidence is owned by Prow. Windows runs weekly from main.
-        os: ${{ fromJSON(github.event_name == 'schedule' && '["windows-latest"]' || '["macos-latest"]') }}
+        # Linux crash evidence is owned by Prow.
+        os: [macos-latest, windows-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
