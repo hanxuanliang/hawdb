@@ -7,6 +7,9 @@ pub mod operator;
 pub mod predicate;
 pub mod properties;
 pub mod relational;
+pub mod relational_join;
+pub mod relational_join_hypergraph;
+pub mod relational_join_rewrite;
 pub mod rule;
 pub mod search;
 pub mod stage;
@@ -38,6 +41,23 @@ pub use relational::{
     estimate_relational_nested_loop_join_cost, select_relational_access_path,
     skyline_prune_relational_access_paths, RelationalAccessPathDescriptor,
     RelationalAccessPathKind, RelationalNestedLoopJoinCost,
+};
+pub use relational_join::{
+    enumerate_relational_inner_joins, RelationalInnerJoinEnumeration,
+    RelationalJoinAccessApplicability, RelationalJoinAccessPath, RelationalJoinEnumerationConfig,
+    RelationalJoinEnumerationError, RelationalJoinGraph, RelationalJoinPlan,
+    RelationalJoinPredicate, RelationalJoinPredicateId, RelationalJoinRelation, RelationalJoinStep,
+};
+pub use relational_join_hypergraph::{
+    enumerate_relational_csg_cmp_joins, RelationalCsgCmpAlternative, RelationalCsgCmpEnumeration,
+    RelationalCsgCmpPlan, RelationalCsgCmpPlanNode,
+};
+pub use relational_join_rewrite::{
+    analyze_relational_join_conflicts, enumerate_relational_join_rewrites,
+    RelationalJoinConflictAnalysis, RelationalJoinConflictDescriptor, RelationalJoinConflictRule,
+    RelationalJoinOperator, RelationalJoinOperatorId, RelationalJoinOperatorKind,
+    RelationalJoinRewriteEnumeration, RelationalJoinRewriteError, RelationalJoinRewritePlan,
+    RelationalJoinRewriteProblem, RelationalJoinRewriteStep, RelationalJoinTree,
 };
 pub use rule::{
     apply_rule_batch, AppliedRule, OptimizerRule, RuleApplication, RuleBatch, RuleId, RuleKind,
