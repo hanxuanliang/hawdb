@@ -11,6 +11,7 @@ use std::fmt::{Display, Formatter};
 mod append_oracle;
 mod coverage;
 mod generator;
+mod output;
 mod predicate_rewrite;
 mod query_ast;
 mod sql_oracle;
@@ -22,6 +23,7 @@ use query_ast::QueryAst;
 
 pub use append_oracle::{run_append_state_machine_case, APPEND_STATE_MACHINE_PROTOCOL};
 pub use coverage::PlanCoverageReport;
+pub use output::{emit_fuzz_report, FuzzReportPaths, DEFAULT_FUZZ_LOG_DIRECTORY};
 pub use sql_oracle::{
     SqlCaseReport, SqlExecutionObservation, SqlFailureReport, SqlJoinGeneratorProfile,
     SqlJoinRewriteCase, SqlJoinRewriteEvidence, SqlJoinRewriteFailureReport, SqlMutation,
@@ -1799,7 +1801,7 @@ pub fn run_campaign(options: CampaignOptions) -> Result<CampaignReport, FuzzErro
             direction_reversal_applicable,
             reproduction_command: (!success).then(|| {
                 format!(
-                    "cargo run -p skein-fuzz -- --seed {} --case-index {index}",
+                    "bazel run //crates/fuzz:skein_optimizer_fuzz -- --seed {} --case-index {index}",
                     options.seed
                 )
             }),

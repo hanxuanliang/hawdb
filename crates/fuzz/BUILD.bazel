@@ -76,7 +76,10 @@ rust_binary(
     srcs = ["src/storage_main.rs"],
     edition = "2024",
     aliases = aliases(),
-    deps = all_crate_deps(normal = True) + ["//:skein"],
+    deps = all_crate_deps(normal = True) + [
+        ":skein_fuzz",
+        "//:skein",
+    ],
     proc_macro_deps = all_crate_deps(proc_macro = True),
 )
 
@@ -91,7 +94,10 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
-    deps = all_crate_deps(normal = True, normal_dev = True) + ["//:skein"],
+    deps = all_crate_deps(normal = True, normal_dev = True) + [
+        ":skein_fuzz",
+        "//:skein",
+    ],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
 )
 
