@@ -263,7 +263,10 @@ pub struct DatabaseConfig {
     pub max_read_result_payload_bytes: Option<usize>,
     pub execution_memory: executor::ExecutionMemoryConfig,
     pub mutation_limits: skein_storage::MutationLimits,
+    /// Maximum memo groups available to graph and relational optimizer search.
     pub max_optimizer_groups: Option<usize>,
+    /// Maximum memo expressions available to relational join enumeration.
+    pub max_relational_join_expressions: Option<usize>,
     pub recovery_mode: RecoveryMode,
     pub max_wal_replay_entries: Option<usize>,
     pub max_wal_replay_bytes: Option<u64>,
@@ -316,13 +319,6 @@ fn restrictive_query_limit(configured: Option<usize>, requested: Option<usize>) 
     }
 }
 
-fn relational_query_limits(
-    config: &DatabaseConfig,
-    max_rows: Option<usize>,
-) -> crate::relational_sql::RelationalQueryLimits {
-    relational_query_limits_with_payload(config, max_rows, config.max_read_result_payload_bytes)
-}
-
 fn relational_query_limits_with_payload(
     config: &DatabaseConfig,
     max_rows: Option<usize>,
@@ -352,8 +348,6 @@ fn relational_query_limits_with_payload(
         max_output_rows,
         max_output_payload_bytes,
         max_intermediate_rows,
-        batch_rows: config.execution_memory.batch_rows,
-        blocking_operator_bytes: config.execution_memory.blocking_operator_bytes,
         hydration: skein_storage::RelationalHydrationBudget {
             max_rows: max_row_read_rows,
             max_compressed_bytes: config.max_relational_hydration_bytes.get(),
@@ -384,14 +378,42 @@ fn relational_query_limits_with_payload(
     }
 }
 
+fn relational_join_enumeration_config_from_database_config(
+    config: &DatabaseConfig,
+) -> skein_optimizer::RelationalJoinEnumerationConfig {
+    let defaults = skein_optimizer::RelationalJoinEnumerationConfig::default();
+    skein_optimizer::RelationalJoinEnumerationConfig {
+        max_groups: optimizer_config_from_database_config(config).max_groups,
+        max_expressions: config
+            .max_relational_join_expressions
+            .unwrap_or(defaults.max_expressions),
+    }
+}
+
+fn relational_query_resource_context<'a>(
+    config: &'a DatabaseConfig,
+    max_rows: Option<usize>,
+    max_payload_bytes: Option<usize>,
+    task_context: Option<&'a skein_core::RuntimeTaskContext>,
+) -> crate::relational_sql::RelationalQueryResourceContext<'a> {
+    crate::relational_sql::RelationalQueryResourceContext::new(
+        relational_join_enumeration_config_from_database_config(config),
+        relational_query_limits_with_payload(config, max_rows, max_payload_bytes),
+        &config.execution_memory,
+        task_context,
+    )
+}
+
 fn relational_index_read_mode<'a>(
     config: &DatabaseConfig,
     store: &'a GraphStore,
 ) -> crate::relational_sql::RelationalIndexReadMode<'a> {
     match config.relational_index_mode {
-        skein_storage::RelationalIndexMode::Materialized
-        | skein_storage::RelationalIndexMode::Shadow => {
+        skein_storage::RelationalIndexMode::Materialized => {
             crate::relational_sql::RelationalIndexReadMode::Materialized
+        }
+        skein_storage::RelationalIndexMode::Shadow => {
+            crate::relational_sql::RelationalIndexReadMode::Shadow(store)
         }
         skein_storage::RelationalIndexMode::DemandPaged => {
             crate::relational_sql::RelationalIndexReadMode::DemandPaged(store)
@@ -411,6 +433,7 @@ impl Default for DatabaseConfig {
             execution_memory: executor::ExecutionMemoryConfig::default(),
             mutation_limits: skein_storage::MutationLimits::default(),
             max_optimizer_groups: None,
+            max_relational_join_expressions: None,
             recovery_mode: RecoveryMode::default(),
             max_wal_replay_entries: Some(skein_storage::DEFAULT_MAX_WAL_REPLAY_ENTRIES),
             max_wal_replay_bytes: Some(skein_storage::DEFAULT_MAX_WAL_REPLAY_BYTES),
@@ -19626,14 +19649,17 @@ fn execute_database_transaction_sql(
                 )));
             }
         };
-        let output = crate::relational_sql::execute_relational_query_sql_with_runtime(
+        let output = crate::relational_sql::execute_relational_query_sql_with_resources(
             sql_text,
             parameters,
             &state.relational_state,
             crate::relational_sql::RelationalQueryReadModes::new(index_read_mode, row_read_mode),
-            relational_query_limits(&runtime.config, runtime.config.max_read_result_rows),
-            &runtime.config.execution_memory,
-            None,
+            relational_query_resource_context(
+                &runtime.config,
+                runtime.config.max_read_result_rows,
+                runtime.config.max_read_result_payload_bytes,
+                None,
+            ),
         )?;
         return Ok(QueryOutput { rows: output.rows });
     }
@@ -20108,6 +20134,8 @@ fn profiled_relational_sql_output(
 ) -> ProfiledRelationalSqlQueryOutput {
     let crate::relational_sql::RelationalQueryOutput {
         rows,
+        join_planning,
+        operator_cardinality_profiles,
         intermediate_rows,
         hydration,
         index_execution_evidence,
@@ -20115,6 +20143,8 @@ fn profiled_relational_sql_output(
         ..
     } = output;
     let profile = RelationalSqlReadProfile {
+        join_planning,
+        operator_cardinality_profiles,
         intermediate_rows,
         hydrated_rows: hydration.hydrated_rows,
         hydrated_compressed_bytes: hydration.compressed_bytes,
@@ -20763,9 +20793,9 @@ impl DatabaseReadTransaction {
     }
 
     /// Executes one bounded relational `SELECT` against this pinned snapshot
-    /// and returns result rows together with the storage accounting from that
-    /// exact execution. Virtual system-catalog queries and `EXPLAIN` are kept
-    /// on their dedicated output paths.
+    /// and returns result rows together with operator cardinality and storage
+    /// accounting from that exact execution. Virtual system-catalog queries
+    /// and `EXPLAIN` are kept on their dedicated output paths.
     pub fn query_sql_with_params_options_profiled(
         &self,
         sql_text: &str,
@@ -20925,7 +20955,7 @@ impl DatabaseReadTransaction {
         max_payload_bytes: Option<usize>,
         task_context: &skein_core::RuntimeTaskContext,
     ) -> Result<ProfiledRelationalSqlQueryOutput> {
-        let query_result = crate::relational_sql::execute_relational_query_sql_with_runtime(
+        let query_result = crate::relational_sql::execute_relational_query_sql_with_resources(
             sql_text,
             parameters,
             self.store.relational_state(),
@@ -20933,9 +20963,12 @@ impl DatabaseReadTransaction {
                 relational_index_read_mode(&self.config, &self.store),
                 crate::relational_sql::RelationalRowReadMode::Store(&self.store),
             ),
-            relational_query_limits_with_payload(&self.config, max_rows, max_payload_bytes),
-            &self.config.execution_memory,
-            Some(task_context),
+            relational_query_resource_context(
+                &self.config,
+                max_rows,
+                max_payload_bytes,
+                Some(task_context),
+            ),
         );
         self.store.poison_on_storage_error(&query_result);
         let output = query_result?;

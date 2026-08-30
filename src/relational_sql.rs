@@ -14,6 +14,7 @@ use skein_storage::{
     RelationalWrite,
 };
 mod append;
+mod cardinality;
 
 pub(crate) use append::{
     compile_append_explain_sql, compile_append_select_sql, compile_append_statement_sql,
@@ -21,13 +22,24 @@ pub(crate) use append::{
 };
 
 mod index_access;
+mod planning;
 mod query;
 mod row_access;
 
+pub use cardinality::{
+    RelationalOperatorCardinalityProfile, RelationalOperatorId, RelationalOperatorKind,
+};
+pub use planning::{
+    RelationalJoinPlanningBudget, RelationalJoinPlanningCost, RelationalJoinPlanningOutcome,
+    RelationalJoinPlanningReason, RelationalJoinPlanningStatus, RelationalJoinPlanningStrategy,
+};
+
 pub(crate) use index_access::RelationalIndexReadMode;
+#[cfg(test)]
+pub(crate) use query::execute_relational_query_sql_with_runtime;
 pub(crate) use query::{
-    execute_relational_query_sql_with_runtime, RelationalQueryLimits, RelationalQueryOutput,
-    RelationalQueryReadModes,
+    execute_relational_query_sql_with_resources, RelationalQueryLimits, RelationalQueryOutput,
+    RelationalQueryReadModes, RelationalQueryResourceContext,
 };
 pub(crate) use row_access::RelationalRowReadMode;
 
@@ -1079,6 +1091,96 @@ mod tests {
             .all(|row| { matches!(row.get("estRows"), Some(Value::Int(rows)) if *rows >= 1) }));
     }
 
+    fn explain_join_with_search_budgets(max_groups: usize, max_expressions: usize) -> String {
+        let mut database = Database::new_with_config(DatabaseConfig {
+            max_optimizer_groups: Some(max_groups),
+            max_relational_join_expressions: Some(max_expressions),
+            ..DatabaseConfig::default()
+        });
+        database
+            .query_sql("CREATE TABLE join_left (id BIGINT PRIMARY KEY)")
+            .expect("create left join table");
+        database
+            .query_sql("CREATE TABLE join_right (id BIGINT PRIMARY KEY, left_id BIGINT NOT NULL)")
+            .expect("create right join table");
+
+        let explain = database
+            .query_sql(
+                "EXPLAIN SELECT l.id FROM join_left AS l \
+                 INNER JOIN join_right AS r ON r.left_id = l.id \
+                 ORDER BY l.id",
+            )
+            .expect("explain join with configured search budgets");
+        let join = explain
+            .rows
+            .iter()
+            .find(|row| {
+                matches!(
+                    row.get("id"),
+                    Some(Value::String(id)) if id.contains("IndexNestedLoopJoinExec")
+                )
+            })
+            .expect("join explain row");
+        match join.get("operator info") {
+            Some(Value::String(info)) => info.clone(),
+            value => panic!("expected join operator info, got {value:?}"),
+        }
+    }
+
+    #[test]
+    fn database_config_injects_relational_join_search_budgets() {
+        let group_limited = explain_join_with_search_budgets(2, 5);
+        assert!(matches!(
+            group_limited.as_str(),
+            info if info.contains("planning_status=fallback")
+                && info.contains("planning_reason=group_budget_exceeded")
+                && info.contains("max_groups=2")
+                && info.contains("max_expressions=5")
+        ));
+
+        let expression_limited = explain_join_with_search_budgets(3, 1);
+        assert!(matches!(
+            expression_limited.as_str(),
+            info if info.contains("planning_status=fallback")
+                && info.contains("planning_reason=expression_budget_exceeded")
+                && info.contains("max_groups=3")
+                && info.contains("max_expressions=1")
+        ));
+    }
+
+    #[test]
+    fn prepared_relational_execution_is_admitted_before_scanning() {
+        let mut config = DatabaseConfig::default();
+        config.execution_memory.query_memory_bytes =
+            std::num::NonZeroUsize::new(1_024).expect("non-zero query memory budget");
+        config.execution_memory.batch_payload_bytes =
+            std::num::NonZeroUsize::new(768).expect("non-zero batch memory budget");
+        config.execution_memory.blocking_operator_bytes =
+            std::num::NonZeroUsize::new(512).expect("non-zero blocking memory budget");
+        let mut database = Database::new_with_config(config);
+        database
+            .query_sql("CREATE TABLE admission_rows (id BIGINT PRIMARY KEY, value BIGINT NOT NULL)")
+            .expect("create admission table");
+        database
+            .query_sql("INSERT INTO admission_rows (id, value) VALUES (1, 2)")
+            .expect("insert admission row");
+
+        let streaming = database
+            .query_sql("SELECT id FROM admission_rows")
+            .expect("streaming descriptor fits the query memory budget");
+        assert_eq!(streaming.rows.len(), 1);
+
+        database
+            .query_sql("EXPLAIN SELECT id FROM admission_rows ORDER BY value")
+            .expect("plain explain does not admit execution resources");
+        let error = database
+            .query_sql("SELECT id FROM admission_rows ORDER BY value")
+            .expect_err("blocking descriptor must be rejected before execution");
+        assert!(error.to_string().contains(
+            "prepared relational query requires 1280 estimated bytes, exceeding query_memory_bytes 1024"
+        ));
+    }
+
     #[test]
     fn database_sql_uses_bounded_pinned_relational_indexes_with_observable_fallback() {
         let nonce = std::time::SystemTime::now()
@@ -1826,8 +1928,298 @@ mod tests {
             Value::String("ready".to_string())
         );
         assert!(profiled.profile.intermediate_rows > 0);
+        assert_eq!(
+            profiled.profile.join_planning.strategy,
+            RelationalJoinPlanningStrategy::SyntaxOrder
+        );
+        assert_eq!(
+            profiled.profile.join_planning.status,
+            RelationalJoinPlanningStatus::NotEligible
+        );
+        assert_eq!(
+            profiled.profile.join_planning.reason,
+            RelationalJoinPlanningReason::NoJoin
+        );
+        assert_eq!(profiled.profile.join_planning.selected_order, ["messages"]);
+        assert!(profiled.profile.join_planning.cost.is_none());
+        assert_eq!(profiled.profile.operator_cardinality_profiles.len(), 1);
+        let scan = &profiled.profile.operator_cardinality_profiles[0];
+        assert_eq!(scan.operator_id.get(), 1);
+        assert_eq!(scan.operator, RelationalOperatorKind::TablePointGet);
+        assert_eq!(scan.table, "messages");
+        assert_eq!(scan.estimated_rows, 1);
+        assert_eq!(scan.actual_rows, Some(1));
+        assert!(scan.fully_consumed);
         assert_eq!(profiled.profile.row_read.runtime_path, "canonical_memory");
         assert_eq!(profiled.profile.row_read.rows_visited, 1);
+    }
+
+    #[test]
+    fn relational_operator_cardinality_profiles_track_join_boundaries_and_early_stop() {
+        const SELECT: &str = "SELECT p.id AS parent_id, c.id AS child_id \
+            FROM profile_parents AS p \
+            INNER JOIN profile_children AS c ON c.parent_id = p.id";
+
+        let mut database = Database::new();
+        database
+            .query_sql("CREATE TABLE profile_parents (id BIGINT PRIMARY KEY)")
+            .expect("create profile parent table");
+        database
+            .query_sql(
+                "CREATE TABLE profile_children (\
+                   id BIGINT PRIMARY KEY, \
+                   parent_id BIGINT NOT NULL REFERENCES profile_parents(id)\
+                 )",
+            )
+            .expect("create profile child table");
+        database
+            .query_sql("INSERT INTO profile_parents (id) VALUES (1), (2)")
+            .expect("insert profile parents");
+        database
+            .query_sql(
+                "INSERT INTO profile_children (id, parent_id) VALUES (11, 1), (12, 1), (21, 2)",
+            )
+            .expect("insert profile children");
+
+        let read = database.begin_read_transaction();
+        let full = read
+            .query_sql_with_params_options_profiled(
+                SELECT,
+                &[],
+                crate::QueryStreamOptions::default(),
+            )
+            .expect("profile fully consumed join");
+        assert_eq!(full.output.rows.len(), 3);
+        assert_eq!(full.profile.intermediate_rows, 5);
+        assert_eq!(full.profile.operator_cardinality_profiles.len(), 2);
+        let base = &full.profile.operator_cardinality_profiles[0];
+        assert_eq!(base.operator_id.get(), 1);
+        assert_eq!(base.operator, RelationalOperatorKind::TableFullScan);
+        assert_eq!(base.table, "profile_parents");
+        assert_eq!(base.estimated_rows, 2);
+        assert_eq!(base.actual_rows, Some(2));
+        assert!(base.fully_consumed);
+        let join = &full.profile.operator_cardinality_profiles[1];
+        assert_eq!(join.operator_id.get(), 2);
+        assert_eq!(join.operator, RelationalOperatorKind::IndexNestedLoopJoin);
+        assert_eq!(join.table, "profile_children");
+        assert_eq!(join.estimated_rows, 6);
+        assert_eq!(join.actual_rows, Some(3));
+        assert!(join.fully_consumed);
+
+        let limited = read
+            .query_sql_with_params_options_profiled(
+                &format!("{SELECT} LIMIT 1"),
+                &[],
+                crate::QueryStreamOptions::default(),
+            )
+            .expect("profile early-stopped join");
+        assert_eq!(limited.output.rows.len(), 1);
+        assert_eq!(limited.profile.intermediate_rows, 2);
+        assert_eq!(
+            limited.profile.operator_cardinality_profiles[0].actual_rows,
+            Some(1)
+        );
+        assert_eq!(
+            limited.profile.operator_cardinality_profiles[1].actual_rows,
+            Some(1)
+        );
+        assert!(limited
+            .profile
+            .operator_cardinality_profiles
+            .iter()
+            .all(|profile| !profile.fully_consumed));
+
+        let plain = read
+            .query_sql_with_params(&format!("EXPLAIN {SELECT}"), &[])
+            .expect("explain cardinality-profiled join");
+        let analyzed = read
+            .query_sql_with_params(&format!("EXPLAIN ANALYZE {SELECT}"), &[])
+            .expect("analyze cardinality-profiled join");
+        let analyzed_ids = analyzed
+            .rows
+            .iter()
+            .filter_map(|row| match row.get("id") {
+                Some(Value::String(id)) => Some(id.clone()),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(analyzed_ids.len(), analyzed.rows.len());
+        for (table, expected_id, estimated_rows, actual_rows) in
+            [("profile_parents", 1, 2, 2), ("profile_children", 2, 6, 3)]
+        {
+            let plain_row = relational_explain_access_row(&plain, table);
+            let analyzed_row = relational_explain_access_row(&analyzed, table);
+            assert_eq!(plain_row["id"], analyzed_row["id"]);
+            assert!(matches!(
+                analyzed_row.get("id"),
+                Some(Value::String(id)) if id.ends_with(&format!("_{expected_id}"))
+            ));
+            assert_eq!(analyzed_row["estRows"], Value::Int(estimated_rows));
+            assert_eq!(analyzed_row["actRows"], Value::Int(actual_rows));
+            assert!(matches!(
+                analyzed_row.get("execution info"),
+                Some(Value::String(info))
+                    if info.contains(&format!("operator_id={expected_id}"))
+                        && info.contains("fully_consumed=true")
+            ));
+        }
+    }
+
+    #[test]
+    fn relational_join_probe_fanout_tracks_checkpoint_epoch_and_wal_delta() {
+        const PREFIX_ONE_SELECT: &str = "SELECT e.id \
+            FROM probe_keys AS p \
+            INNER JOIN events AS e ON e.tenant = p.tenant";
+        const PREFIX_TWO_SELECT: &str = "SELECT e.id \
+            FROM probe_keys AS p \
+            INNER JOIN events AS e \
+              ON e.tenant = p.tenant AND e.category = p.category";
+
+        fn estimated_join_rows(database: &Database, sql: &str) -> usize {
+            let read = database.begin_read_transaction();
+            let profiled = read
+                .query_sql_with_params_options_profiled(
+                    sql,
+                    &[],
+                    crate::QueryStreamOptions::default(),
+                )
+                .expect("profile composite index join");
+            assert_eq!(profiled.profile.operator_cardinality_profiles.len(), 2);
+            assert_eq!(
+                profiled.profile.operator_cardinality_profiles[1].operator,
+                RelationalOperatorKind::IndexNestedLoopJoin
+            );
+            assert_eq!(
+                profiled.profile.operator_cardinality_profiles[1].table,
+                "events"
+            );
+            profiled.profile.operator_cardinality_profiles[1].estimated_rows
+        }
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "skein-relational-probe-fanout-{}-{nonce}",
+            std::process::id()
+        ));
+        let config = DatabaseConfig {
+            relational_index_mode: skein_storage::RelationalIndexMode::Shadow,
+            ..DatabaseConfig::default()
+        };
+        {
+            let mut database = Database::open_with_durability_and_config(
+                &path,
+                DurabilityPolicy::default(),
+                config.clone(),
+            )
+            .expect("open probe-fanout database");
+            database
+                .query_sql(
+                    "CREATE TABLE probe_keys (\
+                       id TEXT PRIMARY KEY, \
+                       tenant TEXT NOT NULL, \
+                       category TEXT NOT NULL\
+                     )",
+                )
+                .expect("create probe keys");
+            database
+                .query_sql(
+                    "CREATE TABLE events (\
+                       id TEXT PRIMARY KEY, \
+                       tenant TEXT NOT NULL, \
+                       category TEXT\
+                     )",
+                )
+                .expect("create events");
+            database
+                .query_sql("CREATE INDEX events_tenant_category_idx ON events (tenant, category)")
+                .expect("create composite event index");
+            database
+                .query_sql(
+                    "INSERT INTO probe_keys (id, tenant, category) \
+                     VALUES ('probe', 'A', 'x')",
+                )
+                .expect("insert probe key");
+            database
+                .query_sql(
+                    "INSERT INTO events (id, tenant, category) VALUES \
+                       ('row-1', 'A', 'x'), \
+                       ('row-2', 'A', 'x'), \
+                       ('row-3', 'A', 'x'), \
+                       ('row-4', 'A', 'x'), \
+                       ('row-5', 'A', 'y'), \
+                       ('row-6', 'A', NULL), \
+                       ('row-7', 'A', NULL), \
+                       ('row-8', 'B', 'x')",
+                )
+                .expect("insert skewed events");
+            assert_eq!(estimated_join_rows(&database, PREFIX_ONE_SELECT), 8);
+            assert_eq!(estimated_join_rows(&database, PREFIX_TWO_SELECT), 8);
+            database
+                .checkpoint()
+                .expect("publish fresh index statistics");
+
+            assert_eq!(estimated_join_rows(&database, PREFIX_ONE_SELECT), 7);
+            assert_eq!(estimated_join_rows(&database, PREFIX_TWO_SELECT), 4);
+
+            database
+                .query_sql(
+                    "INSERT INTO events (id, tenant, category) \
+                     VALUES ('row-9', 'A', 'x')",
+                )
+                .expect("append WAL delta");
+            assert_eq!(estimated_join_rows(&database, PREFIX_ONE_SELECT), 9);
+            assert_eq!(estimated_join_rows(&database, PREFIX_TWO_SELECT), 9);
+        }
+
+        {
+            let mut database = Database::open_with_durability_and_config(
+                &path,
+                DurabilityPolicy::default(),
+                config.clone(),
+            )
+            .expect("reopen with recovered WAL delta");
+            assert_eq!(estimated_join_rows(&database, PREFIX_ONE_SELECT), 9);
+            assert_eq!(estimated_join_rows(&database, PREFIX_TWO_SELECT), 9);
+
+            database
+                .checkpoint()
+                .expect("refresh index statistics after WAL recovery");
+            assert_eq!(estimated_join_rows(&database, PREFIX_ONE_SELECT), 8);
+            assert_eq!(estimated_join_rows(&database, PREFIX_TWO_SELECT), 5);
+        }
+
+        {
+            let database = Database::open_with_durability_and_config(
+                &path,
+                DurabilityPolicy::default(),
+                config,
+            )
+            .expect("reopen fresh index statistics");
+            assert_eq!(estimated_join_rows(&database, PREFIX_ONE_SELECT), 8);
+            assert_eq!(estimated_join_rows(&database, PREFIX_TWO_SELECT), 5);
+        }
+
+        std::fs::remove_dir_all(path).expect("remove probe-fanout fixture");
+    }
+
+    fn relational_explain_access_row<'a>(
+        output: &'a crate::QueryOutput,
+        table: &str,
+    ) -> crate::executor::QueryRowRef<'a> {
+        output
+            .rows
+            .iter()
+            .find(|row| {
+                matches!(
+                    row.get("access object"),
+                    Some(Value::String(access)) if access.contains(&format!("table:{table}"))
+                )
+            })
+            .unwrap_or_else(|| panic!("EXPLAIN output has no access row for {table}"))
     }
 
     fn relational_explain_operator_info<'a>(
@@ -2423,9 +2815,11 @@ mod tests {
             .to_string()
             .contains("relational columnar aggregate cannot fit one row"));
 
-        let mut constrained = query_limits(1, 4 * 1024);
-        constrained.blocking_operator_bytes =
-            std::num::NonZeroUsize::new(1).expect("non-zero aggregate memory budget");
+        let constrained_memory = skein_executor::ExecutionMemoryConfig {
+            blocking_operator_bytes: std::num::NonZeroUsize::new(1)
+                .expect("non-zero aggregate memory budget"),
+            ..skein_executor::ExecutionMemoryConfig::default()
+        };
         let error = execute_relational_query_sql_with_runtime(
             summary_sql,
             &[text("stream-1")],
@@ -2434,8 +2828,8 @@ mod tests {
                 RelationalIndexReadMode::Materialized,
                 RelationalRowReadMode::CanonicalMemory,
             ),
-            constrained,
-            &skein_executor::ExecutionMemoryConfig::default(),
+            query_limits(1, 4 * 1024),
+            &constrained_memory,
             None,
         )
         .expect_err("aggregate must honor its memory budget");
@@ -2463,9 +2857,6 @@ mod tests {
             max_output_rows,
             max_output_payload_bytes,
             max_intermediate_rows: 10_000,
-            batch_rows: std::num::NonZeroUsize::new(256).expect("non-zero batch row budget"),
-            blocking_operator_bytes: std::num::NonZeroUsize::new(64 * 1024 * 1024)
-                .expect("non-zero aggregate memory budget"),
             hydration: skein_storage::RelationalHydrationBudget::default(),
             index_read: skein_storage::RelationalIndexReadLimits::default(),
             row_read: skein_storage::RelationalRowPageSnapshotReadLimits::default(),
@@ -2538,6 +2929,22 @@ mod tests {
             output.join_access_paths[0].index_columns[0],
             "content_doc_id"
         );
+        assert_eq!(
+            output.join_planning.strategy,
+            RelationalJoinPlanningStrategy::InnerJoinMemo
+        );
+        assert_eq!(
+            output.join_planning.status,
+            RelationalJoinPlanningStatus::Selected
+        );
+        assert_eq!(
+            output.join_planning.reason,
+            RelationalJoinPlanningReason::CostReordered
+        );
+        assert_eq!(output.join_planning.selected_order, ["d", "c"]);
+        assert!(output.join_planning.memo_groups.is_some());
+        assert!(output.join_planning.memo_expressions.is_some());
+        assert!(output.join_planning.cost.is_some());
 
         let explain_sql = format!("EXPLAIN ANALYZE {SQL}");
         let explained = execute_relational_query_sql_with_runtime(
@@ -2569,7 +2976,13 @@ mod tests {
         ));
         assert!(matches!(
             join.get("operator info"),
-            Some(Value::String(info)) if info.contains("join_order=cost_reordered")
+            Some(Value::String(info))
+                if info.contains("join_order=cost_reordered")
+                    && info.contains("planning_strategy=inner_join_memo")
+                    && info.contains("planning_status=selected")
+                    && info.contains("planning_reason=cost_reordered")
+                    && info.contains("selected_order=[d,c]")
+                    && info.contains("plan_cost=")
         ));
     }
 
@@ -2638,6 +3051,113 @@ mod tests {
         assert!(output.join_access_paths[0].unique_point);
         assert_eq!(output.join_access_paths[0].index_columns, ["owner_id"]);
         assert_eq!(output.join_access_paths[1].index_columns, ["document_id"]);
+        assert_eq!(output.operator_cardinality_profiles.len(), 3);
+        assert_eq!(
+            output
+                .operator_cardinality_profiles
+                .iter()
+                .map(|profile| profile.operator_id.get())
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert_eq!(
+            output
+                .operator_cardinality_profiles
+                .iter()
+                .map(|profile| profile.estimated_rows)
+                .collect::<Vec<_>>(),
+            [1, 1, 12]
+        );
+        assert_eq!(
+            output
+                .operator_cardinality_profiles
+                .iter()
+                .map(|profile| profile.actual_rows)
+                .collect::<Vec<_>>(),
+            [Some(1), Some(1), Some(3)]
+        );
+        assert!(output
+            .operator_cardinality_profiles
+            .iter()
+            .all(|profile| profile.fully_consumed));
+    }
+
+    #[test]
+    fn disconnected_join_graph_reports_syntax_fallback() {
+        const SQL: &str = "SELECT a.id AS a_id, c.id AS c_id \
+            FROM planning_a AS a \
+            INNER JOIN planning_b AS b ON b.a_id = a.id \
+            INNER JOIN planning_c AS c ON b.a_id = a.id \
+            ORDER BY a.id ASC, c.id ASC";
+
+        let store = RelationalStore::default();
+        for ddl in [
+            "CREATE TABLE planning_a (id TEXT PRIMARY KEY)",
+            "CREATE TABLE planning_b (id TEXT PRIMARY KEY, a_id TEXT NOT NULL REFERENCES planning_a(id))",
+            "CREATE TABLE planning_c (id TEXT PRIMARY KEY)",
+        ] {
+            commit_sql(&store, ddl, &[]);
+        }
+        commit_sql(&store, "INSERT INTO planning_a (id) VALUES ('a-1')", &[]);
+        commit_sql(
+            &store,
+            "INSERT INTO planning_b (id, a_id) VALUES ('b-1', 'a-1')",
+            &[],
+        );
+        commit_sql(&store, "INSERT INTO planning_c (id) VALUES ('c-1')", &[]);
+
+        let snapshot = store.snapshot().expect("join fallback snapshot");
+        let output = execute_relational_query_sql_with_runtime(
+            SQL,
+            &[],
+            snapshot.value(),
+            RelationalQueryReadModes::new(
+                RelationalIndexReadMode::Materialized,
+                RelationalRowReadMode::CanonicalMemory,
+            ),
+            query_limits(8, 64 * 1024),
+            &skein_executor::ExecutionMemoryConfig::default(),
+            None,
+        )
+        .expect("execute syntax fallback for a disconnected join graph");
+
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(
+            output.join_planning.strategy,
+            RelationalJoinPlanningStrategy::InnerJoinMemo
+        );
+        assert_eq!(
+            output.join_planning.status,
+            RelationalJoinPlanningStatus::Fallback
+        );
+        assert_eq!(
+            output.join_planning.reason,
+            RelationalJoinPlanningReason::DisconnectedGraph
+        );
+        assert_eq!(output.join_planning.selected_order, ["a", "b", "c"]);
+        assert!(output.join_planning.cost.is_none());
+
+        let explained = execute_relational_query_sql_with_runtime(
+            &format!("EXPLAIN {SQL}"),
+            &[],
+            snapshot.value(),
+            RelationalQueryReadModes::new(
+                RelationalIndexReadMode::Materialized,
+                RelationalRowReadMode::CanonicalMemory,
+            ),
+            query_limits(16, 64 * 1024),
+            &skein_executor::ExecutionMemoryConfig::default(),
+            None,
+        )
+        .expect("explain syntax fallback for a disconnected join graph");
+        assert!(explained.rows.iter().any(|row| matches!(
+            row.get("operator info"),
+            Some(Value::String(info))
+                if info.contains("join_order=syntax_fallback")
+                    && info.contains("planning_status=fallback")
+                    && info.contains("planning_reason=disconnected_graph")
+                    && info.contains("plan_cost=unavailable")
+        )));
     }
 
     #[test]
@@ -2705,6 +3225,26 @@ mod tests {
         assert_eq!(output.access_path.index_columns, ["external_id"]);
         assert_eq!(output.join_access_paths[0].index_columns, ["c_id"]);
         assert_eq!(output.join_access_paths[1].index_columns, ["a_id"]);
+        assert_eq!(
+            output
+                .operator_cardinality_profiles
+                .iter()
+                .map(|profile| (
+                    profile.operator,
+                    profile.estimated_rows,
+                    profile.actual_rows
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (RelationalOperatorKind::IndexRangeScan, 1, Some(1)),
+                (RelationalOperatorKind::IndexNestedLoopJoin, 3, Some(2)),
+                (RelationalOperatorKind::IndexNestedLoopLeftJoin, 6, Some(2)),
+            ]
+        );
+        assert!(output
+            .operator_cardinality_profiles
+            .iter()
+            .all(|profile| profile.fully_consumed));
     }
 
     #[test]
@@ -2879,13 +3419,11 @@ mod tests {
             &[Value::Int(0), text("zero")],
         );
         let snapshot = store.snapshot().expect("spill fixture snapshot");
-        let mut limits = query_limits(256, 64 * 1024);
-        limits.batch_rows = std::num::NonZeroUsize::new(8).expect("non-zero batch rows");
-        limits.blocking_operator_bytes =
-            std::num::NonZeroUsize::new(16 * 1_024).expect("non-zero blocking memory");
+        let limits = query_limits(256, 64 * 1024);
         let memory = skein_executor::ExecutionMemoryConfig {
-            batch_rows: limits.batch_rows,
-            blocking_operator_bytes: limits.blocking_operator_bytes,
+            batch_rows: std::num::NonZeroUsize::new(8).expect("non-zero batch rows"),
+            blocking_operator_bytes: std::num::NonZeroUsize::new(16 * 1_024)
+                .expect("non-zero blocking memory"),
             min_spill_free_bytes: std::num::NonZeroU64::MIN,
             spill_directory: std::env::temp_dir().join(format!(
                 "skein-relational-spill-{}-{}",

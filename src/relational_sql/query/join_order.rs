@@ -1,8 +1,13 @@
 use super::{
     choose_base_access, choose_join_access, projection_contains_aggregate,
-    RelationalBaseAccessPlanning, RelationalJoinAccess, RelationalQueryLimits,
+    PreparedRelationalAccessPlan, PreparedRelationalJoinSelection, RelationalAccessCandidate,
+    RelationalBaseAccess, RelationalBaseAccessPlanning, RelationalIndexReadMode,
+    RelationalJoinAccess, RelationalJoinAccessCandidate, RelationalQueryLimits,
 };
 use crate::error::{Result, SkeinError};
+use crate::relational_sql::{
+    RelationalJoinPlanningOutcome, RelationalJoinPlanningReason, RelationalJoinPlanningStrategy,
+};
 use crate::sql::{
     SelectProjection, SelectStatement, SqlColumnRef, SqlExpression, SqlFunctionArgument, SqlJoin,
     SqlJoinKind, SqlPredicate, SqlTableName,
@@ -24,7 +29,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) struct PlannedSelectStatement {
     pub(super) statement: SelectStatement,
-    pub(super) join_order_reordered: bool,
+    pub(super) access_plan: Option<PreparedRelationalAccessPlan>,
+    pub(super) join_planning: RelationalJoinPlanningOutcome,
 }
 
 struct BoundRelation<'a> {
@@ -51,27 +57,59 @@ struct BoundJoinInputs {
     operators: Vec<BoundJoinOperator>,
 }
 
+struct PreparedGraphRelation {
+    optimizer_relation: RelationalJoinRelation,
+    base_accesses: Vec<(RelationalJoinAccessPath, RelationalAccessCandidate)>,
+    join_accesses: Vec<(RelationalJoinAccessPath, RelationalJoinAccessCandidate)>,
+}
+
 pub(super) fn plan_select_join_order(
     select: SelectStatement,
     parameters: &[Value],
     state: &RelationalState,
+    index_read_mode: RelationalIndexReadMode<'_>,
     limits: RelationalQueryLimits,
+    config: RelationalJoinEnumerationConfig,
 ) -> Result<PlannedSelectStatement> {
-    if !supports_join_enumeration(&select) {
-        return Ok(unchanged(select));
+    let syntax_order = select_relation_order(&select);
+    if let Err(reason) = join_enumeration_eligibility(&select) {
+        let outcome = RelationalJoinPlanningOutcome::not_eligible(reason, syntax_order, config);
+        return Ok(unchanged(select, outcome));
     }
     let relations = bind_relations(&select, state)?;
     if !select_columns_resolve(&select, &relations) {
-        return Ok(unchanged(select));
+        let outcome = RelationalJoinPlanningOutcome::not_eligible(
+            RelationalJoinPlanningReason::UnresolvedColumns,
+            syntax_order,
+            config,
+        );
+        return Ok(unchanged(select, outcome));
     }
     let Some(bound_joins) = bind_join_inputs(&select, &relations) else {
-        return Ok(unchanged(select));
+        let outcome = RelationalJoinPlanningOutcome::not_eligible(
+            RelationalJoinPlanningReason::UnsupportedJoinPredicate,
+            syntax_order,
+            config,
+        );
+        return Ok(unchanged(select, outcome));
     };
     let predicates = &bound_joins.predicates;
-    let Some(graph_relations) =
-        build_graph_relations(&select, parameters, state, limits, &relations, predicates)?
+    let Some(graph_relations) = build_graph_relations(
+        &select,
+        parameters,
+        state,
+        index_read_mode,
+        limits,
+        &relations,
+        predicates,
+    )?
     else {
-        return Ok(unchanged(select));
+        let outcome = RelationalJoinPlanningOutcome::not_eligible(
+            RelationalJoinPlanningReason::UnavailableAccessBinding,
+            syntax_order,
+            config,
+        );
+        return Ok(unchanged(select, outcome));
     };
     if bound_joins
         .operators
@@ -79,7 +117,10 @@ pub(super) fn plan_select_join_order(
         .all(|operator| operator.operator.kind == RelationalJoinOperatorKind::Inner)
     {
         let graph = RelationalJoinGraph {
-            relations: graph_relations,
+            relations: graph_relations
+                .iter()
+                .map(|relation| relation.optimizer_relation.clone())
+                .collect(),
             predicates: predicates
                 .iter()
                 .map(|predicate| RelationalJoinPredicate {
@@ -88,78 +129,170 @@ pub(super) fn plan_select_join_order(
                 })
                 .collect(),
         };
-        let Ok(enumeration) = enumerate_relational_inner_joins(
+        let enumeration = match enumerate_relational_inner_joins(
             &graph,
             &RequiredProperties::default(),
-            RelationalJoinEnumerationConfig::default(),
-        ) else {
-            return Ok(unchanged(select));
+            config,
+        ) {
+            Ok(enumeration) => enumeration,
+            Err(error) => {
+                let outcome = RelationalJoinPlanningOutcome::fallback_from_enumeration(
+                    RelationalJoinPlanningStrategy::InnerJoinMemo,
+                    &error,
+                    syntax_order,
+                    config,
+                );
+                return Ok(unchanged(select, outcome));
+            }
         };
-        let selected_order = enumeration.plan.binding_order();
-        let syntax_order = relations
+        let selected_bindings = enumeration.plan.binding_order();
+        let syntax_bindings = relations
             .iter()
             .map(|relation| relation.binding)
             .collect::<Vec<_>>();
-        if selected_order == syntax_order {
-            return Ok(unchanged(select));
-        }
-        return rebuild_inner_select(select, &relations, predicates, enumeration.plan);
+        let reordered = selected_bindings != syntax_bindings;
+        let selected_order = binding_order_names(&selected_bindings, &relations);
+        let outcome = RelationalJoinPlanningOutcome::selected(
+            RelationalJoinPlanningStrategy::InnerJoinMemo,
+            reordered,
+            enumeration.memo_groups,
+            enumeration.memo_expressions,
+            selected_order,
+            enumeration.plan.cost_breakdown,
+            config,
+        );
+        return prepare_inner_select(
+            select,
+            &relations,
+            predicates,
+            &graph_relations,
+            enumeration.plan,
+            outcome,
+        );
     }
 
     let Some(initial_tree) = build_initial_join_tree(&relations, &bound_joins.operators) else {
-        return Ok(unchanged(select));
+        let outcome = RelationalJoinPlanningOutcome::not_eligible(
+            RelationalJoinPlanningReason::InvalidJoinTree,
+            syntax_order,
+            config,
+        );
+        return Ok(unchanged(select, outcome));
     };
     let post_join_filter = match select.selection.as_ref() {
         Some(predicate) => {
             let Some(predicate) = qualify_predicate(predicate, &relations)
                 .and_then(|predicate| bind_null_rejection_predicate(&predicate, &relations))
             else {
-                return Ok(unchanged(select));
+                let outcome = RelationalJoinPlanningOutcome::not_eligible(
+                    RelationalJoinPlanningReason::UnsupportedPostJoinFilter,
+                    syntax_order,
+                    config,
+                );
+                return Ok(unchanged(select, outcome));
             };
             Some(predicate)
         }
         None => None,
     };
     let problem = RelationalJoinRewriteProblem {
-        relations: graph_relations,
+        relations: graph_relations
+            .iter()
+            .map(|relation| relation.optimizer_relation.clone())
+            .collect(),
         initial_tree,
         post_join_filter,
     };
-    let Ok(enumeration) = enumerate_relational_join_rewrites(
+    let enumeration = match enumerate_relational_join_rewrites(
         &problem,
         &RequiredProperties::default(),
-        RelationalJoinEnumerationConfig::default(),
-    ) else {
-        return Ok(unchanged(select));
+        config,
+    ) {
+        Ok(enumeration) => enumeration,
+        Err(error) => {
+            let outcome =
+                RelationalJoinPlanningOutcome::fallback_from_rewrite(&error, syntax_order, config);
+            return Ok(unchanged(select, outcome));
+        }
     };
-    if rewrite_plan_matches_syntax(&enumeration.plan, &bound_joins.operators) {
-        return Ok(unchanged(select));
-    }
-    rebuild_outer_select(select, &relations, predicates, enumeration.plan)
+    let reordered = !rewrite_plan_matches_syntax(&enumeration.plan, &bound_joins.operators);
+    let selected_order = binding_order_names(&enumeration.plan.binding_order(), &relations);
+    let outcome = RelationalJoinPlanningOutcome::selected(
+        RelationalJoinPlanningStrategy::InnerLeftJoinRewriteMemo,
+        reordered,
+        enumeration.memo_groups,
+        enumeration.memo_expressions,
+        selected_order,
+        enumeration.plan.cost_breakdown,
+        config,
+    );
+    prepare_outer_select(
+        select,
+        &relations,
+        predicates,
+        &graph_relations,
+        enumeration.plan,
+        outcome,
+    )
 }
 
-fn unchanged(statement: SelectStatement) -> PlannedSelectStatement {
+fn unchanged(
+    statement: SelectStatement,
+    join_planning: RelationalJoinPlanningOutcome,
+) -> PlannedSelectStatement {
     PlannedSelectStatement {
         statement,
-        join_order_reordered: false,
+        access_plan: None,
+        join_planning,
     }
 }
 
-fn supports_join_enumeration(select: &SelectStatement) -> bool {
-    !select.joins.is_empty()
-        && select
-            .joins
-            .iter()
-            .all(|join| matches!(join.kind, SqlJoinKind::Inner | SqlJoinKind::Left))
-        && select.lock_strength.is_none()
-        && !select
-            .projection
-            .iter()
-            .any(|projection| matches!(projection, SelectProjection::Wildcard))
-        && (select.distinct
-            || !select.order_by.is_empty()
-            || !select.group_by.is_empty()
-            || select.projection.iter().any(projection_contains_aggregate))
+fn join_enumeration_eligibility(
+    select: &SelectStatement,
+) -> std::result::Result<(), RelationalJoinPlanningReason> {
+    if select.joins.is_empty() {
+        return Err(RelationalJoinPlanningReason::NoJoin);
+    }
+    if !select
+        .joins
+        .iter()
+        .all(|join| matches!(join.kind, SqlJoinKind::Inner | SqlJoinKind::Left))
+    {
+        return Err(RelationalJoinPlanningReason::UnsupportedJoinKind);
+    }
+    if select.lock_strength.is_some() {
+        return Err(RelationalJoinPlanningReason::LockingSelect);
+    }
+    if select
+        .projection
+        .iter()
+        .any(|projection| matches!(projection, SelectProjection::Wildcard))
+    {
+        return Err(RelationalJoinPlanningReason::WildcardProjection);
+    }
+    if !(select.distinct
+        || !select.order_by.is_empty()
+        || !select.group_by.is_empty()
+        || select.projection.iter().any(projection_contains_aggregate))
+    {
+        return Err(RelationalJoinPlanningReason::UnstableOutputOrder);
+    }
+    Ok(())
+}
+
+fn select_relation_order(select: &SelectStatement) -> Vec<String> {
+    std::iter::once(
+        select
+            .from_alias
+            .clone()
+            .unwrap_or_else(|| select.from.name.clone()),
+    )
+    .chain(select.joins.iter().map(|join| {
+        join.alias
+            .clone()
+            .unwrap_or_else(|| join.table.name.clone())
+    }))
+    .collect()
 }
 
 fn bind_relations<'a>(
@@ -251,14 +384,22 @@ fn build_graph_relations(
     select: &SelectStatement,
     parameters: &[Value],
     state: &RelationalState,
+    index_read_mode: RelationalIndexReadMode<'_>,
     limits: RelationalQueryLimits,
     relations: &[BoundRelation<'_>],
     predicates: &[BoundJoinPredicate],
-) -> Result<Option<Vec<RelationalJoinRelation>>> {
+) -> Result<Option<Vec<PreparedGraphRelation>>> {
     let mut graph_relations = Vec::with_capacity(relations.len());
     for relation in relations {
         let Some(graph_relation) = build_graph_relation(
-            select, parameters, state, limits, relations, relation, predicates,
+            select,
+            parameters,
+            state,
+            index_read_mode,
+            limits,
+            relations,
+            relation,
+            predicates,
         )?
         else {
             return Ok(None);
@@ -273,11 +414,12 @@ fn build_graph_relation(
     select: &SelectStatement,
     parameters: &[Value],
     state: &RelationalState,
+    index_read_mode: RelationalIndexReadMode<'_>,
     limits: RelationalQueryLimits,
     relations: &[BoundRelation<'_>],
     relation: &BoundRelation<'_>,
     predicates: &[BoundJoinPredicate],
-) -> Result<Option<RelationalJoinRelation>> {
+) -> Result<Option<PreparedGraphRelation>> {
     let base = choose_base_access(RelationalBaseAccessPlanning {
         predicate: select.selection.as_ref(),
         order_by: &[],
@@ -290,9 +432,26 @@ fn build_graph_relation(
         cardinality_limit: limits.max_intermediate_rows.saturating_add(1),
     })?;
     let full_scan = full_scan_descriptor(state, &relation.table.name);
-    let mut access_paths = vec![RelationalJoinAccessPath::base_and_probe(full_scan.clone())];
+    let full_scan_path = RelationalJoinAccessPath::base_and_probe(full_scan.clone());
+    let mut access_paths = vec![full_scan_path.clone()];
+    let mut base_accesses = vec![(
+        full_scan_path.clone(),
+        RelationalAccessCandidate {
+            descriptor: full_scan.clone(),
+            access: RelationalBaseAccess::FullScan,
+        },
+    )];
+    let mut join_accesses = vec![(
+        full_scan_path,
+        RelationalJoinAccessCandidate {
+            descriptor: full_scan.clone(),
+            access: RelationalJoinAccess::FullScan,
+        },
+    )];
     if base.descriptor != full_scan {
-        access_paths.push(RelationalJoinAccessPath::base(base.descriptor));
+        let path = RelationalJoinAccessPath::base(base.descriptor.clone());
+        access_paths.push(path.clone());
+        base_accesses.push((path, base));
     }
 
     let mut predicate_groups = BTreeMap::<BindingSet, Vec<SqlPredicate>>::new();
@@ -327,6 +486,7 @@ fn build_graph_relation(
             relation.schema,
             &relation.table.name,
             &relation.qualifier,
+            index_read_mode,
         )?;
         if candidate.descriptor.kind == RelationalAccessPathKind::FullScan {
             continue;
@@ -336,14 +496,19 @@ fn build_graph_relation(
         else {
             return Ok(None);
         };
-        let path = RelationalJoinAccessPath::probe(candidate.descriptor, required_bindings);
+        let path = RelationalJoinAccessPath::probe(candidate.descriptor.clone(), required_bindings);
         if !access_paths.iter().any(|existing| existing == &path) {
-            access_paths.push(path);
+            access_paths.push(path.clone());
+            join_accesses.push((path, candidate));
         }
     }
-    Ok(Some(RelationalJoinRelation {
-        binding: relation.binding,
-        access_paths,
+    Ok(Some(PreparedGraphRelation {
+        optimizer_relation: RelationalJoinRelation {
+            binding: relation.binding,
+            access_paths,
+        },
+        base_accesses,
+        join_accesses,
     }))
 }
 
@@ -381,83 +546,191 @@ fn join_access_bindings(
     (!bindings.contains(target) && !bindings.is_empty()).then_some(bindings)
 }
 
-fn rebuild_inner_select(
+fn prepare_inner_select(
     mut select: SelectStatement,
     relations: &[BoundRelation<'_>],
     predicates: &[BoundJoinPredicate],
+    prepared_relations: &[PreparedGraphRelation],
     plan: skein_optimizer::RelationalJoinPlan,
+    join_planning: RelationalJoinPlanningOutcome,
 ) -> Result<PlannedSelectStatement> {
-    let base = relation_by_binding(relations, plan.base_binding);
-    select.from = base.table.clone();
-    select.from_alias = base.alias.clone();
-    let predicate_by_id = predicates
-        .iter()
-        .map(|predicate| (predicate.id, predicate.predicate.clone()))
-        .collect::<BTreeMap<_, _>>();
-    select.joins = plan
-        .steps
-        .into_iter()
-        .map(|step| {
-            let relation = relation_by_binding(relations, step.binding);
-            let on = combine_predicates(step.activated_predicates.into_iter().map(|id| {
-                predicate_by_id
-                    .get(&id)
-                    .expect("enumerated predicate id came from the bound graph")
-                    .clone()
-            }));
-            SqlJoin {
-                kind: SqlJoinKind::Inner,
-                table: relation.table.clone(),
-                alias: relation.alias.clone(),
-                on,
-            }
-        })
-        .collect();
+    let reordered = join_planning.join_order_reordered();
+    let access_plan = prepare_selected_access_plan(
+        prepared_relations,
+        plan.base_binding,
+        &plan.base_access_path,
+        plan.steps
+            .iter()
+            .map(|step| (step.binding, &step.access_path)),
+        plan.cost_breakdown,
+    )?;
+    if reordered {
+        let base = relation_by_binding(relations, plan.base_binding);
+        select.from = base.table.clone();
+        select.from_alias = base.alias.clone();
+        let predicate_by_id = predicates
+            .iter()
+            .map(|predicate| (predicate.id, predicate.predicate.clone()))
+            .collect::<BTreeMap<_, _>>();
+        select.joins = plan
+            .steps
+            .into_iter()
+            .map(|step| {
+                let relation = relation_by_binding(relations, step.binding);
+                let on = combine_predicates(step.activated_predicates.into_iter().map(|id| {
+                    predicate_by_id
+                        .get(&id)
+                        .expect("enumerated predicate id came from the bound graph")
+                        .clone()
+                }));
+                SqlJoin {
+                    kind: SqlJoinKind::Inner,
+                    table: relation.table.clone(),
+                    alias: relation.alias.clone(),
+                    on,
+                }
+            })
+            .collect();
+    }
     Ok(PlannedSelectStatement {
         statement: select,
-        join_order_reordered: true,
+        access_plan: Some(access_plan),
+        join_planning,
     })
 }
 
-fn rebuild_outer_select(
+fn prepare_outer_select(
     mut select: SelectStatement,
     relations: &[BoundRelation<'_>],
     predicates: &[BoundJoinPredicate],
+    prepared_relations: &[PreparedGraphRelation],
     plan: RelationalJoinRewritePlan,
+    join_planning: RelationalJoinPlanningOutcome,
 ) -> Result<PlannedSelectStatement> {
-    let base = relation_by_binding(relations, plan.base_binding);
-    select.from = base.table.clone();
-    select.from_alias = base.alias.clone();
-    let predicate_by_id = predicates
-        .iter()
-        .map(|predicate| (predicate.id, predicate.predicate.clone()))
-        .collect::<BTreeMap<_, _>>();
-    select.joins = plan
-        .steps
-        .into_iter()
-        .map(|step| {
-            let relation = relation_by_binding(relations, step.binding);
-            let on = combine_predicates(step.predicate_ids.into_iter().map(|id| {
-                predicate_by_id
-                    .get(&id)
-                    .expect("enumerated predicate id came from the bound join operator")
-                    .clone()
-            }));
-            SqlJoin {
-                kind: match step.operator_kind {
-                    RelationalJoinOperatorKind::Inner => SqlJoinKind::Inner,
-                    RelationalJoinOperatorKind::LeftOuter => SqlJoinKind::Left,
-                },
-                table: relation.table.clone(),
-                alias: relation.alias.clone(),
-                on,
-            }
-        })
-        .collect();
+    let reordered = join_planning.join_order_reordered();
+    let access_plan = prepare_selected_access_plan(
+        prepared_relations,
+        plan.base_binding,
+        &plan.base_access_path,
+        plan.steps
+            .iter()
+            .map(|step| (step.binding, &step.access_path)),
+        plan.cost_breakdown,
+    )?;
+    if reordered {
+        let base = relation_by_binding(relations, plan.base_binding);
+        select.from = base.table.clone();
+        select.from_alias = base.alias.clone();
+        let predicate_by_id = predicates
+            .iter()
+            .map(|predicate| (predicate.id, predicate.predicate.clone()))
+            .collect::<BTreeMap<_, _>>();
+        select.joins = plan
+            .steps
+            .into_iter()
+            .map(|step| {
+                let relation = relation_by_binding(relations, step.binding);
+                let on = combine_predicates(step.predicate_ids.into_iter().map(|id| {
+                    predicate_by_id
+                        .get(&id)
+                        .expect("enumerated predicate id came from the bound join operator")
+                        .clone()
+                }));
+                SqlJoin {
+                    kind: match step.operator_kind {
+                        RelationalJoinOperatorKind::Inner => SqlJoinKind::Inner,
+                        RelationalJoinOperatorKind::LeftOuter => SqlJoinKind::Left,
+                    },
+                    table: relation.table.clone(),
+                    alias: relation.alias.clone(),
+                    on,
+                }
+            })
+            .collect();
+    }
     Ok(PlannedSelectStatement {
         statement: select,
-        join_order_reordered: true,
+        access_plan: Some(access_plan),
+        join_planning,
     })
+}
+
+fn prepare_selected_access_plan<'a>(
+    prepared_relations: &[PreparedGraphRelation],
+    base_binding: BindingId,
+    base_path: &RelationalJoinAccessPath,
+    joins: impl IntoIterator<Item = (BindingId, &'a RelationalJoinAccessPath)>,
+    cost_breakdown: skein_optimizer::PlanCostBreakdown,
+) -> Result<PreparedRelationalAccessPlan> {
+    let base_access = selected_base_access(prepared_relations, base_binding, base_path)?;
+    let selected_joins = joins.into_iter().collect::<Vec<_>>();
+    let join_accesses = selected_joins
+        .iter()
+        .map(|(binding, path)| selected_join_access(prepared_relations, *binding, path))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(PreparedRelationalAccessPlan {
+        base_access,
+        join_accesses,
+        join_selection: Some(PreparedRelationalJoinSelection {
+            base_binding,
+            join_bindings: selected_joins
+                .into_iter()
+                .map(|(binding, _)| binding)
+                .collect(),
+            cost_breakdown,
+        }),
+    })
+}
+
+fn selected_base_access(
+    prepared_relations: &[PreparedGraphRelation],
+    binding: BindingId,
+    path: &RelationalJoinAccessPath,
+) -> Result<RelationalAccessCandidate> {
+    prepared_relation(prepared_relations, binding)?
+        .base_accesses
+        .iter()
+        .find(|(candidate, _)| candidate == path)
+        .map(|(_, access)| access.clone())
+        .ok_or_else(|| {
+            SkeinError::Execution(format!(
+                "optimizer selected an unavailable base access path for binding {}",
+                binding.get()
+            ))
+        })
+}
+
+fn selected_join_access(
+    prepared_relations: &[PreparedGraphRelation],
+    binding: BindingId,
+    path: &RelationalJoinAccessPath,
+) -> Result<RelationalJoinAccessCandidate> {
+    prepared_relation(prepared_relations, binding)?
+        .join_accesses
+        .iter()
+        .find(|(candidate, _)| candidate == path)
+        .map(|(_, access)| access.clone())
+        .ok_or_else(|| {
+            SkeinError::Execution(format!(
+                "optimizer selected an unavailable join access path for binding {}",
+                binding.get()
+            ))
+        })
+}
+
+fn prepared_relation(
+    prepared_relations: &[PreparedGraphRelation],
+    binding: BindingId,
+) -> Result<&PreparedGraphRelation> {
+    prepared_relations
+        .iter()
+        .find(|relation| relation.optimizer_relation.binding == binding)
+        .ok_or_else(|| {
+            SkeinError::Execution(format!(
+                "optimizer selected an unknown relational binding {}",
+                binding.get()
+            ))
+        })
 }
 
 fn rewrite_plan_matches_syntax(
@@ -480,6 +753,13 @@ fn relation_by_binding<'relations, 'schema>(
         .iter()
         .find(|relation| relation.binding == binding)
         .expect("enumerated binding came from the bound relation set")
+}
+
+fn binding_order_names(bindings: &[BindingId], relations: &[BoundRelation<'_>]) -> Vec<String> {
+    bindings
+        .iter()
+        .map(|binding| relation_by_binding(relations, *binding).qualifier.clone())
+        .collect()
 }
 
 fn combine_predicates(predicates: impl IntoIterator<Item = SqlPredicate>) -> SqlPredicate {
@@ -717,18 +997,134 @@ mod tests {
             "SELECT c.id FROM chunks AS c INNER JOIN documents AS d ON d.id = c.document_id INNER JOIN owners AS o ON o.id = d.owner_id ORDER BY c.id",
             "SELECT c.id FROM chunks AS c LEFT JOIN documents AS d ON d.id = c.document_id WHERE d.id IS NOT NULL ORDER BY c.id",
         ] {
-            assert!(supports_join_enumeration(&select(sql)), "{sql}");
+            assert!(join_enumeration_eligibility(&select(sql)).is_ok(), "{sql}");
         }
     }
 
     #[test]
     fn join_enumeration_rejects_semantically_unstable_shapes() {
-        for sql in [
-            "SELECT * FROM chunks AS c INNER JOIN documents AS d ON d.id = c.document_id ORDER BY c.id",
-            "SELECT c.id FROM chunks AS c INNER JOIN documents AS d ON d.id = c.document_id",
-            "SELECT c.id FROM chunks AS c INNER JOIN documents AS d ON d.id = c.document_id ORDER BY c.id FOR UPDATE",
+        for (sql, expected) in [
+            (
+                "SELECT * FROM chunks AS c INNER JOIN documents AS d ON d.id = c.document_id ORDER BY c.id",
+                RelationalJoinPlanningReason::WildcardProjection,
+            ),
+            (
+                "SELECT c.id FROM chunks AS c INNER JOIN documents AS d ON d.id = c.document_id",
+                RelationalJoinPlanningReason::UnstableOutputOrder,
+            ),
+            (
+                "SELECT c.id FROM chunks AS c INNER JOIN documents AS d ON d.id = c.document_id ORDER BY c.id FOR UPDATE",
+                RelationalJoinPlanningReason::LockingSelect,
+            ),
         ] {
-            assert!(!supports_join_enumeration(&select(sql)), "{sql}");
+            assert_eq!(join_enumeration_eligibility(&select(sql)), Err(expected), "{sql}");
         }
+    }
+
+    #[test]
+    fn join_enumeration_reports_no_join() {
+        assert_eq!(
+            join_enumeration_eligibility(&select("SELECT id FROM chunks ORDER BY id")),
+            Err(RelationalJoinPlanningReason::NoJoin)
+        );
+    }
+
+    #[test]
+    fn selected_access_plan_retains_the_optimizer_access_contract() {
+        let outer = BindingId::new(0);
+        let inner = BindingId::new(1);
+        let base_descriptor = RelationalAccessPathDescriptor {
+            kind: RelationalAccessPathKind::FullScan,
+            name: "__full_scan".to_string(),
+            index_columns: Vec::new(),
+            access_columns: BTreeSet::new(),
+            equality_prefix_len: 0,
+            order_prefix_len: 0,
+            unique_point: false,
+            covering: false,
+            requires_row_fetch: false,
+            estimated_rows: 5,
+        };
+        let join_descriptor = RelationalAccessPathDescriptor {
+            kind: RelationalAccessPathKind::Index,
+            name: "idx_inner_outer".to_string(),
+            index_columns: vec!["outer_id".to_string()],
+            access_columns: BTreeSet::from(["outer_id".to_string()]),
+            equality_prefix_len: 1,
+            order_prefix_len: 0,
+            unique_point: false,
+            covering: false,
+            requires_row_fetch: true,
+            estimated_rows: 7,
+        };
+        let base_path = RelationalJoinAccessPath::base(base_descriptor.clone());
+        let join_path =
+            RelationalJoinAccessPath::probe(join_descriptor.clone(), BindingSet::from([outer]));
+        let prepared_relations = vec![
+            PreparedGraphRelation {
+                optimizer_relation: RelationalJoinRelation {
+                    binding: outer,
+                    access_paths: vec![base_path.clone()],
+                },
+                base_accesses: vec![(
+                    base_path.clone(),
+                    RelationalAccessCandidate {
+                        descriptor: base_descriptor,
+                        access: RelationalBaseAccess::FullScan,
+                    },
+                )],
+                join_accesses: Vec::new(),
+            },
+            PreparedGraphRelation {
+                optimizer_relation: RelationalJoinRelation {
+                    binding: inner,
+                    access_paths: vec![join_path.clone()],
+                },
+                base_accesses: Vec::new(),
+                join_accesses: vec![(
+                    join_path.clone(),
+                    RelationalJoinAccessCandidate {
+                        descriptor: join_descriptor,
+                        access: RelationalJoinAccess::Index {
+                            name: "idx_inner_outer".to_string(),
+                            columns: vec![(
+                                "outer_id".to_string(),
+                                SqlColumnRef {
+                                    qualifier: Some("outer".to_string()),
+                                    name: "id".to_string(),
+                                },
+                            )],
+                        },
+                    },
+                )],
+            },
+        ];
+        let cost_breakdown = skein_optimizer::PlanCostBreakdown::new(35, 40, 0, 0, 0);
+
+        let prepared = prepare_selected_access_plan(
+            &prepared_relations,
+            outer,
+            &base_path,
+            [(inner, &join_path)],
+            cost_breakdown,
+        )
+        .expect("prepare optimizer-selected relational access paths");
+
+        assert_eq!(prepared.base_access.descriptor.name, "__full_scan");
+        assert_eq!(prepared.join_accesses[0].descriptor.name, "idx_inner_outer");
+        let RelationalJoinAccess::Index { name, columns } = &prepared.join_accesses[0].access
+        else {
+            panic!("expected prepared index probe");
+        };
+        assert_eq!(name, "idx_inner_outer");
+        assert_eq!(columns[0].1.qualifier.as_deref(), Some("outer"));
+        assert_eq!(
+            prepared.join_selection,
+            Some(PreparedRelationalJoinSelection {
+                base_binding: outer,
+                join_bindings: vec![inner],
+                cost_breakdown,
+            })
+        );
     }
 }

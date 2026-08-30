@@ -1,3 +1,7 @@
+use super::{
+    RelationalJoinPlanningOutcome, RelationalJoinPlanningStatus,
+    RelationalOperatorCardinalityProfile, RelationalOperatorId, RelationalOperatorKind,
+};
 use crate::error::{Result, SkeinError};
 use crate::executor::{map_payload_bytes, Row};
 use crate::relational_sql::index_access::{
@@ -28,8 +32,11 @@ use skein_executor::{
     QueryMemoryClass, QueryMemoryLease, QueryMemoryLedger, QueryRows, QueryRowsBuilder,
     RelationalRowLocator, SlotDescriptor, SlotId, SlotType,
 };
+use skein_expression::BindingId;
 use skein_optimizer::{
-    select_relational_access_path, RelationalAccessPathDescriptor, RelationalAccessPathKind,
+    estimate_relational_access_cost, estimate_relational_probe_join_cost,
+    select_relational_access_path, PlanCostBreakdown, RelationalAccessPathDescriptor,
+    RelationalAccessPathKind, RelationalJoinCardinality, RelationalJoinEnumerationConfig,
 };
 use skein_plan::{PhysicalPlan, SortDirection, SortItem, SortKey};
 use skein_storage::{
@@ -57,16 +64,40 @@ pub(crate) struct RelationalQueryLimits {
     pub max_output_rows: usize,
     pub max_output_payload_bytes: usize,
     pub max_intermediate_rows: usize,
-    pub batch_rows: NonZeroUsize,
-    pub blocking_operator_bytes: NonZeroUsize,
     pub hydration: RelationalHydrationBudget,
     pub index_read: skein_storage::RelationalIndexReadLimits,
     pub row_read: skein_storage::RelationalRowPageSnapshotReadLimits,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RelationalQueryResourceContext<'a> {
+    join_enumeration: RelationalJoinEnumerationConfig,
+    limits: RelationalQueryLimits,
+    execution_memory: &'a skein_executor::ExecutionMemoryConfig,
+    task_context: Option<&'a skein_core::RuntimeTaskContext>,
+}
+
+impl<'a> RelationalQueryResourceContext<'a> {
+    pub(crate) const fn new(
+        join_enumeration: RelationalJoinEnumerationConfig,
+        limits: RelationalQueryLimits,
+        execution_memory: &'a skein_executor::ExecutionMemoryConfig,
+        task_context: Option<&'a skein_core::RuntimeTaskContext>,
+    ) -> Self {
+        Self {
+            join_enumeration,
+            limits,
+            execution_memory,
+            task_context,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RelationalQueryOutput {
     pub rows: QueryRows,
+    pub join_planning: RelationalJoinPlanningOutcome,
+    pub operator_cardinality_profiles: Vec<RelationalOperatorCardinalityProfile>,
     pub intermediate_rows: usize,
     pub hydration: RelationalHydrationBudget,
     pub access_path: RelationalAccessPathDescriptor,
@@ -76,13 +107,13 @@ pub(crate) struct RelationalQueryOutput {
     pub blocking_operator_memory_reports: Vec<BlockingOperatorMemoryReport>,
 }
 
-#[derive(Clone, Copy)]
-struct RelationalSelectExecution<'state, 'runtime> {
+struct AdmittedRelationalExecution<'state, 'runtime> {
     state: &'state RelationalState,
     index_read_mode: RelationalIndexReadMode<'state>,
     row_read_mode: RelationalRowReadMode<'state>,
     limits: RelationalQueryLimits,
     execution_memory: &'runtime skein_executor::ExecutionMemoryConfig,
+    memory_ledger: QueryMemoryLedger,
     task_context: Option<&'runtime skein_core::RuntimeTaskContext>,
 }
 
@@ -101,14 +132,12 @@ impl<'a> RelationalQueryReadModes<'a> {
     }
 }
 
-pub(crate) fn execute_relational_query_sql_with_runtime<'a>(
+pub(crate) fn execute_relational_query_sql_with_resources<'a>(
     sql: &str,
     parameters: &[Value],
     state: &'a RelationalState,
     read_modes: RelationalQueryReadModes<'a>,
-    limits: RelationalQueryLimits,
-    execution_memory: &skein_executor::ExecutionMemoryConfig,
-    task_context: Option<&skein_core::RuntimeTaskContext>,
+    resources: RelationalQueryResourceContext<'_>,
 ) -> Result<RelationalQueryOutput> {
     let prepared = skein_sql::prepare_postgres_sql(sql)?;
     if prepared.parameters.len() != parameters.len() {
@@ -118,24 +147,18 @@ pub(crate) fn execute_relational_query_sql_with_runtime<'a>(
             parameters.len()
         )));
     }
-    let execution = RelationalSelectExecution {
-        state,
-        index_read_mode: read_modes.index,
-        row_read_mode: read_modes.row,
-        limits,
-        execution_memory,
-        task_context,
-    };
     match prepared.statement {
         SqlStatement::Select(select) => {
-            let planned = join_order::plan_select_join_order(select, parameters, state, limits)?;
-            execute_select(
-                &planned.statement,
+            let prepared = prepare_relational_select(
+                select,
                 parameters,
-                execution,
-                false,
-                planned.join_order_reordered,
-            )
+                state,
+                read_modes.index,
+                resources.limits,
+                resources.join_enumeration,
+            )?;
+            let execution = prepared.execution.admit(state, read_modes, resources)?;
+            execute_select(&prepared, parameters, execution)
         }
         SqlStatement::Explain(explain) => {
             let SqlStatement::Select(select) = *explain.statement else {
@@ -143,31 +166,55 @@ pub(crate) fn execute_relational_query_sql_with_runtime<'a>(
                     "EXPLAIN only supports relational SELECT".to_string(),
                 ));
             };
-            let planned = join_order::plan_select_join_order(select, parameters, state, limits)?;
-            let output = execute_select(
-                &planned.statement,
+            let prepared = prepare_relational_select(
+                select,
                 parameters,
-                execution,
-                !explain.analyze,
-                planned.join_order_reordered,
+                state,
+                read_modes.index,
+                resources.limits,
+                resources.join_enumeration,
             )?;
-            if explain.analyze {
-                format_relational_explain(
-                    &planned.statement,
-                    parameters,
-                    output,
-                    true,
-                    limits,
-                    planned.join_order_reordered,
-                )
-            } else {
-                Ok(output)
+            if !explain.analyze {
+                return explain_select(&prepared, parameters, resources.limits);
             }
+            let execution = prepared.execution.admit(state, read_modes, resources)?;
+            let output = execute_select(&prepared, parameters, execution)?;
+            format_relational_explain(
+                &prepared.statement,
+                parameters,
+                output,
+                true,
+                resources.limits,
+            )
         }
         _ => Err(SkeinError::Semantic(
             "relational query entrypoint requires SELECT or EXPLAIN SELECT".to_string(),
         )),
     }
+}
+
+#[cfg(test)]
+pub(crate) fn execute_relational_query_sql_with_runtime<'a>(
+    sql: &str,
+    parameters: &[Value],
+    state: &'a RelationalState,
+    read_modes: RelationalQueryReadModes<'a>,
+    limits: RelationalQueryLimits,
+    execution_memory: &skein_executor::ExecutionMemoryConfig,
+    task_context: Option<&skein_core::RuntimeTaskContext>,
+) -> Result<RelationalQueryOutput> {
+    execute_relational_query_sql_with_resources(
+        sql,
+        parameters,
+        state,
+        read_modes,
+        RelationalQueryResourceContext::new(
+            RelationalJoinEnumerationConfig::default(),
+            limits,
+            execution_memory,
+            task_context,
+        ),
+    )
 }
 
 #[derive(Clone)]
@@ -196,14 +243,14 @@ struct BoundRow<'a> {
     bindings: Vec<Binding<'a>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum RelationalBaseAccess {
     PrimaryKey(RelationalKey),
     Index { name: String, prefix: RelationalKey },
     FullScan,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum RelationalJoinAccess {
     PrimaryKey(Vec<(String, SqlColumnRef)>),
     Index {
@@ -213,16 +260,314 @@ enum RelationalJoinAccess {
     FullScan,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RelationalAccessCandidate {
     descriptor: RelationalAccessPathDescriptor,
     access: RelationalBaseAccess,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RelationalJoinAccessCandidate {
     descriptor: RelationalAccessPathDescriptor,
     access: RelationalJoinAccess,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreparedRelationalJoinSelection {
+    base_binding: BindingId,
+    join_bindings: Vec<BindingId>,
+    cost_breakdown: PlanCostBreakdown,
+}
+
+#[derive(Debug)]
+struct PreparedRelationalAccessPlan {
+    base_access: RelationalAccessCandidate,
+    join_accesses: Vec<RelationalJoinAccessCandidate>,
+    join_selection: Option<PreparedRelationalJoinSelection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreparedRelationalExecutionMode {
+    OrderedIndexProjection,
+    StreamingProjection,
+    BlockingProjection,
+    Aggregate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RelationalExecutionMemoryShape {
+    /// Maximum concurrently retained executor transfer batches.
+    pipeline_batch_count: usize,
+    /// Maximum concurrently retained blocking operator states.
+    blocking_operator_count: usize,
+}
+
+impl RelationalExecutionMemoryShape {
+    fn estimated_bytes(self, memory: &skein_executor::ExecutionMemoryConfig) -> usize {
+        self.pipeline_batch_count
+            .saturating_mul(memory.batch_payload_bytes.get())
+            .saturating_add(
+                self.blocking_operator_count
+                    .saturating_mul(memory.blocking_operator_bytes.get()),
+            )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreparedRelationalExecutionDescriptor {
+    /// The execution path selected during preparation. Execution must not
+    /// independently infer a different path from the SQL statement.
+    mode: PreparedRelationalExecutionMode,
+    /// Plan-derived peak shape resolved against runtime memory ceilings during
+    /// admission.
+    memory_shape: RelationalExecutionMemoryShape,
+}
+
+impl PreparedRelationalExecutionDescriptor {
+    fn prepare(select: &SelectStatement, access_plan: &PreparedRelationalAccessPlan) -> Self {
+        let has_aggregate = select.projection.iter().any(projection_contains_aggregate);
+        let ordered_index_projection = !select.order_by.is_empty()
+            && access_plan.base_access.descriptor.order_prefix_len == select.order_by.len()
+            && select.joins.is_empty()
+            && !select.distinct
+            && !has_aggregate
+            && select.group_by.is_empty()
+            && predicate_is_covered_by_access(
+                select.selection.as_ref(),
+                &access_plan.base_access.descriptor,
+                &select.from.name,
+                select.from_alias.as_deref().unwrap_or(&select.from.name),
+            );
+        let mode = if ordered_index_projection {
+            PreparedRelationalExecutionMode::OrderedIndexProjection
+        } else if has_aggregate || !select.group_by.is_empty() {
+            PreparedRelationalExecutionMode::Aggregate
+        } else if !select.order_by.is_empty() || select.distinct {
+            PreparedRelationalExecutionMode::BlockingProjection
+        } else {
+            PreparedRelationalExecutionMode::StreamingProjection
+        };
+        let blocking_operator_count = match mode {
+            PreparedRelationalExecutionMode::OrderedIndexProjection
+            | PreparedRelationalExecutionMode::StreamingProjection => 0,
+            PreparedRelationalExecutionMode::BlockingProjection => {
+                usize::from(select.distinct) + usize::from(!select.order_by.is_empty())
+            }
+            PreparedRelationalExecutionMode::Aggregate => {
+                if !select.group_by.is_empty() {
+                    2
+                } else {
+                    1
+                }
+            }
+        };
+        Self {
+            mode,
+            memory_shape: RelationalExecutionMemoryShape {
+                pipeline_batch_count: 1,
+                blocking_operator_count,
+            },
+        }
+    }
+
+    fn admit<'state, 'runtime>(
+        self,
+        state: &'state RelationalState,
+        read_modes: RelationalQueryReadModes<'state>,
+        resources: RelationalQueryResourceContext<'runtime>,
+    ) -> Result<AdmittedRelationalExecution<'state, 'runtime>> {
+        skein_executor::pipeline::runtime_checkpoint(resources.task_context)?;
+        let estimated_bytes = self
+            .memory_shape
+            .estimated_bytes(resources.execution_memory);
+        if estimated_bytes > resources.execution_memory.query_memory_bytes.get() {
+            return Err(SkeinError::Execution(format!(
+                "prepared relational query requires {estimated_bytes} estimated bytes, exceeding query_memory_bytes {}",
+                resources.execution_memory.query_memory_bytes
+            )));
+        }
+        Ok(AdmittedRelationalExecution {
+            state,
+            index_read_mode: read_modes.index,
+            row_read_mode: read_modes.row,
+            limits: resources.limits,
+            execution_memory: resources.execution_memory,
+            memory_ledger: QueryMemoryLedger::new(resources.execution_memory.query_memory_bytes),
+            task_context: resources.task_context,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct PreparedRelationalSelect {
+    statement: SelectStatement,
+    access_plan: PreparedRelationalAccessPlan,
+    join_planning: RelationalJoinPlanningOutcome,
+    execution: PreparedRelationalExecutionDescriptor,
+}
+
+impl PreparedRelationalSelect {
+    fn validate(&self) -> Result<()> {
+        if self.statement.joins.len() != self.access_plan.join_accesses.len() {
+            return Err(SkeinError::Execution(format!(
+                "prepared relational SELECT has {} joins but {} join access paths",
+                self.statement.joins.len(),
+                self.access_plan.join_accesses.len()
+            )));
+        }
+        if !base_access_matches_descriptor(&self.access_plan.base_access) {
+            return Err(SkeinError::Execution(
+                "prepared relational SELECT has an inconsistent base access path".to_string(),
+            ));
+        }
+        if self
+            .access_plan
+            .join_accesses
+            .iter()
+            .any(|access| !join_access_matches_descriptor(access))
+        {
+            return Err(SkeinError::Execution(
+                "prepared relational SELECT has an inconsistent join access path".to_string(),
+            ));
+        }
+        if let Some(selection) = &self.access_plan.join_selection {
+            if selection.join_bindings.len() != self.statement.joins.len() {
+                return Err(SkeinError::Execution(format!(
+                    "prepared relational join selection has {} bindings for {} joins",
+                    selection.join_bindings.len(),
+                    self.statement.joins.len()
+                )));
+            }
+            let mut bindings = BTreeSet::from([selection.base_binding]);
+            if selection
+                .join_bindings
+                .iter()
+                .any(|binding| !bindings.insert(*binding))
+            {
+                return Err(SkeinError::Execution(
+                    "prepared relational join selection contains duplicate bindings".to_string(),
+                ));
+            }
+            let cost = selection.cost_breakdown;
+            let component_total = cost
+                .cpu
+                .saturating_add(cost.random_io)
+                .saturating_add(cost.sequential_io)
+                .saturating_add(cost.output_rows);
+            if cost.estimated_rows == 0 || cost.cost != component_total {
+                return Err(SkeinError::Execution(
+                    "prepared relational join selection has an invalid cost breakdown".to_string(),
+                ));
+            }
+        }
+        if self.execution
+            != PreparedRelationalExecutionDescriptor::prepare(&self.statement, &self.access_plan)
+        {
+            return Err(SkeinError::Execution(
+                "prepared relational SELECT has an inconsistent execution descriptor".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn base_access_matches_descriptor(candidate: &RelationalAccessCandidate) -> bool {
+    match (&candidate.descriptor.kind, &candidate.access) {
+        (RelationalAccessPathKind::PrimaryKey, RelationalBaseAccess::PrimaryKey(key)) => {
+            candidate.descriptor.equality_prefix_len == key.0.len()
+                && candidate.descriptor.access_columns
+                    == candidate.descriptor.index_columns.iter().cloned().collect()
+        }
+        (RelationalAccessPathKind::Index, RelationalBaseAccess::Index { name, prefix }) => {
+            candidate.descriptor.name == *name
+                && candidate.descriptor.equality_prefix_len == prefix.0.len()
+        }
+        (RelationalAccessPathKind::FullScan, RelationalBaseAccess::FullScan) => {
+            candidate.descriptor.equality_prefix_len == 0
+        }
+        _ => false,
+    }
+}
+
+fn join_access_matches_descriptor(candidate: &RelationalJoinAccessCandidate) -> bool {
+    match (&candidate.descriptor.kind, &candidate.access) {
+        (RelationalAccessPathKind::PrimaryKey, RelationalJoinAccess::PrimaryKey(columns)) => {
+            candidate.descriptor.equality_prefix_len == columns.len()
+                && candidate.descriptor.access_columns
+                    == columns.iter().map(|(column, _)| column.clone()).collect()
+        }
+        (RelationalAccessPathKind::Index, RelationalJoinAccess::Index { name, columns }) => {
+            candidate.descriptor.name == *name
+                && candidate.descriptor.equality_prefix_len == columns.len()
+                && candidate.descriptor.access_columns
+                    == columns.iter().map(|(column, _)| column.clone()).collect()
+        }
+        (RelationalAccessPathKind::FullScan, RelationalJoinAccess::FullScan) => {
+            candidate.descriptor.equality_prefix_len == 0
+        }
+        _ => false,
+    }
+}
+
+fn planned_operator_cardinality_profiles(
+    prepared: &PreparedRelationalSelect,
+) -> Result<Vec<RelationalOperatorCardinalityProfile>> {
+    let mut cost =
+        estimate_relational_access_cost(prepared.access_plan.base_access.descriptor.estimated_rows);
+    let mut profiles = Vec::with_capacity(prepared.statement.joins.len().saturating_add(1));
+    profiles.push(RelationalOperatorCardinalityProfile {
+        operator_id: RelationalOperatorId::from_plan_index(0),
+        operator: match prepared.access_plan.base_access.descriptor.kind {
+            RelationalAccessPathKind::FullScan => RelationalOperatorKind::TableFullScan,
+            RelationalAccessPathKind::PrimaryKey => RelationalOperatorKind::TablePointGet,
+            RelationalAccessPathKind::Index => RelationalOperatorKind::IndexRangeScan,
+        },
+        table: prepared.statement.from.name.clone(),
+        estimated_rows: estimated_rows_as_usize(cost.estimated_rows),
+        actual_rows: None,
+        fully_consumed: false,
+    });
+    for (index, (join, access)) in prepared
+        .statement
+        .joins
+        .iter()
+        .zip(&prepared.access_plan.join_accesses)
+        .enumerate()
+    {
+        let cardinality = match join.kind {
+            SqlJoinKind::Inner => RelationalJoinCardinality::Inner,
+            SqlJoinKind::Left => RelationalJoinCardinality::PreserveLeft,
+        };
+        cost = estimate_relational_probe_join_cost(
+            cost,
+            access.descriptor.estimated_rows,
+            cardinality,
+        );
+        profiles.push(RelationalOperatorCardinalityProfile {
+            operator_id: RelationalOperatorId::from_plan_index(index.saturating_add(1)),
+            operator: match join.kind {
+                SqlJoinKind::Inner => RelationalOperatorKind::IndexNestedLoopJoin,
+                SqlJoinKind::Left => RelationalOperatorKind::IndexNestedLoopLeftJoin,
+            },
+            table: join.table.name.clone(),
+            estimated_rows: estimated_rows_as_usize(cost.estimated_rows),
+            actual_rows: None,
+            fully_consumed: false,
+        });
+    }
+    if let Some(selection) = &prepared.access_plan.join_selection
+        && cost != selection.cost_breakdown
+    {
+        return Err(SkeinError::Execution(
+            "prepared relational operator estimates diverge from the selected join cost"
+                .to_string(),
+        ));
+    }
+    Ok(profiles)
+}
+
+fn estimated_rows_as_usize(rows: u64) -> usize {
+    usize::try_from(rows).unwrap_or(usize::MAX)
 }
 
 struct PlannedJoin<'a> {
@@ -257,6 +602,8 @@ struct RelationalPipelineState<'a> {
     rows_until_checkpoint: usize,
     intermediate_rows: usize,
     max_intermediate_rows: usize,
+    operator_cardinality_profiles: Vec<RelationalOperatorCardinalityProfile>,
+    operator_pipeline_started: bool,
 }
 
 const RELATIONAL_ROW_LOCATOR_SLOT: SlotId = SlotId(0);
@@ -358,19 +705,44 @@ impl<'a> RelationalPipelineState<'a> {
     fn new(
         task_context: Option<&'a skein_core::RuntimeTaskContext>,
         limits: RelationalQueryLimits,
+        batch_rows: NonZeroUsize,
+        operator_cardinality_profiles: Vec<RelationalOperatorCardinalityProfile>,
     ) -> Self {
-        let batch_rows = limits.batch_rows.get();
+        let batch_rows = batch_rows.get();
         Self {
             task_context,
             batch_rows,
             rows_until_checkpoint: batch_rows,
             intermediate_rows: 0,
             max_intermediate_rows: limits.max_intermediate_rows,
+            operator_cardinality_profiles,
+            operator_pipeline_started: false,
         }
     }
 
-    fn account_row(&mut self) -> Result<()> {
+    fn begin_operator_pipeline(&mut self) {
+        let first_invocation = !self.operator_pipeline_started;
+        self.operator_pipeline_started = true;
+        for profile in &mut self.operator_cardinality_profiles {
+            profile.actual_rows.get_or_insert(0);
+            if first_invocation {
+                profile.fully_consumed = true;
+            }
+        }
+    }
+
+    fn account_operator_row(&mut self, operator_id: RelationalOperatorId) -> Result<()> {
         account_intermediate(&mut self.intermediate_rows, 1, self.max_intermediate_rows)?;
+        let profile = self
+            .operator_cardinality_profiles
+            .get_mut(operator_id.get().saturating_sub(1))
+            .ok_or_else(|| {
+                SkeinError::Execution(format!(
+                    "relational operator {} has no cardinality profile",
+                    operator_id.get()
+                ))
+            })?;
+        profile.actual_rows = Some(profile.actual_rows.unwrap_or(0).saturating_add(1));
         self.rows_until_checkpoint = self.rows_until_checkpoint.saturating_sub(1);
         if self.rows_until_checkpoint == 0 {
             skein_executor::pipeline::runtime_checkpoint(self.task_context)?;
@@ -379,27 +751,72 @@ impl<'a> RelationalPipelineState<'a> {
         Ok(())
     }
 
+    fn finish_operator_pipeline(&mut self, fully_consumed: bool) {
+        if self.operator_pipeline_started {
+            for profile in &mut self.operator_cardinality_profiles {
+                profile.fully_consumed &= fully_consumed;
+            }
+        }
+    }
+
+    fn operator_cardinality_profiles(&self) -> Vec<RelationalOperatorCardinalityProfile> {
+        self.operator_cardinality_profiles.clone()
+    }
+
     fn finish(&self) -> Result<()> {
         skein_executor::pipeline::runtime_checkpoint(self.task_context)
     }
 }
 
-fn execute_select<'state>(
-    select: &SelectStatement,
+fn prepare_relational_select(
+    select: SelectStatement,
     parameters: &[Value],
-    execution: RelationalSelectExecution<'state, '_>,
-    explain_only: bool,
-    join_order_reordered: bool,
-) -> Result<RelationalQueryOutput> {
-    let RelationalSelectExecution {
+    state: &RelationalState,
+    index_read_mode: RelationalIndexReadMode<'_>,
+    limits: RelationalQueryLimits,
+    join_enumeration: RelationalJoinEnumerationConfig,
+) -> Result<PreparedRelationalSelect> {
+    reject_non_public_schema(select.from.schema.as_deref())?;
+    for join in &select.joins {
+        reject_non_public_schema(join.table.schema.as_deref())?;
+    }
+    let planned = join_order::plan_select_join_order(
+        select,
+        parameters,
         state,
         index_read_mode,
-        row_read_mode,
         limits,
-        execution_memory,
-        task_context,
-    } = execution;
-    reject_non_public_schema(select.from.schema.as_deref())?;
+        join_enumeration,
+    )?;
+    let access_plan = match planned.access_plan {
+        Some(access_plan) => access_plan,
+        None => prepare_syntax_access_plan(
+            &planned.statement,
+            parameters,
+            state,
+            index_read_mode,
+            limits,
+        )?,
+    };
+    let execution =
+        PreparedRelationalExecutionDescriptor::prepare(&planned.statement, &access_plan);
+    let prepared = PreparedRelationalSelect {
+        statement: planned.statement,
+        access_plan,
+        join_planning: planned.join_planning,
+        execution,
+    };
+    prepared.validate()?;
+    Ok(prepared)
+}
+
+fn prepare_syntax_access_plan(
+    select: &SelectStatement,
+    parameters: &[Value],
+    state: &RelationalState,
+    index_read_mode: RelationalIndexReadMode<'_>,
+    limits: RelationalQueryLimits,
+) -> Result<PreparedRelationalAccessPlan> {
     let base_schema = state.table_schema(&select.from.name).ok_or_else(|| {
         SkeinError::Semantic(format!("unknown relational table {}", select.from.name))
     })?;
@@ -421,11 +838,104 @@ fn execute_select<'state>(
         qualifier: &base_qualifier,
         cardinality_limit: limits.max_intermediate_rows.saturating_add(1),
     })?;
+    let join_accesses = select
+        .joins
+        .iter()
+        .map(|join| {
+            let join_schema = state.table_schema(&join.table.name).ok_or_else(|| {
+                SkeinError::Semantic(format!("unknown relational table {}", join.table.name))
+            })?;
+            let qualifier = join
+                .alias
+                .clone()
+                .unwrap_or_else(|| join.table.name.clone());
+            choose_join_access(
+                &join.on,
+                state,
+                join_schema,
+                &join.table.name,
+                &qualifier,
+                index_read_mode,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(PreparedRelationalAccessPlan {
+        base_access,
+        join_accesses,
+        join_selection: None,
+    })
+}
+
+fn explain_select(
+    prepared: &PreparedRelationalSelect,
+    parameters: &[Value],
+    limits: RelationalQueryLimits,
+) -> Result<RelationalQueryOutput> {
+    let access_path = prepared.access_plan.base_access.descriptor.clone();
+    let join_access_paths = prepared
+        .access_plan
+        .join_accesses
+        .iter()
+        .map(|access| access.descriptor.clone())
+        .collect();
+    format_relational_explain(
+        &prepared.statement,
+        parameters,
+        RelationalQueryOutput {
+            rows: QueryRows::empty(),
+            join_planning: prepared.join_planning.clone(),
+            operator_cardinality_profiles: planned_operator_cardinality_profiles(prepared)?,
+            intermediate_rows: 0,
+            hydration: limits.hydration,
+            access_path,
+            join_access_paths,
+            index_execution_evidence: Vec::new(),
+            row_execution_evidence: RelationalRowExecutionEvidence {
+                runtime_path: "not_executed",
+                ..RelationalRowExecutionEvidence::default()
+            },
+            blocking_operator_memory_reports: Vec::new(),
+        },
+        false,
+        limits,
+    )
+}
+
+fn execute_select<'state>(
+    prepared: &PreparedRelationalSelect,
+    parameters: &[Value],
+    execution: AdmittedRelationalExecution<'state, '_>,
+) -> Result<RelationalQueryOutput> {
+    let select = &prepared.statement;
+    let join_planning = &prepared.join_planning;
+    let operator_cardinality_profiles = planned_operator_cardinality_profiles(prepared)?;
+    let AdmittedRelationalExecution {
+        state,
+        index_read_mode,
+        row_read_mode,
+        limits,
+        execution_memory,
+        memory_ledger,
+        task_context,
+    } = execution;
+    let base_schema = state.table_schema(&select.from.name).ok_or_else(|| {
+        SkeinError::Semantic(format!("unknown relational table {}", select.from.name))
+    })?;
+    let base_qualifier = select
+        .from_alias
+        .clone()
+        .unwrap_or_else(|| select.from.name.clone());
+    let has_aggregate = select.projection.iter().any(projection_contains_aggregate);
+    let base_access = &prepared.access_plan.base_access;
     let access_path = base_access.descriptor.clone();
     let mut planned_joins = Vec::with_capacity(select.joins.len());
-    let mut join_access_paths = Vec::with_capacity(select.joins.len());
-    for join in &select.joins {
-        reject_non_public_schema(join.table.schema.as_deref())?;
+    let join_access_paths = prepared
+        .access_plan
+        .join_accesses
+        .iter()
+        .map(|access| access.descriptor.clone())
+        .collect::<Vec<_>>();
+    for (join, join_access) in select.joins.iter().zip(&prepared.access_plan.join_accesses) {
         let join_schema = state.table_schema(&join.table.name).ok_or_else(|| {
             SkeinError::Semantic(format!("unknown relational table {}", join.table.name))
         })?;
@@ -433,53 +943,12 @@ fn execute_select<'state>(
             .alias
             .clone()
             .unwrap_or_else(|| join.table.name.clone());
-        let join_access =
-            choose_join_access(&join.on, state, join_schema, &join.table.name, &qualifier)?;
-        join_access_paths.push(join_access.descriptor.clone());
         planned_joins.push(PlannedJoin {
             join,
             schema: join_schema,
             qualifier,
-            access: join_access.access,
+            access: join_access.access.clone(),
         });
-    }
-    let ordered_index_projection = !select.order_by.is_empty()
-        && base_access.descriptor.order_prefix_len == select.order_by.len()
-        && select.joins.is_empty()
-        && !select.distinct
-        && !has_aggregate
-        && select.group_by.is_empty()
-        && predicate_is_covered_by_access(
-            select.selection.as_ref(),
-            &base_access.descriptor,
-            &select.from.name,
-            &base_qualifier,
-        );
-    let has_blocking_operator = has_aggregate
-        || !select.group_by.is_empty()
-        || (!select.order_by.is_empty() && !ordered_index_projection)
-        || select.distinct;
-    if explain_only {
-        return format_relational_explain(
-            select,
-            parameters,
-            RelationalQueryOutput {
-                rows: QueryRows::empty(),
-                intermediate_rows: 0,
-                hydration: limits.hydration,
-                access_path,
-                join_access_paths,
-                index_execution_evidence: Vec::new(),
-                row_execution_evidence: RelationalRowExecutionEvidence {
-                    runtime_path: "not_executed",
-                    ..RelationalRowExecutionEvidence::default()
-                },
-                blocking_operator_memory_reports: Vec::new(),
-            },
-            false,
-            limits,
-            join_order_reordered,
-        );
     }
     let default_task = skein_core::RuntimeTaskContext::default();
     let row_task = task_context.unwrap_or(&default_task);
@@ -501,9 +970,14 @@ fn execute_select<'state>(
         limits.hydration,
         row_task,
     )?;
-    let mut pipeline = RelationalPipelineState::new(task_context, limits);
+    let mut pipeline = RelationalPipelineState::new(
+        task_context,
+        limits,
+        execution_memory.batch_rows,
+        operator_cardinality_profiles,
+    );
     let index_runtime = RelationalIndexRuntime::new(index_read_mode, limits.index_read);
-    if ordered_index_projection {
+    if prepared.execution.mode == PreparedRelationalExecutionMode::OrderedIndexProjection {
         let output = execute_ordered_index_projection(
             select,
             parameters,
@@ -516,10 +990,13 @@ fn execute_select<'state>(
             &row_runtime,
             limits,
             execution_memory,
+            &memory_ledger,
         )?;
         pipeline.finish()?;
         return Ok(RelationalQueryOutput {
             rows: output.rows,
+            join_planning: join_planning.clone(),
+            operator_cardinality_profiles: pipeline.operator_cardinality_profiles(),
             intermediate_rows: pipeline.intermediate_rows,
             hydration: row_runtime.hydration(),
             access_path,
@@ -529,7 +1006,7 @@ fn execute_select<'state>(
             blocking_operator_memory_reports: output.blocking_operator_memory_reports,
         });
     }
-    if !has_blocking_operator {
+    if prepared.execution.mode == PreparedRelationalExecutionMode::StreamingProjection {
         let output = execute_streaming_projection(
             select,
             parameters,
@@ -546,6 +1023,8 @@ fn execute_select<'state>(
         pipeline.finish()?;
         return Ok(RelationalQueryOutput {
             rows: output.rows,
+            join_planning: join_planning.clone(),
+            operator_cardinality_profiles: pipeline.operator_cardinality_profiles(),
             intermediate_rows: pipeline.intermediate_rows,
             hydration: row_runtime.hydration(),
             access_path,
@@ -556,7 +1035,7 @@ fn execute_select<'state>(
         });
     }
 
-    if has_aggregate || !select.group_by.is_empty() {
+    if prepared.execution.mode == PreparedRelationalExecutionMode::Aggregate {
         return execute_aggregate_select(
             select,
             parameters,
@@ -570,8 +1049,10 @@ fn execute_select<'state>(
             &row_runtime,
             limits,
             execution_memory,
+            &memory_ledger,
             access_path,
             join_access_paths,
+            join_planning,
         );
     }
 
@@ -588,10 +1069,13 @@ fn execute_select<'state>(
         &row_runtime,
         limits,
         execution_memory,
+        &memory_ledger,
     )?;
     pipeline.finish()?;
     Ok(RelationalQueryOutput {
         rows: output.rows,
+        join_planning: join_planning.clone(),
+        operator_cardinality_profiles: pipeline.operator_cardinality_profiles(),
         intermediate_rows: pipeline.intermediate_rows,
         hydration: row_runtime.hydration(),
         access_path,
@@ -605,6 +1089,7 @@ fn execute_select<'state>(
 #[derive(Debug)]
 struct RelationalExplainNode {
     operator: &'static str,
+    operator_id: Option<RelationalOperatorId>,
     estimated_rows: Option<usize>,
     access_object: String,
     operator_info: String,
@@ -617,7 +1102,6 @@ fn format_relational_explain(
     mut output: RelationalQueryOutput,
     analyze: bool,
     limits: RelationalQueryLimits,
-    join_order_reordered: bool,
 ) -> Result<RelationalQueryOutput> {
     let actual_output_rows = output.rows.len();
     let mut nodes = Vec::new();
@@ -626,6 +1110,7 @@ fn format_relational_explain(
     if select.limit.is_some() || select.offset.is_some() {
         nodes.push(RelationalExplainNode {
             operator: "LimitExec",
+            operator_id: None,
             estimated_rows: bound_limit.map(|limit| usize::try_from(limit).unwrap_or(usize::MAX)),
             access_object: String::new(),
             operator_info: format!(
@@ -641,6 +1126,7 @@ fn format_relational_explain(
     if !select.order_by.is_empty() && output.access_path.order_prefix_len != select.order_by.len() {
         nodes.push(RelationalExplainNode {
             operator: "TopNExec",
+            operator_id: None,
             estimated_rows: bound_limit.map(|limit| usize::try_from(limit).unwrap_or(usize::MAX)),
             access_object: String::new(),
             operator_info: format!(
@@ -655,6 +1141,7 @@ fn format_relational_explain(
     if has_aggregate || !select.group_by.is_empty() {
         nodes.push(RelationalExplainNode {
             operator: "RelationalAggregateExec",
+            operator_id: None,
             estimated_rows: (!select.group_by.is_empty()).then_some(
                 output
                     .access_path
@@ -673,6 +1160,7 @@ fn format_relational_explain(
     if !select.group_by.is_empty() {
         nodes.push(RelationalExplainNode {
             operator: "SortExec",
+            operator_id: None,
             estimated_rows: Some(output.access_path.estimated_rows),
             access_object: String::new(),
             operator_info: format!("group_keys=[{}]", explain_columns(&select.group_by)),
@@ -682,6 +1170,7 @@ fn format_relational_explain(
     if select.distinct || single_count_distinct_column(select).is_some() {
         nodes.push(RelationalExplainNode {
             operator: "DistinctExec",
+            operator_id: None,
             estimated_rows: Some(output.access_path.estimated_rows),
             access_object: String::new(),
             operator_info: if select.distinct {
@@ -694,6 +1183,7 @@ fn format_relational_explain(
     }
     nodes.push(RelationalExplainNode {
         operator: "ProjectionExec",
+        operator_id: None,
         estimated_rows: Some(output.access_path.estimated_rows),
         access_object: String::new(),
         operator_info: format!("columns={}", select.projection.len()),
@@ -709,40 +1199,57 @@ fn format_relational_explain(
     {
         nodes.push(RelationalExplainNode {
             operator: "SelectionExec",
+            operator_id: None,
             estimated_rows: Some(output.access_path.estimated_rows),
             access_object: String::new(),
             operator_info: "residual_predicate=true".to_string(),
             report_operator: None,
         });
     }
-    for (join, descriptor) in select.joins.iter().zip(&output.join_access_paths) {
+    for (index, (join, descriptor)) in select
+        .joins
+        .iter()
+        .zip(&output.join_access_paths)
+        .enumerate()
+    {
+        let operator_id = RelationalOperatorId::from_plan_index(index.saturating_add(1));
+        let cardinality = relational_operator_cardinality_profile(&output, operator_id);
         let access_path = explain_access_path(
             descriptor,
             relational_index_evidence(&output, &join.table.name, descriptor),
             &output.row_execution_evidence,
         );
         nodes.push(RelationalExplainNode {
-            operator: match join.kind {
-                SqlJoinKind::Inner => "IndexNestedLoopJoinExec",
-                SqlJoinKind::Left => "IndexNestedLoopLeftJoinExec",
-            },
-            estimated_rows: Some(descriptor.estimated_rows),
+            operator: cardinality.map_or_else(
+                || match join.kind {
+                    SqlJoinKind::Inner => "IndexNestedLoopJoinExec",
+                    SqlJoinKind::Left => "IndexNestedLoopLeftJoinExec",
+                },
+                |profile| profile.operator.as_str(),
+            ),
+            operator_id: Some(operator_id),
+            estimated_rows: cardinality.map(|profile| profile.estimated_rows),
             access_object: explain_access_object(&join.table.name, descriptor),
-            operator_info: if join_order_reordered {
-                format!("join_order=cost_reordered, {access_path}")
-            } else {
-                access_path
-            },
+            operator_info: format!(
+                "{}, {access_path}",
+                explain_join_planning(&output.join_planning)
+            ),
             report_operator: None,
         });
     }
+    let base_operator_id = RelationalOperatorId::from_plan_index(0);
+    let base_cardinality = relational_operator_cardinality_profile(&output, base_operator_id);
     nodes.push(RelationalExplainNode {
-        operator: match output.access_path.kind {
-            RelationalAccessPathKind::FullScan => "TableFullScanExec",
-            RelationalAccessPathKind::PrimaryKey => "TablePointGetExec",
-            RelationalAccessPathKind::Index => "IndexRangeScanExec",
-        },
-        estimated_rows: Some(output.access_path.estimated_rows),
+        operator: base_cardinality.map_or_else(
+            || match output.access_path.kind {
+                RelationalAccessPathKind::FullScan => "TableFullScanExec",
+                RelationalAccessPathKind::PrimaryKey => "TablePointGetExec",
+                RelationalAccessPathKind::Index => "IndexRangeScanExec",
+            },
+            |profile| profile.operator.as_str(),
+        ),
+        operator_id: Some(base_operator_id),
+        estimated_rows: base_cardinality.map(|profile| profile.estimated_rows),
         access_object: explain_access_object(&select.from.name, &output.access_path),
         operator_info: explain_access_path(
             &output.access_path,
@@ -754,6 +1261,7 @@ fn format_relational_explain(
 
     let mut rows = Vec::with_capacity(nodes.len());
     let mut payload_bytes = 0usize;
+    let mut next_unprofiled_id = output.operator_cardinality_profiles.len().saturating_add(1);
     for (index, node) in nodes.iter().enumerate() {
         let report = node.report_operator.and_then(|operator| {
             output
@@ -761,10 +1269,21 @@ fn format_relational_explain(
                 .iter()
                 .find(|report| report.operator == operator)
         });
+        let cardinality = node
+            .operator_id
+            .and_then(|operator_id| relational_operator_cardinality_profile(&output, operator_id));
+        let display_id = node.operator_id.map_or_else(
+            || {
+                let display_id = next_unprofiled_id;
+                next_unprofiled_id = next_unprofiled_id.saturating_add(1);
+                display_id
+            },
+            RelationalOperatorId::get,
+        );
         let mut row = Row::from([
             (
                 "id".to_string(),
-                Value::String(explain_tree_id(node.operator, index)),
+                Value::String(explain_tree_id(node.operator, index, display_id)),
             ),
             (
                 "estRows".to_string(),
@@ -783,7 +1302,9 @@ fn format_relational_explain(
         if analyze {
             row.insert(
                 "actRows".to_string(),
-                if index == 0 {
+                if let Some(cardinality) = cardinality {
+                    optional_usize_explain_value(cardinality.actual_rows)
+                } else if index == 0 {
                     optional_usize_explain_value(Some(actual_output_rows))
                 } else {
                     optional_usize_explain_value(report.map(|report| report.input_rows))
@@ -791,7 +1312,13 @@ fn format_relational_explain(
             );
             row.insert(
                 "execution info".to_string(),
-                if index == 0 {
+                if let Some(cardinality) = cardinality {
+                    Value::String(format!(
+                        "operator_id={}, fully_consumed={}",
+                        cardinality.operator_id.get(),
+                        cardinality.fully_consumed
+                    ))
+                } else if index == 0 {
                     Value::String(format!(
                         "intermediate_rows={}, hydrated_rows={}, compressed_bytes={}, decompressed_bytes={}",
                         output.intermediate_rows,
@@ -837,11 +1364,52 @@ fn format_relational_explain(
     Ok(output)
 }
 
-fn explain_tree_id(operator: &str, index: usize) -> String {
-    if index == 0 {
-        format!("{operator}_1")
+fn explain_join_planning(outcome: &RelationalJoinPlanningOutcome) -> String {
+    let join_order = if outcome.join_order_reordered() {
+        "cost_reordered"
+    } else if outcome.status == RelationalJoinPlanningStatus::Fallback {
+        "syntax_fallback"
     } else {
-        format!("{}└─{operator}_{}", "  ".repeat(index - 1), index + 1)
+        "syntax"
+    };
+    let memo_groups = outcome
+        .memo_groups
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unavailable".to_string());
+    let memo_expressions = outcome
+        .memo_expressions
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unavailable".to_string());
+    let selected_order = outcome.selected_order.join(",");
+    let cost = outcome.cost.map_or_else(
+        || "plan_cost=unavailable".to_string(),
+        |cost| {
+            format!(
+                "estimated_rows={}, plan_cost={}, cpu={}, random_io={}, sequential_io={}, output_rows={}",
+                cost.estimated_rows,
+                cost.cost,
+                cost.cpu,
+                cost.random_io,
+                cost.sequential_io,
+                cost.output_rows
+            )
+        },
+    );
+    format!(
+        "join_order={join_order}, planning_strategy={}, planning_status={}, planning_reason={}, memo_groups={memo_groups}, memo_expressions={memo_expressions}, max_groups={}, max_expressions={}, selected_order=[{selected_order}], {cost}",
+        outcome.strategy.as_str(),
+        outcome.status.as_str(),
+        outcome.reason.as_str(),
+        outcome.budget.max_groups,
+        outcome.budget.max_expressions,
+    )
+}
+
+fn explain_tree_id(operator: &str, index: usize, display_id: usize) -> String {
+    if index == 0 {
+        format!("{operator}_{display_id}")
+    } else {
+        format!("{}└─{operator}_{display_id}", "  ".repeat(index - 1))
     }
 }
 
@@ -863,6 +1431,16 @@ fn explain_access_object(table: &str, descriptor: &RelationalAccessPathDescripto
             format!("table:{table}, index:{}", descriptor.name)
         }
     }
+}
+
+fn relational_operator_cardinality_profile(
+    output: &RelationalQueryOutput,
+    operator_id: RelationalOperatorId,
+) -> Option<&RelationalOperatorCardinalityProfile> {
+    output
+        .operator_cardinality_profiles
+        .iter()
+        .find(|profile| profile.operator_id == operator_id)
 }
 
 fn relational_index_evidence<'a>(
@@ -1319,6 +1897,7 @@ fn choose_join_access(
     schema: &RelationalTableSchema,
     table: &str,
     qualifier: &str,
+    index_read_mode: RelationalIndexReadMode<'_>,
 ) -> Result<RelationalJoinAccessCandidate> {
     let mut bound = BTreeMap::<String, SqlColumnRef>::new();
     collect_conjunctive_join_equalities(predicate, table, qualifier, &mut bound);
@@ -1364,6 +1943,8 @@ fn choose_join_access(
             true,
             &bound,
             row_count,
+            table,
+            index_read_mode,
         ) {
             candidates.push(candidate);
         }
@@ -1375,6 +1956,8 @@ fn choose_join_access(
             index.unique,
             &bound,
             row_count,
+            table,
+            index_read_mode,
         ) {
             candidates.push(candidate);
         }
@@ -1458,6 +2041,8 @@ fn join_index_access_candidate(
     unique: bool,
     bound: &BTreeMap<String, SqlColumnRef>,
     row_count: usize,
+    table: &str,
+    index_read_mode: RelationalIndexReadMode<'_>,
 ) -> Option<RelationalJoinAccessCandidate> {
     let access_columns = columns
         .iter()
@@ -1473,6 +2058,21 @@ fn join_index_access_candidate(
     }
     let equality_prefix_len = access_columns.len();
     let unique_point = unique && equality_prefix_len == columns.len();
+    let estimated_rows = if unique_point {
+        usize::from(row_count != 0)
+    } else {
+        index_read_mode
+            .probe_statistics(table, &name, equality_prefix_len)
+            .map(|statistics| {
+                debug_assert!(statistics.distinct_non_null_values <= statistics.non_null_rows);
+                debug_assert!(statistics.fanout <= statistics.non_null_rows);
+                usize::try_from(statistics.fanout)
+                    .unwrap_or(usize::MAX)
+                    .min(row_count)
+            })
+            .unwrap_or(row_count)
+    }
+    .max(1);
     Some(RelationalJoinAccessCandidate {
         descriptor: RelationalAccessPathDescriptor {
             kind: RelationalAccessPathKind::Index,
@@ -1484,12 +2084,7 @@ fn join_index_access_candidate(
             unique_point,
             covering: false,
             requires_row_fetch: true,
-            estimated_rows: if unique_point {
-                usize::from(row_count != 0)
-            } else {
-                row_count
-            }
-            .max(1),
+            estimated_rows,
         },
         access: RelationalJoinAccess::Index {
             name,
@@ -1602,14 +2197,15 @@ fn visit_relational_rows<'a>(
     row_runtime: &RelationalRowRuntime<'a>,
     visit: &mut dyn FnMut(BoundRow<'a>) -> Result<bool>,
 ) -> Result<bool> {
-    visit_base_entries(
+    pipeline.begin_operator_pipeline();
+    let fully_consumed = visit_base_entries(
         state,
         index_runtime,
         row_runtime,
         &select.from.name,
         base_access,
         &mut |row| {
-            pipeline.account_row()?;
+            pipeline.account_operator_row(RelationalOperatorId::from_plan_index(0))?;
             visit_joined_row(
                 select,
                 parameters,
@@ -1630,7 +2226,9 @@ fn visit_relational_rows<'a>(
                 visit,
             )
         },
-    )
+    )?;
+    pipeline.finish_operator_pipeline(fully_consumed);
+    Ok(fully_consumed)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1678,7 +2276,9 @@ fn visit_joined_row<'a>(
                 return Ok(true);
             }
             matched = true;
-            pipeline.account_row()?;
+            pipeline.account_operator_row(RelationalOperatorId::from_plan_index(
+                join_index.saturating_add(1),
+            ))?;
             visit_joined_row(
                 select,
                 parameters,
@@ -1704,7 +2304,9 @@ fn visit_joined_row<'a>(
             schema: planned.schema,
             row: None,
         });
-        pipeline.account_row()?;
+        pipeline.account_operator_row(RelationalOperatorId::from_plan_index(
+            join_index.saturating_add(1),
+        ))?;
         return visit_joined_row(
             select,
             parameters,
@@ -1932,6 +2534,7 @@ fn execute_blocking_projection<'a>(
     row_runtime: &RelationalRowRuntime<'a>,
     limits: RelationalQueryLimits,
     memory: &skein_executor::ExecutionMemoryConfig,
+    memory_ledger: &QueryMemoryLedger,
 ) -> Result<StreamingProjectionOutput> {
     let offset = usize::try_from(bind_bound(select.offset, parameters, "OFFSET")?.unwrap_or(0))
         .map_err(|_| SkeinError::Semantic("SQL OFFSET is too large".to_string()))?;
@@ -1946,7 +2549,6 @@ fn execute_blocking_projection<'a>(
     let input_plan = relational_input_plan();
     let catalog = Catalog::default();
     let observer = RelationalBlockingObserver::default();
-    let memory_ledger = QueryMemoryLedger::new(memory.query_memory_bytes);
     let task_context = pipeline.task_context;
     let mut output = Vec::with_capacity(detection_limit.min(limits.max_output_rows));
     let mut payload_bytes = 0usize;
@@ -1970,14 +2572,14 @@ fn execute_blocking_projection<'a>(
             pipeline,
             index_runtime,
             row_runtime,
-            batch_rows: limits.batch_rows.get(),
+            batch_rows: memory.batch_rows.get(),
         };
         let mut distinct = DistinctBatchSource {
             input: &mut projected,
             input_plan: &input_plan,
             catalog: &catalog,
             memory,
-            memory_ledger: &memory_ledger,
+            memory_ledger,
             task_context,
             observer: &observer,
         };
@@ -1989,7 +2591,7 @@ fn execute_blocking_projection<'a>(
                 BlockingExecutionContext {
                     catalog: &catalog,
                     memory,
-                    memory_ledger: &memory_ledger,
+                    memory_ledger,
                     task_context,
                     observer: &observer,
                 },
@@ -2031,7 +2633,7 @@ fn execute_blocking_projection<'a>(
                 detection_limit,
                 &catalog,
                 memory,
-                &memory_ledger,
+                memory_ledger,
                 task_context,
                 &observer,
                 &mut |batch| {
@@ -2054,7 +2656,7 @@ fn execute_blocking_projection<'a>(
             offset,
             detection_limit,
             memory,
-            &memory_ledger,
+            memory_ledger,
             task_context,
         );
         visit_relational_rows(
@@ -2352,6 +2954,7 @@ fn execute_ordered_index_projection<'a>(
     row_runtime: &RelationalRowRuntime<'a>,
     limits: RelationalQueryLimits,
     execution_memory: &skein_executor::ExecutionMemoryConfig,
+    memory_ledger: &QueryMemoryLedger,
 ) -> Result<StreamingProjectionOutput> {
     let RelationalBaseAccess::Index { name, prefix } = base_access else {
         return Err(SkeinError::Execution(
@@ -2369,11 +2972,10 @@ fn execute_ordered_index_projection<'a>(
         .unwrap_or(usize::MAX);
     let mut output = Vec::with_capacity(requested.min(limits.max_output_rows));
     let mut payload_bytes = 0usize;
-    let memory_ledger = QueryMemoryLedger::new(execution_memory.query_memory_bytes);
     let mut locator_batch = AccountedRelationalLocatorBatch::new(
-        limits.batch_rows.get(),
+        execution_memory.batch_rows.get(),
         execution_memory.batch_payload_bytes,
-        &memory_ledger,
+        memory_ledger,
     )?;
     let mut hydrate = |batch: ColumnarBatch| -> Result<BatchControl> {
         let locators = batch.column(RELATIONAL_ROW_LOCATOR_SLOT).ok_or_else(|| {
@@ -2429,13 +3031,14 @@ fn execute_ordered_index_projection<'a>(
     };
     let mut selected_rows = 0usize;
     if requested != 0 {
-        index_runtime.visit_prefix_entries(
+        pipeline.begin_operator_pipeline();
+        let fully_consumed = index_runtime.visit_prefix_entries(
             state,
             &select.from.name,
             name,
             prefix,
             |_, primary_key| {
-                pipeline.account_row()?;
+                pipeline.account_operator_row(RelationalOperatorId::from_plan_index(0))?;
                 if offset != 0 {
                     offset -= 1;
                     return Ok(true);
@@ -2457,6 +3060,7 @@ fn execute_ordered_index_projection<'a>(
                 Ok(true)
             },
         )?;
+        pipeline.finish_operator_pipeline(fully_consumed);
         locator_batch.emit(&mut hydrate)?;
     }
     Ok(StreamingProjectionOutput {
@@ -2586,8 +3190,9 @@ fn execute_borrowed_streaming_full_scan(
     let mut output_rows = 0usize;
     let mut payload_bytes = 0usize;
     if requested != 0 {
-        row_runtime.visit_all_ref(&select.from.name, |row| {
-            pipeline.account_row()?;
+        pipeline.begin_operator_pipeline();
+        let fully_consumed = row_runtime.visit_all_ref(&select.from.name, |row| {
+            pipeline.account_operator_row(RelationalOperatorId::from_plan_index(0))?;
             if predicate
                 .as_ref()
                 .map(|predicate| predicate.truth(row))
@@ -2618,6 +3223,7 @@ fn execute_borrowed_streaming_full_scan(
             output_rows = output_rows.saturating_add(1);
             Ok(output_rows < requested)
         })?;
+        pipeline.finish_operator_pipeline(fully_consumed);
     }
     Ok(StreamingProjectionOutput {
         rows: output.finish(),
@@ -2639,8 +3245,10 @@ fn execute_aggregate_select<'a>(
     row_runtime: &RelationalRowRuntime<'a>,
     limits: RelationalQueryLimits,
     execution_memory: &skein_executor::ExecutionMemoryConfig,
+    memory_ledger: &QueryMemoryLedger,
     access_path: RelationalAccessPathDescriptor,
     join_access_paths: Vec<RelationalAccessPathDescriptor>,
+    join_planning: &RelationalJoinPlanningOutcome,
 ) -> Result<RelationalQueryOutput> {
     if let Some((column, output_name)) = single_count_distinct_column(select) {
         return execute_single_count_distinct(
@@ -2658,8 +3266,10 @@ fn execute_aggregate_select<'a>(
             row_runtime,
             limits,
             execution_memory,
+            memory_ledger,
             access_path,
             join_access_paths,
+            join_planning,
         );
     }
     if !select.group_by.is_empty() {
@@ -2676,8 +3286,10 @@ fn execute_aggregate_select<'a>(
             row_runtime,
             limits,
             execution_memory,
+            memory_ledger,
             access_path,
             join_access_paths,
+            join_planning,
         );
     }
     if !select.order_by.is_empty() || select.distinct {
@@ -2685,23 +3297,22 @@ fn execute_aggregate_select<'a>(
             "aggregate SELECT does not yet support statement DISTINCT or ORDER BY".to_string(),
         ));
     }
-    let memory_ledger = QueryMemoryLedger::new(execution_memory.query_memory_bytes);
     if let Some(mut aggregate) = ColumnarAggregateExecutor::try_new(
         select,
         base_schema,
         &select.from.name,
         base_qualifier,
         joins.is_empty(),
-        limits.batch_rows.get(),
+        execution_memory.batch_rows.get(),
         execution_memory.batch_payload_bytes,
-        &memory_ledger,
+        memory_ledger,
     )? {
         let mut memory_tracker = OperatorMemoryTracker::with_account(
-            limits.blocking_operator_bytes,
+            execution_memory.blocking_operator_bytes,
             memory_ledger.account(
                 QueryMemoryClass::BlockingState,
                 "RelationalColumnarAggregate",
-                limits.blocking_operator_bytes,
+                execution_memory.blocking_operator_bytes,
             ),
         );
         charge_aggregate_memory(aggregate.blocking_state_bytes(), &mut memory_tracker)?;
@@ -2749,6 +3360,8 @@ fn execute_aggregate_select<'a>(
         }
         return Ok(RelationalQueryOutput {
             rows: rows.into(),
+            join_planning: join_planning.clone(),
+            operator_cardinality_profiles: pipeline.operator_cardinality_profiles(),
             intermediate_rows,
             hydration: row_runtime.hydration(),
             access_path,
@@ -2771,11 +3384,11 @@ fn execute_aggregate_select<'a>(
         .collect::<Result<Vec<_>>>()?;
     let mut groups = BTreeMap::<Vec<RelationalValue>, Vec<AggregateProjectionState>>::new();
     let mut memory_tracker = OperatorMemoryTracker::with_account(
-        limits.blocking_operator_bytes,
+        execution_memory.blocking_operator_bytes,
         memory_ledger.account(
             QueryMemoryClass::BlockingState,
             "RelationalAggregate",
-            limits.blocking_operator_bytes,
+            execution_memory.blocking_operator_bytes,
         ),
     );
     let mut aggregate_input_rows = 0usize;
@@ -2872,6 +3485,8 @@ fn execute_aggregate_select<'a>(
     }
     Ok(RelationalQueryOutput {
         rows: output.into(),
+        join_planning: join_planning.clone(),
+        operator_cardinality_profiles: pipeline.operator_cardinality_profiles(),
         intermediate_rows,
         hydration: row_runtime.hydration(),
         access_path,
@@ -2924,13 +3539,14 @@ fn execute_single_count_distinct<'a>(
     row_runtime: &RelationalRowRuntime<'a>,
     limits: RelationalQueryLimits,
     execution_memory: &skein_executor::ExecutionMemoryConfig,
+    memory_ledger: &QueryMemoryLedger,
     access_path: RelationalAccessPathDescriptor,
     join_access_paths: Vec<RelationalAccessPathDescriptor>,
+    join_planning: &RelationalJoinPlanningOutcome,
 ) -> Result<RelationalQueryOutput> {
     let input_plan = relational_input_plan();
     let catalog = Catalog::default();
     let observer = RelationalBlockingObserver::default();
-    let memory_ledger = QueryMemoryLedger::new(execution_memory.query_memory_bytes);
     let task_context = pipeline.task_context;
     let mut source = DistinctAggregateValueBatchSource {
         select,
@@ -2944,7 +3560,7 @@ fn execute_single_count_distinct<'a>(
         pipeline,
         index_runtime,
         row_runtime,
-        batch_rows: limits.batch_rows.get(),
+        batch_rows: execution_memory.batch_rows.get(),
     };
     let mut count = 0usize;
     stream_distinct_batches(
@@ -2953,7 +3569,7 @@ fn execute_single_count_distinct<'a>(
         BlockingExecutionContext {
             catalog: &catalog,
             memory: execution_memory,
-            memory_ledger: &memory_ledger,
+            memory_ledger,
             task_context,
             observer: &observer,
         },
@@ -2981,6 +3597,8 @@ fn execute_single_count_distinct<'a>(
     }
     Ok(RelationalQueryOutput {
         rows: vec![row].into(),
+        join_planning: join_planning.clone(),
+        operator_cardinality_profiles: pipeline.operator_cardinality_profiles(),
         intermediate_rows: pipeline.intermediate_rows,
         hydration: row_runtime.hydration(),
         access_path,
@@ -3005,8 +3623,10 @@ fn execute_grouped_aggregate<'a>(
     row_runtime: &RelationalRowRuntime<'a>,
     limits: RelationalQueryLimits,
     execution_memory: &skein_executor::ExecutionMemoryConfig,
+    memory_ledger: &QueryMemoryLedger,
     access_path: RelationalAccessPathDescriptor,
     join_access_paths: Vec<RelationalAccessPathDescriptor>,
+    join_planning: &RelationalJoinPlanningOutcome,
 ) -> Result<RelationalQueryOutput> {
     if !select.order_by.is_empty() || select.distinct {
         return Err(SkeinError::Semantic(
@@ -3029,7 +3649,6 @@ fn execute_grouped_aggregate<'a>(
         .unwrap_or(usize::MAX);
     let detection_limit = requested.min(limits.max_output_rows.saturating_add(1));
     let observer = RelationalBlockingObserver::default();
-    let memory_ledger = QueryMemoryLedger::new(execution_memory.query_memory_bytes);
     let task_context = pipeline.task_context;
     let locator_layout =
         relational_locator_layout(&select.from.name, base_qualifier, base_schema, joins)?;
@@ -3039,7 +3658,7 @@ fn execute_grouped_aggregate<'a>(
         0,
         usize::MAX,
         execution_memory,
-        &memory_ledger,
+        memory_ledger,
         task_context,
     );
     let mut input_rows = 0usize;
@@ -3077,11 +3696,11 @@ fn execute_grouped_aggregate<'a>(
     let mut current_key = None::<Vec<RelationalValue>>;
     let mut current_group = None::<Vec<AggregateProjectionState>>;
     let mut tracker = OperatorMemoryTracker::with_account(
-        limits.blocking_operator_bytes,
+        execution_memory.blocking_operator_bytes,
         memory_ledger.account(
             QueryMemoryClass::BlockingState,
             "RelationalGroupedAggregate",
-            limits.blocking_operator_bytes,
+            execution_memory.blocking_operator_bytes,
         ),
     );
     let mut output = Vec::new();
@@ -3154,6 +3773,8 @@ fn execute_grouped_aggregate<'a>(
     ));
     Ok(RelationalQueryOutput {
         rows: output.into(),
+        join_planning: join_planning.clone(),
+        operator_cardinality_profiles: pipeline.operator_cardinality_profiles(),
         intermediate_rows: pipeline.intermediate_rows,
         hydration: row_runtime.hydration(),
         access_path,
