@@ -106,15 +106,16 @@ pub use api::{
     KnowledgeSourceCandidateScanOutput, KnowledgeSourceCandidateScanRequest,
     KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphExplainOutput,
     NowledgeGraphStatement, NowledgeGraphTransactionOutput, PlanCacheBypassReason, PlanCacheLookup,
-    PlanCacheStats, ProfiledRelationalSqlQueryOutput, QueryAccessControlContext, QueryOutput,
-    QueryStreamOptions, QueryStreamReport, QuerySystemVariables, RankedBackgroundMaintenance,
-    RelationalJoinPlanningAttempt, RelationalJoinPlanningBudget, RelationalJoinPlanningCost,
-    RelationalJoinPlanningFallbackClass, RelationalJoinPlanningOutcome,
-    RelationalJoinPlanningReason, RelationalJoinPlanningStatus, RelationalJoinPlanningStrategy,
-    RelationalMutationResult, RelationalOperatorCardinalityProfile, RelationalOperatorId,
-    RelationalOperatorKind, RelationalSqlIndexReadProfile, RelationalSqlReadProfile,
-    RelationalSqlRowReadProfile, RelationalSqlStageTimings, ScheduledSearchProjectionCatchUpReport,
-    SearchProjectionCatchUpReport, SearchProjectionCatchUpStopReason, SearchProjectionChangeBatch,
+    PlanCacheStats, ProfiledRelationalSqlQueryOutput, ProjectionRelationalReadBinding,
+    QueryAccessControlContext, QueryOutput, QueryStreamOptions, QueryStreamReport,
+    QuerySystemVariables, RankedBackgroundMaintenance, RelationalJoinPlanningAttempt,
+    RelationalJoinPlanningBudget, RelationalJoinPlanningCost, RelationalJoinPlanningFallbackClass,
+    RelationalJoinPlanningOutcome, RelationalJoinPlanningReason, RelationalJoinPlanningStatus,
+    RelationalJoinPlanningStrategy, RelationalMutationResult, RelationalOperatorCardinalityProfile,
+    RelationalOperatorId, RelationalOperatorKind, RelationalSqlIndexReadProfile,
+    RelationalSqlReadProfile, RelationalSqlRowReadProfile, RelationalSqlStageTimings,
+    ScheduledSearchProjectionCatchUpReport, SearchProjectionCatchUpReport,
+    SearchProjectionCatchUpStopReason, SearchProjectionChangeBatch,
     SearchProjectionGraphDeltaRequest, SearchProjectionRelationalDelta,
     SkeinLightningBootstrapExport, SkeinLightningBootstrapManifest, SkeinLightningGraphStream,
     SkeinLightningGraphStreamValidation, SkeinLightningInitialImportApplyReport,
@@ -475,6 +476,16 @@ pub use skein_runtime_tokio::{
     TokioTaskError,
 };
 pub use skein_storage::ScanPredicate;
+pub use skein_storage::{
+    decode_projection_relational_member, encode_projection_relational_member,
+    ProjectionGenerationBatchLimits, ProjectionGenerationBegin, ProjectionGenerationCursor,
+    ProjectionGenerationDigestBuilder, ProjectionGenerationError, ProjectionGenerationGcLimits,
+    ProjectionGenerationGcReport, ProjectionGenerationIdentity, ProjectionGenerationManifest,
+    ProjectionGenerationMember, ProjectionGenerationPage, ProjectionGenerationPublishReport,
+    ProjectionGenerationReadLimits, ProjectionGenerationReadReport, ProjectionGenerationReader,
+    ProjectionGenerationSeal, ProjectionGenerationState, ProjectionGenerationStatus,
+    ProjectionGenerationStore, ProjectionGenerationWriter, SealedProjectionGeneration,
+};
 #[cfg(feature = "vector-search")]
 pub use skein_vector_projection::{
     KernelPreference as TurboQuantKernelPreference,

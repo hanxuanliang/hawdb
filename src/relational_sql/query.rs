@@ -168,7 +168,7 @@ pub(crate) fn execute_prepared_relational_query_with_resources<'a>(
                 select,
                 parameters,
                 state,
-                read_modes.index,
+                read_modes,
                 resources.limits,
                 resources.join_enumeration,
                 initial_stage_timings,
@@ -186,7 +186,7 @@ pub(crate) fn execute_prepared_relational_query_with_resources<'a>(
                 select,
                 parameters,
                 state,
-                read_modes.index,
+                read_modes,
                 resources.limits,
                 resources.join_enumeration,
                 initial_stage_timings,
@@ -1102,7 +1102,7 @@ fn prepare_relational_select(
     select: SelectStatement,
     parameters: &[Value],
     state: &RelationalState,
-    index_read_mode: RelationalIndexReadMode<'_>,
+    read_modes: RelationalQueryReadModes<'_>,
     limits: RelationalQueryLimits,
     join_enumeration: RelationalJoinEnumerationConfig,
     initial_stage_timings: RelationalSqlStageTimings,
@@ -1132,20 +1132,16 @@ fn prepare_relational_select(
         select,
         parameters,
         state,
-        index_read_mode,
+        read_modes,
         limits,
         join_enumeration,
         &mut current_state_bind_nanos,
     )?;
     let access_plan = match planned.access_plan {
         Some(access_plan) => access_plan,
-        None => prepare_syntax_access_plan(
-            &planned.statement,
-            parameters,
-            state,
-            index_read_mode,
-            limits,
-        )?,
+        None => {
+            prepare_syntax_access_plan(&planned.statement, parameters, state, read_modes, limits)?
+        }
     };
     let execution =
         PreparedRelationalExecutionDescriptor::prepare(&planned.statement, &access_plan);
@@ -1172,7 +1168,7 @@ fn prepare_syntax_access_plan(
     select: &SelectStatement,
     parameters: &[Value],
     state: &RelationalState,
-    index_read_mode: RelationalIndexReadMode<'_>,
+    read_modes: RelationalQueryReadModes<'_>,
     limits: RelationalQueryLimits,
 ) -> Result<PreparedRelationalAccessPlan> {
     let base_schema = state.table_schema(&select.from.name).ok_or_else(|| {
@@ -1195,6 +1191,7 @@ fn prepare_syntax_access_plan(
         table: &select.from.name,
         qualifier: &base_qualifier,
         cardinality_limit: limits.max_intermediate_rows.saturating_add(1),
+        projection: projection_access_planning(read_modes.row, &select.from.name),
     })?;
     let join_accesses = select
         .joins
@@ -1213,7 +1210,8 @@ fn prepare_syntax_access_plan(
                 join_schema,
                 &join.table.name,
                 &qualifier,
-                index_read_mode,
+                read_modes.index,
+                projection_access_planning(read_modes.row, &join.table.name),
             )
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1929,8 +1927,15 @@ fn explain_access_path(
         descriptor.requires_row_fetch
     );
     let row = format!(
-        "row_runtime_path={}, row_base_generation={}, row_delta_generation={}, row_base_epoch={}, row_visible_epoch={}, row_root_set_digest={}, row_descriptor_reads={}, row_logical_pages={}, row_logical_bytes={}, row_physical_pages={}, row_physical_bytes={}, row_cache_hits={}, row_cache_misses={}, row_cache_admission_rejections={}, row_overlay_entries={}, row_overlay_bytes={}, row_rows={}, row_borrowed_rows={}, row_owned_rows={}",
+        "row_runtime_path={}, row_projection_generation={}, row_projection_source_watermark={}, row_projection_version={}, row_projection_publication_epoch={}, row_base_generation={}, row_delta_generation={}, row_base_epoch={}, row_visible_epoch={}, row_root_set_digest={}, row_descriptor_reads={}, row_logical_pages={}, row_logical_bytes={}, row_physical_pages={}, row_physical_bytes={}, row_cache_hits={}, row_cache_misses={}, row_cache_admission_rejections={}, row_overlay_entries={}, row_overlay_bytes={}, row_rows={}, row_borrowed_rows={}, row_owned_rows={}",
         row_evidence.runtime_path,
+        row_evidence
+            .projection_generation
+            .as_deref()
+            .unwrap_or("none"),
+        optional_u64_text(row_evidence.projection_source_watermark),
+        optional_u64_text(row_evidence.projection_version),
+        optional_u64_text(row_evidence.projection_publication_commit_epoch),
         optional_u64_text(row_evidence.base_generation),
         optional_u64_text(row_evidence.delta_generation),
         optional_u64_text(row_evidence.base_commit_epoch),
@@ -2046,6 +2051,23 @@ struct RelationalBaseAccessPlanning<'a> {
     table: &'a str,
     qualifier: &'a str,
     cardinality_limit: usize,
+    projection: RelationalProjectionAccessPlanning,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct RelationalProjectionAccessPlanning {
+    force_full_scan: bool,
+    row_count_override: Option<usize>,
+}
+
+fn projection_access_planning(
+    row_read_mode: RelationalRowReadMode<'_>,
+    table: &str,
+) -> RelationalProjectionAccessPlanning {
+    RelationalProjectionAccessPlanning {
+        force_full_scan: row_read_mode.is_projection_table(table),
+        row_count_override: row_read_mode.projection_estimated_rows(table),
+    }
 }
 
 fn choose_base_access(
@@ -2061,6 +2083,7 @@ fn choose_base_access(
         table,
         qualifier,
         cardinality_limit,
+        projection,
     } = planning;
     let mut equalities = Vec::new();
     if let Some(predicate) = predicate {
@@ -2099,7 +2122,9 @@ fn choose_base_access(
         }
     }
 
-    let row_count = state.row_count(table);
+    let row_count = projection
+        .row_count_override
+        .unwrap_or_else(|| state.row_count(table));
     let mut candidates = vec![RelationalAccessCandidate {
         descriptor: RelationalAccessPathDescriptor {
             kind: RelationalAccessPathKind::FullScan,
@@ -2118,47 +2143,48 @@ fn choose_base_access(
         access: RelationalBaseAccess::FullScan,
     }];
 
-    if let Some(key) = complete_key(&schema.primary_key, &bound) {
-        let estimated_rows = usize::from(state.row(table, &key).is_some()).max(1);
-        candidates.push(RelationalAccessCandidate {
-            descriptor: RelationalAccessPathDescriptor {
-                kind: RelationalAccessPathKind::PrimaryKey,
-                name: "__primary_key".to_string(),
-                index_columns: schema.primary_key.clone(),
-                access_columns: schema.primary_key.iter().cloned().collect(),
-                equality_prefix_len: schema.primary_key.len(),
-                order_prefix_len: 0,
-                exclusive_range: false,
-                reverse_order: false,
-                unique_point: true,
-                covering: false,
-                requires_row_fetch: false,
-                estimated_rows,
-            },
-            access: RelationalBaseAccess::PrimaryKey(key),
-        });
-    }
-
-    for (ordinal, columns) in schema.unique_constraints.iter().enumerate() {
-        if let Some(candidate) = index_access_candidate(
-            &planning,
-            relational_unique_index_name(ordinal),
-            columns,
-            true,
-            &bound,
-        )? {
-            candidates.push(candidate);
+    if !projection.force_full_scan {
+        if let Some(key) = complete_key(&schema.primary_key, &bound) {
+            let estimated_rows = usize::from(state.row(table, &key).is_some()).max(1);
+            candidates.push(RelationalAccessCandidate {
+                descriptor: RelationalAccessPathDescriptor {
+                    kind: RelationalAccessPathKind::PrimaryKey,
+                    name: "__primary_key".to_string(),
+                    index_columns: schema.primary_key.clone(),
+                    access_columns: schema.primary_key.iter().cloned().collect(),
+                    equality_prefix_len: schema.primary_key.len(),
+                    order_prefix_len: 0,
+                    exclusive_range: false,
+                    reverse_order: false,
+                    unique_point: true,
+                    covering: false,
+                    requires_row_fetch: false,
+                    estimated_rows,
+                },
+                access: RelationalBaseAccess::PrimaryKey(key),
+            });
         }
-    }
-    for index in &schema.indexes {
-        if let Some(candidate) = index_access_candidate(
-            &planning,
-            index.name.clone(),
-            &index.columns,
-            index.unique,
-            &bound,
-        )? {
-            candidates.push(candidate);
+        for (ordinal, columns) in schema.unique_constraints.iter().enumerate() {
+            if let Some(candidate) = index_access_candidate(
+                &planning,
+                relational_unique_index_name(ordinal),
+                columns,
+                true,
+                &bound,
+            )? {
+                candidates.push(candidate);
+            }
+        }
+        for index in &schema.indexes {
+            if let Some(candidate) = index_access_candidate(
+                &planning,
+                index.name.clone(),
+                &index.columns,
+                index.unique,
+                &bound,
+            )? {
+                candidates.push(candidate);
+            }
         }
     }
 
@@ -2602,10 +2628,13 @@ fn choose_join_access(
     table: &str,
     qualifier: &str,
     index_read_mode: RelationalIndexReadMode<'_>,
+    projection: RelationalProjectionAccessPlanning,
 ) -> Result<RelationalJoinAccessCandidate> {
     let mut bound = BTreeMap::<String, SqlColumnRef>::new();
     collect_conjunctive_join_equalities(predicate, table, qualifier, &mut bound);
-    let row_count = state.row_count(table);
+    let row_count = projection
+        .row_count_override
+        .unwrap_or_else(|| state.row_count(table));
     let mut candidates = vec![RelationalJoinAccessCandidate {
         descriptor: RelationalAccessPathDescriptor {
             kind: RelationalAccessPathKind::FullScan,
@@ -2624,50 +2653,51 @@ fn choose_join_access(
         access: RelationalJoinAccess::FullScan,
     }];
 
-    if let Some(columns) = complete_join_columns(&schema.primary_key, &bound) {
-        candidates.push(RelationalJoinAccessCandidate {
-            descriptor: RelationalAccessPathDescriptor {
-                kind: RelationalAccessPathKind::PrimaryKey,
-                name: "__primary_key".to_string(),
-                index_columns: schema.primary_key.clone(),
-                access_columns: schema.primary_key.iter().cloned().collect(),
-                equality_prefix_len: schema.primary_key.len(),
-                order_prefix_len: 0,
-                exclusive_range: false,
-                reverse_order: false,
-                unique_point: true,
-                covering: false,
-                requires_row_fetch: false,
-                estimated_rows: usize::from(row_count != 0).max(1),
-            },
-            access: RelationalJoinAccess::PrimaryKey(columns),
-        });
-    }
-
-    for (ordinal, columns) in schema.unique_constraints.iter().enumerate() {
-        if let Some(candidate) = join_index_access_candidate(
-            relational_unique_index_name(ordinal),
-            columns,
-            true,
-            &bound,
-            row_count,
-            table,
-            index_read_mode,
-        ) {
-            candidates.push(candidate);
+    if !projection.force_full_scan {
+        if let Some(columns) = complete_join_columns(&schema.primary_key, &bound) {
+            candidates.push(RelationalJoinAccessCandidate {
+                descriptor: RelationalAccessPathDescriptor {
+                    kind: RelationalAccessPathKind::PrimaryKey,
+                    name: "__primary_key".to_string(),
+                    index_columns: schema.primary_key.clone(),
+                    access_columns: schema.primary_key.iter().cloned().collect(),
+                    equality_prefix_len: schema.primary_key.len(),
+                    order_prefix_len: 0,
+                    exclusive_range: false,
+                    reverse_order: false,
+                    unique_point: true,
+                    covering: false,
+                    requires_row_fetch: false,
+                    estimated_rows: usize::from(row_count != 0).max(1),
+                },
+                access: RelationalJoinAccess::PrimaryKey(columns),
+            });
         }
-    }
-    for index in &schema.indexes {
-        if let Some(candidate) = join_index_access_candidate(
-            index.name.clone(),
-            &index.columns,
-            index.unique,
-            &bound,
-            row_count,
-            table,
-            index_read_mode,
-        ) {
-            candidates.push(candidate);
+        for (ordinal, columns) in schema.unique_constraints.iter().enumerate() {
+            if let Some(candidate) = join_index_access_candidate(
+                relational_unique_index_name(ordinal),
+                columns,
+                true,
+                &bound,
+                row_count,
+                table,
+                index_read_mode,
+            ) {
+                candidates.push(candidate);
+            }
+        }
+        for index in &schema.indexes {
+            if let Some(candidate) = join_index_access_candidate(
+                index.name.clone(),
+                &index.columns,
+                index.unique,
+                &bound,
+                row_count,
+                table,
+                index_read_mode,
+            ) {
+                candidates.push(candidate);
+            }
         }
     }
 
@@ -5716,7 +5746,10 @@ mod tests {
             &select,
             &[],
             &state,
-            RelationalIndexReadMode::Materialized,
+            RelationalQueryReadModes::new(
+                RelationalIndexReadMode::Materialized,
+                RelationalRowReadMode::CanonicalMemory,
+            ),
             limits,
         )
         .expect("prepare syntax access plan");
@@ -5731,6 +5764,7 @@ mod tests {
             table: "bushy_c",
             qualifier: "c",
             cardinality_limit: limits.max_intermediate_rows.saturating_add(1),
+            projection: RelationalProjectionAccessPlanning::default(),
         })
         .expect("prepare bushy_c materialized base access");
 
