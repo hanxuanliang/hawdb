@@ -14,8 +14,8 @@ use crate::relational_sql::row_access::{
 };
 use crate::sql::{
     SelectProjection, SelectStatement, SqlBound, SqlColumnRef, SqlComparisonOp, SqlExpression,
-    SqlFunctionArgument, SqlJoinKind, SqlNullOrder, SqlOrderDirection, SqlPredicate, SqlStatement,
-    SqlValue,
+    SqlFunctionArgument, SqlJoinKind, SqlLikeEscape, SqlNullOrder, SqlOrderDirection, SqlPredicate,
+    SqlStatement, SqlValue,
 };
 use crate::value::Value;
 use skein_core::Catalog;
@@ -45,8 +45,8 @@ use skein_optimizer::{
 use skein_plan::{PhysicalPlan, SortDirection, SortItem, SortKey};
 use skein_storage::{
     relational_unique_index_name, RelationalHydrationBudget, RelationalIndexRangeScan,
-    RelationalIndexScanDirection, RelationalKey, RelationalState, RelationalTableSchema,
-    RelationalValue, RelationalValueRef,
+    RelationalIndexScanDirection, RelationalKey, RelationalScalarType, RelationalState,
+    RelationalTableSchema, RelationalValue, RelationalValueRef,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -2349,9 +2349,16 @@ fn format_relational_explain(
             ),
             access_object: String::new(),
             operator_info: if select.group_by.is_empty() {
-                "group_by=[]".to_string()
+                format!(
+                    "group_by=[], aggregates=[{}]",
+                    explain_aggregate_projections(&select.projection)
+                )
             } else {
-                format!("group_by=[{}]", explain_columns(&select.group_by))
+                format!(
+                    "group_by=[{}], aggregates=[{}]",
+                    explain_columns(&select.group_by),
+                    explain_aggregate_projections(&select.projection)
+                )
             },
             report_operator: Some("RelationalAggregateExec"),
         });
@@ -2402,7 +2409,10 @@ fn format_relational_explain(
             identity: RelationalExplainNodeIdentity::Logical("selection"),
             estimated_rows: Some(output.access_path.estimated_rows),
             access_object: String::new(),
-            operator_info: "implementation=fused, residual_predicate=true".to_string(),
+            operator_info: format!(
+                "implementation=fused, residual_predicate={}",
+                explain_predicate(select.selection.as_ref().expect("selection is present"))
+            ),
             report_operator: None,
         });
     }
@@ -2815,6 +2825,173 @@ fn explain_column(column: &SqlColumnRef) -> String {
         .unwrap_or_else(|| column.name.clone())
 }
 
+fn explain_aggregate_projections(projections: &[SelectProjection]) -> String {
+    projections
+        .iter()
+        .filter_map(|projection| match projection {
+            SelectProjection::Expression { expression, .. } => {
+                explain_aggregate_expression(expression)
+            }
+            SelectProjection::Wildcard | SelectProjection::Column { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn explain_aggregate_expression(expression: &SqlExpression) -> Option<String> {
+    let SqlExpression::Function {
+        name,
+        arguments,
+        filter,
+        ..
+    } = expression
+    else {
+        return None;
+    };
+    if name == "coalesce" {
+        let aggregates = arguments
+            .iter()
+            .filter_map(|argument| match argument {
+                SqlFunctionArgument::Expression(expression) => {
+                    explain_aggregate_expression(expression)
+                }
+                SqlFunctionArgument::Wildcard => None,
+            })
+            .collect::<Vec<_>>();
+        return (!aggregates.is_empty()).then(|| format!("coalesce({})", aggregates.join(", ")));
+    }
+    if !matches!(name.as_str(), "count" | "sum" | "max") {
+        return None;
+    }
+    let arguments = arguments
+        .iter()
+        .map(|argument| match argument {
+            SqlFunctionArgument::Wildcard => "*".to_string(),
+            SqlFunctionArgument::Expression(expression) => explain_expression(expression),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut explanation = format!("{name}({arguments})");
+    if let Some(filter) = filter {
+        explanation.push_str(" FILTER (");
+        explanation.push_str(&explain_predicate(filter));
+        explanation.push(')');
+    }
+    Some(explanation)
+}
+
+fn explain_expression(expression: &SqlExpression) -> String {
+    match expression {
+        SqlExpression::Column(column) => explain_column(column),
+        SqlExpression::Value(value) => explain_sql_value(value),
+        SqlExpression::Function {
+            name, arguments, ..
+        } => format!(
+            "{name}({})",
+            arguments
+                .iter()
+                .map(|argument| match argument {
+                    SqlFunctionArgument::Wildcard => "*".to_string(),
+                    SqlFunctionArgument::Expression(expression) => explain_expression(expression),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn explain_predicate(predicate: &SqlPredicate) -> String {
+    match predicate {
+        SqlPredicate::And(left, right) => {
+            format!(
+                "({} AND {})",
+                explain_predicate(left),
+                explain_predicate(right)
+            )
+        }
+        SqlPredicate::Or(left, right) => {
+            format!(
+                "({} OR {})",
+                explain_predicate(left),
+                explain_predicate(right)
+            )
+        }
+        SqlPredicate::Not(predicate) => format!("NOT ({})", explain_predicate(predicate)),
+        SqlPredicate::Compare { left, op, right } => format!(
+            "{} {} {}",
+            explain_column(left),
+            explain_comparison_operator(*op),
+            explain_sql_value(right)
+        ),
+        SqlPredicate::CompareColumns { left, op, right } => format!(
+            "{} {} {}",
+            explain_column(left),
+            explain_comparison_operator(*op),
+            explain_column(right)
+        ),
+        SqlPredicate::InList {
+            left,
+            values,
+            negated,
+        } => format!(
+            "{} {}IN ({})",
+            explain_column(left),
+            if *negated { "NOT " } else { "" },
+            values
+                .iter()
+                .map(explain_sql_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        SqlPredicate::Like {
+            left,
+            pattern,
+            case_insensitive,
+            negated,
+            escape,
+        } => {
+            let mut explanation = format!(
+                "{} {}{} {}",
+                explain_column(left),
+                if *negated { "NOT " } else { "" },
+                if *case_insensitive { "ILIKE" } else { "LIKE" },
+                explain_sql_value(pattern)
+            );
+            match escape {
+                SqlLikeEscape::Character('\\') => {}
+                SqlLikeEscape::Character(character) => {
+                    explanation.push_str(&format!(" ESCAPE '{character}'"));
+                }
+                SqlLikeEscape::Disabled => explanation.push_str(" ESCAPE ''"),
+            }
+            explanation
+        }
+        SqlPredicate::IsNull { column, negated } => format!(
+            "{} IS {}NULL",
+            explain_column(column),
+            if *negated { "NOT " } else { "" }
+        ),
+    }
+}
+
+fn explain_comparison_operator(operator: SqlComparisonOp) -> &'static str {
+    match operator {
+        SqlComparisonOp::Eq => "=",
+        SqlComparisonOp::NotEq => "!=",
+        SqlComparisonOp::Lt => "<",
+        SqlComparisonOp::Lte => "<=",
+        SqlComparisonOp::Gt => ">",
+        SqlComparisonOp::Gte => ">=",
+    }
+}
+
+fn explain_sql_value(value: &SqlValue) -> String {
+    match value {
+        SqlValue::Literal(value) => value.to_string(),
+        SqlValue::Parameter(position) => format!("${position}"),
+    }
+}
+
 struct RelationalBaseAccessPlanning<'a> {
     predicate: Option<&'a SqlPredicate>,
     order_by: &'a [crate::sql::SqlOrderItem],
@@ -2875,7 +3052,10 @@ fn choose_base_access(
         let Some(position) = schema.column_position(&column.name) else {
             continue;
         };
-        let value = value_to_relational(bind_sql_value(value, parameters)?)?;
+        let value = value_to_relational_as(
+            bind_sql_value(value, parameters)?,
+            schema.columns[position].scalar_type,
+        )?;
         if matches!(value, RelationalValue::Null) {
             continue;
         }
@@ -3215,10 +3395,13 @@ fn bind_canonical_keyset_bound(
     };
     let mut bound = prefix.0.clone();
     for (value, item) in [(first, &order_by[0]), (second, &order_by[1])] {
-        let value = value_to_relational(bind_sql_value(value, parameters)?)?;
         let Some(position) = schema.column_position(&item.column.name) else {
             return Ok(None);
         };
+        let value = value_to_relational_as(
+            bind_sql_value(value, parameters)?,
+            schema.columns[position].scalar_type,
+        )?;
         if schema.columns[position].nullable
             || matches!(value, RelationalValue::Null)
             || value.scalar_type() != Some(schema.columns[position].scalar_type)
@@ -5755,6 +5938,7 @@ struct ProjectedBatchSource<'a, 'pipeline> {
 struct DistinctAggregateValueBatchSource<'a, 'pipeline> {
     select: &'a SelectStatement,
     column: &'a SqlColumnRef,
+    filter: Option<&'a SqlPredicate>,
     parameters: &'a [Value],
     state: &'a RelationalState,
     base_schema: &'a RelationalTableSchema,
@@ -5797,6 +5981,9 @@ impl BindingBatchSource for DistinctAggregateValueBatchSource<'_, '_> {
             self.index_runtime,
             self.row_runtime,
             &mut |row| {
+                if !aggregate_filter_matches(self.filter, &row, self.parameters)? {
+                    return Ok(true);
+                }
                 let value = resolve_column(&row, self.column)?;
                 if matches!(value, RelationalValue::Null) {
                     return Ok(true);
@@ -6234,6 +6421,7 @@ fn relational_sort_value(value: &RelationalValue) -> Result<Value> {
         RelationalValue::DoublePrecision(value) => Ok(Value::Float(*value)),
         RelationalValue::Text(value) => Ok(Value::String(value.clone())),
         RelationalValue::Bytea(value) => Ok(Value::Binary(value.clone())),
+        RelationalValue::Uuid(value) => Ok(Value::Uuid(*value)),
         RelationalValue::Overflow(_) => Err(SkeinError::Execution(
             "ORDER BY requires overflow hydration before qualification".to_string(),
         )),
@@ -6695,11 +6883,12 @@ fn execute_aggregate_select<'a>(
     join_access_paths: Vec<RelationalAccessPathDescriptor>,
     join_planning: &RelationalJoinPlanningOutcome,
 ) -> Result<RelationalQueryOutput> {
-    if let Some((column, output_name)) = single_count_distinct_column(select) {
+    if let Some((column, output_name, filter)) = single_count_distinct_column(select) {
         return execute_single_count_distinct(
             select,
             column,
             output_name,
+            filter,
             parameters,
             state,
             base_schema,
@@ -6880,7 +7069,7 @@ fn execute_aggregate_select<'a>(
             }
             let group = groups.get_mut(&key).expect("aggregate group was inserted");
             for projection in group {
-                let delta = projection.update(&row)?;
+                let delta = projection.update(&row, parameters)?;
                 memory_tracker.release(delta.released_bytes);
                 charge_aggregate_memory(delta.added_bytes, &mut memory_tracker)?;
             }
@@ -6954,7 +7143,9 @@ fn execute_aggregate_select<'a>(
     })
 }
 
-fn single_count_distinct_column(select: &SelectStatement) -> Option<(&SqlColumnRef, String)> {
+fn single_count_distinct_column(
+    select: &SelectStatement,
+) -> Option<(&SqlColumnRef, String, Option<&SqlPredicate>)> {
     let [SelectProjection::Expression { expression, alias }] = select.projection.as_slice() else {
         return None;
     };
@@ -6962,6 +7153,7 @@ fn single_count_distinct_column(select: &SelectStatement) -> Option<(&SqlColumnR
         name,
         arguments,
         distinct: true,
+        filter,
     } = expression
     else {
         return None;
@@ -6970,8 +7162,13 @@ fn single_count_distinct_column(select: &SelectStatement) -> Option<(&SqlColumnR
     else {
         return None;
     };
-    (name == "count" && select.group_by.is_empty() && select.order_by.is_empty())
-        .then(|| (column, alias.clone().unwrap_or_else(|| "count".to_string())))
+    (name == "count" && select.group_by.is_empty() && select.order_by.is_empty()).then(|| {
+        (
+            column,
+            alias.clone().unwrap_or_else(|| "count".to_string()),
+            filter.as_ref(),
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6979,6 +7176,7 @@ fn execute_single_count_distinct<'a>(
     select: &'a SelectStatement,
     column: &'a SqlColumnRef,
     output_name: String,
+    filter: Option<&'a SqlPredicate>,
     parameters: &'a [Value],
     state: &'a RelationalState,
     base_schema: &'a RelationalTableSchema,
@@ -7003,6 +7201,7 @@ fn execute_single_count_distinct<'a>(
     let mut source = DistinctAggregateValueBatchSource {
         select,
         column,
+        filter,
         parameters,
         state,
         base_schema,
@@ -7201,7 +7400,7 @@ fn execute_grouped_aggregate<'a>(
                     .as_mut()
                     .expect("grouped aggregate initialized current group");
                 for projection in group {
-                    let delta = projection.update(row)?;
+                    let delta = projection.update(row, parameters)?;
                     tracker.release(delta.released_bytes);
                     charge_aggregate_memory(delta.added_bytes, &mut tracker)?;
                 }
@@ -7310,8 +7509,8 @@ impl AggregateProjectionState {
         }
     }
 
-    fn update(&mut self, row: &BoundRow<'_>) -> Result<AggregateMemoryDelta> {
-        self.expression.update(row)
+    fn update(&mut self, row: &BoundRow<'_>, parameters: &[Value]) -> Result<AggregateMemoryDelta> {
+        self.expression.update(row, parameters)
     }
 
     fn finish(self) -> Result<(String, Value)> {
@@ -7328,11 +7527,13 @@ enum AggregateExpressionState {
     },
     Count {
         column: Option<SqlColumnRef>,
+        filter: Option<SqlPredicate>,
         count: usize,
         distinct: Option<BTreeSet<RelationalValue>>,
     },
     Numeric {
         expression: SqlExpression,
+        filter: Option<SqlPredicate>,
         aggregate: NumericAggregate,
         value: Option<RelationalValue>,
         distinct: Option<BTreeSet<RelationalValue>>,
@@ -7385,6 +7586,7 @@ impl AggregateExpressionState {
                 name,
                 arguments,
                 distinct,
+                filter,
             } => match name.as_str() {
                 "count" => {
                     let [argument] = arguments.as_slice() else {
@@ -7410,6 +7612,7 @@ impl AggregateExpressionState {
                     }
                     Ok(Self::Count {
                         column,
+                        filter: filter.clone(),
                         count: 0,
                         distinct: distinct.then(BTreeSet::new),
                     })
@@ -7422,6 +7625,7 @@ impl AggregateExpressionState {
                     };
                     Ok(Self::Numeric {
                         expression: expression.clone(),
+                        filter: filter.clone(),
                         aggregate: if name == "sum" {
                             NumericAggregate::Sum
                         } else {
@@ -7457,7 +7661,7 @@ impl AggregateExpressionState {
         }
     }
 
-    fn update(&mut self, row: &BoundRow<'_>) -> Result<AggregateMemoryDelta> {
+    fn update(&mut self, row: &BoundRow<'_>, parameters: &[Value]) -> Result<AggregateMemoryDelta> {
         match self {
             Self::Constant(_) => Ok(AggregateMemoryDelta::default()),
             Self::First { column, value } => {
@@ -7474,9 +7678,13 @@ impl AggregateExpressionState {
             }
             Self::Count {
                 column,
+                filter,
                 count,
                 distinct,
             } => {
+                if !aggregate_filter_matches(filter.as_ref(), row, parameters)? {
+                    return Ok(AggregateMemoryDelta::default());
+                }
                 let value = column
                     .as_ref()
                     .map(|column| resolve_column(row, column).cloned())
@@ -7505,10 +7713,14 @@ impl AggregateExpressionState {
             }
             Self::Numeric {
                 expression,
+                filter,
                 aggregate,
                 value,
                 distinct,
             } => {
+                if !aggregate_filter_matches(filter.as_ref(), row, parameters)? {
+                    return Ok(AggregateMemoryDelta::default());
+                }
                 let candidate = evaluate_row_expression(expression, row)?;
                 if matches!(candidate, RelationalValue::Null) {
                     return Ok(AggregateMemoryDelta::default());
@@ -7529,7 +7741,7 @@ impl AggregateExpressionState {
             Self::Coalesce(states) => {
                 let mut delta = AggregateMemoryDelta::default();
                 for state in states {
-                    delta.combine(state.update(row)?);
+                    delta.combine(state.update(row, parameters)?);
                 }
                 Ok(delta)
             }
@@ -7648,10 +7860,14 @@ fn aggregate_expression_base_memory_bytes(state: &AggregateExpressionState) -> u
         AggregateExpressionState::First { column, value } => column_ref_memory_bytes(column)
             .saturating_add(value.as_ref().map_or(0, relational_value_memory_bytes)),
         AggregateExpressionState::Count {
-            column, distinct, ..
+            column,
+            filter,
+            distinct,
+            ..
         } => column
             .as_ref()
             .map_or(0, column_ref_memory_bytes)
+            .saturating_add(filter.as_ref().map_or(0, sql_predicate_memory_bytes))
             .saturating_add(
                 distinct
                     .as_ref()
@@ -7659,10 +7875,12 @@ fn aggregate_expression_base_memory_bytes(state: &AggregateExpressionState) -> u
             ),
         AggregateExpressionState::Numeric {
             expression,
+            filter,
             value,
             distinct,
             ..
         } => sql_expression_memory_bytes(expression)
+            .saturating_add(filter.as_ref().map_or(0, sql_predicate_memory_bytes))
             .saturating_add(value.as_ref().map_or(0, relational_value_memory_bytes))
             .saturating_add(
                 distinct
@@ -7684,18 +7902,54 @@ fn sql_expression_memory_bytes(expression: &SqlExpression) -> usize {
         }
         SqlExpression::Value(SqlValue::Parameter(_)) => 0,
         SqlExpression::Function {
-            name, arguments, ..
-        } => arguments.iter().fold(
-            name.len()
-                .saturating_add(std::mem::size_of::<Vec<SqlFunctionArgument>>()),
-            |total, argument| match argument {
-                SqlFunctionArgument::Expression(expression) => {
-                    total.saturating_add(sql_expression_memory_bytes(expression))
-                }
-                SqlFunctionArgument::Wildcard => total,
-            },
-        ),
+            name,
+            arguments,
+            filter,
+            ..
+        } => arguments
+            .iter()
+            .fold(
+                name.len()
+                    .saturating_add(std::mem::size_of::<Vec<SqlFunctionArgument>>()),
+                |total, argument| match argument {
+                    SqlFunctionArgument::Expression(expression) => {
+                        total.saturating_add(sql_expression_memory_bytes(expression))
+                    }
+                    SqlFunctionArgument::Wildcard => total,
+                },
+            )
+            .saturating_add(filter.as_ref().map_or(0, sql_predicate_memory_bytes)),
     })
+}
+
+fn sql_predicate_memory_bytes(predicate: &SqlPredicate) -> usize {
+    std::mem::size_of::<SqlPredicate>().saturating_add(match predicate {
+        SqlPredicate::And(left, right) | SqlPredicate::Or(left, right) => {
+            sql_predicate_memory_bytes(left).saturating_add(sql_predicate_memory_bytes(right))
+        }
+        SqlPredicate::Not(predicate) => sql_predicate_memory_bytes(predicate),
+        SqlPredicate::Compare { left, right, .. } => {
+            column_ref_memory_bytes(left).saturating_add(sql_value_memory_bytes(right))
+        }
+        SqlPredicate::CompareColumns { left, right, .. } => {
+            column_ref_memory_bytes(left).saturating_add(column_ref_memory_bytes(right))
+        }
+        SqlPredicate::InList { left, values, .. } => values.iter().fold(
+            column_ref_memory_bytes(left).saturating_add(std::mem::size_of::<Vec<SqlValue>>()),
+            |total, value| total.saturating_add(sql_value_memory_bytes(value)),
+        ),
+        SqlPredicate::Like { left, pattern, .. } => {
+            column_ref_memory_bytes(left).saturating_add(sql_value_memory_bytes(pattern))
+        }
+        SqlPredicate::IsNull { column, .. } => column_ref_memory_bytes(column),
+    })
+}
+
+fn sql_value_memory_bytes(value: &SqlValue) -> usize {
+    match value {
+        SqlValue::Literal(value) => skein_executor::binding::value_memory_bytes(value),
+        SqlValue::Parameter(_) => 0,
+    }
 }
 
 fn column_ref_memory_bytes(column: &SqlColumnRef) -> usize {
@@ -7722,6 +7976,7 @@ fn evaluate_row_expression(
             name,
             arguments,
             distinct: false,
+            filter: None,
         } if name == "octet_length" => {
             let [SqlFunctionArgument::Expression(SqlExpression::Column(column))] =
                 arguments.as_slice()
@@ -7749,6 +8004,17 @@ fn evaluate_row_expression(
         SqlExpression::Function { name, .. } => Err(SkeinError::Semantic(format!(
             "unsupported aggregate row function {name}"
         ))),
+    }
+}
+
+fn aggregate_filter_matches(
+    filter: Option<&SqlPredicate>,
+    row: &BoundRow<'_>,
+    parameters: &[Value],
+) -> Result<bool> {
+    match filter {
+        Some(filter) => Ok(predicate_truth(filter, row, parameters)? == Some(true)),
+        None => Ok(true),
     }
 }
 
@@ -7791,6 +8057,7 @@ fn relational_ref_to_value(value: RelationalValueRef<'_>) -> Result<Value> {
         RelationalValueRef::DoublePrecision(value) => Ok(Value::Float(value)),
         RelationalValueRef::Text(value) => Ok(Value::String(value.to_owned())),
         RelationalValueRef::Bytea(value) => Ok(Value::Binary(value.to_vec())),
+        RelationalValueRef::Uuid(value) => Ok(Value::Uuid(value)),
         RelationalValueRef::Overflow(_) => Err(SkeinError::Execution(
             "overflow value reached projection without hydration".to_string(),
         )),
@@ -7822,11 +8089,14 @@ fn predicate_truth(
         SqlPredicate::Not(predicate) => {
             Ok(predicate_truth(predicate, row, parameters)?.map(|value| !value))
         }
-        SqlPredicate::Compare { left, op, right } => compare_values(
-            resolve_column(row, left)?,
-            &value_to_relational(bind_sql_value(right, parameters)?)?,
-            *op,
-        ),
+        SqlPredicate::Compare { left, op, right } => {
+            let (left_value, scalar_type) = resolve_column_with_type(row, left)?;
+            compare_values(
+                left_value,
+                &value_to_relational_as(bind_sql_value(right, parameters)?, scalar_type)?,
+                *op,
+            )
+        }
         SqlPredicate::CompareColumns { left, op, right } => {
             compare_values(resolve_column(row, left)?, resolve_column(row, right)?, *op)
         }
@@ -7835,13 +8105,13 @@ fn predicate_truth(
             values,
             negated,
         } => {
-            let left = resolve_column(row, left)?;
+            let (left, scalar_type) = resolve_column_with_type(row, left)?;
             let mut has_unknown = false;
             let mut matched = false;
             for value in values {
                 match compare_values(
                     left,
-                    &value_to_relational(bind_sql_value(value, parameters)?)?,
+                    &value_to_relational_as(bind_sql_value(value, parameters)?, scalar_type)?,
                     SqlComparisonOp::Eq,
                 )? {
                     Some(true) => matched = true,
@@ -7858,6 +8128,38 @@ fn predicate_truth(
             };
             Ok(result.map(|value| value != *negated))
         }
+        SqlPredicate::Like {
+            left,
+            pattern,
+            case_insensitive,
+            negated,
+            escape,
+        } => {
+            let (left, scalar_type) = resolve_column_with_type(row, left)?;
+            if scalar_type != RelationalScalarType::Text {
+                return Err(SkeinError::Semantic(
+                    "LIKE and ILIKE require a TEXT column".to_string(),
+                ));
+            }
+            let pattern = value_to_relational_as(
+                bind_sql_value(pattern, parameters)?,
+                RelationalScalarType::Text,
+            )?;
+            match (left, pattern) {
+                (RelationalValue::Null, _) | (_, RelationalValue::Null) => Ok(None),
+                (RelationalValue::Text(value), RelationalValue::Text(pattern)) => {
+                    let matched =
+                        skein_sql::sql_like_matches(value, &pattern, *escape, *case_insensitive)?;
+                    Ok(Some(matched != *negated))
+                }
+                (RelationalValue::Overflow(_), _) => Err(SkeinError::Execution(
+                    "LIKE reached an overflow value without hydration".to_string(),
+                )),
+                _ => Err(SkeinError::Semantic(
+                    "LIKE and ILIKE require TEXT values".to_string(),
+                )),
+            }
+        }
         SqlPredicate::IsNull { column, negated } => Ok(Some(
             matches!(resolve_column(row, column)?, RelationalValue::Null) != *negated,
         )),
@@ -7873,6 +8175,13 @@ fn compare_values(
 }
 
 fn resolve_column<'a>(row: &'a BoundRow<'a>, column: &SqlColumnRef) -> Result<&'a RelationalValue> {
+    resolve_column_with_type(row, column).map(|(value, _)| value)
+}
+
+fn resolve_column_with_type<'a>(
+    row: &'a BoundRow<'a>,
+    column: &SqlColumnRef,
+) -> Result<(&'a RelationalValue, RelationalScalarType)> {
     let bindings =
         row.bindings.iter().filter(|binding| {
             column.qualifier.as_deref().is_none_or(|qualifier| {
@@ -7891,7 +8200,10 @@ fn resolve_column<'a>(row: &'a BoundRow<'a>, column: &SqlColumnRef) -> Result<&'
         .schema
         .column_position(&column.name)
         .expect("filtered binding has column");
-    binding.value(position)
+    Ok((
+        binding.value(position)?,
+        binding.schema.columns[position].scalar_type,
+    ))
 }
 
 fn project_bound_row(row: &BoundRow<'_>, projection: &[SelectProjection]) -> Result<Row> {
@@ -7915,14 +8227,38 @@ fn project_bound_row(row: &BoundRow<'_>, projection: &[SelectProjection]) -> Res
                     value,
                 )?;
             }
-            SelectProjection::Expression { .. } => {
-                return Err(SkeinError::Semantic(
-                    "non-aggregate relational projection expressions are not supported".to_string(),
-                ));
-            }
+            SelectProjection::Expression { expression, alias } => insert_output(
+                &mut output,
+                alias.clone().unwrap_or_else(|| expression_name(expression)),
+                relational_to_value(&evaluate_projection_expression(expression, row)?)?,
+            )?,
         }
     }
     Ok(output)
+}
+
+fn evaluate_projection_expression(
+    expression: &SqlExpression,
+    row: &BoundRow<'_>,
+) -> Result<RelationalValue> {
+    match expression {
+        SqlExpression::Column(column) => Ok(resolve_column(row, column)?.clone()),
+        SqlExpression::Value(SqlValue::Literal(value)) => value_to_relational(value.clone()),
+        SqlExpression::Value(SqlValue::Parameter(position)) => Err(SkeinError::Semantic(format!(
+            "projection expression cannot bind parameter ${position}"
+        ))),
+        SqlExpression::Function {
+            name,
+            arguments,
+            distinct: false,
+            filter: None,
+        } if name == "uuidv7" && arguments.is_empty() => {
+            Ok(RelationalValue::Uuid(super::uuidv7::generate_uuidv7()?))
+        }
+        SqlExpression::Function { name, .. } => Err(SkeinError::Semantic(format!(
+            "unsupported relational projection function {name}"
+        ))),
+    }
 }
 
 fn resolve_binding<'a>(
@@ -8004,10 +8340,18 @@ fn value_to_relational(value: Value) -> Result<RelationalValue> {
         Value::Float(value) => Ok(RelationalValue::DoublePrecision(value)),
         Value::String(value) => Ok(RelationalValue::Text(value)),
         Value::Binary(value) => Ok(RelationalValue::Bytea(value)),
+        Value::Uuid(value) => Ok(RelationalValue::Uuid(value)),
         Value::List(_) | Value::Map(_) => Err(SkeinError::Semantic(
             "relational SQL values must be scalar".to_string(),
         )),
     }
+}
+
+fn value_to_relational_as(
+    value: Value,
+    scalar_type: RelationalScalarType,
+) -> Result<RelationalValue> {
+    super::coerce_relational_value(value_to_relational(value)?, scalar_type)
 }
 
 fn relational_to_value(value: &RelationalValue) -> Result<Value> {
@@ -8018,6 +8362,7 @@ fn relational_to_value(value: &RelationalValue) -> Result<Value> {
         RelationalValue::DoublePrecision(value) => Ok(Value::Float(*value)),
         RelationalValue::Text(value) => Ok(Value::String(value.clone())),
         RelationalValue::Bytea(value) => Ok(Value::Binary(value.clone())),
+        RelationalValue::Uuid(value) => Ok(Value::Uuid(*value)),
         RelationalValue::Overflow(_) => Err(SkeinError::Execution(
             "overflow value reached projection without hydration".to_string(),
         )),

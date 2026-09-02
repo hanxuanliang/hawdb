@@ -350,6 +350,7 @@ fn graph_create_allocation_lock_prevents_duplicate_physical_ids() {
     assert!(error
         .to_string()
         .contains("transaction lock wait timed out"));
+    waiter.rollback();
     owner.commit().unwrap();
 }
 
@@ -1676,6 +1677,142 @@ fn for_update_point_lock_blocks_exact_update_until_owner_finishes() {
         .to_string()
         .contains("transaction lock wait timed out"));
     owner.rollback();
+}
+
+#[test]
+fn bigint_arithmetic_update_uses_the_existing_point_lock_contract() {
+    let db = Database::new().into_concurrent();
+    db.query_sql("CREATE TABLE public.counters (id BIGINT PRIMARY KEY, count BIGINT NOT NULL)")
+        .unwrap();
+    db.query_sql("INSERT INTO public.counters (id, count) VALUES (1, 0)")
+        .unwrap();
+
+    let mut owner = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_secs(1),
+        ))
+        .unwrap();
+    owner
+        .query_sql("UPDATE public.counters SET count = count + 1 WHERE id = 1")
+        .unwrap();
+
+    let mut waiter = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_millis(25),
+        ))
+        .unwrap();
+    let error = waiter
+        .query_sql("UPDATE public.counters SET count = count + 1 WHERE id = 1")
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("transaction lock wait timed out"));
+    owner.commit().unwrap();
+
+    let mut retry = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_secs(1),
+        ))
+        .unwrap();
+    retry
+        .query_sql("UPDATE public.counters SET count = count + 1 WHERE id = 1")
+        .unwrap();
+    retry.commit().unwrap();
+    assert_eq!(
+        db.query_sql("SELECT count FROM public.counters WHERE id = 1")
+            .unwrap()
+            .rows[0]["count"],
+        Value::Int(2)
+    );
+}
+
+#[test]
+fn delete_cascade_blocks_a_concurrent_child_insert_before_publication() {
+    let db = Database::new().into_concurrent();
+    db.query_sql("CREATE TABLE public.parents (id BIGINT PRIMARY KEY)")
+        .unwrap();
+    db.query_sql(
+        "CREATE TABLE public.children (\
+            id BIGINT PRIMARY KEY, \
+            parent_id BIGINT NOT NULL REFERENCES public.parents(id) ON DELETE CASCADE\
+        )",
+    )
+    .unwrap();
+    db.query_sql("INSERT INTO public.parents (id) VALUES (1)")
+        .unwrap();
+
+    let mut deleting = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_secs(1),
+        ))
+        .unwrap();
+    deleting
+        .query_sql("DELETE FROM public.parents WHERE id = 1")
+        .unwrap();
+
+    let mut inserting = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_millis(25),
+        ))
+        .unwrap();
+    let error = inserting
+        .query_sql("INSERT INTO public.children (id, parent_id) VALUES (10, 1)")
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("transaction lock wait timed out"));
+
+    deleting.commit().unwrap();
+    assert!(db
+        .query_sql("SELECT id FROM public.parents")
+        .unwrap()
+        .rows
+        .is_empty());
+    assert!(db
+        .query_sql("SELECT id FROM public.children")
+        .unwrap()
+        .rows
+        .is_empty());
+}
+
+#[test]
+fn uuidv7_defaults_preserve_staged_ids_across_concurrent_commit_modes() {
+    let db = Database::new().into_concurrent();
+    db.query_sql(
+        "CREATE TABLE public.uuidv7_defaults (\
+            id UUID PRIMARY KEY DEFAULT uuidv7(), \
+            url TEXT NOT NULL UNIQUE\
+        )",
+    )
+    .unwrap();
+
+    for (url, options) in [
+        (
+            "https://optimistic.example",
+            ConcurrentTransactionOptions::optimistic(),
+        ),
+        (
+            "https://pessimistic.example",
+            ConcurrentTransactionOptions::pessimistic(Duration::from_secs(1)),
+        ),
+    ] {
+        let mut transaction = db.begin_transaction(options).unwrap();
+        let staged = transaction
+            .query_sql_with_result(&format!(
+                "INSERT INTO public.uuidv7_defaults (url) VALUES ('{url}') RETURNING id"
+            ))
+            .unwrap();
+        let staged_id = staged.mutation.unwrap().rows[0]["id"].clone();
+        let Value::Uuid(uuid) = &staged_id else {
+            panic!("uuidv7 default must stage a typed UUID");
+        };
+        assert_eq!(uuid.as_bytes()[6] >> 4, 7, "uuidv7 version bits");
+        assert_eq!(uuid.as_bytes()[8] & 0b1100_0000, 0b1000_0000);
+
+        let committed = transaction.commit_with_result().unwrap();
+        assert_eq!(committed.output.rows[0]["id"], staged_id);
+        assert_eq!(committed.mutations[0].rows[0]["id"], staged_id);
+    }
 }
 
 #[test]

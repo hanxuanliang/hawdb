@@ -1577,6 +1577,10 @@ fn hash_relational_value(hasher: &mut IntegrityHasher, value: &RelationalValue) 
             hasher.update(&[5]);
             hash_bounded_bytes(hasher, value);
         }
+        RelationalValue::Uuid(value) => {
+            hasher.update(&[7]);
+            hasher.update(value.as_bytes());
+        }
         RelationalValue::Overflow(reference) => {
             hasher.update(&[6, relational_scalar_type_tag(reference.scalar_type)]);
             hash_bounded_bytes(hasher, reference.digest.as_bytes());
@@ -1593,6 +1597,7 @@ const fn relational_scalar_type_tag(scalar_type: RelationalScalarType) -> u8 {
         RelationalScalarType::DoublePrecision => 2,
         RelationalScalarType::Text => 3,
         RelationalScalarType::Bytea => 4,
+        RelationalScalarType::Uuid => 5,
     }
 }
 

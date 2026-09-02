@@ -1,7 +1,7 @@
 use crate::{
-    DeleteStatement, InsertStatement, SelectProjection, SelectStatement, SqlAssignment,
-    SqlAssignmentValue, SqlBound, SqlExpression, SqlFunctionArgument, SqlPredicate, SqlStatement,
-    SqlValue, UpdateStatement,
+    DeleteStatement, InsertStatement, SelectProjection, SelectStatement, SqlArithmeticOperand,
+    SqlAssignment, SqlAssignmentValue, SqlBound, SqlColumnDefault, SqlExpression,
+    SqlFunctionArgument, SqlPredicate, SqlStatement, SqlValue, UpdateStatement,
 };
 use skein_core::{Result, SkeinError};
 use std::collections::BTreeSet;
@@ -61,16 +61,22 @@ fn collect_statement_parameters(statement: &SqlStatement, positions: &mut BTreeS
         SqlStatement::CreateTable(create) => {
             for column in &create.columns {
                 if let Some(value) = &column.default {
-                    collect_value_parameter(value, positions);
+                    collect_column_default_parameter(value, positions);
                 }
             }
         }
         SqlStatement::AlterTableAddColumn(alter) => {
             if let Some(value) = &alter.column.default {
-                collect_value_parameter(value, positions);
+                collect_column_default_parameter(value, positions);
             }
         }
         SqlStatement::CreateIndex(_) => {}
+    }
+}
+
+fn collect_column_default_parameter(default: &SqlColumnDefault, positions: &mut BTreeSet<usize>) {
+    if let SqlColumnDefault::Literal(value) = default {
+        collect_value_parameter(value, positions);
     }
 }
 
@@ -118,20 +124,39 @@ fn collect_delete_parameters(delete: &DeleteStatement, positions: &mut BTreeSet<
 
 fn collect_assignment_parameters(assignments: &[SqlAssignment], positions: &mut BTreeSet<usize>) {
     for assignment in assignments {
-        if let SqlAssignmentValue::Value(value) = &assignment.value {
-            collect_value_parameter(value, positions);
+        match &assignment.value {
+            SqlAssignmentValue::Value(value) => collect_value_parameter(value, positions),
+            SqlAssignmentValue::Column(_) => {}
+            SqlAssignmentValue::Arithmetic { left, right, .. } => {
+                collect_arithmetic_operand_parameter(left, positions);
+                collect_arithmetic_operand_parameter(right, positions);
+            }
         }
+    }
+}
+
+fn collect_arithmetic_operand_parameter(
+    operand: &SqlArithmeticOperand,
+    positions: &mut BTreeSet<usize>,
+) {
+    if let SqlArithmeticOperand::Value(value) = operand {
+        collect_value_parameter(value, positions);
     }
 }
 
 fn collect_expression_parameters(expression: &SqlExpression, positions: &mut BTreeSet<usize>) {
     match expression {
         SqlExpression::Value(value) => collect_value_parameter(value, positions),
-        SqlExpression::Function { arguments, .. } => {
+        SqlExpression::Function {
+            arguments, filter, ..
+        } => {
             for argument in arguments {
                 if let SqlFunctionArgument::Expression(expression) = argument {
                     collect_expression_parameters(expression, positions);
                 }
+            }
+            if let Some(filter) = filter {
+                collect_predicate_parameters(filter, positions);
             }
         }
         SqlExpression::Column(_) => {}
@@ -151,6 +176,7 @@ fn collect_predicate_parameters(predicate: &SqlPredicate, positions: &mut BTreeS
                 collect_value_parameter(value, positions);
             }
         }
+        SqlPredicate::Like { pattern, .. } => collect_value_parameter(pattern, positions),
         SqlPredicate::CompareColumns { .. } | SqlPredicate::IsNull { .. } => {}
     }
 }

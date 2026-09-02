@@ -1,10 +1,14 @@
 use super::{bind_sql_value, compare_value_refs, relational_ref_to_value, value_to_relational};
 use crate::error::{Result, SkeinError};
 use crate::relational_sql::row_access::RelationalReadRowRef;
-use crate::sql::{SelectProjection, SqlColumnRef, SqlComparisonOp, SqlPredicate};
+use crate::sql::{
+    SelectProjection, SqlColumnRef, SqlComparisonOp, SqlExpression, SqlLikeEscape, SqlPredicate,
+};
 use crate::value::Value;
 use skein_executor::{QueryRowsBuilder, QuerySchema};
-use skein_storage::{RelationalTableSchema, RelationalValue, RelationalValueRef};
+use skein_storage::{
+    RelationalScalarType, RelationalTableSchema, RelationalValue, RelationalValueRef,
+};
 
 pub(super) enum BoundStreamingPredicate {
     And(Box<Self>, Box<Self>),
@@ -24,6 +28,13 @@ pub(super) enum BoundStreamingPredicate {
         left: usize,
         values: Box<[RelationalValue]>,
         negated: bool,
+    },
+    Like {
+        left: usize,
+        pattern: RelationalValue,
+        case_insensitive: bool,
+        negated: bool,
+        escape: SqlLikeEscape,
     },
     IsNull {
         column: usize,
@@ -96,6 +107,29 @@ impl BoundStreamingPredicate {
                     negated: *negated,
                 })
             }
+            SqlPredicate::Like {
+                left,
+                pattern,
+                case_insensitive,
+                negated,
+                escape,
+            } => {
+                let left = bind_column(left, schema, table, qualifier)?;
+                if schema.columns[left].scalar_type != RelationalScalarType::Text {
+                    return Err(SkeinError::Semantic(
+                        "LIKE and ILIKE require a TEXT column".to_string(),
+                    ));
+                }
+                let pattern = value_to_relational(bind_sql_value(pattern, parameters)?)?;
+                validate_value_type(schema, left, &pattern)?;
+                Ok(Self::Like {
+                    left,
+                    pattern,
+                    case_insensitive: *case_insensitive,
+                    negated: *negated,
+                    escape: *escape,
+                })
+            }
             SqlPredicate::IsNull { column, negated } => Ok(Self::IsNull {
                 column: bind_column(column, schema, table, qualifier)?,
                 negated: *negated,
@@ -144,6 +178,26 @@ impl BoundStreamingPredicate {
                 }
                 Ok(if has_unknown { None } else { Some(*negated) })
             }
+            Self::Like {
+                left,
+                pattern,
+                case_insensitive,
+                negated,
+                escape,
+            } => match (row.value(*left)?, pattern.as_ref()) {
+                (RelationalValueRef::Null, _) | (_, RelationalValueRef::Null) => Ok(None),
+                (RelationalValueRef::Text(value), RelationalValueRef::Text(pattern)) => {
+                    let matched =
+                        skein_sql::sql_like_matches(value, pattern, *escape, *case_insensitive)?;
+                    Ok(Some(matched != *negated))
+                }
+                (RelationalValueRef::Overflow(_), _) => Err(SkeinError::Execution(
+                    "LIKE reached an overflow value without hydration".to_string(),
+                )),
+                _ => Err(SkeinError::Semantic(
+                    "LIKE and ILIKE require TEXT values".to_string(),
+                )),
+            },
             Self::IsNull { column, negated } => Ok(Some(
                 matches!(row.value(*column)?, RelationalValueRef::Null) != *negated,
             )),
@@ -158,8 +212,14 @@ pub(super) struct BoundStreamingProjection {
 }
 
 struct BoundStreamingColumn {
-    ordinal: usize,
+    value: BoundStreamingValue,
     output_name: String,
+}
+
+#[derive(Clone, Copy)]
+enum BoundStreamingValue {
+    Column(usize),
+    UuidV7,
 }
 
 impl BoundStreamingProjection {
@@ -175,23 +235,38 @@ impl BoundStreamingProjection {
                 SelectProjection::Wildcard => {
                     columns.extend(schema.columns.iter().enumerate().map(|(ordinal, column)| {
                         BoundStreamingColumn {
-                            ordinal,
+                            value: BoundStreamingValue::Column(ordinal),
                             output_name: column.name.clone(),
                         }
                     }));
                 }
                 SelectProjection::Column { name, alias } => {
                     columns.push(BoundStreamingColumn {
-                        ordinal: bind_column(name, schema, table, qualifier)?,
+                        value: BoundStreamingValue::Column(bind_column(
+                            name, schema, table, qualifier,
+                        )?),
                         output_name: alias.clone().unwrap_or_else(|| name.name.clone()),
                     });
                 }
-                SelectProjection::Expression { .. } => {
-                    return Err(SkeinError::Semantic(
-                        "non-aggregate relational projection expressions are not supported"
-                            .to_string(),
-                    ));
-                }
+                SelectProjection::Expression { expression, alias } => match expression {
+                    SqlExpression::Function {
+                        name,
+                        arguments,
+                        distinct: false,
+                        filter: None,
+                    } if name == "uuidv7" && arguments.is_empty() => {
+                        columns.push(BoundStreamingColumn {
+                            value: BoundStreamingValue::UuidV7,
+                            output_name: alias.clone().unwrap_or_else(|| name.clone()),
+                        });
+                    }
+                    _ => {
+                        return Err(SkeinError::Semantic(
+                            "non-aggregate relational projection expressions are not supported"
+                                .to_string(),
+                        ));
+                    }
+                },
             }
         }
         let mut names = std::collections::BTreeSet::new();
@@ -229,7 +304,14 @@ impl BoundStreamingProjection {
         let previous_payload_bytes = *payload_bytes;
         *payload_bytes = payload_bytes.saturating_add(self.row_name_bytes);
         let result = output.try_push_values(self.columns.iter().map(|column| {
-            let value = relational_ref_to_value(row.value(column.ordinal)?)?;
+            let value = match column.value {
+                BoundStreamingValue::Column(ordinal) => {
+                    relational_ref_to_value(row.value(ordinal)?)?
+                }
+                BoundStreamingValue::UuidV7 => {
+                    Value::Uuid(super::super::uuidv7::generate_uuidv7()?)
+                }
+            };
             *payload_bytes =
                 payload_bytes.saturating_add(skein_executor::query_value_payload_bytes(&value));
             if *payload_bytes > max_payload_bytes {

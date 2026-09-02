@@ -1483,6 +1483,7 @@ fn collect_expression_hydration_columns(
             name,
             arguments,
             distinct: false,
+            filter: None,
         } if matches!(name.as_str(), "count" | "octet_length")
             && matches!(
                 arguments.as_slice(),
@@ -1496,7 +1497,9 @@ fn collect_expression_hydration_columns(
             };
             metadata_columns.push(column.clone());
         }
-        SqlExpression::Function { arguments, .. } => {
+        SqlExpression::Function {
+            arguments, filter, ..
+        } => {
             for argument in arguments {
                 if let SqlFunctionArgument::Expression(expression) = argument {
                     collect_expression_hydration_columns(
@@ -1506,8 +1509,36 @@ fn collect_expression_hydration_columns(
                     );
                 }
             }
+            if let Some(filter) = filter {
+                collect_predicate_hydration_columns(filter, value_columns);
+            }
         }
         SqlExpression::Value(_) => {}
+    }
+}
+
+fn collect_predicate_hydration_columns(
+    predicate: &SqlPredicate,
+    value_columns: &mut Vec<SqlColumnRef>,
+) {
+    match predicate {
+        SqlPredicate::And(left, right) | SqlPredicate::Or(left, right) => {
+            collect_predicate_hydration_columns(left, value_columns);
+            collect_predicate_hydration_columns(right, value_columns);
+        }
+        SqlPredicate::Not(predicate) => {
+            collect_predicate_hydration_columns(predicate, value_columns)
+        }
+        SqlPredicate::Compare { left, .. }
+        | SqlPredicate::InList { left, .. }
+        | SqlPredicate::Like { left, .. } => {
+            value_columns.push(left.clone());
+        }
+        SqlPredicate::CompareColumns { left, right, .. } => {
+            value_columns.push(left.clone());
+            value_columns.push(right.clone());
+        }
+        SqlPredicate::IsNull { column, .. } => value_columns.push(column.clone()),
     }
 }
 
@@ -1517,11 +1548,16 @@ fn collect_expression_columns<'a>(
 ) {
     match expression {
         SqlExpression::Column(column) => output.push(column),
-        SqlExpression::Function { arguments, .. } => {
+        SqlExpression::Function {
+            arguments, filter, ..
+        } => {
             for argument in arguments {
                 if let SqlFunctionArgument::Expression(expression) = argument {
                     collect_expression_columns(expression, output);
                 }
+            }
+            if let Some(filter) = filter {
+                collect_predicate_columns(filter, output);
             }
         }
         SqlExpression::Value(_) => {}
@@ -1535,7 +1571,9 @@ fn collect_predicate_columns<'a>(predicate: &'a SqlPredicate, output: &mut Vec<&
             collect_predicate_columns(right, output);
         }
         SqlPredicate::Not(predicate) => collect_predicate_columns(predicate, output),
-        SqlPredicate::Compare { left, .. } | SqlPredicate::InList { left, .. } => output.push(left),
+        SqlPredicate::Compare { left, .. }
+        | SqlPredicate::InList { left, .. }
+        | SqlPredicate::Like { left, .. } => output.push(left),
         SqlPredicate::CompareColumns { left, right, .. } => {
             output.push(left);
             output.push(right);

@@ -62,6 +62,7 @@ _SKEIN_SRCS = glob(
 
 _SKEIN_BASE_DEPS = [
     "@crate_index//:chrono",
+    "@crate_index//:getrandom",
     "@crate_index//:jieba-rs",
     "@crate_index//:serde",
     "@crate_index//:serde_json",
@@ -231,6 +232,7 @@ _SKEIN_CLI_SRCS = ["src/main.rs"] + glob(["src/cli/**/*.rs"])
 
 _SKEIN_CLI_DEPS = all_crate_deps(normal = True) + [
     ":skein",
+    "//crates/core:skein_core",
     "//crates/integrity:skein_integrity",
     "//crates/storage:skein_storage",
 ]

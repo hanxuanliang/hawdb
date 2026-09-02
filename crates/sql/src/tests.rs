@@ -1,8 +1,8 @@
 use super::{
-    parse_postgres_sql, prepare_postgres_sql, SelectProjection, SqlBound, SqlColumnRef,
-    SqlComparisonOp, SqlConflictAction, SqlDataType, SqlExpression, SqlFunctionArgument,
-    SqlJoinKind, SqlLockStrength, SqlOrderDirection, SqlPredicate, SqlStatement, SqlTableName,
-    SqlValue,
+    parse_postgres_sql, prepare_postgres_sql, SelectProjection, SqlArithmeticOperand,
+    SqlArithmeticOperator, SqlAssignmentValue, SqlBound, SqlColumnRef, SqlComparisonOp,
+    SqlConflictAction, SqlDataType, SqlExpression, SqlFunctionArgument, SqlJoinKind, SqlLikeEscape,
+    SqlLockStrength, SqlOrderDirection, SqlPredicate, SqlStatement, SqlTableName, SqlValue,
 };
 use skein_core::Value;
 
@@ -245,12 +245,55 @@ fn parses_aggregate_projection_and_distinct_argument() {
                 name,
                 arguments,
                 distinct: true,
+                filter: None,
             },
             alias: Some(alias),
         } if name == "count"
             && alias == "covered_messages"
             && matches!(arguments.as_slice(), [SqlFunctionArgument::Expression(_)])
     ));
+}
+
+#[test]
+fn parses_aggregate_filter_predicate_and_parameters() {
+    let prepared = prepare_postgres_sql(
+        "SELECT COUNT(*) FILTER (WHERE is_read = $1) AS unread_count FROM entries",
+    )
+    .expect("supported aggregate filter");
+    assert_eq!(
+        prepared
+            .parameters
+            .iter()
+            .map(|parameter| parameter.position)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    let SqlStatement::Select(select) = prepared.statement else {
+        panic!("expected SELECT statement");
+    };
+    assert!(matches!(
+        &select.projection[0],
+        SelectProjection::Expression {
+            expression: SqlExpression::Function {
+                name,
+                arguments,
+                distinct: false,
+                filter: Some(SqlPredicate::Compare {
+                    left,
+                    op: SqlComparisonOp::Eq,
+                    right: SqlValue::Parameter(1),
+                }),
+            },
+            alias: Some(alias),
+        } if name == "count"
+            && alias == "unread_count"
+            && left.name == "is_read"
+            && matches!(arguments.as_slice(), [SqlFunctionArgument::Wildcard])
+    ));
+
+    let error = parse_postgres_sql("SELECT MAX(id) FILTER (WHERE id = 'entry-1') FROM entries")
+        .expect_err("non-supported aggregate filter must fail");
+    assert!(error.to_string().contains("FILTER"));
 }
 
 #[test]
@@ -351,6 +394,58 @@ fn parses_insert_on_conflict_update() {
         insert.on_conflict.map(|conflict| conflict.action),
         Some(SqlConflictAction::DoUpdate(assignments)) if assignments.len() == 2
     ));
+}
+
+#[test]
+fn parses_prepared_bigint_update_arithmetic() {
+    let prepared = prepare_postgres_sql(
+        "UPDATE feeds SET failure_count = failure_count + $2, retry_count = $3 + retry_count, \
+         success_count = success_count - $4 WHERE id = $1",
+    )
+    .expect("supported BIGINT UPDATE arithmetic");
+    assert_eq!(
+        prepared
+            .parameters
+            .iter()
+            .map(|parameter| parameter.position)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+    let SqlStatement::Update(update) = prepared.statement else {
+        panic!("expected UPDATE statement");
+    };
+    assert!(matches!(
+        update.assignments[0].value,
+        SqlAssignmentValue::Arithmetic {
+            left: SqlArithmeticOperand::Column(_),
+            operator: SqlArithmeticOperator::Add,
+            right: SqlArithmeticOperand::Value(SqlValue::Parameter(2)),
+        }
+    ));
+    assert!(matches!(
+        update.assignments[1].value,
+        SqlAssignmentValue::Arithmetic {
+            left: SqlArithmeticOperand::Value(SqlValue::Parameter(3)),
+            operator: SqlArithmeticOperator::Add,
+            right: SqlArithmeticOperand::Column(_),
+        }
+    ));
+    assert!(matches!(
+        update.assignments[2].value,
+        SqlAssignmentValue::Arithmetic {
+            left: SqlArithmeticOperand::Column(_),
+            operator: SqlArithmeticOperator::Subtract,
+            right: SqlArithmeticOperand::Value(SqlValue::Parameter(4)),
+        }
+    ));
+
+    for sql in [
+        "UPDATE feeds SET failure_count = 1 - failure_count WHERE id = $1",
+        "UPDATE feeds SET failure_count = failure_count * 2 WHERE id = $1",
+    ] {
+        let error = parse_postgres_sql(sql).expect_err("unsupported arithmetic shape");
+        assert!(error.to_string().contains("arithmetic"));
+    }
 }
 
 #[test]
@@ -464,4 +559,99 @@ fn parses_nested_octet_length_aggregate() {
             alias: Some(alias),
         } if name == "coalesce" && alias == "payload_bytes"
     ));
+}
+
+#[test]
+fn parses_like_and_ilike_predicates_with_parameters_and_escape() {
+    let statement = parse_postgres_sql(
+        "SELECT id FROM documents WHERE title LIKE $1 ESCAPE '!' OR title NOT ILIKE 'guide%'",
+    )
+    .expect("valid LIKE and ILIKE predicates");
+    let SqlStatement::Select(select) = statement else {
+        panic!("expected SELECT");
+    };
+    let Some(SqlPredicate::Or(left, right)) = select.selection else {
+        panic!("expected disjunctive predicate");
+    };
+    assert!(matches!(
+        *left,
+        SqlPredicate::Like {
+            pattern: SqlValue::Parameter(1),
+            case_insensitive: false,
+            negated: false,
+            escape: SqlLikeEscape::Character('!'),
+            ..
+        }
+    ));
+    assert!(matches!(
+        *right,
+        SqlPredicate::Like {
+            pattern: SqlValue::Literal(Value::String(ref pattern)),
+            case_insensitive: true,
+            negated: true,
+            escape: SqlLikeEscape::Character('\\'),
+            ..
+        } if pattern == "guide%"
+    ));
+}
+
+#[test]
+fn like_matcher_handles_wildcards_escaping_and_unicode_case_insensitivity() {
+    assert!(super::sql_like_matches(
+        "prefix-middle-suffix",
+        "prefix%suffix",
+        SqlLikeEscape::Character('\\'),
+        false,
+    )
+    .expect("valid LIKE pattern"));
+    assert!(super::sql_like_matches(
+        "road_map",
+        r"road\_map",
+        SqlLikeEscape::Character('\\'),
+        false,
+    )
+    .expect("escaped underscore"));
+    assert!(super::sql_like_matches(
+        "100% complete",
+        "100!% complete",
+        SqlLikeEscape::Character('!'),
+        false,
+    )
+    .expect("custom escape"));
+    assert!(super::sql_like_matches(
+        "ÄPFEL guide",
+        "%äpfel%",
+        SqlLikeEscape::Character('\\'),
+        true,
+    )
+    .expect("locale-independent Unicode case folding"));
+    assert!(
+        super::sql_like_matches("Straße", "%STRASSE%", SqlLikeEscape::Character('\\'), true,)
+            .expect("default case folding expands sharp s")
+    );
+    assert!(
+        super::sql_like_matches("ß", "_", SqlLikeEscape::Character('\\'), true,)
+            .expect("wildcard consumes one source character after case folding")
+    );
+    assert!(
+        !super::sql_like_matches("ß", "__", SqlLikeEscape::Character('\\'), true,)
+            .expect("wildcards do not consume case-folded expansions")
+    );
+    assert!(!super::sql_like_matches(
+        "roadXmap",
+        r"road\_map",
+        SqlLikeEscape::Character('\\'),
+        false,
+    )
+    .expect("literal underscore does not match arbitrary character"));
+    assert!(
+        super::sql_like_matches("trailing\\", "trailing\\", SqlLikeEscape::Disabled, false,)
+            .expect("disabled escape retains literal backslash")
+    );
+    assert!(
+        super::sql_like_matches("value", "value\\", SqlLikeEscape::Character('\\'), false,)
+            .expect_err("dangling escape must fail")
+            .to_string()
+            .contains("ends with its escape")
+    );
 }

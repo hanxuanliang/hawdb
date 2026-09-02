@@ -321,6 +321,7 @@ impl<'a> RelationalLocatorBindingLayout<'a> {
                     )
                     | (RelationalScalarType::Text, RelationalValue::Text(_))
                     | (RelationalScalarType::Bytea, RelationalValue::Bytea(_))
+                    | (RelationalScalarType::Uuid, RelationalValue::Uuid(_))
             );
             if !matches {
                 return Err(SkeinError::Execution(format!(
@@ -447,6 +448,7 @@ fn relational_value_encoded_len(value: &RelationalValue) -> Result<usize> {
         RelationalValue::BigInt(_) | RelationalValue::DoublePrecision(_) => Ok(9),
         RelationalValue::Text(value) => checked_add(5, value.len(), "text value"),
         RelationalValue::Bytea(value) => checked_add(5, value.len(), "bytea value"),
+        RelationalValue::Uuid(_) => Ok(17),
         RelationalValue::Overflow(_) => Err(SkeinError::Execution(
             "typed relational locator cannot spill an overflow reference".to_string(),
         )),
@@ -485,6 +487,10 @@ fn write_relational_value(
             output.push(5);
             write_bytes(output, value)?;
         }
+        RelationalValue::Uuid(value) => {
+            output.push(6);
+            output.extend_from_slice(value.as_bytes());
+        }
         RelationalValue::Overflow(_) => {
             return Err(SkeinError::Execution(
                 "typed relational locator cannot spill an overflow reference".to_string(),
@@ -516,6 +522,7 @@ fn read_relational_value(
                 .map_err(|_| invalid_typed_record("invalid UTF-8 text"))?,
         ),
         5 => RelationalValue::Bytea(read_bytes(input, record_bytes)?),
+        6 => RelationalValue::Uuid(skein_core::Uuid::from_bytes(read_array(input)?)),
         _ => return Err(invalid_typed_record("invalid relational value tag")),
     })
 }
@@ -845,6 +852,7 @@ mod tests {
             RelationalValue::DoublePrecision(value) => ("float", Value::Float(*value)),
             RelationalValue::Text(value) => ("text", Value::String(value.clone())),
             RelationalValue::Bytea(value) => ("bytea", Value::Binary(value.clone())),
+            RelationalValue::Uuid(value) => ("uuid", Value::Uuid(*value)),
             RelationalValue::Null | RelationalValue::Overflow(_) => {
                 panic!("test key must be inline and non-null")
             }

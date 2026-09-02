@@ -2,10 +2,10 @@ use crate::{
     FileSegmentRangeReader, SegmentRangeReader, SegmentReadRange, SnapshotCommitError,
     SnapshotCoordinator, SnapshotReadGuard,
 };
-use skein_core::LogicalType;
+use skein_core::{LogicalType, Uuid};
 use skein_integrity::Sha256Digest;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
@@ -209,6 +209,7 @@ pub enum RelationalScalarType {
     DoublePrecision,
     Text,
     Bytea,
+    Uuid,
 }
 
 impl RelationalScalarType {
@@ -219,6 +220,7 @@ impl RelationalScalarType {
             Self::DoublePrecision => LogicalType::Float64,
             Self::Text => LogicalType::Text,
             Self::Bytea => LogicalType::Binary,
+            Self::Uuid => LogicalType::Uuid,
         }
     }
 }
@@ -231,6 +233,7 @@ pub enum RelationalValue {
     DoublePrecision(f64),
     Text(String),
     Bytea(Vec<u8>),
+    Uuid(Uuid),
     Overflow(RelationalOverflowRef),
 }
 
@@ -247,6 +250,7 @@ pub enum RelationalValueRef<'a> {
     DoublePrecision(f64),
     Text(&'a str),
     Bytea(&'a [u8]),
+    Uuid(Uuid),
     Overflow(RelationalOverflowRef),
 }
 
@@ -263,6 +267,7 @@ impl RelationalValue {
             Self::DoublePrecision(_) => Some(RelationalScalarType::DoublePrecision),
             Self::Text(_) => Some(RelationalScalarType::Text),
             Self::Bytea(_) => Some(RelationalScalarType::Bytea),
+            Self::Uuid(_) => Some(RelationalScalarType::Uuid),
             Self::Overflow(reference) => Some(reference.scalar_type),
         }
     }
@@ -278,6 +283,7 @@ impl RelationalValue {
             Self::BigInt(_) | Self::DoublePrecision(_) => 8,
             Self::Text(value) => value.len(),
             Self::Bytea(value) => value.len(),
+            Self::Uuid(_) => 16,
             Self::Overflow(_) => std::mem::size_of::<RelationalOverflowRef>(),
         }
     }
@@ -290,7 +296,8 @@ impl RelationalValue {
             Self::DoublePrecision(_) => 3,
             Self::Text(_) => 4,
             Self::Bytea(_) => 5,
-            Self::Overflow(_) => 6,
+            Self::Uuid(_) => 6,
+            Self::Overflow(_) => 7,
         }
     }
 }
@@ -304,6 +311,7 @@ impl<'a> RelationalValueRef<'a> {
             Self::DoublePrecision(_) => Some(RelationalScalarType::DoublePrecision),
             Self::Text(_) => Some(RelationalScalarType::Text),
             Self::Bytea(_) => Some(RelationalScalarType::Bytea),
+            Self::Uuid(_) => Some(RelationalScalarType::Uuid),
             Self::Overflow(reference) => Some(reference.scalar_type),
         }
     }
@@ -322,6 +330,7 @@ impl<'a> RelationalValueRef<'a> {
             Self::BigInt(_) | Self::DoublePrecision(_) => 8,
             Self::Text(value) => value.len(),
             Self::Bytea(value) => value.len(),
+            Self::Uuid(_) => 16,
             Self::Overflow(_) => std::mem::size_of::<RelationalOverflowRef>(),
         }
     }
@@ -334,6 +343,7 @@ impl<'a> RelationalValueRef<'a> {
             Self::DoublePrecision(value) => RelationalValue::DoublePrecision(value),
             Self::Text(value) => RelationalValue::Text(value.to_owned()),
             Self::Bytea(value) => RelationalValue::Bytea(value.to_vec()),
+            Self::Uuid(value) => RelationalValue::Uuid(value),
             Self::Overflow(reference) => RelationalValue::Overflow(reference),
         }
     }
@@ -346,7 +356,8 @@ impl<'a> RelationalValueRef<'a> {
             Self::DoublePrecision(_) => 3,
             Self::Text(_) => 4,
             Self::Bytea(_) => 5,
-            Self::Overflow(_) => 6,
+            Self::Uuid(_) => 6,
+            Self::Overflow(_) => 7,
         }
     }
 }
@@ -360,6 +371,7 @@ impl<'a> From<&'a RelationalValue> for RelationalValueRef<'a> {
             RelationalValue::DoublePrecision(value) => Self::DoublePrecision(*value),
             RelationalValue::Text(value) => Self::Text(value),
             RelationalValue::Bytea(value) => Self::Bytea(value),
+            RelationalValue::Uuid(value) => Self::Uuid(*value),
             RelationalValue::Overflow(reference) => Self::Overflow(*reference),
         }
     }
@@ -392,6 +404,7 @@ impl Ord for RelationalValueRef<'_> {
                 }
                 (Self::Text(left), Self::Text(right)) => left.cmp(right),
                 (Self::Bytea(left), Self::Bytea(right)) => left.cmp(right),
+                (Self::Uuid(left), Self::Uuid(right)) => left.cmp(&right),
                 (Self::Overflow(left), Self::Overflow(right)) => left.cmp(&right),
                 _ => Ordering::Equal,
             })
@@ -425,6 +438,7 @@ impl Ord for RelationalValue {
                 }
                 (Self::Text(left), Self::Text(right)) => left.cmp(right),
                 (Self::Bytea(left), Self::Bytea(right)) => left.cmp(right),
+                (Self::Uuid(left), Self::Uuid(right)) => left.cmp(right),
                 (Self::Overflow(left), Self::Overflow(right)) => left.cmp(right),
                 _ => Ordering::Equal,
             })
@@ -441,6 +455,7 @@ impl Hash for RelationalValue {
             Self::DoublePrecision(value) => value.to_bits().hash(state),
             Self::Text(value) => value.hash(state),
             Self::Bytea(value) => value.hash(state),
+            Self::Uuid(value) => value.hash(state),
             Self::Overflow(reference) => reference.hash(state),
         }
     }
@@ -451,13 +466,20 @@ pub struct RelationalColumnSchema {
     pub name: String,
     pub scalar_type: RelationalScalarType,
     pub nullable: bool,
-    pub default: Option<RelationalValue>,
+    pub default: Option<RelationalColumnDefault>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelationalColumnDefault {
+    Literal(RelationalValue),
+    UuidV7,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelationalReferentialAction {
     NoAction,
     Restrict,
+    Cascade,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1356,6 +1378,12 @@ fn relational_row_entry_bytes(key: &RelationalKey, row: &RelationalRow) -> usize
                 .sum::<usize>(),
         )
         .saturating_add(row.estimated_payload_bytes())
+}
+
+fn relational_key_payload_bytes(key: &RelationalKey) -> Option<usize> {
+    key.0.iter().try_fold(0usize, |bytes, value| {
+        bytes.checked_add(value.estimated_payload_bytes())
+    })
 }
 
 fn relational_sparse_recovery_entry_bytes(entry: &RelationalSparseRecoveryRow) -> Option<usize> {
@@ -4045,6 +4073,23 @@ pub struct RelationalUpsertAssignment {
 pub enum RelationalUpdateValue {
     Column(String),
     Value(RelationalValue),
+    BigIntArithmetic {
+        left: RelationalBigIntOperand,
+        operator: RelationalBigIntArithmeticOperator,
+        right: RelationalBigIntOperand,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelationalBigIntOperand {
+    Column(String),
+    Value(RelationalValue),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelationalBigIntArithmeticOperator {
+    Add,
+    Subtract,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4433,6 +4478,147 @@ struct TransactionApplyResult {
     mutation_outcomes: Vec<RelationalMutationOutcome>,
 }
 
+struct CascadeDelete {
+    table: String,
+    row: RelationalRow,
+}
+
+fn apply_delete_cascades(
+    state: &mut RelationalState,
+    deleted_rows: &mut VecDeque<CascadeDelete>,
+    limits: RelationalMutationLimits,
+    admitted_rows: usize,
+    admitted_payload_bytes: usize,
+    unbounded_delete_rows: usize,
+    unbounded_delete_payload_bytes: usize,
+    changed_keys: &mut BTreeMap<String, BTreeSet<RelationalKey>>,
+    touched: &mut BTreeSet<String>,
+    mut replay_access_tracker: Option<&mut RelationalReplayAccessTracker>,
+) -> Result<(), RelationalError> {
+    let mut cascade_rows = 0usize;
+    let mut cascade_payload_bytes = 0usize;
+    while let Some(CascadeDelete { table, row }) = deleted_rows.pop_front() {
+        let referenced_schema = Arc::clone(state.schemas.get(&table).ok_or_else(|| {
+            RelationalError::Schema(format!("unknown table {table} during delete cascade"))
+        })?);
+        let inbound = state
+            .schemas
+            .iter()
+            .flat_map(|(child_table, child_schema)| {
+                child_schema
+                    .foreign_keys
+                    .iter()
+                    .filter(|foreign_key| {
+                        foreign_key.referenced_table == table
+                            && foreign_key.on_delete == RelationalReferentialAction::Cascade
+                    })
+                    .cloned()
+                    .map(|foreign_key| (child_table.clone(), foreign_key))
+            })
+            .collect::<Vec<_>>();
+        for (child_table, foreign_key) in inbound {
+            let referenced_positions =
+                column_positions(&referenced_schema, &foreign_key.referenced_columns)?;
+            let referenced_key = row_key(&row, &referenced_positions);
+            if key_contains_null(&referenced_key) {
+                continue;
+            }
+            let child_schema = Arc::clone(state.schemas.get(&child_table).ok_or_else(|| {
+                RelationalError::Schema(format!(
+                    "unknown child table {child_table} during delete cascade"
+                ))
+            })?);
+            let local_positions = column_positions(&child_schema, &foreign_key.columns)?;
+            let child_keys = state
+                .segments
+                .get(&child_table)
+                .ok_or_else(|| {
+                    RelationalError::Schema(format!(
+                        "missing row segment for child table {child_table} during delete cascade"
+                    ))
+                })?
+                .rows
+                .iter()
+                .filter_map(|(key, candidate)| {
+                    let local_key = row_key(candidate, &local_positions);
+                    (!key_contains_null(&local_key) && local_key == referenced_key)
+                        .then(|| key.clone())
+                })
+                .collect::<Vec<_>>();
+            if child_keys.is_empty() {
+                continue;
+            }
+            for key in child_keys {
+                cascade_rows = cascade_rows.checked_add(1).ok_or_else(|| {
+                    RelationalError::Admission(
+                        "relational delete cascade row count overflow".to_string(),
+                    )
+                })?;
+                let total_rows = admitted_rows
+                    .checked_add(unbounded_delete_rows)
+                    .and_then(|rows| rows.checked_add(cascade_rows))
+                    .ok_or_else(|| {
+                        RelationalError::Admission(
+                            "relational delete cascade row count overflow".to_string(),
+                        )
+                    })?;
+                if total_rows > limits.max_rows.get() {
+                    return Err(RelationalError::Admission(format!(
+                        "relational delete cascade affects {total_rows} rows, exceeding max_rows {}",
+                        limits.max_rows
+                    )));
+                }
+                cascade_payload_bytes = cascade_payload_bytes
+                    .checked_add(relational_key_payload_bytes(&key).ok_or_else(|| {
+                        RelationalError::Admission(
+                            "relational delete cascade payload byte count overflow".to_string(),
+                        )
+                    })?)
+                    .ok_or_else(|| {
+                        RelationalError::Admission(
+                            "relational delete cascade payload byte count overflow".to_string(),
+                        )
+                    })?;
+                let total_payload_bytes = admitted_payload_bytes
+                    .checked_add(unbounded_delete_payload_bytes)
+                    .and_then(|bytes| bytes.checked_add(cascade_payload_bytes))
+                    .ok_or_else(|| {
+                        RelationalError::Admission(
+                            "relational delete cascade payload byte count overflow".to_string(),
+                        )
+                    })?;
+                if total_payload_bytes > limits.max_payload_bytes.get() {
+                    return Err(RelationalError::Admission(format!(
+                        "relational delete cascade contains {total_payload_bytes} payload bytes, exceeding max_payload_bytes {}",
+                        limits.max_payload_bytes
+                    )));
+                }
+                if let Some(tracker) = replay_access_tracker.as_deref_mut() {
+                    tracker.record(&child_table, &key)?;
+                }
+                let row = Arc::make_mut(state.segments.get_mut(&child_table).ok_or_else(|| {
+                    RelationalError::Schema(format!(
+                        "missing row segment for child table {child_table} during delete cascade"
+                    ))
+                })?)
+                .rows
+                .remove(&key)
+                .expect("cascade target was selected from the current child segment");
+                changed_keys
+                    .entry(child_table.clone())
+                    .or_default()
+                    .insert(key);
+                touched.insert(child_table.clone());
+                deleted_rows.push_back(CascadeDelete {
+                    table: child_table.clone(),
+                    row,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn apply_transaction_inner(
     state: &RelationalState,
     transaction: RelationalTransaction,
@@ -4463,6 +4649,11 @@ fn apply_transaction_inner(
             next.omit_materialized_index_postings();
         }
     }
+    let admitted_rows = transaction.estimated_mutation_rows();
+    let admitted_payload_bytes = transaction.estimated_payload_bytes();
+    let mut unbounded_delete_rows = 0usize;
+    let mut unbounded_delete_payload_bytes = 0usize;
+    let mut deleted_rows = VecDeque::new();
     let mut touched = BTreeSet::new();
     let mut changed_keys = BTreeMap::<String, BTreeSet<RelationalKey>>::new();
     let mut replay_access_tracker = replay_access_limits.map(RelationalReplayAccessTracker::new);
@@ -4511,7 +4702,19 @@ fn apply_transaction_inner(
                         limits.max_rows
                     )));
                 }
-                let fill = column.default.clone().unwrap_or(RelationalValue::Null);
+                let fill = match column.default.clone() {
+                    None => RelationalValue::Null,
+                    Some(RelationalColumnDefault::Literal(value)) => value,
+                    Some(RelationalColumnDefault::UuidV7) if row_count == 0 => {
+                        RelationalValue::Null
+                    }
+                    Some(RelationalColumnDefault::UuidV7) => {
+                        return Err(RelationalError::Schema(format!(
+                            "ALTER TABLE {table} cannot add column {} with uuidv7() default to a non-empty table",
+                            column.name
+                        )));
+                    }
+                };
                 if !column.nullable && matches!(&fill, RelationalValue::Null) && row_count != 0 {
                     return Err(RelationalError::Constraint(format!(
                         "ALTER TABLE {table} cannot add NOT NULL column {} without a default to a non-empty table",
@@ -4649,7 +4852,12 @@ fn apply_transaction_inner(
                         .entry(table.clone())
                         .or_default()
                         .insert(key.clone());
-                    segment.rows.remove(&key);
+                    if let Some(row) = segment.rows.remove(&key) {
+                        deleted_rows.push_back(CascadeDelete {
+                            table: table.clone(),
+                            row,
+                        });
+                    }
                 }
                 touched.insert(table);
             }
@@ -4682,12 +4890,63 @@ fn apply_transaction_inner(
                         limits.max_rows
                     )));
                 }
+                unbounded_delete_rows =
+                    unbounded_delete_rows
+                        .checked_add(keys.len())
+                        .ok_or_else(|| {
+                            RelationalError::Admission(
+                                "relational DELETE row count overflow".to_string(),
+                            )
+                        })?;
+                if admitted_rows
+                    .checked_add(unbounded_delete_rows)
+                    .is_none_or(|rows| rows > limits.max_rows.get())
+                {
+                    return Err(RelationalError::Admission(format!(
+                        "relational mutation affects more than max_rows {}",
+                        limits.max_rows
+                    )));
+                }
+                let delete_payload_bytes = keys.iter().try_fold(0usize, |bytes, key| {
+                    bytes
+                        .checked_add(relational_key_payload_bytes(key).ok_or_else(|| {
+                            RelationalError::Admission(
+                                "relational DELETE payload byte count overflow".to_string(),
+                            )
+                        })?)
+                        .ok_or_else(|| {
+                            RelationalError::Admission(
+                                "relational DELETE payload byte count overflow".to_string(),
+                            )
+                        })
+                })?;
+                unbounded_delete_payload_bytes = unbounded_delete_payload_bytes
+                    .checked_add(delete_payload_bytes)
+                    .ok_or_else(|| {
+                        RelationalError::Admission(
+                            "relational DELETE payload byte count overflow".to_string(),
+                        )
+                    })?;
+                if admitted_payload_bytes
+                    .checked_add(unbounded_delete_payload_bytes)
+                    .is_none_or(|bytes| bytes > limits.max_payload_bytes.get())
+                {
+                    return Err(RelationalError::Admission(format!(
+                        "relational DELETE contains more than max_payload_bytes {}",
+                        limits.max_payload_bytes
+                    )));
+                }
                 for key in keys {
                     changed_keys
                         .entry(table.clone())
                         .or_default()
                         .insert(key.clone());
-                    segment.rows.remove(&key);
+                    if let Some(row) = segment.rows.remove(&key) {
+                        deleted_rows.push_back(CascadeDelete {
+                            table: table.clone(),
+                            row,
+                        });
+                    }
                 }
                 touched.insert(table);
             }
@@ -4712,6 +4971,18 @@ fn apply_transaction_inner(
             }
         }
     }
+    apply_delete_cascades(
+        &mut next,
+        &mut deleted_rows,
+        limits,
+        admitted_rows,
+        admitted_payload_bytes,
+        unbounded_delete_rows,
+        unbounded_delete_payload_bytes,
+        &mut changed_keys,
+        &mut touched,
+        replay_access_tracker.as_mut(),
+    )?;
     overflow::prune_unreachable_segments(&mut next);
     if index_mode == TransactionIndexMode::Materialized {
         for table in &touched {
@@ -5065,7 +5336,7 @@ fn apply_update(
                     assignment.column
                 ))
             })?;
-            let source = match &assignment.value {
+            let value = match &assignment.value {
                 RelationalUpdateValue::Column(column) => {
                     let source = schema.column_position(column).ok_or_else(|| {
                         RelationalError::Schema(format!(
@@ -5077,14 +5348,31 @@ fn apply_update(
                             "UPDATE assignment from {column} has an incompatible type"
                         )));
                     }
-                    Some(source)
+                    ResolvedUpdateValue::Column(source)
                 }
                 RelationalUpdateValue::Value(value) => {
                     validate_value_type(&schema.columns[target], value)?;
-                    None
+                    ResolvedUpdateValue::Value(value.clone())
+                }
+                RelationalUpdateValue::BigIntArithmetic {
+                    left,
+                    operator,
+                    right,
+                } => {
+                    if schema.columns[target].scalar_type != RelationalScalarType::BigInt {
+                        return Err(RelationalError::Schema(format!(
+                            "UPDATE arithmetic assignment target {} must be BIGINT",
+                            assignment.column
+                        )));
+                    }
+                    ResolvedUpdateValue::BigIntArithmetic {
+                        left: resolve_bigint_operand(&schema, left)?,
+                        operator: *operator,
+                        right: resolve_bigint_operand(&schema, right)?,
+                    }
                 }
             };
-            Ok((target, source, &assignment.value))
+            Ok((target, value))
         })
         .collect::<Result<Vec<_>, RelationalError>>()?;
     let segment = state
@@ -5110,13 +5398,17 @@ fn apply_update(
     let mut updates = Vec::with_capacity(matched.len());
     for (old_key, row) in &matched {
         let mut values = row.values().to_vec();
-        for (target, source, assignment) in &resolved {
-            values[*target] = match (source, *assignment) {
-                (Some(source), _) => row.values()[*source].clone(),
-                (None, RelationalUpdateValue::Value(value)) => value.clone(),
-                (None, RelationalUpdateValue::Column(_)) => {
-                    unreachable!("update source position was resolved")
-                }
+        for (target, value) in &resolved {
+            values[*target] = match value {
+                ResolvedUpdateValue::Column(source) => row.values()[*source].clone(),
+                ResolvedUpdateValue::Value(value) => value.clone(),
+                ResolvedUpdateValue::BigIntArithmetic {
+                    left,
+                    operator,
+                    right,
+                } => RelationalValue::BigInt(evaluate_bigint_arithmetic(
+                    row, left, *operator, right,
+                )?),
             };
         }
         let mut updated = RelationalRow::new(values);
@@ -5143,6 +5435,77 @@ fn apply_update(
         }
     }
     Ok(())
+}
+
+enum ResolvedUpdateValue {
+    Column(usize),
+    Value(RelationalValue),
+    BigIntArithmetic {
+        left: ResolvedBigIntOperand,
+        operator: RelationalBigIntArithmeticOperator,
+        right: ResolvedBigIntOperand,
+    },
+}
+
+enum ResolvedBigIntOperand {
+    Column(usize),
+    Value(i64),
+}
+
+fn resolve_bigint_operand(
+    schema: &RelationalTableSchema,
+    operand: &RelationalBigIntOperand,
+) -> Result<ResolvedBigIntOperand, RelationalError> {
+    match operand {
+        RelationalBigIntOperand::Column(column) => {
+            let position = schema.column_position(column).ok_or_else(|| {
+                RelationalError::Schema(format!(
+                    "UPDATE arithmetic references unknown source column {column}"
+                ))
+            })?;
+            if schema.columns[position].scalar_type != RelationalScalarType::BigInt {
+                return Err(RelationalError::Schema(format!(
+                    "UPDATE arithmetic source column {column} must be BIGINT"
+                )));
+            }
+            Ok(ResolvedBigIntOperand::Column(position))
+        }
+        RelationalBigIntOperand::Value(RelationalValue::BigInt(value)) => {
+            Ok(ResolvedBigIntOperand::Value(*value))
+        }
+        RelationalBigIntOperand::Value(value) => Err(RelationalError::Schema(format!(
+            "UPDATE arithmetic value must be a non-null BIGINT, got {:?}",
+            value.scalar_type()
+        ))),
+    }
+}
+
+fn evaluate_bigint_arithmetic(
+    row: &RelationalRow,
+    left: &ResolvedBigIntOperand,
+    operator: RelationalBigIntArithmeticOperator,
+    right: &ResolvedBigIntOperand,
+) -> Result<i64, RelationalError> {
+    let operand = |operand: &ResolvedBigIntOperand| match operand {
+        ResolvedBigIntOperand::Value(value) => Ok(*value),
+        ResolvedBigIntOperand::Column(position) => match row.values()[*position] {
+            RelationalValue::BigInt(value) => Ok(value),
+            RelationalValue::Null => Err(RelationalError::Constraint(
+                "UPDATE BIGINT arithmetic does not accept NULL operands".to_string(),
+            )),
+            ref value => Err(RelationalError::Corruption(format!(
+                "UPDATE BIGINT arithmetic source has unexpected type {:?}",
+                value.scalar_type()
+            ))),
+        },
+    };
+    let left = operand(left)?;
+    let right = operand(right)?;
+    match operator {
+        RelationalBigIntArithmeticOperator::Add => left.checked_add(right),
+        RelationalBigIntArithmeticOperator::Subtract => left.checked_sub(right),
+    }
+    .ok_or_else(|| RelationalError::Constraint("UPDATE BIGINT arithmetic overflow".to_string()))
 }
 
 fn validate_predicate(
@@ -5260,7 +5623,17 @@ fn validate_table_schema(schema: &RelationalTableSchema) -> Result<(), Relationa
             )));
         }
         if let Some(default) = &column.default {
-            validate_value_type(column, default)?;
+            match default {
+                RelationalColumnDefault::Literal(value) => validate_value_type(column, value)?,
+                RelationalColumnDefault::UuidV7
+                    if column.scalar_type == RelationalScalarType::Uuid => {}
+                RelationalColumnDefault::UuidV7 => {
+                    return Err(RelationalError::Schema(format!(
+                        "column {} uses uuidv7() default but is not UUID",
+                        column.name
+                    )));
+                }
+            }
         }
     }
     validate_column_list(schema, &schema.primary_key, "primary key")?;
@@ -5832,6 +6205,7 @@ fn estimated_relational_key_encoding_bytes(key: &RelationalKey) -> Option<usize>
             RelationalValue::Bytea(value) => 3usize
                 .checked_add(value.iter().filter(|byte| **byte == 0).count())?
                 .checked_add(value.len())?,
+            RelationalValue::Uuid(_) => 17,
             RelationalValue::Overflow(_) => return None,
         };
         bytes.checked_add(value_bytes)

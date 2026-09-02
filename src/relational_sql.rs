@@ -1,11 +1,13 @@
 use crate::error::{Result, SkeinError};
 use crate::sql::{
-    AlterTableAddColumnStatement, CreateIndexStatement, CreateTableStatement, SqlAssignmentValue,
-    SqlColumnDefinition, SqlComparisonOp, SqlConflictAction, SqlDataType, SqlPredicate,
-    SqlReferentialAction, SqlStatement, SqlTableConstraint, SqlTableStorage, SqlValue,
+    AlterTableAddColumnStatement, CreateIndexStatement, CreateTableStatement, SqlArithmeticOperand,
+    SqlAssignmentValue, SqlColumnDefault, SqlColumnDefinition, SqlComparisonOp, SqlConflictAction,
+    SqlDataType, SqlPredicate, SqlReferentialAction, SqlStatement, SqlTableConstraint,
+    SqlTableStorage, SqlValue,
 };
 use crate::value::Value;
 use skein_storage::{
+    RelationalBigIntArithmeticOperator, RelationalBigIntOperand, RelationalColumnDefault,
     RelationalColumnSchema, RelationalComparisonOp, RelationalConflictAction,
     RelationalForeignKeySchema, RelationalIndexSchema, RelationalInsertMode, RelationalPredicate,
     RelationalReferentialAction, RelationalRow, RelationalScalarType, RelationalState,
@@ -15,6 +17,7 @@ use skein_storage::{
 };
 mod append;
 mod cardinality;
+mod uuidv7;
 
 pub(crate) use append::{
     compile_append_explain_sql, compile_append_select_sql, compile_append_statement_sql,
@@ -184,17 +187,21 @@ fn compile_relational_mutation(
                     let mut row = schema
                         .columns
                         .iter()
-                        .map(|column| column.default.clone().unwrap_or(RelationalValue::Null))
-                        .collect::<Vec<_>>();
+                        .map(materialize_column_default)
+                        .collect::<Result<Vec<_>>>()?;
                     for ((position, value), column_name) in
                         positions.iter().zip(values).zip(insert.columns.iter())
                     {
-                        row[*position] =
-                            bind_relational_value(value, parameters).map_err(|error| {
-                                SkeinError::Semantic(format!(
-                                    "failed to bind INSERT column {column_name}: {error}"
-                                ))
-                            })?;
+                        row[*position] = bind_relational_value_as(
+                            value,
+                            parameters,
+                            schema.columns[*position].scalar_type,
+                        )
+                        .map_err(|error| {
+                            SkeinError::Semantic(format!(
+                                "failed to bind INSERT column {column_name}: {error}"
+                            ))
+                        })?;
                     }
                     Ok(RelationalRow::new(row))
                 })
@@ -222,6 +229,12 @@ fn compile_relational_mutation(
                                         RelationalUpsertValue::Value(bind_relational_value(
                                             value, parameters,
                                         )?)
+                                    }
+                                    SqlAssignmentValue::Arithmetic { .. } => {
+                                        return Err(SkeinError::Semantic(
+                                            "ON CONFLICT assignments do not support arithmetic expressions"
+                                                .to_string(),
+                                        ));
                                     }
                                 };
                                 Ok(RelationalUpsertAssignment {
@@ -289,6 +302,10 @@ fn compile_relational_mutation(
                             schema.name, assignment.column
                         )));
                     }
+                    let target_type = schema.columns[schema
+                        .column_position(&assignment.column)
+                        .expect("assignment column was validated")]
+                    .scalar_type;
                     let value = match assignment.value {
                         SqlAssignmentValue::Column(column) => {
                             validate_mutation_column(
@@ -299,8 +316,44 @@ fn compile_relational_mutation(
                             )?;
                             RelationalUpdateValue::Column(column.name)
                         }
-                        SqlAssignmentValue::Value(value) => {
-                            RelationalUpdateValue::Value(bind_relational_value(value, parameters)?)
+                        SqlAssignmentValue::Value(value) => RelationalUpdateValue::Value(
+                            bind_relational_value_as(value, parameters, target_type)?,
+                        ),
+                        SqlAssignmentValue::Arithmetic {
+                            left,
+                            operator,
+                            right,
+                        } => {
+                            if target_type != RelationalScalarType::BigInt {
+                                return Err(SkeinError::Semantic(format!(
+                                    "UPDATE arithmetic assignment target {} must be BIGINT",
+                                    assignment.column
+                                )));
+                            }
+                            RelationalUpdateValue::BigIntArithmetic {
+                                left: compile_bigint_arithmetic_operand(
+                                    left,
+                                    parameters,
+                                    schema,
+                                    update.alias.as_deref(),
+                                    &update.table.name,
+                                )?,
+                                operator: match operator {
+                                    crate::sql::SqlArithmeticOperator::Add => {
+                                        RelationalBigIntArithmeticOperator::Add
+                                    }
+                                    crate::sql::SqlArithmeticOperator::Subtract => {
+                                        RelationalBigIntArithmeticOperator::Subtract
+                                    }
+                                },
+                                right: compile_bigint_arithmetic_operand(
+                                    right,
+                                    parameters,
+                                    schema,
+                                    update.alias.as_deref(),
+                                    &update.table.name,
+                                )?,
+                            }
                         }
                     };
                     Ok(RelationalUpdateAssignment {
@@ -339,6 +392,42 @@ fn compile_relational_mutation(
     })
 }
 
+fn compile_bigint_arithmetic_operand(
+    operand: SqlArithmeticOperand,
+    parameters: &[Value],
+    schema: &RelationalTableSchema,
+    alias: Option<&str>,
+    table: &str,
+) -> Result<RelationalBigIntOperand> {
+    match operand {
+        SqlArithmeticOperand::Column(column) => {
+            validate_mutation_column(&column, schema, alias, table)?;
+            let position = schema.column_position(&column.name).ok_or_else(|| {
+                SkeinError::Semantic(format!(
+                    "table {} has no column {}",
+                    schema.name, column.name
+                ))
+            })?;
+            if schema.columns[position].scalar_type != RelationalScalarType::BigInt {
+                return Err(SkeinError::Semantic(format!(
+                    "UPDATE arithmetic source column {} must be BIGINT",
+                    column.name
+                )));
+            }
+            Ok(RelationalBigIntOperand::Column(column.name))
+        }
+        SqlArithmeticOperand::Value(value) => {
+            let value = bind_relational_value_as(value, parameters, RelationalScalarType::BigInt)?;
+            if !matches!(value, RelationalValue::BigInt(_)) {
+                return Err(SkeinError::Semantic(
+                    "UPDATE arithmetic values must be non-null BIGINT scalars".to_string(),
+                ));
+            }
+            Ok(RelationalBigIntOperand::Value(value))
+        }
+    }
+}
+
 fn compile_mutation_predicate(
     predicate: SqlPredicate,
     parameters: &[Value],
@@ -358,10 +447,14 @@ fn compile_mutation_predicate(
         SqlPredicate::Not(predicate) => RelationalPredicate::Not(Box::new(compile(*predicate)?)),
         SqlPredicate::Compare { left, op, right } => {
             validate_mutation_column(&left, schema, alias, table)?;
+            let scalar_type = schema.columns[schema
+                .column_position(&left.name)
+                .expect("mutation column was validated")]
+            .scalar_type;
             RelationalPredicate::Compare {
                 column: left.name,
                 op: compile_comparison_op(op),
-                value: bind_relational_value(right, parameters)?,
+                value: bind_relational_value_as(right, parameters, scalar_type)?,
             }
         }
         SqlPredicate::CompareColumns { .. } => {
@@ -370,12 +463,21 @@ fn compile_mutation_predicate(
                     .to_string(),
             ));
         }
+        SqlPredicate::Like { .. } => {
+            return Err(SkeinError::Semantic(
+                "single-table mutation predicates do not support LIKE or ILIKE".to_string(),
+            ));
+        }
         SqlPredicate::InList {
             left,
             values,
             negated,
         } => {
             validate_mutation_column(&left, schema, alias, table)?;
+            let scalar_type = schema.columns[schema
+                .column_position(&left.name)
+                .expect("mutation column was validated")]
+            .scalar_type;
             let mut predicates = values
                 .into_iter()
                 .map(|value| {
@@ -386,7 +488,7 @@ fn compile_mutation_predicate(
                         } else {
                             RelationalComparisonOp::Eq
                         },
-                        value: bind_relational_value(value, parameters)?,
+                        value: bind_relational_value_as(value, parameters, scalar_type)?,
                     })
                 })
                 .collect::<Result<Vec<_>>>()?
@@ -468,6 +570,7 @@ pub(crate) fn bind_relational_value(
         Value::Float(value) => Ok(RelationalValue::DoublePrecision(value)),
         Value::String(value) => Ok(RelationalValue::Text(value)),
         Value::Binary(value) => Ok(RelationalValue::Bytea(value)),
+        Value::Uuid(value) => Ok(RelationalValue::Uuid(value)),
         Value::List(_) | Value::Map(_) => Err(SkeinError::Semantic(
             "relational SQL parameters must be scalar".to_string(),
         )),
@@ -519,8 +622,8 @@ fn compile_create_table(create: CreateTableStatement) -> Result<RelationalTableS
                 columns: vec![column.name.clone()],
                 referenced_table: reference.table.name.clone(),
                 referenced_columns: reference.columns.clone(),
-                on_delete: compile_referential_action(reference.on_delete)?,
-                on_update: compile_referential_action(reference.on_update)?,
+                on_delete: compile_delete_referential_action(reference.on_delete)?,
+                on_update: compile_update_referential_action(reference.on_update)?,
             });
         }
     }
@@ -540,8 +643,8 @@ fn compile_create_table(create: CreateTableStatement) -> Result<RelationalTableS
                     columns,
                     referenced_table: reference.table.name,
                     referenced_columns: reference.columns,
-                    on_delete: compile_referential_action(reference.on_delete)?,
-                    on_update: compile_referential_action(reference.on_update)?,
+                    on_delete: compile_delete_referential_action(reference.on_delete)?,
+                    on_update: compile_update_referential_action(reference.on_update)?,
                 });
             }
         }
@@ -588,11 +691,28 @@ fn compile_create_table(create: CreateTableStatement) -> Result<RelationalTableS
 }
 
 fn compile_column(column: SqlColumnDefinition) -> Result<RelationalColumnSchema> {
+    let scalar_type = compile_data_type(column.data_type);
     Ok(RelationalColumnSchema {
         name: column.name,
-        scalar_type: compile_data_type(column.data_type),
+        scalar_type,
         nullable: column.nullable,
-        default: column.default.map(compile_schema_value).transpose()?,
+        default: column
+            .default
+            .map(|default| match default {
+                SqlColumnDefault::Literal(value) => {
+                    compile_schema_value(value, scalar_type).map(RelationalColumnDefault::Literal)
+                }
+                SqlColumnDefault::UuidV7 => Ok(RelationalColumnDefault::UuidV7),
+            })
+            .transpose()?,
+    })
+}
+
+fn materialize_column_default(column: &RelationalColumnSchema) -> Result<RelationalValue> {
+    Ok(match &column.default {
+        None => RelationalValue::Null,
+        Some(RelationalColumnDefault::Literal(value)) => value.clone(),
+        Some(RelationalColumnDefault::UuidV7) => RelationalValue::Uuid(uuidv7::generate_uuidv7()?),
     })
 }
 
@@ -603,10 +723,14 @@ fn compile_data_type(data_type: SqlDataType) -> RelationalScalarType {
         SqlDataType::DoublePrecision => RelationalScalarType::DoublePrecision,
         SqlDataType::Text => RelationalScalarType::Text,
         SqlDataType::Bytea => RelationalScalarType::Bytea,
+        SqlDataType::Uuid => RelationalScalarType::Uuid,
     }
 }
 
-fn compile_schema_value(value: SqlValue) -> Result<RelationalValue> {
+fn compile_schema_value(
+    value: SqlValue,
+    scalar_type: RelationalScalarType,
+) -> Result<RelationalValue> {
     let SqlValue::Literal(value) = value else {
         return Err(SkeinError::Semantic(
             "schema defaults cannot contain parameters".to_string(),
@@ -619,18 +743,61 @@ fn compile_schema_value(value: SqlValue) -> Result<RelationalValue> {
         Value::Float(value) => Ok(RelationalValue::DoublePrecision(value)),
         Value::String(value) => Ok(RelationalValue::Text(value)),
         Value::Binary(value) => Ok(RelationalValue::Bytea(value)),
+        Value::Uuid(value) => Ok(RelationalValue::Uuid(value)),
         Value::List(_) | Value::Map(_) => Err(SkeinError::Semantic(
             "relational schema defaults must be scalar".to_string(),
         )),
     }
+    .and_then(|value| coerce_relational_value(value, scalar_type))
 }
 
-fn compile_referential_action(action: SqlReferentialAction) -> Result<RelationalReferentialAction> {
+fn bind_relational_value_as(
+    value: SqlValue,
+    parameters: &[Value],
+    scalar_type: RelationalScalarType,
+) -> Result<RelationalValue> {
+    bind_relational_value(value, parameters)
+        .and_then(|value| coerce_relational_value(value, scalar_type))
+}
+
+fn coerce_relational_value(
+    value: RelationalValue,
+    scalar_type: RelationalScalarType,
+) -> Result<RelationalValue> {
+    match (scalar_type, value) {
+        (RelationalScalarType::Uuid, RelationalValue::Text(value)) => {
+            skein_core::Uuid::parse_str(&value)
+                .map(RelationalValue::Uuid)
+                .map_err(|_| SkeinError::Semantic(format!("invalid UUID value {value:?}")))
+        }
+        (RelationalScalarType::Uuid, RelationalValue::Uuid(value)) => {
+            Ok(RelationalValue::Uuid(value))
+        }
+        (_, value) => Ok(value),
+    }
+}
+
+fn compile_delete_referential_action(
+    action: SqlReferentialAction,
+) -> Result<RelationalReferentialAction> {
+    match action {
+        SqlReferentialAction::NoAction => Ok(RelationalReferentialAction::NoAction),
+        SqlReferentialAction::Restrict => Ok(RelationalReferentialAction::Restrict),
+        SqlReferentialAction::Cascade => Ok(RelationalReferentialAction::Cascade),
+        SqlReferentialAction::SetNull => Err(SkeinError::Semantic(
+            "ON DELETE SET NULL is not supported".to_string(),
+        )),
+    }
+}
+
+fn compile_update_referential_action(
+    action: SqlReferentialAction,
+) -> Result<RelationalReferentialAction> {
     match action {
         SqlReferentialAction::NoAction => Ok(RelationalReferentialAction::NoAction),
         SqlReferentialAction::Restrict => Ok(RelationalReferentialAction::Restrict),
         SqlReferentialAction::Cascade | SqlReferentialAction::SetNull => Err(SkeinError::Semantic(
-            "CASCADE and SET NULL require a qualified relational mutation executor".to_string(),
+            "ON UPDATE CASCADE and SET NULL are not supported".to_string(),
         )),
     }
 }
@@ -697,6 +864,925 @@ mod tests {
     use crate::{Database, DatabaseConfig};
     use skein_storage::{DurabilityPolicy, RelationalStore};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn relational_uuid_scalar_preserves_typed_schema_keys_and_queries() {
+        let account_id = skein_core::Uuid::parse_str("018f4e6a-7c1b-7cc8-8f4d-1234567890ab")
+            .expect("parse account UUID");
+        let account_external_id =
+            skein_core::Uuid::parse_str("018f4e6a-7c1a-79d2-8f4d-1234567890ab")
+                .expect("parse account external UUID");
+        let duplicate_account_id =
+            skein_core::Uuid::parse_str("018f4e6a-7c1b-79d2-8f4d-1234567890ab")
+                .expect("parse duplicate account UUID");
+        let first_session = skein_core::Uuid::parse_str("018f4e6a-7c1c-7b45-8f4d-1234567890ab")
+            .expect("parse first session UUID");
+        let second_session = skein_core::Uuid::parse_str("018f4e6a-7c1d-7b45-8f4d-1234567890ab")
+            .expect("parse second session UUID");
+        let mut database = Database::new();
+        database
+            .query_sql(
+                "CREATE TABLE accounts (\
+                    id UUID PRIMARY KEY, \
+                    external_id UUID NOT NULL UNIQUE, \
+                    name TEXT NOT NULL UNIQUE\
+                )",
+            )
+            .expect("create UUID parent table");
+        database
+            .query_sql(
+                "CREATE TABLE sessions (\
+                    id UUID PRIMARY KEY, \
+                    account_id UUID NOT NULL REFERENCES accounts(id), \
+                    label TEXT NOT NULL\
+                )",
+            )
+            .expect("create UUID child table");
+        database
+            .query_sql("CREATE INDEX sessions_account_id_idx ON sessions (account_id, id)")
+            .expect("create UUID secondary index");
+        database
+            .query_sql(&format!(
+                "INSERT INTO accounts (id, external_id, name) \
+                 VALUES ('{account_id}', '{account_external_id}', 'primary')"
+            ))
+            .expect("insert UUID parent");
+        database
+            .query_sql(&format!(
+                "INSERT INTO sessions (id, account_id, label) VALUES \
+                 ('{second_session}', '{account_id}', 'second'), \
+                 ('{first_session}', '{account_id}', 'first')"
+            ))
+            .expect("insert UUID children");
+
+        let point = database
+            .query_sql(&format!(
+                "SELECT id FROM accounts WHERE id = '{account_id}'"
+            ))
+            .expect("read UUID primary key");
+        assert_eq!(point.rows[0]["id"], Value::Uuid(account_id));
+        assert_eq!(point.rows[0]["id"].to_string(), account_id.to_string());
+
+        let unique = database
+            .query_sql(&format!(
+                "SELECT id FROM accounts WHERE external_id = '{account_external_id}'"
+            ))
+            .expect("read UUID unique constraint");
+        assert_eq!(unique.rows[0]["id"], Value::Uuid(account_id));
+        database
+            .query_sql(&format!(
+                "INSERT INTO accounts (id, external_id, name) \
+                 VALUES ('{duplicate_account_id}', '{account_external_id}', 'duplicate')"
+            ))
+            .expect_err("duplicate UUID unique constraint must reject atomically");
+        assert!(database
+            .query_sql("SELECT id FROM accounts WHERE name = 'duplicate'")
+            .expect("read after duplicate UUID unique constraint")
+            .rows
+            .is_empty());
+
+        let parameterized = database
+            .query_sql_with_params(
+                "SELECT id FROM accounts WHERE id = $1",
+                &[Value::String(account_id.to_string())],
+            )
+            .expect("bind UUID parameter as a typed scalar");
+        assert_eq!(parameterized.rows[0]["id"], Value::Uuid(account_id));
+
+        let joined = database
+            .query_sql(&format!(
+                "SELECT s.id FROM sessions AS s \
+                 INNER JOIN accounts AS a ON a.id = s.account_id \
+                 WHERE a.id = '{account_id}' \
+                 ORDER BY s.id ASC LIMIT 2"
+            ))
+            .expect("join UUID foreign key");
+        assert_eq!(
+            joined
+                .rows
+                .iter()
+                .map(|row| row["id"].clone())
+                .collect::<Vec<_>>(),
+            [Value::Uuid(first_session), Value::Uuid(second_session)]
+        );
+
+        let range = database
+            .query_sql(&format!(
+                "SELECT id FROM sessions WHERE account_id = '{account_id}' \
+                 AND id > '{first_session}' ORDER BY id ASC LIMIT 1"
+            ))
+            .expect("range read UUID index");
+        assert_eq!(range.rows[0]["id"], Value::Uuid(second_session));
+
+        let metadata = database
+            .query_sql(
+                "SELECT data_type, udt_name FROM information_schema.columns \
+                 WHERE table_name = 'sessions' AND column_name = 'id'",
+            )
+            .expect("read UUID information schema");
+        assert_eq!(
+            metadata.rows[0]["data_type"],
+            Value::String("uuid".to_string())
+        );
+        assert_eq!(
+            metadata.rows[0]["udt_name"],
+            Value::String("uuid".to_string())
+        );
+
+        let invalid = database
+            .query_sql("INSERT INTO accounts (id, name) VALUES ('invalid', 'bad')")
+            .expect_err("invalid UUID must fail before mutation");
+        assert!(invalid.to_string().contains("invalid UUID"));
+        assert_eq!(
+            database
+                .query_sql("SELECT id FROM accounts WHERE name = 'bad'")
+                .expect("read after invalid UUID")
+                .rows
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn relational_uuid_scalar_survives_wal_and_checkpoint_reopen() {
+        let value = skein_core::Uuid::parse_str("018f4e6a-7c1e-7d7a-8f4d-1234567890ab")
+            .expect("parse durable UUID");
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "skein-relational-uuid-{nonce}-{}",
+            std::process::id()
+        ));
+        {
+            let mut database = Database::open_with_durability(&path, DurabilityPolicy::default())
+                .expect("open durable UUID database");
+            database
+                .query_sql("CREATE TABLE durable_ids (id UUID PRIMARY KEY, label TEXT NOT NULL)")
+                .expect("create durable UUID table");
+            database
+                .query_sql(&format!(
+                    "INSERT INTO durable_ids (id, label) VALUES ('{value}', 'durable')"
+                ))
+                .expect("insert durable UUID");
+        }
+        {
+            let mut reopened = Database::open_with_durability(&path, DurabilityPolicy::default())
+                .expect("reopen UUID WAL");
+            let recovered = reopened
+                .query_sql("SELECT id FROM durable_ids WHERE label = 'durable'")
+                .expect("read UUID recovered from WAL");
+            assert_eq!(recovered.rows[0]["id"], Value::Uuid(value));
+            reopened.checkpoint().expect("checkpoint durable UUID");
+        }
+        {
+            let mut reopened = Database::open_with_durability(&path, DurabilityPolicy::default())
+                .expect("reopen UUID checkpoint");
+            let recovered = reopened
+                .query_sql(&format!("SELECT id FROM durable_ids WHERE id = '{value}'"))
+                .expect("read UUID recovered from checkpoint");
+            assert_eq!(recovered.rows[0]["id"], Value::Uuid(value));
+        }
+        std::fs::remove_dir_all(path).expect("remove durable UUID test directory");
+    }
+
+    #[test]
+    fn relational_uuidv7_function_and_default_materialize_once_per_row() {
+        let mut database = Database::new();
+        database
+            .query_sql("CREATE TABLE probe (id BIGINT PRIMARY KEY)")
+            .expect("create uuidv7 probe");
+        database
+            .query_sql("INSERT INTO probe (id) VALUES (1)")
+            .expect("insert uuidv7 probe row");
+        let projected = database
+            .query_sql("SELECT uuidv7() AS generated_id FROM probe LIMIT 1")
+            .expect("project uuidv7");
+        let Value::Uuid(projected_id) = projected.rows[0]["generated_id"] else {
+            panic!("uuidv7 projection must return a UUID");
+        };
+        assert_uuidv7(projected_id);
+
+        database
+            .query_sql(
+                "CREATE TABLE feeds (\
+                    id UUID PRIMARY KEY DEFAULT uuidv7(), \
+                    url TEXT NOT NULL UNIQUE\
+                )",
+            )
+            .expect("create uuidv7 default table");
+        let defaults = database
+            .query_sql(
+                "SELECT column_default FROM information_schema.columns \
+                 WHERE table_name = 'feeds' AND column_name = 'id'",
+            )
+            .expect("read uuidv7 default metadata");
+        assert_eq!(
+            defaults.rows[0]["column_default"],
+            Value::String("uuidv7()".to_string())
+        );
+
+        let inserted = database
+            .query_sql(
+                "INSERT INTO feeds (url) VALUES ('https://one.example'), ('https://two.example') \
+                 RETURNING id",
+            )
+            .expect("insert UUID default rows");
+        let ids = inserted
+            .rows
+            .iter()
+            .map(|row| match row["id"] {
+                Value::Uuid(value) => value,
+                _ => panic!("uuidv7 default must return a UUID"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+        assert!(ids[0] < ids[1]);
+        ids.iter().copied().for_each(assert_uuidv7);
+
+        let explicit = uuidv7::generate_uuidv7().expect("generate explicit UUIDv7");
+        let explicit_insert = database
+            .query_sql(&format!(
+                "INSERT INTO feeds (id, url) VALUES ('{explicit}', 'https://explicit.example') \
+                 RETURNING id"
+            ))
+            .expect("insert explicit UUID");
+        assert_eq!(explicit_insert.rows[0]["id"], Value::Uuid(explicit));
+
+        let conflict = database
+            .query_sql(
+                "INSERT INTO feeds (url) VALUES ('https://one.example') \
+                 ON CONFLICT (url) DO NOTHING RETURNING id",
+            )
+            .expect("ignore UUID default conflict");
+        assert!(conflict.rows.is_empty());
+
+        let mut transaction = database.begin_transaction();
+        let staged = transaction
+            .query_sql_with_result(
+                "INSERT INTO feeds (url) VALUES ('https://transaction.example') RETURNING id",
+            )
+            .expect("stage UUID default insert");
+        let staged_id = match staged
+            .mutation
+            .expect("staged UUID mutation")
+            .rows
+            .first()
+            .expect("one staged UUID row")["id"]
+        {
+            Value::Uuid(value) => value,
+            _ => panic!("staged UUID default must be typed"),
+        };
+        let committed = transaction
+            .commit_with_result()
+            .expect("commit UUID default insert");
+        assert_eq!(committed.output.rows[0]["id"], Value::Uuid(staged_id));
+
+        let mut rollback = database.begin_transaction();
+        let staged = rollback
+            .query_sql_with_result(
+                "INSERT INTO feeds (url) VALUES ('https://rollback.example') RETURNING id",
+            )
+            .expect("stage rollback UUID default insert");
+        assert_eq!(
+            staged.mutation.expect("rollback mutation").rows.len(),
+            1,
+            "uuidv7 is materialized while the statement is staged"
+        );
+        rollback.rollback();
+        assert!(database
+            .query_sql("SELECT id FROM feeds WHERE url = 'https://rollback.example'")
+            .expect("read rolled-back UUID default row")
+            .rows
+            .is_empty());
+
+        let error = database
+            .query_sql("CREATE TABLE invalid_uuid_default (id TEXT PRIMARY KEY DEFAULT uuidv7())")
+            .expect_err("uuidv7 default must require UUID column");
+        assert!(error
+            .to_string()
+            .contains("uuidv7() default but is not UUID"));
+    }
+
+    #[test]
+    fn relational_uuidv7_defaults_survive_wal_and_checkpoint_without_regeneration() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "skein-relational-uuidv7-{nonce}-{}",
+            std::process::id()
+        ));
+        let generated;
+        {
+            let mut database = Database::open_with_durability(&path, DurabilityPolicy::default())
+                .expect("open durable uuidv7 database");
+            database
+                .query_sql(
+                    "CREATE TABLE durable_feeds (\
+                        id UUID PRIMARY KEY DEFAULT uuidv7(), \
+                        url TEXT NOT NULL UNIQUE\
+                    )",
+                )
+                .expect("create durable uuidv7 table");
+            let inserted = database
+                .query_sql(
+                    "INSERT INTO durable_feeds (url) VALUES ('https://durable.example') \
+                     RETURNING id",
+                )
+                .expect("insert durable uuidv7 row");
+            generated = match inserted.rows[0]["id"] {
+                Value::Uuid(value) => value,
+                _ => panic!("durable uuidv7 default must return a UUID"),
+            };
+            database
+                .checkpoint()
+                .expect("checkpoint durable uuidv7 row");
+        }
+        let mut reopened = Database::open_with_durability(&path, DurabilityPolicy::default())
+            .expect("reopen durable uuidv7 database");
+        let recovered = reopened
+            .query_sql("SELECT id FROM durable_feeds WHERE url = 'https://durable.example'")
+            .expect("read durable uuidv7 row");
+        assert_eq!(recovered.rows[0]["id"], Value::Uuid(generated));
+        assert_uuidv7(generated);
+        drop(reopened);
+        std::fs::remove_dir_all(path).expect("remove durable uuidv7 test directory");
+    }
+
+    #[test]
+    fn relational_on_delete_cascade_is_transitive_and_atomic() {
+        let mut database = Database::new();
+        database
+            .query_sql("CREATE TABLE parents (id BIGINT PRIMARY KEY)")
+            .expect("create cascade parent table");
+        database
+            .query_sql(
+                "CREATE TABLE children (\
+                    id BIGINT PRIMARY KEY, \
+                    parent_id BIGINT NOT NULL REFERENCES parents(id) ON DELETE CASCADE\
+                )",
+            )
+            .expect("create cascade child table");
+        database
+            .query_sql(
+                "CREATE TABLE grandchildren (\
+                    id BIGINT PRIMARY KEY, \
+                    child_id BIGINT NOT NULL REFERENCES children(id) ON DELETE CASCADE\
+                )",
+            )
+            .expect("create cascade grandchild table");
+        database
+            .query_sql(
+                "CREATE TABLE restrictors (\
+                    id BIGINT PRIMARY KEY, \
+                    parent_id BIGINT NOT NULL REFERENCES parents(id) ON DELETE RESTRICT\
+                )",
+            )
+            .expect("create restrict child table");
+
+        database
+            .query_sql("INSERT INTO parents (id) VALUES (1)")
+            .expect("insert cascade parent");
+        database
+            .query_sql("INSERT INTO children (id, parent_id) VALUES (10, 1), (11, 1)")
+            .expect("insert cascade children");
+        database
+            .query_sql("INSERT INTO grandchildren (id, child_id) VALUES (100, 10), (101, 11)")
+            .expect("insert cascade grandchildren");
+        database
+            .query_sql("DELETE FROM parents WHERE id = 1")
+            .expect("delete cascade parent");
+        for table in ["parents", "children", "grandchildren"] {
+            assert!(database
+                .query_sql(&format!("SELECT id FROM {table}"))
+                .expect("read cascade result")
+                .rows
+                .is_empty());
+        }
+
+        database
+            .query_sql("INSERT INTO parents (id) VALUES (2)")
+            .expect("insert restricted parent");
+        database
+            .query_sql("INSERT INTO children (id, parent_id) VALUES (20, 2)")
+            .expect("insert restricted cascade child");
+        database
+            .query_sql("INSERT INTO grandchildren (id, child_id) VALUES (200, 20)")
+            .expect("insert restricted cascade grandchild");
+        database
+            .query_sql("INSERT INTO restrictors (id, parent_id) VALUES (300, 2)")
+            .expect("insert restrict child");
+        let rejected = database
+            .query_sql("DELETE FROM parents WHERE id = 2")
+            .expect_err("restrict child must reject the complete cascade");
+        assert!(rejected.to_string().contains("prevents removing"));
+        for (table, id) in [
+            ("parents", 2),
+            ("children", 20),
+            ("grandchildren", 200),
+            ("restrictors", 300),
+        ] {
+            assert_eq!(
+                database
+                    .query_sql(&format!("SELECT id FROM {table} WHERE id = {id}"))
+                    .expect("read rejected cascade result")
+                    .rows
+                    .len(),
+                1
+            );
+        }
+
+        database
+            .query_sql("INSERT INTO parents (id) VALUES (3)")
+            .expect("insert rollback parent");
+        database
+            .query_sql("INSERT INTO children (id, parent_id) VALUES (30, 3)")
+            .expect("insert rollback child");
+        let mut rollback = database.begin_transaction();
+        rollback
+            .query_sql("DELETE FROM parents WHERE id = 3")
+            .expect("stage delete cascade");
+        rollback.rollback();
+        assert_eq!(
+            database
+                .query_sql("SELECT id FROM children WHERE id = 30")
+                .expect("read rolled back cascade child")
+                .rows
+                .len(),
+            1
+        );
+
+        let unsupported = database
+            .query_sql(
+                "CREATE TABLE unsupported_update (\
+                    id BIGINT PRIMARY KEY, \
+                    parent_id BIGINT NOT NULL REFERENCES parents(id) ON UPDATE CASCADE\
+                )",
+            )
+            .expect_err("ON UPDATE CASCADE remains unsupported");
+        assert!(unsupported.to_string().contains("ON UPDATE CASCADE"));
+    }
+
+    #[test]
+    fn relational_on_delete_cascade_survives_wal_and_checkpoint_reopen() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "skein-relational-cascade-{nonce}-{}",
+            std::process::id()
+        ));
+        {
+            let mut database = Database::open_with_durability(&path, DurabilityPolicy::default())
+                .expect("open durable cascade database");
+            database
+                .query_sql("CREATE TABLE durable_parents (id BIGINT PRIMARY KEY)")
+                .expect("create durable cascade parent table");
+            database
+                .query_sql(
+                    "CREATE TABLE durable_children (\
+                        id BIGINT PRIMARY KEY, \
+                        parent_id BIGINT NOT NULL REFERENCES durable_parents(id) ON DELETE CASCADE\
+                    )",
+                )
+                .expect("create durable cascade child table");
+            database
+                .query_sql("INSERT INTO durable_parents (id) VALUES (1)")
+                .expect("insert durable cascade parent");
+            database
+                .query_sql("INSERT INTO durable_children (id, parent_id) VALUES (10, 1)")
+                .expect("insert durable cascade child");
+            database
+                .query_sql("DELETE FROM durable_parents WHERE id = 1")
+                .expect("delete durable cascade parent");
+        }
+        {
+            let mut reopened = Database::open_with_durability(&path, DurabilityPolicy::default())
+                .expect("reopen durable cascade WAL");
+            for table in ["durable_parents", "durable_children"] {
+                assert!(reopened
+                    .query_sql(&format!("SELECT id FROM {table}"))
+                    .expect("read durable cascade WAL result")
+                    .rows
+                    .is_empty());
+            }
+            reopened
+                .checkpoint()
+                .expect("checkpoint durable cascade result");
+        }
+        {
+            let mut reopened = Database::open_with_durability(&path, DurabilityPolicy::default())
+                .expect("reopen durable cascade checkpoint");
+            for table in ["durable_parents", "durable_children"] {
+                assert!(reopened
+                    .query_sql(&format!("SELECT id FROM {table}"))
+                    .expect("read durable cascade checkpoint result")
+                    .rows
+                    .is_empty());
+            }
+        }
+        std::fs::remove_dir_all(path).expect("remove durable cascade test directory");
+    }
+
+    #[test]
+    fn relational_bigint_update_arithmetic_is_checked_and_transactional() {
+        let mut database = Database::new();
+        database
+            .query_sql(
+                "CREATE TABLE counters (\
+                    id BIGINT PRIMARY KEY, \
+                    count BIGINT NOT NULL, \
+                    label TEXT NOT NULL, \
+                    nullable_count BIGINT\
+                )",
+            )
+            .expect("create counter table");
+        for (id, count, label) in [
+            (1, 5, "one"),
+            (2, -2, "two"),
+            (3, i64::MAX, "maximum"),
+            (4, i64::MIN, "minimum"),
+            (5, 0, "nullable"),
+        ] {
+            database
+                .query_sql_with_params(
+                    "INSERT INTO counters (id, count, label) VALUES ($1, $2, $3)",
+                    &[
+                        Value::Int(id),
+                        Value::Int(count),
+                        Value::String(label.to_string()),
+                    ],
+                )
+                .expect("insert counter row");
+        }
+
+        database
+            .query_sql("UPDATE counters SET count = count + 3 WHERE id = 1")
+            .expect("increment literal counter");
+        database
+            .query_sql("UPDATE counters SET count = 2 + count WHERE id = 1")
+            .expect("reverse increment literal counter");
+        database
+            .query_sql_with_params(
+                "UPDATE counters SET count = count - $1 WHERE id = $2",
+                &[Value::Int(-2), Value::Int(1)],
+            )
+            .expect("parameterized counter subtraction");
+        let addition_summary = database
+            .query_sql(
+                "SELECT digest FROM system.statement_summary \
+                 WHERE query_text = 'UPDATE counters SET count = count + 3 WHERE id = 1'",
+            )
+            .expect("read addition statement summary");
+        let subtraction_summary = database
+            .query_sql(
+                "SELECT digest FROM system.statement_summary \
+                 WHERE query_text = 'UPDATE counters SET count = count - $1 WHERE id = $2'",
+            )
+            .expect("read subtraction statement summary");
+        assert_eq!(addition_summary.rows.len(), 1);
+        assert_eq!(subtraction_summary.rows.len(), 1);
+        assert_ne!(
+            addition_summary.rows[0]["digest"], subtraction_summary.rows[0]["digest"],
+            "statement summaries must retain the arithmetic expression shape"
+        );
+        database
+            .query_sql("UPDATE counters SET count = count + 1 WHERE id <= 2")
+            .expect("update multiple counter rows");
+        assert_eq!(
+            database
+                .query_sql("SELECT count FROM counters WHERE id = 1")
+                .expect("read incremented counter")
+                .rows[0]["count"],
+            Value::Int(13)
+        );
+        assert_eq!(
+            database
+                .query_sql("SELECT count FROM counters WHERE id = 2")
+                .expect("read second incremented counter")
+                .rows[0]["count"],
+            Value::Int(-1)
+        );
+
+        let mut transaction = database.begin_transaction();
+        transaction
+            .query_sql("UPDATE counters SET count = count + 1 WHERE id = 1")
+            .expect("stage first transaction-local increment");
+        transaction
+            .query_sql("UPDATE counters SET count = count + 1 WHERE id = 1")
+            .expect("stage second transaction-local increment");
+        assert_eq!(
+            transaction
+                .query_sql("SELECT count FROM counters WHERE id = 1")
+                .expect("read transaction-local increment")
+                .rows[0]["count"],
+            Value::Int(15)
+        );
+        transaction
+            .commit()
+            .expect("commit transaction-local increments");
+
+        let overflow = database
+            .query_sql("UPDATE counters SET count = count + 1 WHERE id >= 3")
+            .expect_err("BIGINT overflow must reject the complete UPDATE");
+        assert!(overflow.to_string().contains("arithmetic overflow"));
+        for (id, expected) in [(3, i64::MAX), (4, i64::MIN)] {
+            assert_eq!(
+                database
+                    .query_sql(&format!("SELECT count FROM counters WHERE id = {id}"))
+                    .expect("read after rejected arithmetic overflow")
+                    .rows[0]["count"],
+                Value::Int(expected)
+            );
+        }
+
+        for (sql, parameters, expected) in [
+            (
+                "UPDATE counters SET label = label + 1 WHERE id = 1",
+                Vec::new(),
+                "target",
+            ),
+            (
+                "UPDATE counters SET count = label + 1 WHERE id = 1",
+                Vec::new(),
+                "source",
+            ),
+            (
+                "UPDATE counters SET count = count + $1 WHERE id = 1",
+                vec![Value::String("one".to_string())],
+                "BIGINT",
+            ),
+            (
+                "UPDATE counters SET count = count + $1 WHERE id = 1",
+                vec![Value::Null],
+                "non-null",
+            ),
+        ] {
+            let error = database
+                .query_sql_with_params(sql, &parameters)
+                .expect_err("invalid arithmetic assignment must fail before publication");
+            assert!(error.to_string().contains(expected));
+        }
+
+        let null_operand = database
+            .query_sql("UPDATE counters SET nullable_count = nullable_count + 1 WHERE id = 5")
+            .expect_err("NULL arithmetic operand must fail");
+        assert!(null_operand.to_string().contains("NULL operands"));
+        database
+            .query_sql("UPDATE counters SET nullable_count = count + 1 WHERE id = 5")
+            .expect("non-null source can update a nullable BIGINT target");
+    }
+
+    #[test]
+    fn relational_bigint_update_arithmetic_survives_wal_and_checkpoint_reopen() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "skein-relational-arithmetic-{nonce}-{}",
+            std::process::id()
+        ));
+        {
+            let mut database = Database::open_with_durability(&path, DurabilityPolicy::default())
+                .expect("open durable arithmetic database");
+            database
+                .query_sql(
+                    "CREATE TABLE durable_counters (\
+                        id BIGINT PRIMARY KEY, \
+                        count BIGINT NOT NULL\
+                    )",
+                )
+                .expect("create durable counter table");
+            database
+                .query_sql("INSERT INTO durable_counters (id, count) VALUES (1, 7)")
+                .expect("insert durable counter");
+            database
+                .query_sql("UPDATE durable_counters SET count = count + 1 WHERE id = 1")
+                .expect("update durable counter");
+        }
+        {
+            let mut reopened = Database::open_with_durability(&path, DurabilityPolicy::default())
+                .expect("reopen arithmetic WAL");
+            assert_eq!(
+                reopened
+                    .query_sql("SELECT count FROM durable_counters WHERE id = 1")
+                    .expect("read durable arithmetic WAL result")
+                    .rows[0]["count"],
+                Value::Int(8)
+            );
+            reopened
+                .checkpoint()
+                .expect("checkpoint durable arithmetic result");
+        }
+        {
+            let mut reopened = Database::open_with_durability(&path, DurabilityPolicy::default())
+                .expect("reopen arithmetic checkpoint");
+            assert_eq!(
+                reopened
+                    .query_sql("SELECT count FROM durable_counters WHERE id = 1")
+                    .expect("read durable arithmetic checkpoint result")
+                    .rows[0]["count"],
+                Value::Int(8)
+            );
+        }
+        std::fs::remove_dir_all(path).expect("remove durable arithmetic test directory");
+    }
+
+    #[test]
+    fn relational_aggregate_filters_preserve_grouping_distinct_and_null_semantics() {
+        let mut database = Database::new();
+        database
+            .query_sql(
+                "CREATE TABLE entries (\
+                    id TEXT PRIMARY KEY, \
+                    feed_id TEXT NOT NULL, \
+                    is_read BOOLEAN, \
+                    is_saved BOOLEAN, \
+                    amount BIGINT\
+                )",
+            )
+            .expect("create aggregate filter table");
+        for (id, feed_id, is_read, is_saved, amount) in [
+            (
+                "entry-1",
+                "feed-1",
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Int(4),
+            ),
+            (
+                "entry-2",
+                "feed-1",
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Int(4),
+            ),
+            (
+                "entry-3",
+                "feed-2",
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Int(8),
+            ),
+            (
+                "entry-4",
+                "feed-2",
+                Value::Null,
+                Value::Bool(false),
+                Value::Null,
+            ),
+            (
+                "entry-5",
+                "feed-2",
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Int(8),
+            ),
+        ] {
+            database
+                .query_sql_with_params(
+                    "INSERT INTO entries (id, feed_id, is_read, is_saved, amount) \
+                     VALUES ($1, $2, $3, $4, $5)",
+                    &[
+                        Value::String(id.to_string()),
+                        Value::String(feed_id.to_string()),
+                        is_read,
+                        is_saved,
+                        amount,
+                    ],
+                )
+                .expect("insert aggregate filter row");
+        }
+
+        let totals = database
+            .query_sql(
+                "SELECT \
+                    COUNT(*) AS entry_count, \
+                    COUNT(*) FILTER (WHERE is_read = FALSE) AS unread_count, \
+                    COUNT(amount) FILTER (WHERE is_read = FALSE) AS unread_amount_count, \
+                    SUM(amount) FILTER (WHERE is_read = FALSE) AS unread_amount_sum, \
+                    SUM(amount) FILTER (WHERE is_read IS NULL) AS null_read_amount_sum \
+                 FROM entries",
+            )
+            .expect("aggregate filters on one snapshot");
+        assert_eq!(
+            totals.rows,
+            vec![BTreeMap::from([
+                ("entry_count".to_string(), Value::Int(5)),
+                ("unread_count".to_string(), Value::Int(3)),
+                ("unread_amount_count".to_string(), Value::Int(3)),
+                ("unread_amount_sum".to_string(), Value::Int(20)),
+                ("null_read_amount_sum".to_string(), Value::Null),
+            ])]
+        );
+
+        let distinct = database
+            .query_sql(
+                "SELECT COUNT(DISTINCT amount) FILTER (WHERE is_read = FALSE) AS amount_count \
+                 FROM entries",
+            )
+            .expect("filtered distinct count");
+        assert_eq!(distinct.rows[0]["amount_count"], Value::Int(2));
+
+        let grouped = database
+            .query_sql(
+                "SELECT \
+                    feed_id, \
+                    COUNT(*) FILTER (WHERE is_read = FALSE) AS unread_count, \
+                    SUM(amount) FILTER (WHERE is_read = FALSE) AS unread_amount_sum, \
+                    COUNT(*) FILTER (WHERE is_read IS NULL) AS null_read_count \
+                 FROM entries GROUP BY feed_id",
+            )
+            .expect("grouped aggregate filters");
+        assert_eq!(
+            grouped.rows,
+            vec![
+                BTreeMap::from([
+                    ("feed_id".to_string(), Value::String("feed-1".to_string())),
+                    ("unread_count".to_string(), Value::Int(1)),
+                    ("unread_amount_sum".to_string(), Value::Int(4)),
+                    ("null_read_count".to_string(), Value::Int(0)),
+                ]),
+                BTreeMap::from([
+                    ("feed_id".to_string(), Value::String("feed-2".to_string())),
+                    ("unread_count".to_string(), Value::Int(2)),
+                    ("unread_amount_sum".to_string(), Value::Int(16)),
+                    ("null_read_count".to_string(), Value::Int(1)),
+                ]),
+            ]
+        );
+
+        let parameterized = database
+            .query_sql_with_params(
+                "SELECT COUNT(*) FILTER (WHERE is_saved = $1) AS saved_count FROM entries",
+                &[Value::Bool(true)],
+            )
+            .expect("parameterized aggregate filter");
+        assert_eq!(parameterized.rows[0]["saved_count"], Value::Int(3));
+
+        let empty = database
+            .query_sql(
+                "SELECT \
+                    COUNT(*) FILTER (WHERE is_read = FALSE) AS unread_count, \
+                    SUM(amount) FILTER (WHERE is_read = FALSE) AS unread_amount_sum \
+                 FROM entries WHERE feed_id = 'missing'",
+            )
+            .expect("aggregate filter over empty selected input");
+        assert_eq!(
+            empty.rows,
+            vec![BTreeMap::from([
+                ("unread_count".to_string(), Value::Int(0)),
+                ("unread_amount_sum".to_string(), Value::Null),
+            ])]
+        );
+
+        let explain = database
+            .query_sql(
+                "EXPLAIN ANALYZE SELECT COUNT(*) FILTER (WHERE is_read = FALSE) \
+                 AS unread_count FROM entries",
+            )
+            .expect("explain aggregate filter");
+        assert!(
+            relational_explain_operator_info(&explain, "RelationalAggregateExec")
+                .contains("count(*) FILTER (is_read = false)")
+        );
+
+        let filtered_identity_sql =
+            "SELECT COUNT(*) FILTER (WHERE is_read = FALSE) AS unread_count FROM entries";
+        let unfiltered_identity_sql = "SELECT COUNT(*) AS entry_count FROM entries";
+        database
+            .query_sql(filtered_identity_sql)
+            .expect("record filtered aggregate statement identity");
+        database
+            .query_sql(unfiltered_identity_sql)
+            .expect("record unfiltered aggregate statement identity");
+        let filtered_summary = database
+            .query_sql(&format!(
+                "SELECT digest FROM system.statement_summary WHERE query_text = '{filtered_identity_sql}'"
+            ))
+            .expect("read filtered aggregate statement summary");
+        let unfiltered_summary = database
+            .query_sql(&format!(
+                "SELECT digest FROM system.statement_summary WHERE query_text = '{unfiltered_identity_sql}'"
+            ))
+            .expect("read unfiltered aggregate statement summary");
+        assert_ne!(
+            filtered_summary.rows[0]["digest"], unfiltered_summary.rows[0]["digest"],
+            "statement identity must retain aggregate FILTER shape"
+        );
+    }
+
+    fn assert_uuidv7(value: crate::Uuid) {
+        let bytes = value.as_bytes();
+        assert_eq!(bytes[6] >> 4, 7, "uuidv7 version bits");
+        assert_eq!(bytes[8] & 0b1100_0000, 0b1000_0000, "RFC 9562 variant bits");
+    }
 
     #[test]
     fn relational_keyset_pagination_uses_exclusive_forward_and_backward_index_seeks() {
@@ -1774,6 +2860,139 @@ mod tests {
             .rows
             .iter()
             .all(|row| row.contains_key("payload") && !row.contains_key("body")));
+    }
+
+    #[test]
+    fn relational_sql_like_and_ilike_cover_scans_joins_groups_and_nulls() {
+        let mut database = Database::new();
+        database
+            .query_sql("CREATE TABLE like_feeds (id TEXT PRIMARY KEY, title TEXT NOT NULL)")
+            .expect("create LIKE feeds");
+        database
+            .query_sql(
+                "CREATE TABLE like_documents (id TEXT PRIMARY KEY, feed_id TEXT NOT NULL, title TEXT)",
+            )
+            .expect("create LIKE documents");
+        database
+            .query_sql(
+                "INSERT INTO like_feeds (id, title) VALUES \
+                 ('feed-1', 'Engineering Notes'), ('feed-2', 'General')",
+            )
+            .expect("insert LIKE feeds");
+        database
+            .query_sql(
+                "INSERT INTO like_documents (id, feed_id, title) VALUES \
+                 ('doc-1', 'feed-1', 'road_map'), \
+                 ('doc-2', 'feed-1', 'roadXmap'), \
+                 ('doc-3', 'feed-2', '100% complete'), \
+                 ('doc-4', 'feed-2', 'ÄPFEL Guide'), \
+                 ('doc-5', 'feed-2', 'misc'), \
+                 ('doc-6', 'feed-2', NULL), \
+                 ('doc-7', 'feed-2', 'Straße')",
+            )
+            .expect("insert LIKE documents");
+
+        let escaped = database
+            .query_sql("SELECT id FROM like_documents WHERE title LIKE 'road\\_map'")
+            .expect("match escaped underscore through borrowed scan");
+        assert_eq!(escaped.rows.len(), 1);
+        assert_eq!(escaped.rows[0]["id"], text("doc-1"));
+
+        let wildcard = database
+            .query_sql("SELECT id FROM like_documents WHERE title LIKE 'road_map'")
+            .expect("match single-character wildcard");
+        assert_eq!(wildcard.rows.len(), 2);
+
+        let suffix = database
+            .query_sql_with_params(
+                "SELECT id FROM like_documents WHERE title LIKE $1",
+                &[text("%complete")],
+            )
+            .expect("match parameterized suffix");
+        assert_eq!(suffix.rows.len(), 1);
+        assert_eq!(suffix.rows[0]["id"], text("doc-3"));
+
+        let custom_escape = database
+            .query_sql("SELECT id FROM like_documents WHERE title LIKE '100!% complete' ESCAPE '!'")
+            .expect("match custom escaped wildcard");
+        assert_eq!(custom_escape.rows.len(), 1);
+        assert_eq!(custom_escape.rows[0]["id"], text("doc-3"));
+
+        let ilike = database
+            .query_sql_with_params(
+                "SELECT id FROM like_documents WHERE title ILIKE $1",
+                &[text("%äpfel%")],
+            )
+            .expect("match Unicode ILIKE without a process locale");
+        assert_eq!(ilike.rows.len(), 1);
+        assert_eq!(ilike.rows[0]["id"], text("doc-4"));
+
+        let case_folded = database
+            .query_sql("SELECT id FROM like_documents WHERE title ILIKE '%STRASSE%'")
+            .expect("match Unicode default case folding");
+        assert_eq!(case_folded.rows.len(), 1);
+        assert_eq!(case_folded.rows[0]["id"], text("doc-7"));
+
+        let case_folded_wildcard = database
+            .query_sql("SELECT id FROM like_documents WHERE title ILIKE 'Stra_e'")
+            .expect("preserve wildcard cardinality across case folding");
+        assert_eq!(case_folded_wildcard.rows.len(), 1);
+        assert_eq!(case_folded_wildcard.rows[0]["id"], text("doc-7"));
+
+        let bounded = database
+            .query_sql(
+                "SELECT id FROM like_documents WHERE title ILIKE 'road%' \
+                 ORDER BY id ASC LIMIT 1 OFFSET 1",
+            )
+            .expect("apply ILIKE before bounded ordering");
+        assert_eq!(bounded.rows.len(), 1);
+        assert_eq!(bounded.rows[0]["id"], text("doc-2"));
+
+        let null_pattern = database
+            .query_sql_with_params(
+                "SELECT id FROM like_documents WHERE title LIKE $1",
+                &[Value::Null],
+            )
+            .expect("NULL LIKE pattern evaluates to unknown");
+        assert!(null_pattern.rows.is_empty());
+        let negated = database
+            .query_sql("SELECT id FROM like_documents WHERE title NOT ILIKE 'road%'")
+            .expect("NOT ILIKE retains SQL NULL semantics");
+        assert_eq!(negated.rows.len(), 4);
+        assert!(negated.rows.iter().all(|row| row["id"] != text("doc-6")));
+
+        let grouped = database
+            .query_sql(
+                "SELECT feed_id, COUNT(*) AS document_count \
+                 FROM like_documents WHERE title ILIKE '%guide%' GROUP BY feed_id",
+            )
+            .expect("group LIKE-filtered documents");
+        assert_eq!(grouped.rows.len(), 1);
+        assert_eq!(grouped.rows[0]["feed_id"], text("feed-2"));
+        assert_eq!(grouped.rows[0]["document_count"], Value::Int(1));
+
+        let joined = database
+            .query_sql(
+                "SELECT d.id FROM like_documents AS d \
+                 INNER JOIN like_feeds AS f ON f.id = d.feed_id \
+                 WHERE f.title ILIKE 'engineering%' OR d.title LIKE '%complete'",
+            )
+            .expect("evaluate LIKE predicates across a join");
+        assert_eq!(joined.rows.len(), 3);
+
+        let explain = database
+            .query_sql("EXPLAIN SELECT id FROM like_documents WHERE title ILIKE '%guide%'")
+            .expect("explain scan-based ILIKE evaluation");
+        assert!(relational_explain_operator_info(&explain, "SelectionExec").contains("ILIKE"));
+        assert!(explain.rows.iter().any(|row| matches!(
+            row.get("id"),
+            Some(Value::String(id)) if id.contains("TableFullScanExec")
+        )));
+
+        let error = database
+            .query_sql("UPDATE like_documents SET title = 'changed' WHERE title LIKE 'road%'")
+            .expect_err("mutation LIKE remains outside the relational write contract");
+        assert!(error.to_string().contains("do not support LIKE or ILIKE"));
     }
 
     #[test]
