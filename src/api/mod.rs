@@ -20671,6 +20671,7 @@ fn profiled_relational_sql_output(
         hydration,
         index_execution_evidence,
         row_execution_evidence,
+        blocking_operator_memory_reports,
         ..
     } = output;
     let profile = RelationalSqlReadProfile {
@@ -20724,6 +20725,7 @@ fn profiled_relational_sql_output(
             overlay_entries: row_execution_evidence.overlay_entries,
             overlay_resident_bytes: row_execution_evidence.overlay_resident_bytes,
         },
+        blocking_operator_memory_reports,
     };
     ProfiledRelationalSqlQueryOutput {
         output: QueryOutput { rows },
