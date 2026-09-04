@@ -879,6 +879,7 @@ struct ProjectionRelationalReadSnapshot {
 struct ReadStreamingExecutionContext<'a> {
     task_context: Option<&'a skein_core::RuntimeTaskContext>,
     external: &'a mut dyn executor::ExternalReadOperator,
+    delivery: executor::StreamDelivery,
 }
 
 #[derive(Debug)]
@@ -21010,9 +21011,10 @@ impl DatabaseReadTransaction {
 
     /// Streams rows from a read plan through a budgeted consumer boundary.
     ///
-    /// Consumer calls are provisional until this method returns `Ok`. A host
-    /// that cannot surface a terminal query error must not publish consumed
-    /// rows before the final report is available.
+    /// When either effective output limit is present, the executor invokes the
+    /// consumer only after the complete result passes both limit checks. With
+    /// both limits disabled, rows cross the consumer boundary as they are
+    /// produced and a later non-budget execution error can still be returned.
     pub fn query_with_params_streaming(
         &mut self,
         cypher_text: &str,
@@ -21027,6 +21029,7 @@ impl DatabaseReadTransaction {
             query_runtime::parse_runtime_execution(cypher_text)?,
             parameters,
             options,
+            executor::StreamDelivery::Validated,
             task_context.as_ref(),
             &mut consumer,
         )
@@ -21066,6 +21069,7 @@ impl DatabaseReadTransaction {
             query_runtime::parse_runtime_execution(cypher_text)?,
             parameters,
             options,
+            executor::StreamDelivery::Validated,
             Some(task_context),
             &mut consumer,
         )
@@ -21089,6 +21093,7 @@ impl DatabaseReadTransaction {
             ReadStreamingExecutionContext {
                 task_context: task_context.as_ref(),
                 external,
+                delivery: executor::StreamDelivery::Validated,
             },
             &mut consumer,
         )
@@ -21100,6 +21105,7 @@ impl DatabaseReadTransaction {
         prepared: PreparedRuntimeQuery,
         parameters: &BTreeMap<String, Value>,
         options: QueryStreamOptions,
+        delivery: executor::StreamDelivery,
         task_context: &skein_core::RuntimeTaskContext,
         mut consumer: impl FnMut(Row) -> Result<()>,
     ) -> Result<QueryStreamReport> {
@@ -21109,6 +21115,7 @@ impl DatabaseReadTransaction {
             prepared,
             parameters,
             options,
+            delivery,
             Some(task_context),
             &mut consumer,
         )
@@ -21120,6 +21127,7 @@ impl DatabaseReadTransaction {
         prepared: query_runtime::PreparedRuntimeExecution,
         parameters: &BTreeMap<String, Value>,
         options: QueryStreamOptions,
+        delivery: executor::StreamDelivery,
         task_context: Option<&skein_core::RuntimeTaskContext>,
         consumer: &mut impl FnMut(Row) -> Result<()>,
     ) -> Result<QueryStreamReport> {
@@ -21132,6 +21140,7 @@ impl DatabaseReadTransaction {
             ReadStreamingExecutionContext {
                 task_context,
                 external: &mut external,
+                delivery,
             },
             consumer,
         )
@@ -21188,33 +21197,19 @@ impl DatabaseReadTransaction {
                 "read transaction query must not be a mutation".to_string(),
             ));
         }
-        let streamed = match context.task_context {
-            Some(task_context) => {
-                executor::execute_with_row_consumer_profile_and_external_and_context_and_memory(
-                    &optimized.physical_plan,
-                    &mut self.catalog,
-                    &mut self.store,
-                    parameters,
-                    context.external,
-                    max_rows,
-                    max_payload_bytes,
-                    consumer,
-                    task_context,
-                    &self.config.execution_memory,
-                )
-            }
-            None => executor::execute_with_row_consumer_profile_and_external_and_memory(
-                &optimized.physical_plan,
-                &mut self.catalog,
-                &mut self.store,
-                parameters,
-                context.external,
-                max_rows,
-                max_payload_bytes,
-                consumer,
-                &self.config.execution_memory,
-            ),
-        };
+        let streamed = executor::execute_with_row_consumer_profile_with_delivery(
+            &optimized.physical_plan,
+            &mut self.catalog,
+            &mut self.store,
+            parameters,
+            context.external,
+            max_rows,
+            max_payload_bytes,
+            consumer,
+            context.task_context,
+            &self.config.execution_memory,
+            context.delivery,
+        );
         self.store.poison_on_storage_error(&streamed);
         let streamed = streamed?;
         let pipeline = &streamed.profile.pipeline_memory_report;
