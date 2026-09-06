@@ -942,6 +942,42 @@ impl RuntimePermit {
 }
 
 impl RuntimeIoWaveController for GovernorIoWaveController {
+    fn try_acquire(
+        &self,
+        slots: NonZeroUsize,
+        context: &RuntimeTaskContext,
+    ) -> Result<Option<Box<dyn RuntimeIoWavePermit>>, RuntimeIoWaveError> {
+        let slots = slots.get();
+        if slots > self.reserved_slots {
+            return Err(RuntimeIoWaveError::ReservationExceeded {
+                requested_slots: slots,
+                reserved_slots: self.reserved_slots,
+            });
+        }
+        context.checkpoint().map_err(RuntimeIoWaveError::Stopped)?;
+        if self.reservation_scope == RuntimeIoReservationScope::Task {
+            let mut active_slots = mutex_lock(&self.task_reservation.active_slots);
+            if slots > self.reserved_slots.saturating_sub(*active_slots) {
+                return Ok(None);
+            }
+            *active_slots = active_slots.saturating_add(slots);
+            return Ok(Some(Box::new(TaskReservedIoWavePermit {
+                reservation: Arc::clone(&self.task_reservation),
+                slots,
+            })));
+        }
+
+        let mut state = mutex_lock(&self.governor.state);
+        if !try_reserve_io_wave(&mut state, self.priority, slots) {
+            return Ok(None);
+        }
+        Ok(Some(Box::new(GovernorIoWavePermit {
+            governor: Arc::clone(&self.governor),
+            priority: self.priority,
+            slots,
+        })))
+    }
+
     fn acquire(
         &self,
         slots: NonZeroUsize,
@@ -1752,6 +1788,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(governor.snapshot().active_foreground_io_slots, 4);
+        assert!(matches!(
+            second
+                .bind_task_context(RuntimeTaskContext::default())
+                .try_acquire_io_wave(NonZeroUsize::MIN)
+                .unwrap(),
+            skein_core::RuntimeIoWaveTryAcquire::Pending
+        ));
 
         let background = governor
             .try_admit(
@@ -1801,9 +1844,11 @@ mod tests {
         assert_eq!(snapshot.active_background_io_slots, 0);
 
         let next_wave = second_context
-            .acquire_io_wave(NonZeroUsize::new(4).unwrap())
-            .unwrap()
+            .try_acquire_io_wave(NonZeroUsize::new(4).unwrap())
             .unwrap();
+        let skein_core::RuntimeIoWaveTryAcquire::Acquired(Some(next_wave)) = next_wave else {
+            panic!("released wave capacity must be immediately acquirable");
+        };
         assert_eq!(governor.snapshot().active_foreground_io_slots, 4);
         drop(next_wave);
     }
