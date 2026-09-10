@@ -21,6 +21,7 @@ use super::{
     FULL_REINDEX_MARKER, METADATA_REPAIR_MARKER, SEARCH_SEGMENT_DESCRIPTOR_FILE,
     SEARCH_SEGMENT_PAYLOAD_FILE,
 };
+use crate::bounded_file::read_bounded_file;
 use crate::error::{Result, SkeinError};
 use crate::{RuntimeCapabilities, RuntimeCapability};
 use serde::{Deserialize, Serialize};
@@ -597,14 +598,13 @@ impl SearchOutOfCoreReader {
             config.max_lexical_manifest_bytes.get(),
             "search lexical manifest",
         )?;
-        drop(lexical_manifest_bytes);
         let lexical_config = LexicalProjectionConfig {
             max_query_score_entries: config.max_score_entries,
             ..LexicalProjectionConfig::default()
         };
-        let lexical_projection = LexicalProjectionReader::load_named(
+        let lexical_projection = LexicalProjectionReader::load_manifest_bytes(
             &root,
-            &manifest.lexical_manifest_file,
+            &lexical_manifest_bytes,
             manifest.source_graph_commit_epoch,
             lexical_analyzer_digest(&analyzer_lexicon),
             manifest.documents_digest,
@@ -616,6 +616,7 @@ impl SearchOutOfCoreReader {
                     .to_string(),
             )
         })?;
+        drop(lexical_manifest_bytes);
 
         #[cfg(feature = "vector-search")]
         let rabitq_projection = open_rabitq_projection(
@@ -781,12 +782,12 @@ impl SearchOutOfCoreReader {
     }
 
     pub fn projection_freshness(&self) -> SearchProjectionFreshness {
-        let full_reindex_reasons =
-            read_marker_lines_bounded(&self.root.join(FULL_REINDEX_MARKER), MAX_MARKER_BYTES)
-                .unwrap_or_default();
-        let metadata_repair_reasons =
-            read_marker_lines_bounded(&self.root.join(METADATA_REPAIR_MARKER), MAX_MARKER_BYTES)
-                .unwrap_or_default();
+        let read_marker = |name| {
+            read_marker_lines_bounded(&self.root.join(name), MAX_MARKER_BYTES)
+                .unwrap_or_else(|error| vec![format!("failed to read marker {name}: {error}")])
+        };
+        let full_reindex_reasons = read_marker(FULL_REINDEX_MARKER);
+        let metadata_repair_reasons = read_marker(METADATA_REPAIR_MARKER);
         SearchProjectionFreshness {
             document_count: self.manifest.document_count,
             import_source_graph_commit_epoch: self.manifest.import_source_graph_commit_epoch,
@@ -2852,17 +2853,6 @@ fn matched_span_bytes_for(span: &super::SearchMatchedSpan) -> u64 {
         .saturating_add(span.text.len() as u64)
         .saturating_add(span.term.len() as u64)
         .saturating_add(std::mem::size_of::<super::SearchMatchedSpan>() as u64)
-}
-
-fn read_bounded_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
-    let length = fs::metadata(path)?.len();
-    if length > max_bytes {
-        return Err(SkeinError::Storage(format!(
-            "search artifact {} requires {length} bytes, exceeding {max_bytes}",
-            path.display()
-        )));
-    }
-    fs::read(path).map_err(Into::into)
 }
 
 fn read_bound_artifact(
