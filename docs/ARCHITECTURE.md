@@ -128,6 +128,15 @@ operations needed after executor preflight. The root executor keeps public
 entrypoints and implements both traits for `GraphStore`; batch and traversal
 kernels do not depend on the concrete store.
 
+`skein-executor::pipeline` owns the recursive `BindingBatchSource` contract and
+shared `BatchExecutionContext`; the original blocking paths remain re-exports
+of the same types. Streaming filter, projection, and limit loops live in
+`skein-executor::transform`. Root adapters retain prepared recursive dispatch,
+scan/adjacency and columnar fast paths, and graph predicate evaluation with its
+existing memory account. Sources honor row caps and cancellation, consumers
+validate output, and kernels reserve/release transform batches and propagate
+stop/error. This internal seam does not add a production integration API.
+
 Query-observer collection also belongs to `skein-executor`: operator identity,
 cardinality, pipeline/morsel counters, typed execution reports, and blocking
 operator inventory require only plan, executor, and storage report types.
