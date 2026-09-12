@@ -184,6 +184,16 @@ operations needed after executor preflight. The root executor keeps public
 entrypoints and implements both traits for `GraphStore`; batch and traversal
 kernels do not depend on the concrete store.
 
+The internal `skein-executor::analytics` module owns graph algorithm dispatch,
+projection name/visibility selection, the `GraphExecutionRead` projection-source
+adapter, and query-owned projection/scratch/result accounting. It depends inward
+on `skein-analytics`, whose algorithm and immutable-projection implementations
+remain independent of executor. Root execution still registers projected graph
+definitions, owns prepared dispatch and task admission, and validates final
+query results. Unknown requested labels/types retain empty-selection semantics;
+the migration preserves error order, cancellation, and resource limits without
+adding a host-facing API.
+
 Storage-neutral mutation command lowering belongs to the internal
 `skein-executor::mutation` module. It translates physical plans and SET values
 into storage commands using the canonical `skein-ddl` conversions; it does not
