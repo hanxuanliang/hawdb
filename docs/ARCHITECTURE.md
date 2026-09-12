@@ -130,6 +130,18 @@ not create a standalone transaction manager or a new host API. Unit tests and
 the explicit local state-machine campaign live with storage; real concurrent
 transaction and key-range integration tests remain at the root boundary.
 
+Owned graph iterators belong to `skein-storage::graph_overlay`. Node and
+relationship wrappers share a private ordered merge kernel over lazy canonical
+records, an already captured ID-ordered delta, and copy-on-write tombstones.
+`GraphStore` still selects the checkpoint reader and captures snapshot state;
+its existing iterator type paths are re-exports of the same owner types. Delta
+records override matching base IDs, tombstones suppress both sources, and a
+physical base error is surfaced before any further delta output. Callers that
+explicitly continue after the error retain the previous remaining-delta behavior.
+This is a read-state ownership seam, not a new transaction manager, persistent
+format, or host API. Map-overlay differential tests and real canonical corruption
+tests live with storage; checkpoint/reopen snapshot coverage stays at the facade.
+
 Source mutation dual-write evidence models and readiness evaluation belong to
 `skein-readiness::source_mutation`. The owner retains the eight-family inventory,
 independent ACK/watermark and replay checks, projection-payload requirements,
