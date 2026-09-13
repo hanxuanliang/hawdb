@@ -175,6 +175,16 @@ The existing root `skein_recovery_text_fuzz_tests` Bazel label forwards through
 a manual test suite to that campaign, while public database reopen/no-write
 corruption tests stay at the root integration boundary.
 
+The v1 compressed text envelope belongs to
+`skein-storage::text::envelope`, alongside those logical text codecs.
+Checkpoint, projected-graph, Source sidecar, and backup callers keep their
+root-private imports and existing file-selection and admission policies.
+The owner preserves zstd encoding, both CRC checks, header validation order,
+and bounded decoding; an envelope cannot raise a caller's decoded-byte limit.
+Frozen wire fixtures and an independently framed local mutation campaign live
+with storage, while actual checkpoint/reopen and rejection-without-write tests
+remain at the facade. No format, resource default, or host API changes here.
+
 The v1 durable manifest codec, artifact-binding validation and atomic manifest
 file replacement belong to `skein-storage::durable_manifest`. Root durable-store
 code retains checkpoint preparation, generation selection, directory ownership,
