@@ -412,3 +412,14 @@ rust_test(
         "vector_background": ["vector-search", "background-maintenance"],
     }.items()
 ]
+
+rust_test(
+    name = "skein_search_segment_allocation_tests",
+    crate_root = "tests/segment_allocation.rs",
+    srcs = [
+        "tests/segment_allocation.rs",
+        "tests/support/allocation.rs",
+    ],
+    edition = "2024",
+    deps = [":skein_search"],
+)
