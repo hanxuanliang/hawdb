@@ -53,6 +53,8 @@ mod document_decoding_tests;
 mod document_encoding;
 mod generation_cleanup;
 mod identifier;
+#[doc(hidden)]
+pub mod knowledge_retrieval_pipeline;
 mod lexical_projection;
 mod lexical_readiness;
 #[cfg(all(test, feature = "full-text-search"))]
@@ -151,6 +153,7 @@ pub use generation_cleanup::{
     SEARCH_PROJECTION_CLEANUP_PROTOCOL,
 };
 use generation_cleanup::{SearchProjectionCleanupState, SearchProjectionGenerations};
+pub use knowledge_retrieval_pipeline::{KnowledgeRetrievalPipelineReport, KnowledgeRetrievalStage};
 use lexical_projection::{
     analyzer_digest as lexical_analyzer_digest, documents_digest as lexical_documents_digest,
     LexicalMiniDelta, LexicalProjectionConfig, LexicalProjectionReader, LexicalProjectionWriter,
