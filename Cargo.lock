@@ -1164,6 +1164,9 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "jieba-rs",
+ "regex",
+ "regex-automata",
+ "regex-syntax",
  "serde",
  "serde_json",
  "simsimd",
