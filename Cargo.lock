@@ -1000,6 +1000,7 @@ dependencies = [
  "skein-core",
  "skein-ddl",
  "skein-plan",
+ "skein-qos",
  "skein-storage",
 ]
 
