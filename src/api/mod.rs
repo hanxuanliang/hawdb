@@ -3218,7 +3218,7 @@ impl Database {
                 batch.complete_through_commit_epoch().unwrap_or(source_graph_commit_epoch)
             )));
         }
-        Ok(Some(batch.graph_delta))
+        Ok(Some(batch.into_graph_delta()))
     }
 
     pub fn build_search_projection_change_batch_after(
@@ -3317,14 +3317,14 @@ impl Database {
             complete_through_commit_epoch = current_epoch;
         }
 
-        Ok(Some(SearchProjectionChangeBatch {
-            graph_delta: SearchProjectionGraphDeltaRequest {
+        Ok(Some(SearchProjectionChangeBatch::new(
+            SearchProjectionGraphDeltaRequest {
                 upsert_node_ids: upsert_node_ids.into_iter().collect(),
                 delete_document_ids: delete_document_ids.into_iter().collect(),
                 max_operations,
                 complete_through_graph_commit_epoch: Some(complete_through_commit_epoch),
             },
-            relational_primary_key_changes: relational_primary_keys
+            relational_primary_keys
                 .into_iter()
                 .map(
                     |(table, primary_keys)| skein_storage::RelationalTablePrimaryKeyChanges {
@@ -3333,7 +3333,7 @@ impl Database {
                     },
                 )
                 .collect(),
-        }))
+        )))
     }
 
     pub fn build_search_projection_graph_delta_request_from_freshness(
@@ -3594,7 +3594,7 @@ impl Database {
         relational: SearchProjectionRelationalDelta,
     ) -> Result<SearchProjectionDeltaReport> {
         let expected_primary_key_count = batch
-            .relational_primary_key_changes
+            .relational_primary_key_changes()
             .iter()
             .map(|table| table.primary_keys.len())
             .fold(0usize, usize::saturating_add);
@@ -3611,8 +3611,8 @@ impl Database {
             ));
         }
         let complete_through_commit_epoch = batch.complete_through_commit_epoch();
-        let max_operations = batch.graph_delta.max_operations;
-        let mut graph = self.build_search_projection_graph_delta(&batch.graph_delta)?;
+        let max_operations = batch.graph_delta().max_operations;
+        let mut graph = self.build_search_projection_graph_delta(batch.graph_delta())?;
         let SearchProjectionDelta {
             upserts,
             deletes,
