@@ -133,6 +133,10 @@ pub use column_group::{
         ColumnGroupTableDirectoryRef, ColumnGroupTableKey, ColumnGroupTableKind,
         PublishedColumnGroupCatalog, COLUMN_GROUP_MANIFEST_FILE,
     },
+    shadow::{
+        ColumnarShadowCheckpointReport, ColumnarShadowCheckpointStatus,
+        ColumnarShadowRecoveryStatus, COLUMN_GROUP_SHADOW_DIR,
+    },
     zone::{ChunkZoneMap, StringPrefixMinMax},
     ColumnGroupError, DeletionVectorBinding, COLUMN_GROUP_MAGIC, DELETION_VECTOR_MAGIC,
 };
@@ -389,6 +393,7 @@ pub use stable_identity::{
     DEFAULT_STABLE_IDENTITY_PAGE_BYTES, DEFAULT_STABLE_IDENTITY_PAGE_ENTRIES,
     DEFAULT_STABLE_IDENTITY_VALUE_BYTES,
 };
+pub use statistics_refresh::{OptimizerStatisticsRefreshOptions, OptimizerStatisticsRefreshReport};
 pub use telemetry::{StorageTelemetrySink, WalAppendTelemetry};
 pub use wal::{
     WalGroupCommitActivation, WalGroupCommitAdaptiveColdStartEvidence,

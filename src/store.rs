@@ -119,11 +119,8 @@ use durable::{
     DerivedArtifactBuildConfig, DurableArtifactMetadata, DurableManifest, DurableOpenMode,
     DurableStore, GraphManifestOpenBudget,
 };
+pub use graph_columnar_shadow::ColumnarShadowAdmission;
 use graph_columnar_shadow::ColumnarShadowState;
-pub use graph_columnar_shadow::{
-    ColumnarShadowAdmission, ColumnarShadowCheckpointReport, ColumnarShadowCheckpointStatus,
-    ColumnarShadowRecoveryStatus, COLUMN_GROUP_SHADOW_DIR,
-};
 use relational_index_shadow::RelationalIndexShadowState;
 pub use relational_index_shadow::{
     RelationalConstraintQualificationProbeReport, RelationalConstraintQualificationReport,
@@ -169,6 +166,7 @@ use skein_storage::projection::artifact::{
 };
 pub(crate) use skein_storage::source_scan;
 pub use skein_storage::source_scan::SourceScanRow;
+pub(crate) use skein_storage::statistics_refresh::OptimizerStatisticsRefreshWork;
 use skein_storage::statistics_refresh::{
     adaptive_histogram_sample_limit, node_property_supports_optimizer_statistics,
     relationship_property_supports_optimizer_statistics, sample_histogram_values,
@@ -243,16 +241,19 @@ pub use skein_storage::{
     StorageScrubReport, StoreId, StoreStableIdMapping, WalReplayConfig,
     STORAGE_PRESSURE_DEFER_RATIO_PER_MILLION, STORAGE_PRESSURE_SOFT_RATIO_PER_MILLION,
 };
+pub use skein_storage::{
+    ColumnarShadowCheckpointReport, ColumnarShadowCheckpointStatus, ColumnarShadowRecoveryStatus,
+    COLUMN_GROUP_SHADOW_DIR,
+};
 use skein_storage::{
     CowSegment, CowSegmentedMap, ProjectedGraphArtifact, ProjectedGraphArtifactData,
 };
 pub use skein_storage::{
     GraphIndexReadMetricsSnapshot, PersistentGraphIndexClass, PublishedReadView,
 };
+pub use skein_storage::{OptimizerStatisticsRefreshOptions, OptimizerStatisticsRefreshReport};
 pub use skein_storage::{RelationalIndexArtifactMetadata, RelationalIndexGenerationArtifacts};
 pub(crate) use skein_storage::{WalSyncGroupFlush, WalSyncGroupProgress};
-pub(crate) use statistics_refresh::OptimizerStatisticsRefreshWork;
-pub use statistics_refresh::{OptimizerStatisticsRefreshOptions, OptimizerStatisticsRefreshReport};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 #[cfg(test)]
