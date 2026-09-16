@@ -15,6 +15,7 @@ _READINESS_BASE_DEPS = all_crate_deps(normal = True) + [
     "//crates/executor:skein_executor",
     "//crates/plan-cache:skein_plan_cache",
     "//crates/route-ownership:skein_route_ownership",
+    "//crates/system-sql:skein_system_sql",
     "//crates/storage:skein_storage",
 ]
 

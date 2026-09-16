@@ -15,5 +15,6 @@ skein-executor = { path = "../executor" }
 skein-nowledge-contracts = { path = "../nowledge-contracts" }
 skein-plan-cache = { path = "../plan-cache" }
 skein-route-ownership = { path = "../route-ownership" }
+skein-system-sql = { path = "../system-sql" }
 skein-search = { path = "../search" }
 skein-storage = { path = "../storage" }

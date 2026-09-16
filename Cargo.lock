@@ -1157,6 +1157,7 @@ dependencies = [
  "skein-route-ownership",
  "skein-search",
  "skein-storage",
+ "skein-system-sql",
 ]
 
 [[package]]
