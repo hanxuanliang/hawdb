@@ -14,12 +14,7 @@ use skein_storage::{ScanPruningReport, ScanPruningStrategy};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use skein_evidence::inventory::NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NowledgeMemQueryExecutionPath {
-    FastPath,
-    OptimizedPath,
-}
+pub use skein_nowledge_contracts::NowledgeMemQueryExecutionPath;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NowledgeMemFastPathClassification {
@@ -79,15 +74,6 @@ pub const fn nowledge_mem_plan_cache_report(
             miss: false,
             bypassed: false,
         },
-    }
-}
-
-impl NowledgeMemQueryExecutionPath {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::FastPath => "fast_path",
-            Self::OptimizedPath => "optimized_path",
-        }
     }
 }
 
@@ -451,6 +437,15 @@ fn scan_pruning_strategy_json(strategy: &ScanPruningStrategy) -> serde_json::Val
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::any::TypeId;
+
+    #[test]
+    fn query_execution_path_reexports_the_shared_contract_type() {
+        assert_eq!(
+            TypeId::of::<NowledgeMemQueryExecutionPath>(),
+            TypeId::of::<skein_nowledge_contracts::NowledgeMemQueryExecutionPath>()
+        );
+    }
 
     #[test]
     fn query_report_preserves_empty_profile_contract() {

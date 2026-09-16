@@ -10,6 +10,7 @@ mod maintenance;
 mod read_snapshot;
 mod retrieval;
 mod storage_lifecycle;
+mod workload;
 
 #[doc(hidden)]
 pub mod test_support;
@@ -21,6 +22,7 @@ pub mod public {
     pub use crate::read_snapshot::*;
     pub use crate::retrieval::*;
     pub use crate::storage_lifecycle::*;
+    pub use crate::workload::*;
 }
 
 pub use graph::*;
@@ -28,3 +30,4 @@ pub use maintenance::*;
 pub use read_snapshot::*;
 pub use retrieval::*;
 pub use storage_lifecycle::*;
+pub use workload::*;
