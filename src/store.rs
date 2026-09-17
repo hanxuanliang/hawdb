@@ -182,11 +182,6 @@ use skein_storage::text::envelope::DURABLE_COMPRESSION_HEADER;
 pub(crate) use skein_storage::text::envelope::{
     encode_durable_text, read_durable_text_bytes, read_durable_text_bytes_with_limit,
 };
-pub(crate) use skein_storage::text::{
-    decode_bool, decode_index_kind, decode_nullable, decode_properties, decode_property_type,
-    decode_schema_object_state, decode_string, decode_string_vec, decode_table_kind,
-    decode_u64_vec, decode_value_vec, parse_u64,
-};
 use skein_storage::GraphIndexReadMetrics;
 #[cfg(test)]
 use skein_storage::COW_MAP_TARGET_SEGMENT_BYTES;
@@ -274,15 +269,12 @@ use wal_codec::{
     WalOpenOutcome, WalRecordCursor,
 };
 
-use skein_storage::durable_manifest::{
-    safe_reclaim_commit_epoch, validate_storage_version, STORAGE_VERSION,
-};
+use skein_storage::durable_manifest::{safe_reclaim_commit_epoch, STORAGE_VERSION};
 const MANIFEST_FILE: &str = "manifest.skein";
 const PROJECTED_GRAPHS_FILE: &str = "projected_graphs.skein";
 const STABLE_ID_MAPPING_FILE: &str = "stable_ids.skein";
 pub(crate) use skein_storage::checkpoint::{
-    decode_search_projection_relational_primary_key_changes, parse_label_set,
-    relational_checkpoint_metadata, split_checkpoint_checksum, CHECKPOINT_HEADER_V1,
+    relational_checkpoint_metadata, split_checkpoint_checksum,
 };
 const BACKUP_MANIFEST_FILE: &str = "backup.skein";
 const CANONICAL_MANIFEST_MAX_BYTES: u64 = 256 * 1024 * 1024;
@@ -3762,45 +3754,6 @@ fn elapsed_micros(started: std::time::Instant) -> u64 {
     started.elapsed().as_micros().min(u64::MAX as u128) as u64
 }
 
-fn parse_u32(input: &str, name: &str) -> Result<u32> {
-    input
-        .parse()
-        .map_err(|_| SkeinError::Storage(format!("invalid {name}: {input}")))
-}
-
-fn parse_usize(input: &str, name: &str) -> Result<usize> {
-    input
-        .parse()
-        .map_err(|_| SkeinError::Storage(format!("invalid {name}: {input}")))
-}
-
-fn parse_statistics_path_key(
-    source: &str,
-    rel_type: &str,
-    target: &str,
-) -> Result<(LabelId, RelTypeId, LabelId)> {
-    Ok((
-        LabelId(parse_u32(source, "statistics source label id")?),
-        RelTypeId(parse_u32(rel_type, "statistics relationship type id")?),
-        LabelId(parse_u32(target, "statistics target label id")?),
-    ))
-}
-
-fn parse_statistics_bounded_path_key(
-    source: &str,
-    rel_type: &str,
-    target: &str,
-    hops: &str,
-) -> Result<(LabelId, RelTypeId, LabelId, usize)> {
-    let (source, rel_type, target) = parse_statistics_path_key(source, rel_type, target)?;
-    Ok((
-        source,
-        rel_type,
-        target,
-        parse_usize(hops, "statistics bounded path hop count")?,
-    ))
-}
-
 fn estimated_node_record_bytes(node: &NodeRecord) -> u64 {
     32u64
         .saturating_add((node.labels.len() as u64).saturating_mul(4))
@@ -3837,6 +3790,7 @@ fn estimated_value_bytes(value: &Value) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    mod checkpoint_parse_order_tests;
     mod envelope_recovery_tests;
     mod hex_recovery_tests;
 
