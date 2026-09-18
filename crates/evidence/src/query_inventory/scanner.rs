@@ -1,8 +1,22 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{
     build_compatibility_query_inventory, compatibility_query_inventory_to_json,
     CompatibilityQueryCallSite, CompatibilityQueryInventory,
 };
-use skein_core::error::{Result, SkeinError};
+use hawdb_core::error::{HawDBError, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -45,7 +59,7 @@ pub fn scan_nowledge_query_inventory_with_options(
     let mut call_sites = Vec::new();
     for file in files {
         let content = fs::read_to_string(&file).map_err(|_| {
-            SkeinError::Execution("failed to read inventory source file: io_error".to_string())
+            HawDBError::Execution("failed to read inventory source file: io_error".to_string())
         })?;
         let relative = file.strip_prefix(root).unwrap_or(&file);
         let source_file = path_to_slash_string(relative);
@@ -105,7 +119,7 @@ pub fn scan_nowledge_query_inventory_to_json(root: impl AsRef<Path>) -> Result<s
 
 fn collect_rust_files(root: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
     let metadata = fs::metadata(root).map_err(|_| {
-        SkeinError::Execution("failed to stat inventory path: io_error".to_string())
+        HawDBError::Execution("failed to stat inventory path: io_error".to_string())
     })?;
     if metadata.is_file() {
         if root.extension().and_then(|ext| ext.to_str()) == Some("rs") {
@@ -115,10 +129,10 @@ fn collect_rust_files(root: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
     }
 
     for entry in fs::read_dir(root).map_err(|_| {
-        SkeinError::Execution("failed to read inventory directory: io_error".to_string())
+        HawDBError::Execution("failed to read inventory directory: io_error".to_string())
     })? {
         let entry = entry.map_err(|_| {
-            SkeinError::Execution("failed to read inventory directory entry: io_error".to_string())
+            HawDBError::Execution("failed to read inventory directory entry: io_error".to_string())
         })?;
         let path = entry.path();
         let file_name = path
@@ -129,7 +143,7 @@ fn collect_rust_files(root: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
             continue;
         }
         let metadata = entry.metadata().map_err(|_| {
-            SkeinError::Execution("failed to stat inventory directory entry: io_error".to_string())
+            HawDBError::Execution("failed to stat inventory directory entry: io_error".to_string())
         })?;
         if metadata.is_dir() {
             collect_rust_files(&path, output)?;
@@ -377,7 +391,7 @@ fn skip_char_literal(content: &str, start: usize) -> Result<(usize, usize)> {
             _ => index += 1,
         }
     }
-    Err(SkeinError::Semantic(format!(
+    Err(HawDBError::Semantic(format!(
         "unterminated Rust char literal at byte {start}"
     )))
 }
@@ -437,7 +451,7 @@ fn parse_cooked_string(content: &str, start: usize) -> Result<(String, usize, us
             }
         }
     }
-    Err(SkeinError::Semantic(format!(
+    Err(HawDBError::Semantic(format!(
         "unterminated Rust string literal at byte {start}"
     )))
 }
@@ -449,7 +463,7 @@ fn parse_raw_string(content: &str, start: usize) -> Result<(String, usize, usize
     let terminator = format!("\"{}", "#".repeat(hashes));
     let rest = &content[body_start..];
     let Some(offset) = rest.find(&terminator) else {
-        return Err(SkeinError::Semantic(format!(
+        return Err(HawDBError::Semantic(format!(
             "unterminated Rust raw string literal at byte {start}"
         )));
     };

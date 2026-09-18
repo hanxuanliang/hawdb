@@ -1,13 +1,27 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{SearchOutOfCoreGenerationBuildOptions, SearchOutOfCoreGenerationWriter};
 use crate::build_control::checkpoint;
 use crate::build_memory::BuildMemory;
-use crate::error::{Result, SkeinError};
+use crate::error::{HawDBError, Result};
 use crate::{
     SearchDocument, SearchOutOfCoreGenerationBuildReport, SearchOutOfCoreMetrics,
     SearchOutOfCoreReader, SearchProjectionDelta, SearchProjectionDeltaReport,
 };
-use skein_core::RuntimeTaskContext;
-use skein_executor::QueryMemoryLease;
+use hawdb_core::RuntimeTaskContext;
+use hawdb_executor::QueryMemoryLease;
 
 mod input;
 
@@ -35,19 +49,19 @@ impl SearchOutOfCoreGenerationUpdate {
         if let Some(limit) = delta.max_operations
             && operation_count > limit
         {
-            return Err(SkeinError::Storage(format!(
+            return Err(HawDBError::Storage(format!(
                 "incremental projection update operation count {operation_count} exceeded configured limit {limit}"
             )));
         }
         if operation_count > options.max_delta_operations.get() {
-            return Err(SkeinError::Storage(format!(
+            return Err(HawDBError::Storage(format!(
                 "incremental projection update operation count {operation_count} exceeded the generation admission {}",
                 options.max_delta_operations
             )));
         }
         let delta_working_bytes = delta_working_bytes(&delta, &task)?;
         if delta_working_bytes > options.max_delta_working_bytes.get() {
-            return Err(SkeinError::Storage(format!(
+            return Err(HawDBError::Storage(format!(
                 "incremental projection update requires {delta_working_bytes} bytes, exceeding the generation admission {}",
                 options.max_delta_working_bytes
             )));
@@ -172,7 +186,7 @@ fn validate_delta_ids(
     for id in upserts.iter().map(|document| &document.id).chain(deletes) {
         checkpoint(task)?;
         if id.is_empty() {
-            return Err(SkeinError::Storage(
+            return Err(HawDBError::Storage(
                 "search generation delta document ids must not be empty".into(),
             ));
         }
@@ -180,7 +194,7 @@ fn validate_delta_ids(
     for pair in upserts.windows(2) {
         checkpoint(task)?;
         if pair[0].id == pair[1].id {
-            return Err(SkeinError::Storage(
+            return Err(HawDBError::Storage(
                 "search generation delta contains duplicate upsert ids".into(),
             ));
         }
@@ -188,7 +202,7 @@ fn validate_delta_ids(
     for pair in deletes.windows(2) {
         checkpoint(task)?;
         if pair[0] == pair[1] {
-            return Err(SkeinError::Storage(
+            return Err(HawDBError::Storage(
                 "search generation delta contains duplicate delete ids".into(),
             ));
         }
@@ -201,7 +215,7 @@ fn validate_delta_ids(
             std::cmp::Ordering::Less => upsert_index = upsert_index.saturating_add(1),
             std::cmp::Ordering::Greater => delete_index = delete_index.saturating_add(1),
             std::cmp::Ordering::Equal => {
-                return Err(SkeinError::Storage(format!(
+                return Err(HawDBError::Storage(format!(
                     "search generation delta contains both upsert and delete for {}",
                     deletes[delete_index]
                 )));

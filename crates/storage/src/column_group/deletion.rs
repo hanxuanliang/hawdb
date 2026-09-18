@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Deletion vector sidecar (§3.3, §3.5.3(d)).
 //!
 //! A deletion vector marks rows of one published node group as deleted or
@@ -134,7 +148,7 @@ impl DeletionVector {
 
     /// Serializes and publishes the sidecar with temp file, fsync, rename.
     pub fn write(&self, path: &Path) -> Result<(), ColumnGroupError> {
-        let tmp_path = path.with_extension("skein.tmp");
+        let tmp_path = path.with_extension("hawdb.tmp");
         let result = self.write_inner(&tmp_path);
         if let Err(error) = result {
             let _ = fs::remove_file(&tmp_path);
@@ -150,7 +164,7 @@ impl DeletionVector {
         file.write_all(DELETION_VECTOR_MAGIC)?;
         file.write_all(&body)?;
         file.write_all(&(body.len() as u64).to_le_bytes())?;
-        file.write_all(&skein_integrity::crc32c(&body).get().to_le_bytes())?;
+        file.write_all(&hawdb_integrity::crc32c(&body).get().to_le_bytes())?;
         file.write_all(DELETION_VECTOR_MAGIC)?;
         file.sync_all()?;
         Ok(())
@@ -203,7 +217,7 @@ impl DeletionVector {
             )));
         }
         let body = &bytes[body_start as usize..footer_start];
-        if skein_integrity::crc32c(body).get() != stored_crc {
+        if hawdb_integrity::crc32c(body).get() != stored_crc {
             return Err(corrupt(
                 "deletion vector checksum does not match its contents".to_string(),
             ));
@@ -279,7 +293,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("skein-column-dv-{name}-{nonce}.skein"))
+        std::env::temp_dir().join(format!("hawdb-column-dv-{name}-{nonce}.hawdb"))
     }
 
     fn binding(
@@ -308,7 +322,7 @@ mod tests {
         assert_eq!(vector.deleted_count(), 5);
         assert_eq!(vector.visible_count(), 125);
         vector.write(&path).unwrap();
-        assert!(!path.with_extension("skein.tmp").exists());
+        assert!(!path.with_extension("hawdb.tmp").exists());
         let reopened = DeletionVector::open(&path).unwrap();
         assert_eq!(reopened, vector);
         let visible = reopened.visible_rows().collect::<Vec<_>>();
@@ -384,7 +398,7 @@ mod tests {
         let footer_start = bytes.len() - FOOTER_BYTES;
         let mut tampered = bytes.clone();
         tampered[body_start + 32..body_start + 36].copy_from_slice(&9u32.to_le_bytes());
-        let crc = skein_integrity::crc32c(&tampered[body_start..footer_start]).get();
+        let crc = hawdb_integrity::crc32c(&tampered[body_start..footer_start]).get();
         tampered[footer_start + 8..footer_start + 12].copy_from_slice(&crc.to_le_bytes());
         fs::write(&path, &tampered).unwrap();
         let error = DeletionVector::open(&path).unwrap_err();

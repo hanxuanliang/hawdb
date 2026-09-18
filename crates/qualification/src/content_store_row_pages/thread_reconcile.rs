@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::evidence::execute_qualified_read;
 use super::fixture::corpus_statement;
 use super::thread_fixture::{
@@ -8,9 +22,9 @@ use super::thread_fixture::{
 use super::{ContentStoreRowPageReadPhase, ContentStoreThreadReconcileQualificationReport};
 use crate::evidence_digest::rows_sha256;
 use crate::ContentStoreSqlCorpus;
-use skein::{
-    Database, DatabaseConfig, DurabilityPolicy, QueryOutput, QueryStreamOptions, Result,
-    SkeinError, Value,
+use hawdb::{
+    Database, DatabaseConfig, DurabilityPolicy, HawDBError, QueryOutput, QueryStreamOptions,
+    Result, Value,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -66,7 +80,7 @@ pub(super) fn qualify_thread_message_reconcile(
     let desired_mapping = [Some(CONTENT_MESSAGE_B_ID), None, Some(CONTENT_MESSAGE_A_ID)];
     validate_preserve_mapping(&existing, &desired_mapping)?;
     if database.commit_epoch() != epoch_before_invalid_mappings {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "content-store invalid reconciliation mapping advanced the commit epoch".to_string(),
         ));
     }
@@ -132,9 +146,9 @@ pub(super) fn qualify_thread_message_reconcile(
             .saturating_add(MESSAGE_B_CONTENT.len())
             .saturating_add(MESSAGE_C_CONTENT.len()),
     )
-    .map_err(|_| SkeinError::Execution("thread reconcile payload size overflow".to_string()))?;
+    .map_err(|_| HawDBError::Execution("thread reconcile payload size overflow".to_string()))?;
     if item_count != FINAL_MESSAGE_COUNT as i64 || size_bytes != expected_size_bytes {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store thread reconcile summary expected count={FINAL_MESSAGE_COUNT}, bytes={expected_size_bytes}, got count={item_count}, bytes={size_bytes}"
         )));
     }
@@ -168,7 +182,7 @@ pub(super) fn qualify_thread_message_reconcile(
 
     let committed_epoch = database.commit_epoch();
     if committed_epoch != seed_commit_epoch.saturating_add(1) {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store thread reconcile published epoch {committed_epoch}, expected {}",
             seed_commit_epoch.saturating_add(1)
         )));
@@ -195,7 +209,7 @@ pub(super) fn qualify_thread_message_reconcile(
     if live_read.execution.visible_commit_epoch != committed_epoch
         || live_read.execution.overlay_entries == 0
     {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store thread reconcile live read observed epoch {} and {} overlay entries, expected epoch {committed_epoch} and a non-empty overlay",
             live_read.execution.visible_commit_epoch, live_read.execution.overlay_entries
         )));
@@ -206,14 +220,14 @@ pub(super) fn qualify_thread_message_reconcile(
     let checkpoint_generation = database
         .relational_index_shadow_checkpoint_report()
         .ok_or_else(|| {
-            SkeinError::Execution(
+            HawDBError::Execution(
                 "content-store thread reconcile checkpoint published no relational generation"
                     .to_string(),
             )
         })?
         .generation;
     if checkpoint_generation <= seed_checkpoint_generation {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store thread reconcile checkpoint generation {checkpoint_generation} did not advance beyond seed generation {seed_checkpoint_generation}"
         )));
     }
@@ -248,7 +262,7 @@ pub(super) fn qualify_thread_message_reconcile(
         || reopened_read.output_sha256 != live_read.output_sha256
         || reopened_anchor_sha256 != live_anchor_sha256
     {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "content-store thread reconcile changed across checkpoint/reopen".to_string(),
         ));
     }
@@ -362,7 +376,7 @@ fn seed_reconcile_thread(
     let seed_checkpoint_generation = database
         .relational_index_shadow_checkpoint_report()
         .ok_or_else(|| {
-            SkeinError::Execution(
+            HawDBError::Execution(
                 "content-store reconcile seed checkpoint published no relational generation"
                     .to_string(),
             )
@@ -373,7 +387,7 @@ fn seed_reconcile_thread(
 
 fn require_invalid_mapping(existing: &[String], mapping: &[Option<&str>]) -> Result<()> {
     if validate_preserve_mapping(existing, mapping).is_ok() {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store thread reconcile admitted invalid mapping {mapping:?}"
         )));
     }
@@ -391,7 +405,7 @@ fn validate_preserve_mapping(existing: &[String], mapping: &[Option<&str>]) -> R
         || preserved_set.len() != existing.len()
         || preserved_set != existing
     {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "preserve mapping must contain every existing message exactly once".to_string(),
         ));
     }
@@ -413,7 +427,7 @@ fn read_message_occurrence_ids(
         },
     )?;
     if output.rows.len() != expected {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store thread reconcile expected {expected} existing messages, got {}",
             output.rows.len()
         )));
@@ -423,7 +437,7 @@ fn read_message_occurrence_ids(
         .iter()
         .map(|row| match row.get("content_message_id") {
             Some(Value::String(value)) => Ok(value.clone()),
-            other => Err(SkeinError::Execution(format!(
+            other => Err(HawDBError::Execution(format!(
                 "content-store thread reconcile existing row has invalid occurrence id {other:?}"
             ))),
         })
@@ -471,7 +485,7 @@ fn require_reconciled_page(output: &QueryOutput) -> Result<()> {
         (CONTENT_MESSAGE_A_ID, MESSAGE_A_ID, 2, MESSAGE_A_CONTENT),
     ];
     if output.rows.len() != expected.len() {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store thread reconcile expected {} messages, got {:?}",
             expected.len(),
             output.rows
@@ -488,7 +502,7 @@ fn require_reconciled_page(output: &QueryOutput) -> Result<()> {
             || row.get("content") != Some(&Value::String(content.to_string()))
             || row.get("created_at") != Some(&Value::String(CREATED_AT.to_string()))
         {
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "content-store thread reconcile message state mismatch: {row:?}"
             )));
         }
@@ -498,7 +512,7 @@ fn require_reconciled_page(output: &QueryOutput) -> Result<()> {
 
 fn require_reconciled_anchors(output: &QueryOutput) -> Result<()> {
     let [legacy, explicit] = output.rows.as_slice() else {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store thread reconcile expected two anchors, got {:?}",
             output.rows
         )));
@@ -516,7 +530,7 @@ fn require_reconciled_anchors(output: &QueryOutput) -> Result<()> {
     if legacy_matches && explicit_matches {
         Ok(())
     } else {
-        Err(SkeinError::Execution(format!(
+        Err(HawDBError::Execution(format!(
             "content-store thread reconcile anchor state mismatch: {:?}",
             output.rows
         )))
@@ -533,7 +547,7 @@ fn require_document_summary(output: &QueryOutput, item_count: i64, size_bytes: i
         {
             Ok(())
         }
-        rows => Err(SkeinError::Execution(format!(
+        rows => Err(HawDBError::Execution(format!(
             "content-store thread reconcile document summary mismatch: {rows:?}"
         ))),
     }
@@ -542,7 +556,7 @@ fn require_document_summary(output: &QueryOutput, item_count: i64, size_bytes: i
 fn require_graph_state(output: &QueryOutput) -> Result<()> {
     match output.rows.as_slice() {
         [row] if row.get("updated_at") == Some(&Value::String(RECONCILED_AT.to_string())) => Ok(()),
-        rows => Err(SkeinError::Execution(format!(
+        rows => Err(HawDBError::Execution(format!(
             "content-store thread reconcile graph state mismatch: {rows:?}"
         ))),
     }
@@ -562,7 +576,7 @@ fn preserved_message_payload_sha256(database: &mut Database) -> Result<String> {
         },
     )?;
     if output.rows.len() != INITIAL_MESSAGE_COUNT {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store thread reconcile preserved-message probe returned {} rows",
             output.rows.len()
         )));
@@ -583,7 +597,7 @@ fn preserved_anchor_payload_sha256(database: &mut Database) -> Result<String> {
         },
     )?;
     if output.rows.len() != INITIAL_MESSAGE_COUNT {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store thread reconcile preserved-anchor probe returned {} rows",
             output.rows.len()
         )));
@@ -599,7 +613,7 @@ fn require_preserved_payloads(
     phase: &str,
 ) -> Result<()> {
     if actual_messages != expected_messages || actual_anchors != expected_anchors {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store thread reconcile changed preserved payloads during {phase}"
         )));
     }
@@ -625,11 +639,11 @@ fn required_i64(output: &QueryOutput, field: &str) -> Result<i64> {
     match output.rows.as_slice() {
         [row] => match row.get(field) {
             Some(Value::Int(value)) => Ok(*value),
-            other => Err(SkeinError::Execution(format!(
+            other => Err(HawDBError::Execution(format!(
                 "content-store thread reconcile expected integer {field}, got {other:?}"
             ))),
         },
-        rows => Err(SkeinError::Execution(format!(
+        rows => Err(HawDBError::Execution(format!(
             "content-store thread reconcile expected one summary row, got {rows:?}"
         ))),
     }

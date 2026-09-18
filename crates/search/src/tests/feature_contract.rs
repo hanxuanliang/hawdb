@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Feature-independent algorithms and compiled/runtime admission contracts.
 
 use super::*;
@@ -92,7 +106,7 @@ fn assert_mode_admission(
     } else {
         let error = result.unwrap_err();
         assert!(
-            matches!(error, SkeinError::CapabilityUnavailable { capability }
+            matches!(error, HawDBError::CapabilityUnavailable { capability }
                 if required.contains(&capability) && !available.is_enabled(capability)),
             "{mode:?}: {error}"
         );
@@ -132,7 +146,7 @@ fn background_delta_obeys_compiled_and_requested_capabilities() {
             } else {
                 assert_eq!(
                     result.unwrap_err(),
-                    SkeinError::CapabilityUnavailable {
+                    HawDBError::CapabilityUnavailable {
                         capability: RuntimeCapability::BackgroundMaintenance
                     }
                 );

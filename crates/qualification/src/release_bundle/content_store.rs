@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{require_bool, require_empty_array, validate_common_artifact, validate_exact_binding};
 use crate::evidence_digest::hash_bytes;
 use crate::{
@@ -9,9 +23,9 @@ use crate::{
     PRODUCTION_CONTENT_STORE_STORAGE_QUALIFICATION_PROTOCOL,
     PRODUCTION_CONTENT_STORE_WRITER_MATRIX,
 };
+use hawdb::ProductionQualificationIdentity;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use skein::ProductionQualificationIdentity;
 use std::collections::{BTreeMap, BTreeSet};
 
 fn validate_read_storage(
@@ -1079,9 +1093,9 @@ fn validate_process(inputs: ProcessValidation<'_>, blockers: &mut Vec<String>) {
 }
 
 pub(super) const READ_STATEMENT_DIGEST_DOMAIN: &[u8] =
-    b"skein-production-content-store-statement-v1";
+    b"hawdb-production-content-store-statement-v1";
 const MUTATION_STATEMENT_DIGEST_DOMAIN: &[u8] =
-    b"skein-production-content-store-mutation-statement-v1";
+    b"hawdb-production-content-store-mutation-statement-v1";
 
 #[derive(Clone, Copy)]
 pub(super) enum StatementRole {
@@ -1113,13 +1127,13 @@ pub(super) fn valid_statement_contract(
             if statement.kind != ContentStoreSqlStatementKind::Mutation {
                 return false;
             }
-            let Ok(lowered) = skein::sql::parse_postgres_sql(&statement.sql) else {
+            let Ok(lowered) = hawdb::sql::parse_postgres_sql(&statement.sql) else {
                 return false;
             };
             matches!(
                 (role, lowered),
-                (StatementRole::Insert, skein::sql::SqlStatement::Insert(_))
-                    | (StatementRole::Update, skein::sql::SqlStatement::Update(_))
+                (StatementRole::Insert, hawdb::sql::SqlStatement::Insert(_))
+                    | (StatementRole::Update, hawdb::sql::SqlStatement::Update(_))
             )
         }
     }

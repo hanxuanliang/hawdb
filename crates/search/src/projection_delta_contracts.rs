@@ -1,6 +1,20 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::SearchProjectionDelta;
-use skein_qos::{BackgroundWorkHint, BackgroundWorkPlan, WorkClass, WorkRequest};
-use skein_storage::RelationalTablePrimaryKeyChanges;
+use hawdb_qos::{BackgroundWorkHint, BackgroundWorkPlan, WorkClass, WorkRequest};
+use hawdb_storage::RelationalTablePrimaryKeyChanges;
 
 /// A bounded graph-derived delta to apply to a search projection.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -108,7 +122,7 @@ pub struct SearchProjectionRelationalDelta {
 #[cfg(test)]
 mod tests {
     use super::{SearchProjectionChangeBatch, SearchProjectionGraphDeltaRequest};
-    use skein_qos::{BackgroundWorkHint, WorkClass};
+    use hawdb_qos::{BackgroundWorkHint, WorkClass};
 
     #[test]
     fn graph_delta_request_preserves_projection_admission_boundaries() {

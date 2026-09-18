@@ -1,13 +1,27 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Borrowed JSON envelopes with admission before output allocation.
 
 use crate::build_control::{checkpoint, CheckedWriter};
 use crate::build_memory::BuildMemory;
 use crate::build_memory::{checked_add as add, checked_mul as mul};
-use crate::error::{Result, SkeinError};
+use crate::error::{HawDBError, Result};
+use hawdb_core::RuntimeTaskContext;
+use hawdb_executor::QueryMemoryLease;
+use hawdb_integrity::Crc32cHasher;
 use serde::Serialize;
-use skein_core::RuntimeTaskContext;
-use skein_executor::QueryMemoryLease;
-use skein_integrity::Crc32cHasher;
 use std::io::{self, Write};
 
 #[derive(Serialize)]
@@ -73,12 +87,12 @@ pub(crate) fn prepare<'a, T: Serialize>(
     task.map_or(Ok(()), checkpoint)?;
     let length = measure.length;
     if length > max_bytes {
-        return Err(SkeinError::Storage(format!(
+        return Err(HawDBError::Storage(format!(
             "{name} requires {length} bytes, exceeding {max_bytes}"
         )));
     }
     let length = usize::try_from(length)
-        .map_err(|_| SkeinError::Storage(format!("{name} length exceeds usize")))?;
+        .map_err(|_| HawDBError::Storage(format!("{name} length exceeds usize")))?;
     Ok(PreparedEnvelope {
         envelope,
         length,
@@ -125,11 +139,11 @@ impl<T: Serialize> PreparedEnvelope<'_, T> {
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(length)
-            .map_err(|error| SkeinError::Storage(format!("{name} allocation failed: {error}")))?;
+            .map_err(|error| HawDBError::Storage(format!("{name} allocation failed: {error}")))?;
         // Both passes borrow the same immutable body. The fixed output boundary
         // also rejects serializers that change their length after preparation.
         if bytes.capacity() > length {
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "{name} capacity exceeded admission"
             )));
         }
@@ -142,7 +156,7 @@ impl<T: Serialize> PreparedEnvelope<'_, T> {
             .map_err(json_error)?;
         task.map_or(Ok(()), checkpoint)?;
         if bytes.len() != length {
-            return Err(SkeinError::Storage(format!(
+            return Err(HawDBError::Storage(format!(
                 "{name} length changed after admission"
             )));
         }
@@ -225,8 +239,8 @@ pub(crate) fn decode_capacity(
     add(add(add(bytes.len(), vectors)?, mul(largest, 8)?)?, 4096)
 }
 
-fn json_error(error: serde_json::Error) -> SkeinError {
-    SkeinError::Storage(error.to_string())
+fn json_error(error: serde_json::Error) -> HawDBError {
+    HawDBError::Storage(error.to_string())
 }
 
 #[derive(Default)]

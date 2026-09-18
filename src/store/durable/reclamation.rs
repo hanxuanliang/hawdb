@@ -1,13 +1,27 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Reader-safe physical-generation retention and retryable reclamation.
 
 use super::{DurableStore, GenerationReclamationDebt};
-use crate::error::{Result, SkeinError};
+use crate::error::{HawDBError, Result};
 use crate::store::{
     parse_append_segment_generation_file, parse_relational_overflow_extent_generation_file,
     parse_relational_row_page_artifact_generation_file, remove_generation_reclamation_candidate,
     storage_generation_for_file, sync_parent_dir,
 };
-use skein_storage::{
+use hawdb_storage::{
     append_generation_manifest_file, AppendGenerationManifest, AppendPublicationConfig,
 };
 use std::collections::BTreeSet;
@@ -135,36 +149,36 @@ impl DurableStore {
         for &generation in retained_generations {
             let overflow_manifest =
                 self.root_path
-                    .join(skein_storage::relational_overflow_manifest_generation_file(
+                    .join(hawdb_storage::relational_overflow_manifest_generation_file(
                         generation,
                     ));
             if overflow_manifest.exists() {
-                let overflow = skein_storage::RelationalOverflowRootReader::open_generation(
+                let overflow = hawdb_storage::RelationalOverflowRootReader::open_generation(
                     &self.root_path,
                     generation,
-                    skein_storage::RelationalOverflowPublicationConfig::default(),
+                    hawdb_storage::RelationalOverflowPublicationConfig::default(),
                 )
-                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                .map_err(|error| HawDBError::Storage(error.to_string()))?;
                 overflow
                     .visit_descriptors(|descriptor| {
                         overflow_extent_generations.insert(descriptor.physical_generation);
                         Ok(())
                     })
-                    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                    .map_err(|error| HawDBError::Storage(error.to_string()))?;
             }
 
             let row_manifest =
                 self.root_path
-                    .join(skein_storage::relational_row_page_manifest_generation_file(
+                    .join(hawdb_storage::relational_row_page_manifest_generation_file(
                         generation,
                     ));
             if row_manifest.exists() {
-                let rows = skein_storage::RelationalRowPageRootReader::open_generation(
+                let rows = hawdb_storage::RelationalRowPageRootReader::open_generation(
                     &self.root_path,
                     generation,
-                    skein_storage::RelationalRowPagePublicationConfig::default(),
+                    hawdb_storage::RelationalRowPagePublicationConfig::default(),
                 )
-                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                .map_err(|error| HawDBError::Storage(error.to_string()))?;
                 let tables = rows
                     .manifest()
                     .tables
@@ -176,7 +190,7 @@ impl DurableStore {
                         row_page_generations.insert(descriptor.physical_generation);
                         Ok(())
                     })
-                    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                    .map_err(|error| HawDBError::Storage(error.to_string()))?;
                 }
             }
         }
@@ -201,7 +215,7 @@ impl DurableStore {
                 generation,
                 AppendPublicationConfig::default(),
             )
-            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            .map_err(|error| HawDBError::Storage(error.to_string()))?;
             segment_generations.extend(manifest.segments.iter().map(|segment| segment.generation));
         }
         Ok(segment_generations)

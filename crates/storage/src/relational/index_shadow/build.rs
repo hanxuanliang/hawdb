@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{
     encode_relational_key, IndexLeafEntry, RelationalIndexShadowConfig, RelationalIndexShadowError,
     TreeWriter,
@@ -6,7 +20,7 @@ use crate::relational::{
     column_positions, index_includes_key, row_key, RelationalIndexDefinition, RelationalIndexRole,
     RelationalIndexRowSource, RelationalTableSchema,
 };
-use skein_integrity::Crc32cHasher;
+use hawdb_integrity::Crc32cHasher;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fs::{self, File};
@@ -831,7 +845,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "skein-relational-index-spill-corruption-{}-{nonce}.tmp",
+            "hawdb-relational-index-spill-corruption-{}-{nonce}.tmp",
             std::process::id()
         ));
         let config = RelationalIndexShadowConfig::default();
@@ -874,7 +888,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let directory = std::env::temp_dir().join(format!(
-            "skein-relational-index-spill-admission-{}-{nonce}",
+            "hawdb-relational-index-spill-admission-{}-{nonce}",
             std::process::id()
         ));
         std::fs::create_dir_all(&directory).expect("create relational index spill fixture");

@@ -1,12 +1,26 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use hawdb::{Database, DatabaseConfig, RecoveryMode, StorageResidencyMode, Value};
 use serde_json::{json, Value as JsonValue};
-use skein::{Database, DatabaseConfig, RecoveryMode, StorageResidencyMode, Value};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const WAL_TAIL_RECOVERY_PROTOCOL: &str = "skein-wal-tail-recovery-fuzz-v1";
+pub const WAL_TAIL_RECOVERY_PROTOCOL: &str = "hawdb-wal-tail-recovery-fuzz-v1";
 
 /// Replay a truncation case from fresh state, comparing the entire recovered
 /// graph with the prefix observed before an unacknowledged multi-record batch.
@@ -16,7 +30,7 @@ pub fn run_wal_tail_recovery_case(seed: u64) -> Result<JsonValue, String> {
         .unwrap_or_default()
         .as_nanos();
     let path = std::env::temp_dir().join(format!(
-        "skein-wal-tail-fuzz-{}-{seed}-{nonce}",
+        "hawdb-wal-tail-fuzz-{}-{seed}-{nonce}",
         std::process::id()
     ));
     let result = run_case(&path, seed).map_err(|error| format!("WAL tail seed {seed}: {error}"));
@@ -50,7 +64,7 @@ fn run_case(path: &Path, seed: u64) -> Result<JsonValue, Box<dyn Error>> {
                 .file_name()?
                 .to_str()?
                 .strip_prefix("wal.")?
-                .strip_suffix(".skein")?
+                .strip_suffix(".hawdb")?
                 .parse::<u64>()
                 .ok()?;
             Some((generation, path))

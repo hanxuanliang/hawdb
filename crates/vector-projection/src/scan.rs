@@ -1,9 +1,23 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::artifact::{FileProjection, SegmentParts};
 use crate::error::{ProjectionError, Result};
 use crate::kernel::{score_function, select_kernel, KernelPreference, ScanKernel};
 use crate::model::{encoded_vector_bytes, InMemoryProjection, ProjectionManifest, RaBitQBitWidth};
 use crate::transform::normalize_and_transform;
-use skein_core::RuntimeTaskContext;
+use hawdb_core::RuntimeTaskContext;
 use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
 use std::num::NonZeroUsize;
@@ -429,7 +443,7 @@ fn search_projection<R: SegmentReader>(
             let mut handles = Vec::with_capacity(worker_count);
             for worker in 0..worker_count {
                 match std::thread::Builder::new()
-                    .name(format!("skein-rabitq-scan-{worker}"))
+                    .name(format!("hawdb-rabitq-scan-{worker}"))
                     .stack_size(WORKER_STACK_BYTES)
                     .spawn_scoped(scope, run_worker)
                 {
@@ -850,7 +864,7 @@ mod tests {
         FileProjection, ProjectionBuildConfig, ProjectionBuilder, ProjectionIdentity,
         ProjectionWriter, RaBitQBitWidth,
     };
-    use skein_core::{RuntimeCancellationToken, RuntimeTaskContext};
+    use hawdb_core::{RuntimeCancellationToken, RuntimeTaskContext};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -997,7 +1011,7 @@ mod tests {
     fn parallel_file_scan_matches_sequential_scan() {
         let root = unique_test_dir("parallel");
         fs::create_dir_all(&root).unwrap();
-        let artifact = root.join("search_rabitq.1.skein");
+        let artifact = root.join("search_rabitq.1.hawdb");
         let config =
             ProjectionBuildConfig::new(64, ProjectionIdentity::new(1)).with_segment_rows(3);
         let mut writer = ProjectionWriter::create(&artifact, config).unwrap();
@@ -1120,7 +1134,7 @@ mod tests {
         let mut builder = ProjectionBuilder::new(config.clone()).unwrap();
         let root = unique_test_dir("one-bit");
         fs::create_dir_all(&root).unwrap();
-        let artifact = root.join("search_rabitq.1.skein");
+        let artifact = root.join("search_rabitq.1.hawdb");
         let mut writer = ProjectionWriter::create(&artifact, config).unwrap();
         for id in 0..5u64 {
             let vector = (0..dimension)
@@ -1170,7 +1184,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "skein_vector_scan_{name}_{}_{nanos}",
+            "hawdb_vector_scan_{name}_{}_{nanos}",
             std::process::id()
         ))
     }

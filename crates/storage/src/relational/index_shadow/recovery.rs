@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Bounded, non-serving WAL recovery deltas for relational index shadows.
 //!
 //! Delta artifacts are derived state. The base shadow and canonical WAL remain
@@ -19,7 +33,7 @@ use crate::{
     durable_replace_file, ContentDigest, ManifestGeneration, RepresentationKind, SegmentCache,
     SegmentCacheError, SegmentCacheKey, StoreId,
 };
-use skein_integrity::{IntegrityDigest, IntegrityHasher, Sha256Digest, SHA256_BYTES};
+use hawdb_integrity::{IntegrityDigest, IntegrityHasher, Sha256Digest, SHA256_BYTES};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Write;
@@ -42,7 +56,7 @@ const DELTA_ENTRY_FIXED_BYTES: usize = 17;
 static NEXT_DELTA_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 pub const RELATIONAL_INDEX_RECOVERY_MANIFEST_FILE: &str =
-    "relational-index-recovery.manifest.skein";
+    "relational-index-recovery.manifest.hawdb";
 pub const DEFAULT_RELATIONAL_INDEX_RECOVERY_DIRTY_ENTRIES: usize = 100_000;
 pub const DEFAULT_RELATIONAL_INDEX_RECOVERY_DIRTY_BYTES: usize = 8 * 1024 * 1024;
 pub const DEFAULT_RELATIONAL_INDEX_RECOVERY_PAGES: usize = 4096;
@@ -53,7 +67,7 @@ pub fn relational_index_recovery_delta_file(
     delta_generation: u64,
     ordinal: u32,
 ) -> String {
-    format!("relational-index-recovery-{base_generation}-{delta_generation}-{ordinal}.delta.skein")
+    format!("relational-index-recovery-{base_generation}-{delta_generation}-{ordinal}.delta.hawdb")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -468,7 +482,7 @@ fn decode_delta_page_descriptor(
         entry_count,
         encoded_len,
         digest: IntegrityDigest {
-            crc32c: skein_integrity::Crc32c::new(crc32c),
+            crc32c: hawdb_integrity::Crc32c::new(crc32c),
             sha256,
         },
         selectors,
@@ -669,7 +683,7 @@ impl RelationalIndexRecoveryBuilder {
         };
         let encoded_manifest = manifest.encode(self.config)?;
         let manifest_path = self.directory.join(RELATIONAL_INDEX_RECOVERY_MANIFEST_FILE);
-        let manifest_tmp = manifest_path.with_extension("skein.tmp");
+        let manifest_tmp = manifest_path.with_extension("hawdb.tmp");
         write_synced(&manifest_tmp, &encoded_manifest, "write recovery manifest")?;
         durable_replace_file(&manifest_tmp, &manifest_path).map_err(|error| {
             RelationalIndexShadowError::Durability(format!(
@@ -722,7 +736,7 @@ impl RelationalIndexRecoveryBuilder {
             self.delta_generation,
             ordinal,
         ));
-        let tmp_path = final_path.with_extension("skein.tmp");
+        let tmp_path = final_path.with_extension("hawdb.tmp");
         let (encoded_len, digest) = write_delta_page(
             &tmp_path,
             DeltaPageWrite {
@@ -2191,7 +2205,7 @@ mod tests {
             entry_count: 1,
             encoded_len: DELTA_PAGE_HEADER_BYTES as u64,
             digest: IntegrityDigest {
-                crc32c: skein_integrity::Crc32c::new(1),
+                crc32c: hawdb_integrity::Crc32c::new(1),
                 sha256: Sha256Digest::from_bytes([0; SHA256_BYTES]),
             },
             selectors,

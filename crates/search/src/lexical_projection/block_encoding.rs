@@ -1,9 +1,23 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{
-    encode_block_header, encode_posting, write_string, BlockDescriptor, BlockKind, Digest, Posting,
-    Result, SkeinError, SPILL_IO_BUFFER_BYTES,
+    encode_block_header, encode_posting, write_string, BlockDescriptor, BlockKind, Digest,
+    HawDBError, Posting, Result, SPILL_IO_BUFFER_BYTES,
 };
 use crate::build_control::{checkpoint, CheckedWriter};
-use skein_core::RuntimeTaskContext;
+use hawdb_core::RuntimeTaskContext;
 use std::io::{self, Write};
 
 #[cfg(test)]
@@ -41,7 +55,7 @@ impl<'a> Entries<'a> {
                 .zip(entries.last())
                 .map(|(first, last)| (first.term.as_str(), last.term.as_str())),
         };
-        bounds.ok_or_else(|| SkeinError::Storage("cannot encode an empty lexical block".into()))
+        bounds.ok_or_else(|| HawDBError::Storage("cannot encode an empty lexical block".into()))
     }
 
     fn encode(self, writer: &mut impl Write, generation: u64, block_id: u64) -> Result<()> {
@@ -98,16 +112,16 @@ pub(super) fn write_block_with_context(
     )?;
     let length = counter.0;
     if length > max_bytes {
-        return Err(SkeinError::Storage(format!(
+        return Err(HawDBError::Storage(format!(
             "lexical build produced a {length} byte block, exceeding {max_bytes}"
         )));
     }
     offset
         .checked_add(length)
-        .ok_or_else(|| SkeinError::Storage("lexical block offset exceeds u64".into()))?;
+        .ok_or_else(|| HawDBError::Storage("lexical block offset exceeds u64".into()))?;
     block_id
         .checked_add(1)
-        .ok_or_else(|| SkeinError::Storage("lexical block identity exceeds u64".into()))?;
+        .ok_or_else(|| HawDBError::Storage("lexical block identity exceeds u64".into()))?;
 
     task.map_or(Ok(()), checkpoint)?;
     // The builder admits directory slots and both key copies before this call.

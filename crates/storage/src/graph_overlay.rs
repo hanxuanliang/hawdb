@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Ordered checkpoint/delta overlay used by the embedded graph store.
 //!
 //! The facade captures the delta and tombstone snapshot. This owner merges it
@@ -8,7 +22,7 @@ use crate::{
     CanonicalNodeIterator, CanonicalRelationshipIterator, CanonicalSegmentError, NodeId,
     NodeRecord, RelId, RelRecord,
 };
-use skein_core::{Result, SkeinError};
+use hawdb_core::{HawDBError, Result};
 use std::collections::BTreeSet;
 use std::iter::Peekable;
 
@@ -107,7 +121,7 @@ impl<R: OverlayRecord, B: Iterator<Item = std::result::Result<R, CanonicalSegmen
             .as_mut()
             .and_then(Iterator::next)
             .expect("peeked base record exists")
-            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))
+            .map_err(|error| HawDBError::StorageIntegrity(error.to_string()))
     }
 }
 

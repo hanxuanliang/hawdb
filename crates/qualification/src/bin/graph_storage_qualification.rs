@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #[path = "shared/graph_qualification_input.rs"]
 mod graph_qualification_input;
 
@@ -10,10 +24,10 @@ mod qualification_value;
 #[path = "graph_storage_qualification/plan.rs"]
 mod plan;
 
-use plan::read_plan;
-use skein_qualification::{
+use hawdb_qualification::{
     run_production_graph_storage_qualification, PRODUCTION_GRAPH_STORAGE_QUALIFICATION_PROTOCOL,
 };
+use plan::read_plan;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -47,7 +61,7 @@ fn main() -> ExitCode {
                     "errors": ["qualification_failed"],
                 })
             );
-            eprintln!("skein-graph-storage-qualification: {error}");
+            eprintln!("hawdb-graph-storage-qualification: {error}");
             ExitCode::from(2)
         }
     }
@@ -55,7 +69,7 @@ fn main() -> ExitCode {
 
 fn run(
     args: impl IntoIterator<Item = String>,
-) -> Result<Option<skein_qualification::ProductionGraphStorageQualificationReport>, String> {
+) -> Result<Option<hawdb_qualification::ProductionGraphStorageQualificationReport>, String> {
     let Some((database_path, plan_path)) = parse_args(args)? else {
         return Ok(None);
     };
@@ -98,8 +112,8 @@ fn parse_args(
 }
 
 fn usage() -> &'static str {
-    "usage: skein-graph-storage-qualification \
-     --database-path <existing-read-only-skein-directory> --plan-json <path>"
+    "usage: hawdb-graph-storage-qualification \
+     --database-path <existing-read-only-hawdb-directory> --plan-json <path>"
 }
 
 #[cfg(test)]
@@ -130,7 +144,7 @@ mod tests {
     fn plan_protocol_is_stable() {
         assert_eq!(
             plan::GRAPH_STORAGE_QUALIFICATION_PLAN_PROTOCOL,
-            "skein-production-graph-storage-plan-v1"
+            "hawdb-production-graph-storage-plan-v1"
         );
     }
 }

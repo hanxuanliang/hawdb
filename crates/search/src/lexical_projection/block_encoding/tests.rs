@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::super::{checksum, ArtifactBuilder, LexicalProjectionConfig, ARTIFACT_HEADER};
 use super::*;
 use crate::{SearchDocument, SearchOutOfCoreGenerationWriter, SearchOutOfCoreReader};
@@ -13,7 +27,7 @@ impl Fixture {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "skein-block-encoding-{}-{}-{}",
+            "hawdb-block-encoding-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -220,7 +234,7 @@ fn long_fields_are_written_in_bounded_chunks() {
 
 #[test]
 fn cancellation_during_short_writes_or_after_the_last_write_rejects_the_block() {
-    use skein_core::{RuntimeCancellationToken, RuntimeTaskContext};
+    use hawdb_core::{RuntimeCancellationToken, RuntimeTaskContext};
 
     struct CancelWriter {
         output: ObservedWriter,
@@ -331,7 +345,7 @@ fn representation_failures_happen_before_writing() {
 #[test]
 fn artifact_builder_preserves_block_boundaries_and_statistics() {
     let fixture = Fixture::new();
-    let path = fixture.0.join("artifact.skein");
+    let path = fixture.0.join("artifact.hawdb");
     let config = LexicalProjectionConfig {
         target_block_bytes: NonZeroU64::new(24).unwrap(),
         ..Default::default()

@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
+# Copyright 2026 Nowledge
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 set -euo pipefail
 if [[ "$1" == "-version" ]]; then
   printf 'fixture Java runtime\n' >&2
@@ -21,7 +35,7 @@ test "$1" = -metadir
 test "$3" = -config
 test -f "$4"
 test -f "$5"
-if [[ "$5" == */SkeinCowPagePublication.tla ]]; then
+if [[ "$5" == */HawDBCowPagePublication.tla ]]; then
   test "$final_liveness" = true
   printf '%s\n' 'Checking temporal properties for the complete state space with 2 total distinct states'
 else

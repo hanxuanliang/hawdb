@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Typed revision-bound qualification workloads for CI and production replicas.
 
 #![forbid(unsafe_code)]
@@ -25,16 +39,15 @@ pub use production_search::*;
 pub use production_vector::*;
 pub use release_bundle::*;
 
+use hawdb::executor::ExecutionMemoryConfig;
+use hawdb::store::MutationLimits;
+use hawdb::{
+    DatabaseConfig, DurabilityPolicy, HawDBEmbedded, HawDBEmbeddedOpenOptions, HawDBTokioEmbedded,
+    ProcessMemoryProfile, ProcessMemorySnapshot, QueryStreamReport, RuntimeGovernorConfig,
+    RuntimeTaskContext, RuntimeWorkRequest, StorageResidencyMode, StorageResidencyReport, Value,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use skein::executor::ExecutionMemoryConfig;
-use skein::store::MutationLimits;
-use skein::{
-    DatabaseConfig, DurabilityPolicy, ProcessMemoryProfile, ProcessMemorySnapshot,
-    QueryStreamReport, RuntimeGovernorConfig, RuntimeTaskContext, RuntimeWorkRequest,
-    SkeinEmbedded, SkeinEmbeddedOpenOptions, SkeinTokioEmbedded, StorageResidencyMode,
-    StorageResidencyReport, Value,
-};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -44,7 +57,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Barrier;
 
-pub const MIXED_SOAK_PROTOCOL: &str = "skein-mixed-runtime-soak-v1";
+pub const MIXED_SOAK_PROTOCOL: &str = "hawdb-mixed-runtime-soak-v1";
 pub const MIXED_SOAK_WORKLOAD: &str =
     "foreground-point-read+background-distinct-cartesian+background-checkpoint-v2";
 
@@ -310,7 +323,7 @@ pub fn run_mixed_soak(config: &MixedSoakConfig) -> Result<MixedSoakReport, Mixed
     let configuration_digest = stable_digest(&serde_json::to_vec(&configuration).map_err(error)?);
     let (prepared_storage, prepared_epoch, dataset_fingerprint) = prepare_fixture(config)?;
     let options = embedded_options(config);
-    let database = SkeinTokioEmbedded::open_owned(options).map_err(error)?;
+    let database = HawDBTokioEmbedded::open_owned(options).map_err(error)?;
     let start_process = ProcessMemorySnapshot::capture().map_err(error)?;
     let runtime_before = database.runtime_snapshot();
     let storage_before =
@@ -457,7 +470,7 @@ fn merge_query_task_outcome(
 }
 
 async fn run_concurrent_workload(
-    database: SkeinTokioEmbedded,
+    database: HawDBTokioEmbedded,
     config: MixedSoakConfig,
 ) -> WorkloadOutcomes {
     let participant_count = config.foreground_workers.saturating_add(2);
@@ -616,7 +629,7 @@ async fn run_concurrent_workload(
 }
 
 async fn stream_query(
-    database: &SkeinTokioEmbedded,
+    database: &HawDBTokioEmbedded,
     cypher: &str,
     parameters: BTreeMap<String, Value>,
     timeout: Duration,
@@ -639,7 +652,7 @@ async fn stream_query(
 fn prepare_fixture(
     config: &MixedSoakConfig,
 ) -> Result<(StorageResidencyReport, u64, String), MixedSoakError> {
-    let mut embedded = SkeinEmbedded::open_with_options(embedded_options(config)).map_err(error)?;
+    let mut embedded = HawDBEmbedded::open_with_options(embedded_options(config)).map_err(error)?;
     let mut fingerprint = StableHasher::new();
     fingerprint.update(config.dataset_id.as_bytes());
     for id in 0..config.node_count {
@@ -665,7 +678,7 @@ fn prepare_fixture(
     Ok((report, epoch, fingerprint.finish()))
 }
 
-fn embedded_options(config: &MixedSoakConfig) -> SkeinEmbeddedOpenOptions {
+fn embedded_options(config: &MixedSoakConfig) -> HawDBEmbeddedOpenOptions {
     let raw_bytes = raw_dataset_bytes(config);
     let batch_payload_bytes =
         usize::try_from((config.runtime_memory_budget_bytes / 16).clamp(8 * 1024, 256 * 1024))
@@ -717,7 +730,7 @@ fn embedded_options(config: &MixedSoakConfig) -> SkeinEmbeddedOpenOptions {
         result_budget_bytes: config.result_budget_bytes,
         ..RuntimeGovernorConfig::shared_host()
     };
-    SkeinEmbeddedOpenOptions::new(&config.database_path)
+    HawDBEmbeddedOpenOptions::new(&config.database_path)
         .with_config(database)
         .with_durability(DurabilityPolicy::SyncOnCheckpoint)
         .with_runtime_governor_config(governor)
@@ -823,8 +836,8 @@ fn process_report(profile: ProcessMemoryProfile) -> MixedSoakProcessReport {
 }
 
 pub(crate) fn runtime_report(
-    before: skein::RuntimeGovernorSnapshot,
-    after: skein::RuntimeGovernorSnapshot,
+    before: hawdb::RuntimeGovernorSnapshot,
+    after: hawdb::RuntimeGovernorSnapshot,
 ) -> MixedSoakRuntimeReport {
     MixedSoakRuntimeReport {
         admissions_delta: after.admissions.saturating_sub(before.admissions),
@@ -965,8 +978,8 @@ mod tests {
         assert_eq!(deterministic_payload(7, 32), deterministic_payload(7, 32));
         assert_ne!(deterministic_payload(7, 32), deterministic_payload(8, 32));
         assert_eq!(
-            stable_digest(b"skein"),
-            "sha256:2f2742392c67f60c5f125eabfee13d571883db5cf38b1c3507d98624ea30bbcb"
+            stable_digest(b"hawdb"),
+            "sha256:0008f032b344fab74c72624fc8b9fb01130ed1c777a91e2c49e440909026a25a"
         );
     }
 
@@ -974,7 +987,7 @@ mod tests {
     fn small_mixed_soak_emits_non_production_typed_evidence() {
         let id = TEST_ID.fetch_add(1, Ordering::SeqCst);
         let root =
-            std::env::temp_dir().join(format!("skein-qualification-{}-{id}", std::process::id()));
+            std::env::temp_dir().join(format!("hawdb-qualification-{}-{id}", std::process::id()));
         let mut config = MixedSoakConfig::scheduled(root.join("database"), "test-revision");
         config.dataset_id = "test-dataset".to_string();
         config.node_count = 512;

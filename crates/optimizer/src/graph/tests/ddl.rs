@@ -1,6 +1,20 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::CascadesOptimizer;
-use skein_core::SkeinError;
-use skein_plan::{
+use hawdb_core::HawDBError;
+use hawdb_plan::{
     LogicalPlan, PhysicalPlan, SchemaObjectState, SchemaPropertyType, SchemaTableKind,
 };
 
@@ -63,8 +77,8 @@ fn assert_pipeline(
     expected_fingerprint: &str,
     counts: &mut Counts,
 ) {
-    let statement = skein_cypher::parse(input).expect("valid DDL");
-    let logical = skein_plan::plan(&statement).expect("valid DDL plan");
+    let statement = hawdb_cypher::parse(input).expect("valid DDL");
+    let logical = hawdb_plan::plan(&statement).expect("valid DDL plan");
     assert_eq!(logical, expected_logical, "logical DDL: {input}");
     let physical = CascadesOptimizer::default().optimize(&logical);
     assert_eq!(physical, expected_physical, "physical DDL: {input}");
@@ -77,7 +91,7 @@ fn assert_pipeline(
 
     for invalid in [invalid_keyword, &format!("{input} unexpected")] {
         assert!(
-            matches!(skein_cypher::parse(invalid), Err(SkeinError::Parse(_))),
+            matches!(hawdb_cypher::parse(invalid), Err(HawDBError::Parse(_))),
             "expected a parse rejection: {invalid}"
         );
         counts.rejected += 1;

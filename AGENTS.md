@@ -4,28 +4,28 @@
 
 - Do not split crates for their own sake.
 - Add a new crate only when it has a clear ownership boundary, dependency-direction benefit, compile-time isolation benefit, or stable reuse contract.
-- Keep `skein` as the SQLite-like embedded library facade; internal crates should support that facade instead of becoming accidental production integration points.
+- Keep `hawdb` as the SQLite-like embedded library facade; internal crates should support that facade instead of becoming accidental production integration points.
 
 ## Library-First Integration
 
-- Treat Skein as an embedded Rust database library, similar to SQLite or LanceDB usage from a host process.
+- Treat HawDB as an embedded Rust database library, similar to SQLite or LanceDB usage from a host process.
 - Production Mem integration must call Rust library APIs directly; command-line binaries may exist only as thin developer, fixture, or preflight wrappers over the same library path.
 - New readiness, slow-query, blackbox, background-maintenance, and replacement-gate capabilities should expose typed Rust APIs first, then derive JSON or CLI output from those APIs when needed.
 - Avoid environment variables, command arguments, helper processes, or shell-out behavior as production control planes.
 
 ## Mem Release Modes and Full Verification
 
-- During the current development phase, Skein code must not appear in any stable or GA release. Stable release artifacts and the public release dependency graph must exclude Skein crates, features, binaries, bundled source, and transitive Skein dependencies.
-- Every Mem App persistence-schema change must update the Skein integration contract in the same delivery. Canonical data changes require matching Skein DDL, import or dual-write mapping, and full-verification coverage. Source-only migration or operational tables must be named explicitly with a rationale and an exclusion test; they must not disappear from the contract merely because Skein does not store them.
-- Skein has not entered production and has no persisted production compatibility obligation. Until that changes, App schema evolution may replace the greenfield Skein baseline destructively and require development databases to be recreated. Do not add compatibility migrations solely for earlier development-only Skein schemas, and do not apply this exception to any authoritative legacy or Cloud datastore.
-- Only nightly or development builds may compile, bundle, or execute Skein during this phase. The stable dual-write and full-activation rules below remain inactive until a separate explicit release-policy decision authorizes Skein code in stable artifacts.
+- During the current development phase, HawDB code must not appear in any stable or GA release. Stable release artifacts and the public release dependency graph must exclude HawDB crates, features, binaries, bundled source, and transitive HawDB dependencies.
+- Every Mem App persistence-schema change must update the HawDB integration contract in the same delivery. Canonical data changes require matching HawDB DDL, import or dual-write mapping, and full-verification coverage. Source-only migration or operational tables must be named explicitly with a rationale and an exclusion test; they must not disappear from the contract merely because HawDB does not store them.
+- HawDB has not entered production and has no persisted production compatibility obligation. Until that changes, App schema evolution may replace the greenfield HawDB baseline destructively and require development databases to be recreated. Do not add compatibility migrations solely for earlier development-only HawDB schemas, and do not apply this exception to any authoritative legacy or Cloud datastore.
+- Only nightly or development builds may compile, bundle, or execute HawDB during this phase. The stable dual-write and full-activation rules below remain inactive until a separate explicit release-policy decision authorizes HawDB code in stable artifacts.
 - Nightly or development builds may support three explicit storage modes:
-  1. dual-write to the legacy stores and Skein while legacy reads remain authoritative;
-  2. dual-write and dual-read from the legacy stores and Skein, with mismatches surfaced as verification evidence;
-  3. Skein-only reads and writes.
-- After Skein is explicitly authorized for stable release artifacts, but before the first full Skein activation, stable or GA builds support only the dual-write transition mode and keep legacy reads authoritative. Dual-write startup must not run or require a full consistency comparison between Skein and the legacy stores.
-- The first stable or GA activation that makes Skein the active data plane must complete this bootstrap sequence before reporting Skein as ready: successfully open Skein, import all required data from Kuzu, LanceDB, and SQLite, then complete one full-data verification of the imported result.
-- The activation verification may use bounded pages or streaming, but it must cover the complete imported datasets rather than a sample. A mismatch or incomplete import or verification must fail closed for Skein readiness, keep the legacy stores authoritative and retained, and must not publish ownership, authorize cutover, or delete legacy data.
+  1. dual-write to the legacy stores and HawDB while legacy reads remain authoritative;
+  2. dual-write and dual-read from the legacy stores and HawDB, with mismatches surfaced as verification evidence;
+  3. HawDB-only reads and writes.
+- After HawDB is explicitly authorized for stable release artifacts, but before the first full HawDB activation, stable or GA builds support only the dual-write transition mode and keep legacy reads authoritative. Dual-write startup must not run or require a full consistency comparison between HawDB and the legacy stores.
+- The first stable or GA activation that makes HawDB the active data plane must complete this bootstrap sequence before reporting HawDB as ready: successfully open HawDB, import all required data from Kuzu, LanceDB, and SQLite, then complete one full-data verification of the imported result.
+- The activation verification may use bounded pages or streaming, but it must cover the complete imported datasets rather than a sample. A mismatch or incomplete import or verification must fail closed for HawDB readiness, keep the legacy stores authoritative and retained, and must not publish ownership, authorize cutover, or delete legacy data.
 
 ## Query and Storage Discipline
 
@@ -54,4 +54,4 @@
 ## Local Fuzz Verification
 
 - Keep fuzz targets available through Bazel, but do not add them to default or dedicated CI jobs.
-- Routine local verification must run `bazel test //crates/fuzz:skein_fuzz_tests //crates/fuzz:skein_fuzz_cli_tests //:skein_linux_ci_fuzz_smoke_test`.
+- Routine local verification must run `bazel test //crates/fuzz:hawdb_fuzz_tests //crates/fuzz:hawdb_fuzz_cli_tests //:hawdb_linux_ci_fuzz_smoke_test`.

@@ -1,8 +1,22 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::{
     Database, DatabaseConfig, QueryStreamOptions, RelationalJoinPlanningDirective,
     RelationalJoinPlanningReason, RelationalJoinPlanningStrategy, Value,
 };
-use skein_optimizer::RelationalOperatorKind;
+use hawdb_optimizer::RelationalOperatorKind;
 
 #[test]
 fn cost_based_reordering_selects_hash_join_and_matches_syntax_order() {
@@ -114,9 +128,9 @@ fn assert_costed_algorithm(indexed: bool, expected: RelationalOperatorKind, spil
     if !indexed {
         assert!(planned.profile.row_read.rows_visited < syntax.profile.row_read.rows_visited);
     }
-    let cancellation = skein_core::RuntimeCancellationToken::new();
+    let cancellation = hawdb_core::RuntimeCancellationToken::new();
     cancellation.cancel();
-    let context = skein_core::RuntimeTaskContext::without_deadline(cancellation);
+    let context = hawdb_core::RuntimeTaskContext::without_deadline(cancellation);
     assert!(read
         .query_sql_with_params_options_context(sql, &[], QueryStreamOptions::default(), &context)
         .unwrap_err()

@@ -1,13 +1,27 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Storage-neutral SQL field planning and output-alias resolution.
 //!
 //! This internal ownership seam does not open stores, read rows, or hydrate values.
 
-use skein_core::{Result, SkeinError};
-use skein_sql::{
+use hawdb_core::{HawDBError, Result};
+use hawdb_sql::{
     Expr, ExprKind, SelectProjection, SelectStatement, SqlColumnRef, SqlExpression,
     SqlFunctionArgument, SqlOrderItem, SqlPredicate,
 };
-use skein_storage::{RelationalState, RelationalTableSchema};
+use hawdb_storage::{RelationalState, RelationalTableSchema};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -60,7 +74,7 @@ pub fn resolve_relational_order_target<'a>(
         return Ok(RelationalOrderTarget::InputColumn(column));
     };
     if aliases.next().is_some() {
-        return Err(SkeinError::Semantic(format!(
+        return Err(HawDBError::Semantic(format!(
             "ambiguous relational ORDER BY alias {}",
             column.name
         )));
@@ -77,11 +91,11 @@ pub struct RelationalFieldPlan {
 impl RelationalFieldPlan {
     pub(crate) fn apply_access_coverage(
         &self,
-        access: &mut skein_optimizer::RelationalAccessPathDescriptor,
+        access: &mut hawdb_optimizer::RelationalAccessPathDescriptor,
         table: &str,
         schema: &RelationalTableSchema,
     ) -> Result<()> {
-        if access.kind == skein_optimizer::RelationalAccessPathKind::Index {
+        if access.kind == hawdb_optimizer::RelationalAccessPathKind::Index {
             access.covering = self.index_covers_table(table, schema, &access.index_columns)?;
             access.requires_row_fetch = !access.covering;
         }
@@ -117,7 +131,7 @@ impl RelationalFieldPlan {
         table: &str,
     ) -> Result<&'fields [usize]> {
         plan.get(table).map(AsRef::as_ref).ok_or_else(|| {
-            SkeinError::StorageIntegrity(format!(
+            HawDBError::StorageIntegrity(format!(
                 "relational query has no field plan for table {table}"
             ))
         })
@@ -134,7 +148,7 @@ impl RelationalFieldPlan {
         index_columns: &[String],
     ) -> Result<bool> {
         let fields = self.scan_fields.get(table).ok_or_else(|| {
-            SkeinError::StorageIntegrity(format!(
+            HawDBError::StorageIntegrity(format!(
                 "relational query has no field plan for table {table}"
             ))
         })?;
@@ -264,7 +278,7 @@ fn plan_scan_hydration_fields(
     scan_fields: &BTreeMap<String, Arc<[usize]>>,
 ) -> Result<BTreeMap<String, Arc<[usize]>>> {
     let base_schema = state.table_schema(&select.from.name).ok_or_else(|| {
-        SkeinError::Semantic(format!("unknown relational table {}", select.from.name))
+        HawDBError::Semantic(format!("unknown relational table {}", select.from.name))
     })?;
     let mut bindings = Vec::with_capacity(select.joins.len() + 1);
     bindings.push(FieldBinding {
@@ -274,7 +288,7 @@ fn plan_scan_hydration_fields(
     });
     for join in &select.joins {
         let schema = state.table_schema(&join.table.name).ok_or_else(|| {
-            SkeinError::Semantic(format!("unknown relational table {}", join.table.name))
+            HawDBError::Semantic(format!("unknown relational table {}", join.table.name))
         })?;
         bindings.push(FieldBinding {
             table: &join.table.name,
@@ -379,7 +393,7 @@ fn plan_fields(
 ) -> Result<BTreeMap<String, Arc<[usize]>>> {
     let mut bindings = Vec::with_capacity(select.joins.len() + 1);
     let base_schema = state.table_schema(&select.from.name).ok_or_else(|| {
-        SkeinError::Semantic(format!("unknown relational table {}", select.from.name))
+        HawDBError::Semantic(format!("unknown relational table {}", select.from.name))
     })?;
     bindings.push(FieldBinding {
         table: &select.from.name,
@@ -388,7 +402,7 @@ fn plan_fields(
     });
     for join in &select.joins {
         let schema = state.table_schema(&join.table.name).ok_or_else(|| {
-            SkeinError::Semantic(format!("unknown relational table {}", join.table.name))
+            HawDBError::Semantic(format!("unknown relational table {}", join.table.name))
         })?;
         bindings.push(FieldBinding {
             table: &join.table.name,
@@ -493,10 +507,10 @@ fn resolve_field_binding<'a>(
             .map(|ordinal| (binding.table, ordinal))
     });
     let first = matches.next().ok_or_else(|| {
-        SkeinError::Semantic(format!("unknown relational column {}", column.name))
+        HawDBError::Semantic(format!("unknown relational column {}", column.name))
     })?;
     if matches.next().is_some() {
-        return Err(SkeinError::Semantic(format!(
+        return Err(HawDBError::Semantic(format!(
             "ambiguous relational column {}",
             column.name
         )));
@@ -628,7 +642,7 @@ fn collect_expression_columns<'a>(
 #[cfg(test)]
 mod tests;
 
-pub fn resolved_access_order_by(select: &SelectStatement) -> Result<Vec<skein_sql::SqlOrderItem>> {
+pub fn resolved_access_order_by(select: &SelectStatement) -> Result<Vec<hawdb_sql::SqlOrderItem>> {
     let mut resolved = Vec::with_capacity(select.order_by.len());
     let mut supports_ordered_access = true;
     for item in &select.order_by {
@@ -641,9 +655,9 @@ pub fn resolved_access_order_by(select: &SelectStatement) -> Result<Vec<skein_sq
             }
         };
         if let Some(column) = column {
-            resolved.push(skein_sql::SqlOrderItem {
-                expression: skein_sql::Expr {
-                    kind: skein_sql::ExprKind::Column(column.clone()),
+            resolved.push(hawdb_sql::SqlOrderItem {
+                expression: hawdb_sql::Expr {
+                    kind: hawdb_sql::ExprKind::Column(column.clone()),
                     span: item.expression.span,
                 },
                 direction: item.direction,

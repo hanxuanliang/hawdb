@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Bounded owner-scoped publication for deterministic derived projections.
 //!
 //! Producers append one canonically ordered candidate in bounded batches,
@@ -11,7 +25,7 @@ use crate::relational::{
     RelationalRow, RelationalTableSchema,
 };
 use crate::{decode_relational_primary_key, encode_relational_primary_key};
-use skein_integrity::{crc32c, Crc32c, IntegrityDigest, IntegrityHasher, Sha256Digest};
+use hawdb_integrity::{crc32c, Crc32c, IntegrityDigest, IntegrityHasher, Sha256Digest};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display, Formatter};
 use std::fs::{self, File, OpenOptions};
@@ -103,7 +117,7 @@ pub struct ProjectionGenerationMember {
 /// Encodes one relational row as a storage-neutral projection member.
 ///
 /// The collection is the relational table name, the member key is the
-/// canonical ordered primary-key encoding, and the payload uses Skein's
+/// canonical ordered primary-key encoding, and the payload uses HawDB's
 /// versioned relational row codec. Query bindings decode the same member
 /// against the durable table schema before exposing it to PostgreSQL SQL.
 pub fn encode_projection_relational_member(
@@ -2167,7 +2181,7 @@ mod tests {
             .expect("system clock")
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "skein-projection-generation-{name}-{}-{nonce}",
+            "hawdb-projection-generation-{name}-{}-{nonce}",
             std::process::id()
         ))
     }

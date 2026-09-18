@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -31,8 +45,8 @@ enum AggregateState {
     },
 }
 
-fn incompatible_partial_states_error() -> SkeinError {
-    SkeinError::Execution("AggregateExec encountered incompatible partial states".to_string())
+fn incompatible_partial_states_error() -> HawDBError {
+    HawDBError::Execution("AggregateExec encountered incompatible partial states".to_string())
 }
 
 #[derive(Default)]
@@ -392,7 +406,7 @@ impl<'a> GroupAccumulator<'a> {
 
     fn update_inputs(&mut self, inputs: Vec<AggregateInput>) -> Result<MemoryDelta> {
         if inputs.len() != self.states.len() {
-            return Err(SkeinError::Execution(
+            return Err(HawDBError::Execution(
                 "AggregateExec compact input width mismatch".to_string(),
             ));
         }
@@ -1082,7 +1096,7 @@ fn update_group_accumulator(
     let delta = accumulator.update(catalog, binding);
     tracker.release(delta.released_bytes);
     if tracker.would_exceed(delta.added_bytes) {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "AggregateExec state exceeds blocking_operator_bytes {}",
             tracker.budget_bytes
         )));
@@ -1099,7 +1113,7 @@ fn update_group_accumulator_inputs(
     let delta = accumulator.update_inputs(inputs)?;
     tracker.release(delta.released_bytes);
     if tracker.would_exceed(delta.added_bytes) {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "AggregateExec state exceeds blocking_operator_bytes {}",
             tracker.budget_bytes
         )));

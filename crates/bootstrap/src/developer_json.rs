@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Developer-facing JSON derived from the portable bootstrap contracts.
 //!
 //! The embedded facade supplies live snapshots and any storage-specific
@@ -5,16 +19,16 @@
 
 use crate::{
     CanonicalSnapshotEndpointViolation, CanonicalSnapshotIdentityAudit,
-    SkeinLightningBootstrapExport, SkeinLightningBootstrapManifest,
-    SkeinLightningGraphStreamValidation, SkeinLightningRelationalStreamValidation,
+    HawDBLightningBootstrapExport, HawDBLightningBootstrapManifest,
+    HawDBLightningGraphStreamValidation, HawDBLightningRelationalStreamValidation,
 };
-use skein_core::Value;
+use hawdb_core::Value;
 
-pub fn skein_lightning_bootstrap_manifest_json(
-    manifest: &SkeinLightningBootstrapManifest,
+pub fn hawdb_lightning_bootstrap_manifest_json(
+    manifest: &HawDBLightningBootstrapManifest,
 ) -> serde_json::Value {
     serde_json::json!({
-        "protocol": "skein-lightning-bootstrap",
+        "protocol": "hawdb-lightning-bootstrap",
         "protocol_version": manifest.protocol_version,
         "database_commit_epoch": manifest.database_commit_epoch,
         "graph_commit_epoch": manifest.graph_commit_epoch,
@@ -47,20 +61,20 @@ pub fn skein_lightning_bootstrap_manifest_json(
             "missing_sources": endpoint_violations_json(&manifest.validation.missing_sources),
             "missing_targets": endpoint_violations_json(&manifest.validation.missing_targets),
         },
-        "relational_validation": skein_lightning_relational_stream_validation_json(
+        "relational_validation": hawdb_lightning_relational_stream_validation_json(
             &manifest.relational_validation,
         ),
     })
 }
 
-pub fn skein_lightning_bootstrap_bundle_json(
-    export: &SkeinLightningBootstrapExport,
+pub fn hawdb_lightning_bootstrap_bundle_json(
+    export: &HawDBLightningBootstrapExport,
 ) -> serde_json::Value {
-    skein_lightning_bootstrap_bundle_json_with_optional_storage_recovery(export, None)
+    hawdb_lightning_bootstrap_bundle_json_with_optional_storage_recovery(export, None)
 }
 
-pub fn skein_lightning_bootstrap_bundle_json_with_optional_storage_recovery(
-    export: &SkeinLightningBootstrapExport,
+pub fn hawdb_lightning_bootstrap_bundle_json_with_optional_storage_recovery(
+    export: &HawDBLightningBootstrapExport,
     storage_recovery: Option<serde_json::Value>,
 ) -> serde_json::Value {
     let graph_stream_validation = export
@@ -94,10 +108,10 @@ pub fn skein_lightning_bootstrap_bundle_json_with_optional_storage_recovery(
         "blocked"
     };
     let mut bundle = serde_json::json!({
-        "protocol": "skein-lightning-bootstrap-bundle",
-        "manifest": skein_lightning_bootstrap_manifest_json(&export.manifest),
-        "graph_stream_validation": skein_lightning_graph_stream_validation_json(&graph_stream_validation),
-        "relational_stream_validation": skein_lightning_relational_stream_validation_json(&relational_stream_validation),
+        "protocol": "hawdb-lightning-bootstrap-bundle",
+        "manifest": hawdb_lightning_bootstrap_manifest_json(&export.manifest),
+        "graph_stream_validation": hawdb_lightning_graph_stream_validation_json(&graph_stream_validation),
+        "relational_stream_validation": hawdb_lightning_relational_stream_validation_json(&relational_stream_validation),
         "export_gate": {
             "decision": decision,
             "manifest_blockers": manifest_blocker_messages.len(),
@@ -118,8 +132,8 @@ pub fn skein_lightning_bootstrap_bundle_json_with_optional_storage_recovery(
     bundle
 }
 
-pub fn skein_lightning_graph_stream_validation_json(
-    validation: &SkeinLightningGraphStreamValidation,
+pub fn hawdb_lightning_graph_stream_validation_json(
+    validation: &HawDBLightningGraphStreamValidation,
 ) -> serde_json::Value {
     serde_json::json!({
         "is_valid": validation.is_valid,
@@ -143,8 +157,8 @@ pub fn skein_lightning_graph_stream_validation_json(
     })
 }
 
-pub fn skein_lightning_relational_stream_validation_json(
-    validation: &SkeinLightningRelationalStreamValidation,
+pub fn hawdb_lightning_relational_stream_validation_json(
+    validation: &HawDBLightningRelationalStreamValidation,
 ) -> serde_json::Value {
     serde_json::json!({
         "is_valid": validation.is_valid,
@@ -224,7 +238,7 @@ mod tests {
             relationships_without_stable_id: vec![2],
             duplicate_node_stable_ids: vec![Value::Binary(vec![0xab])],
             duplicate_relationship_stable_ids: vec![Value::Uuid(
-                skein_core::Uuid::parse_str("018f4e6a-7c1b-7cc8-8f4d-1234567890ab")
+                hawdb_core::Uuid::parse_str("018f4e6a-7c1b-7cc8-8f4d-1234567890ab")
                     .expect("parse UUID"),
             )],
         };

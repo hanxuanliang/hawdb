@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Immutable, manifest-last relational row delta runs.
 
 use super::{RelationalRowPageLimits, RelationalRowPageRootReader};
@@ -5,7 +19,7 @@ use crate::relational::{
     RelationalOverflowRootBinding, RelationalRecoverySourceIdentity,
     RelationalRowChangeCaptureLimits,
 };
-use skein_integrity::{IntegrityDigest, Sha256Digest};
+use hawdb_integrity::{IntegrityDigest, Sha256Digest};
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::Path;
@@ -18,7 +32,7 @@ pub use builder::RelationalRowDeltaBuilder;
 pub use reader::RelationalRowDeltaReader;
 pub(super) use reader::RelationalRowDeltaRunRangeCursor;
 
-pub const RELATIONAL_ROW_DELTA_MANIFEST_FILE: &str = "relational-row-delta.manifest.skein";
+pub const RELATIONAL_ROW_DELTA_MANIFEST_FILE: &str = "relational-row-delta.manifest.hawdb";
 const RELATIONAL_ROW_DELTA_PUBLICATION_LOCK_FILE: &str = "relational-row-delta.lock";
 
 pub const DEFAULT_RELATIONAL_ROW_DELTA_DIRTY_ENTRIES: usize = 100_000;
@@ -35,14 +49,14 @@ pub fn relational_row_delta_run_file(
     delta_generation: u64,
     ordinal: u32,
 ) -> String {
-    format!("relational-row-delta-{base_generation}-{delta_generation}-{ordinal}.run.skein")
+    format!("relational-row-delta-{base_generation}-{delta_generation}-{ordinal}.run.hawdb")
 }
 
 pub fn relational_row_delta_manifest_generation_file(
     base_generation: u64,
     delta_generation: u64,
 ) -> String {
-    format!("relational-row-delta-{base_generation}-{delta_generation}.manifest.skein")
+    format!("relational-row-delta-{base_generation}-{delta_generation}.manifest.hawdb")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

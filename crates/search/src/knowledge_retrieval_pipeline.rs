@@ -1,5 +1,19 @@
-use skein_core::{Result, SkeinError};
-use skein_executor::{
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use hawdb_core::{HawDBError, Result};
+use hawdb_executor::{
     QueryMemoryClass, QueryMemoryLease, QueryMemoryLedger, QueryMemoryLedgerSnapshot,
 };
 use std::num::NonZeroUsize;
@@ -67,7 +81,7 @@ pub struct KnowledgeRetrievalPipelineBudget {
 impl KnowledgeRetrievalPipelineBudget {
     pub fn new(query_memory_budget: NonZeroUsize, result_payload_budget: usize) -> Result<Self> {
         if result_payload_budget == 0 {
-            return Err(SkeinError::Execution(
+            return Err(HawDBError::Execution(
                 "knowledge retrieval requires a positive result payload budget".to_string(),
             ));
         }
@@ -99,7 +113,7 @@ impl KnowledgeRetrievalPipelineBudget {
     pub fn enter(&mut self, stage: KnowledgeRetrievalStage) -> Result<()> {
         let expected = STAGE_ORDER.get(self.stages.len()).copied();
         if expected != Some(stage) {
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "knowledge retrieval stage order violation: expected {}, got {}",
                 expected.map_or("<complete>", KnowledgeRetrievalStage::as_str),
                 stage.as_str(),
@@ -118,12 +132,12 @@ impl KnowledgeRetrievalPipelineBudget {
             .result_payload_bytes
             .checked_add(payload_bytes)
             .ok_or_else(|| {
-                SkeinError::Execution(
+                HawDBError::Execution(
                     "knowledge retrieval result payload accounting overflow".to_string(),
                 )
             })?;
         if next_payload > self.result_payload_budget {
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "knowledge retrieval result uses {next_payload} payload bytes, exceeding max_read_result_payload_bytes {}",
                 self.result_payload_budget
             )));
@@ -142,7 +156,7 @@ impl KnowledgeRetrievalPipelineBudget {
         metadata_filter_authorized_graph_expansion: bool,
     ) -> Result<KnowledgeRetrievalPipelineReport> {
         if self.stages.as_slice() != STAGE_ORDER {
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "knowledge retrieval pipeline completed after {} of {} required stages",
                 self.stages.len(),
                 STAGE_ORDER.len()

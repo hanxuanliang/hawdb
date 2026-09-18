@@ -1,6 +1,20 @@
-//! Compatibility facade and embedded-store adapter for `skein-analytics`.
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-pub use skein_analytics::{
+//! Compatibility facade and embedded-store adapter for `hawdb-analytics`.
+
+pub use hawdb_analytics::{
     CommunityAssignment, GraphAlgorithmMemoryEstimate, HierarchicalCommunityAssignment,
     LouvainOptions, PageRankOptions, PageRankScore, ProjectedGraph, ProjectionLayout,
     ProjectionMemoryAdmissionError, ProjectionMemoryBudget, ProjectionMemoryEstimate,
@@ -12,7 +26,7 @@ use crate::store::{GraphScanControl, GraphStore};
 impl ProjectionSource for GraphStore {
     fn visit_projection_nodes(
         &self,
-        visitor: &mut dyn FnMut(skein_storage::NodeRecord) -> ProjectionScanControl,
+        visitor: &mut dyn FnMut(hawdb_storage::NodeRecord) -> ProjectionScanControl,
     ) -> std::result::Result<ProjectionScanControl, String> {
         self.visit_nodes_owned(None, |node| match visitor(node) {
             ProjectionScanControl::Continue => GraphScanControl::Continue,
@@ -27,7 +41,7 @@ impl ProjectionSource for GraphStore {
 
     fn visit_projection_relationships(
         &self,
-        visitor: &mut dyn FnMut(skein_storage::RelRecord) -> ProjectionScanControl,
+        visitor: &mut dyn FnMut(hawdb_storage::RelRecord) -> ProjectionScanControl,
     ) -> std::result::Result<ProjectionScanControl, String> {
         for relationship in self.relationship_records_owned() {
             let relationship = relationship.map_err(|error| error.to_string())?;

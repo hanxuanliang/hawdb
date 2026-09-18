@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{
     aggregate_filter_matches, bind_bound, order_by_uses_expression_alias, project_bound_row,
     project_typed_locator, relational_locator_layout, relational_physical_join_plan_locator_layout,
@@ -5,23 +19,23 @@ use super::{
     typed_row_set_locator, visit_relational_rows, AccountedBindingBatch, BatchControl,
     BindingBatch, BindingBatchSource, BlockingExecutionContext, BlockingOperatorMemoryReport,
     BoundRow, Catalog, ExecutionLimit, ExecutionObserver, ExecutorBinding, ExternalTopN,
-    NonZeroUsize, PhysicalPlan, PlannedJoin, QueryMemoryLedger, QueryRows, RefCell,
+    HawDBError, NonZeroUsize, PhysicalPlan, PlannedJoin, QueryMemoryLedger, QueryRows, RefCell,
     RelationalBaseAccess, RelationalIndexRuntime, RelationalOrderTarget,
     RelationalPhysicalJoinExecution, RelationalPipelineState, RelationalQueryLimits,
     RelationalRowRuntime, RelationalSortKey, RelationalSortRecord, RelationalState,
     RelationalTableSchema, RelationalValue, Result, Row, SelectProjection, SelectStatement,
-    SkeinError, SortDirection, SortItem, SortKey, SqlColumnRef, SqlNullOrder, SqlOrderDirection,
-    SqlPredicate, Value,
+    SortDirection, SortItem, SortKey, SqlColumnRef, SqlNullOrder, SqlOrderDirection, SqlPredicate,
+    Value,
 };
 pub(super) use crate::query_output::push_relational_output;
-use skein_sql::{Expr, ExprKind};
+use hawdb_sql::{Expr, ExprKind};
 
 pub(super) struct StreamingProjectionOutput {
     pub(super) rows: QueryRows,
     pub(super) blocking_operator_memory_reports: Vec<BlockingOperatorMemoryReport>,
 }
 
-pub(super) const RELATIONAL_SORT_COLUMN_PREFIX: &str = "__skein_relational_sort_";
+pub(super) const RELATIONAL_SORT_COLUMN_PREFIX: &str = "__hawdb_relational_sort_";
 
 #[derive(Default)]
 pub(super) struct RelationalBlockingObserver {
@@ -184,9 +198,9 @@ pub(super) struct DistinctBatchSource<'a> {
     pub(super) input: &'a mut dyn BindingBatchSource,
     pub(super) input_plan: &'a PhysicalPlan,
     pub(super) catalog: &'a Catalog,
-    pub(super) memory: &'a skein_executor::ExecutionMemoryConfig,
+    pub(super) memory: &'a hawdb_executor::ExecutionMemoryConfig,
     pub(super) memory_ledger: &'a QueryMemoryLedger,
-    pub(super) task_context: Option<&'a skein_core::RuntimeTaskContext>,
+    pub(super) task_context: Option<&'a hawdb_core::RuntimeTaskContext>,
     pub(super) observer: &'a dyn ExecutionObserver,
 }
 
@@ -215,7 +229,7 @@ impl BindingBatchSource for DistinctBatchSource<'_> {
 
 pub(super) struct ProjectedSortKeyBatchSource<'a> {
     pub(super) input: &'a mut dyn BindingBatchSource,
-    pub(super) order_columns: &'a [(String, skein_sql::SqlOrderItem)],
+    pub(super) order_columns: &'a [(String, hawdb_sql::SqlOrderItem)],
 }
 
 impl BindingBatchSource for ProjectedSortKeyBatchSource<'_> {
@@ -230,7 +244,7 @@ impl BindingBatchSource for ProjectedSortKeyBatchSource<'_> {
                 for binding in &mut batch {
                     for (ordinal, (column, item)) in self.order_columns.iter().enumerate() {
                         let value = binding.values.get(column).cloned().ok_or_else(|| {
-                            SkeinError::Semantic(format!(
+                            HawDBError::Semantic(format!(
                                 "DISTINCT ORDER BY column {} is not projected",
                                 item.expression
                                     .as_column()
@@ -266,15 +280,15 @@ pub(super) fn execute_blocking_projection<'a>(
     >,
     row_runtime: &RelationalRowRuntime<'a>,
     limits: RelationalQueryLimits,
-    memory: &skein_executor::ExecutionMemoryConfig,
+    memory: &hawdb_executor::ExecutionMemoryConfig,
     memory_ledger: &QueryMemoryLedger,
 ) -> Result<StreamingProjectionOutput> {
     let offset = usize::try_from(bind_bound(select.offset, parameters, "OFFSET")?.unwrap_or(0))
-        .map_err(|_| SkeinError::Semantic("SQL OFFSET is too large".to_string()))?;
+        .map_err(|_| HawDBError::Semantic("SQL OFFSET is too large".to_string()))?;
     let requested = bind_bound(select.limit, parameters, "LIMIT")?
         .map(|value| {
             usize::try_from(value)
-                .map_err(|_| SkeinError::Semantic("SQL LIMIT is too large".to_string()))
+                .map_err(|_| HawDBError::Semantic("SQL LIMIT is too large".to_string()))
         })
         .transpose()?
         .unwrap_or(usize::MAX);
@@ -528,9 +542,9 @@ pub(super) fn execute_relational_order(
     offset: usize,
     limit: usize,
     catalog: &Catalog,
-    memory: &skein_executor::ExecutionMemoryConfig,
+    memory: &hawdb_executor::ExecutionMemoryConfig,
     memory_ledger: &QueryMemoryLedger,
-    task_context: Option<&skein_core::RuntimeTaskContext>,
+    task_context: Option<&hawdb_core::RuntimeTaskContext>,
     observer: &dyn ExecutionObserver,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
@@ -586,7 +600,7 @@ pub(super) fn add_relational_order_keys(
             RelationalOrderTarget::ProjectionColumn { alias, .. }
             | RelationalOrderTarget::ProjectionExpression { alias, .. } => {
                 projected.get(alias).cloned().ok_or_else(|| {
-                    SkeinError::Semantic(format!(
+                    HawDBError::Semantic(format!(
                         "relational ORDER BY alias {alias} is not projected"
                     ))
                 })?
@@ -613,7 +627,7 @@ pub(super) fn relational_sort_value(value: &RelationalValue) -> Result<Value> {
         RelationalValue::Text(value) => Ok(Value::String(value.clone())),
         RelationalValue::Bytea(value) => Ok(Value::Binary(value.clone())),
         RelationalValue::Uuid(value) => Ok(Value::Uuid(*value)),
-        RelationalValue::Overflow(_) => Err(SkeinError::Execution(
+        RelationalValue::Overflow(_) => Err(HawDBError::Execution(
             "ORDER BY requires overflow hydration before qualification".to_string(),
         )),
     }
@@ -640,7 +654,7 @@ pub(super) fn postgres_sort_key(
 
 pub(super) fn projected_order_columns(
     select: &SelectStatement,
-) -> Result<Vec<(String, skein_sql::SqlOrderItem)>> {
+) -> Result<Vec<(String, hawdb_sql::SqlOrderItem)>> {
     select
         .order_by
         .iter()
@@ -677,7 +691,7 @@ pub(super) fn projected_order_columns(
                         }),
                 };
             output.map(|output| (output, item.clone())).ok_or_else(|| {
-                SkeinError::Semantic(format!(
+                HawDBError::Semantic(format!(
                     "SELECT DISTINCT requires ORDER BY column {} to appear in the projection",
                     item.expression
                         .as_column()

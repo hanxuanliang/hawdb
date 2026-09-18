@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Field-tagged varint wire primitives for record-level payloads.
 //!
 //! Record-level payloads (binary WAL records, residual column rows) follow
@@ -8,7 +22,7 @@
 //! wire type. The codec is hand-rolled; no code generation enters the
 //! supply chain.
 
-use skein_core::error::{Result, SkeinError};
+use hawdb_core::error::{HawDBError, Result};
 
 /// Varint-encoded unsigned body.
 pub const WIRE_TYPE_VARINT: u8 = 0;
@@ -37,11 +51,11 @@ pub fn decode_varint_u64(bytes: &[u8], pos: &mut usize) -> Result<u64> {
     for _ in 0..MAX_VARINT_BYTES {
         let byte = *bytes
             .get(*pos)
-            .ok_or_else(|| SkeinError::Storage("wire varint is truncated".to_string()))?;
+            .ok_or_else(|| HawDBError::Storage("wire varint is truncated".to_string()))?;
         *pos += 1;
         let low = u64::from(byte & 0x7f);
         if shift == 63 && low > 1 {
-            return Err(SkeinError::Storage("wire varint overflows u64".to_string()));
+            return Err(HawDBError::Storage("wire varint overflows u64".to_string()));
         }
         value |= low << shift;
         if byte & 0x80 == 0 {
@@ -49,7 +63,7 @@ pub fn decode_varint_u64(bytes: &[u8], pos: &mut usize) -> Result<u64> {
         }
         shift += 7;
     }
-    Err(SkeinError::Storage(
+    Err(HawDBError::Storage(
         "wire varint exceeds ten bytes".to_string(),
     ))
 }
@@ -72,7 +86,7 @@ pub fn decode_tag(bytes: &[u8], pos: &mut usize) -> Result<(u32, u8)> {
     let wire_type = (tag & 0x7) as u8;
     let field_id = tag >> 3;
     let field_id = u32::try_from(field_id)
-        .map_err(|_| SkeinError::Storage("wire field id overflows u32".to_string()))?;
+        .map_err(|_| HawDBError::Storage("wire field id overflows u32".to_string()))?;
     Ok((field_id, wire_type))
 }
 
@@ -100,7 +114,7 @@ pub fn decode_fixed64(bytes: &[u8], pos: &mut usize) -> Result<u64> {
     let end = pos
         .checked_add(8)
         .filter(|end| *end <= bytes.len())
-        .ok_or_else(|| SkeinError::Storage("wire fixed64 body is truncated".to_string()))?;
+        .ok_or_else(|| HawDBError::Storage("wire fixed64 body is truncated".to_string()))?;
     let mut raw = [0u8; 8];
     raw.copy_from_slice(&bytes[*pos..end]);
     *pos = end;
@@ -110,13 +124,13 @@ pub fn decode_fixed64(bytes: &[u8], pos: &mut usize) -> Result<u64> {
 pub fn decode_len_body<'a>(bytes: &'a [u8], pos: &mut usize) -> Result<&'a [u8]> {
     let len = decode_varint_u64(bytes, pos)?;
     let len = usize::try_from(len).map_err(|_| {
-        SkeinError::Storage("wire length-delimited body overflows usize".to_string())
+        HawDBError::Storage("wire length-delimited body overflows usize".to_string())
     })?;
     let end = pos
         .checked_add(len)
         .filter(|end| *end <= bytes.len())
         .ok_or_else(|| {
-            SkeinError::Storage("wire length-delimited body is truncated".to_string())
+            HawDBError::Storage("wire length-delimited body is truncated".to_string())
         })?;
     let body = &bytes[*pos..end];
     *pos = end;
@@ -126,7 +140,7 @@ pub fn decode_len_body<'a>(bytes: &'a [u8], pos: &mut usize) -> Result<&'a [u8]>
 pub fn decode_string_body(bytes: &[u8], pos: &mut usize) -> Result<String> {
     let body = decode_len_body(bytes, pos)?;
     String::from_utf8(body.to_vec())
-        .map_err(|error| SkeinError::Storage(format!("wire string is not valid UTF-8: {error}")))
+        .map_err(|error| HawDBError::Storage(format!("wire string is not valid UTF-8: {error}")))
 }
 
 /// Skips one field body of the given wire type, enabling forward-compatible
@@ -145,7 +159,7 @@ pub fn skip_field(bytes: &[u8], pos: &mut usize, wire_type: u8) -> Result<()> {
             decode_len_body(bytes, pos)?;
             Ok(())
         }
-        _ => Err(SkeinError::Storage(format!(
+        _ => Err(HawDBError::Storage(format!(
             "wire type {wire_type} is not skippable"
         ))),
     }

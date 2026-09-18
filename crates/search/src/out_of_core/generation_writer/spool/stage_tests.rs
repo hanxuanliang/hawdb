@@ -1,7 +1,21 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use crate::build_memory::directory;
 use crate::test_allocation as allocation;
-use skein_core::RuntimeMemoryReservation;
+use hawdb_core::RuntimeMemoryReservation;
 use std::path::PathBuf;
 
 struct Fixture(PathBuf);
@@ -43,7 +57,7 @@ fn stage_cleanup_retains_workspace_through_full_root_cancellation_and_unwind() {
         let stage = StageDirectory::create(&fixture.0, &memory, &task).unwrap();
         let path = stage.path.to_path_buf();
         for index in 0..129 {
-            fs::write(path.join(format!("generated-{index}.skein")), b"partial").unwrap();
+            fs::write(path.join(format!("generated-{index}.hawdb")), b"partial").unwrap();
         }
         let reserved = memory.ledger.snapshot().used_bytes;
         let held = memory.input.reserve(budget as usize - reserved).unwrap();

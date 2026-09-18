@@ -1,7 +1,21 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
-use crate::{Result, SkeinError};
+use crate::{HawDBError, Result};
 
 #[derive(Clone)]
 pub struct ValidatedRegex {
@@ -13,7 +27,7 @@ impl ValidatedRegex {
     pub fn new(source: impl Into<String>) -> Result<Self> {
         let source = source.into();
         let compiled = regex::Regex::new(&source)
-            .map_err(|error| SkeinError::Semantic(format!("invalid regex pattern: {error}")))?;
+            .map_err(|error| HawDBError::Semantic(format!("invalid regex pattern: {error}")))?;
         Ok(Self {
             source,
             compiled: Arc::new(compiled),

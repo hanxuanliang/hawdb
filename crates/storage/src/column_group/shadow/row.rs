@@ -1,10 +1,24 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Row representation kernels for the derived graph columnar shadow.
 
 use crate::{
     residual_row_properties_encoded_len, write_residual_row_properties, ColumnGroupTableKey,
     ColumnGroupTableKind, StreamedBlob,
 };
-use skein_core::{LabelId, RelTypeId, Result, SkeinError, Value};
+use hawdb_core::{HawDBError, LabelId, RelTypeId, Result, Value};
 use std::collections::BTreeSet;
 
 /// The shadow table key of a node with `labels` (minimum label = primary).
@@ -69,7 +83,7 @@ pub struct ResidualRowBlob<'a> {
 impl<'a> ResidualRowBlob<'a> {
     pub fn new(entries: &'a [(u32, &'a Value)]) -> Result<Self> {
         let encoded_len = residual_row_properties_encoded_len(entries)
-            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            .map_err(|error| HawDBError::Storage(error.to_string()))?;
         Ok(Self {
             entries,
             encoded_len,

@@ -1,10 +1,24 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Developer-facing input parsing for graph route execution evidence.
 
 use crate::bounded_read_evidence::NowledgeMemGraphMode;
 use crate::graph_route_catalog::{
     parse_route_parity_evidence, parse_route_query_inventory, RouteParityEvidence, RouteQuery,
 };
-use skein_core::{Result, SkeinError};
+use hawdb_core::{HawDBError, Result};
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -41,7 +55,7 @@ pub fn parse_graph_route_evidence_cli_inputs(
             "--slow-log-threshold-micros" => {
                 slow_log_threshold_micros =
                     Some(next_arg(&mut args)?.parse::<u128>().map_err(|_| {
-                        SkeinError::Semantic(
+                        HawDBError::Semantic(
                             "--slow-log-threshold-micros requires a non-negative integer"
                                 .to_string(),
                         )
@@ -51,18 +65,18 @@ pub fn parse_graph_route_evidence_cli_inputs(
                 route_parity = Some(parse_route_parity_evidence(&read_json_arg(&mut args)?)?);
             }
             value if value.starts_with("--") => {
-                return Err(SkeinError::Semantic(nowledge_graph_route_evidence_usage()));
+                return Err(HawDBError::Semantic(nowledge_graph_route_evidence_usage()));
             }
             value if graph_path.is_none() => graph_path = Some(value.to_string()),
             value if route_query_path.replace(value.to_string()).is_none() => {}
-            _ => return Err(SkeinError::Semantic(nowledge_graph_route_evidence_usage())),
+            _ => return Err(HawDBError::Semantic(nowledge_graph_route_evidence_usage())),
         }
     }
 
     let graph_path =
-        graph_path.ok_or_else(|| SkeinError::Semantic(nowledge_graph_route_evidence_usage()))?;
+        graph_path.ok_or_else(|| HawDBError::Semantic(nowledge_graph_route_evidence_usage()))?;
     let route_query_path = route_query_path
-        .ok_or_else(|| SkeinError::Semantic(nowledge_graph_route_evidence_usage()))?;
+        .ok_or_else(|| HawDBError::Semantic(nowledge_graph_route_evidence_usage()))?;
     Ok(GraphRouteEvidenceCliInputs {
         require_ready,
         mode,
@@ -78,7 +92,7 @@ fn parse_mode(raw: &str) -> Result<NowledgeMemGraphMode> {
     match raw {
         "shadow_read_only" => Ok(NowledgeMemGraphMode::ShadowReadOnly),
         "writable_cutover" => Ok(NowledgeMemGraphMode::WritableCutover),
-        _ => Err(SkeinError::Semantic(format!(
+        _ => Err(HawDBError::Semantic(format!(
             "invalid nowledge graph route evidence mode: {raw}"
         ))),
     }
@@ -86,7 +100,7 @@ fn parse_mode(raw: &str) -> Result<NowledgeMemGraphMode> {
 
 fn next_arg(args: &mut impl Iterator<Item = String>) -> Result<String> {
     args.next()
-        .ok_or_else(|| SkeinError::Semantic(nowledge_graph_route_evidence_usage()))
+        .ok_or_else(|| HawDBError::Semantic(nowledge_graph_route_evidence_usage()))
 }
 
 fn read_json_arg(args: &mut impl Iterator<Item = String>) -> Result<serde_json::Value> {
@@ -96,13 +110,13 @@ fn read_json_arg(args: &mut impl Iterator<Item = String>) -> Result<serde_json::
 
 fn read_json_file(path: &Path) -> Result<serde_json::Value> {
     let raw = std::fs::read_to_string(path).map_err(|error| {
-        SkeinError::Execution(format!(
+        HawDBError::Execution(format!(
             "failed to read graph route query evidence input: {}",
             error.kind()
         ))
     })?;
     serde_json::from_str(&raw).map_err(|_| {
-        SkeinError::Semantic("failed to parse graph route query JSON: invalid_json".to_string())
+        HawDBError::Semantic("failed to parse graph route query JSON: invalid_json".to_string())
     })
 }
 
@@ -113,7 +127,7 @@ mod tests {
     #[test]
     fn parser_preserves_options_and_route_inventory() {
         let root = std::env::temp_dir().join(format!(
-            "skein_graph_route_cli_{}_{}",
+            "hawdb_graph_route_cli_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

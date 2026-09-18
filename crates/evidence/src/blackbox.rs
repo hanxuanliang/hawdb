@@ -1,12 +1,26 @@
-use skein_core::{Result, SkeinError};
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use hawdb_core::{HawDBError, Result};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const BLACKBOX_REPORT_PROTOCOL: &str = "skein-blackbox-report-v1";
-pub const BLACKBOX_EVENT_PROTOCOL: &str = "skein-blackbox-event-v1";
+pub const BLACKBOX_REPORT_PROTOCOL: &str = "hawdb-blackbox-report-v1";
+pub const BLACKBOX_EVENT_PROTOCOL: &str = "hawdb-blackbox-event-v1";
 
 const KNOWN_ARTIFACTS: &[&str] = &[
     "contract.json",
@@ -15,8 +29,8 @@ const KNOWN_ARTIFACTS: &[&str] = &[
     "adapter-smoke.json",
     "adapter-shadow.jsonl",
     "slow-query-log.jsonl",
-    "skein-log.jsonl",
-    "skein-demo.out",
+    "hawdb-log.jsonl",
+    "hawdb-demo.out",
     "storage-recovery.json",
     "storage-recovery-evidence.json",
     "background-maintenance.json",
@@ -449,7 +463,7 @@ impl BlackboxReport {
             return false;
         };
         artifact.format == "json"
-            && background_qos.protocol.as_deref() == Some("skein-background-maintenance-report")
+            && background_qos.protocol.as_deref() == Some("hawdb-background-maintenance-report")
             && background_qos.ready == Some(true)
             && background_qos.total_candidates.is_some()
             && background_qos.admitted_count.is_some()
@@ -517,14 +531,14 @@ impl BlackboxReport {
 }
 
 impl std::str::FromStr for BlackboxRunStatus {
-    type Err = SkeinError;
+    type Err = HawDBError;
 
     fn from_str(value: &str) -> Result<Self> {
         match value {
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
             "running" => Ok(Self::Running),
-            _ => Err(SkeinError::Semantic(
+            _ => Err(HawDBError::Semantic(
                 "blackbox run status must be completed, failed, or running".to_string(),
             )),
         }
@@ -533,18 +547,18 @@ impl std::str::FromStr for BlackboxRunStatus {
 
 pub fn blackbox_report(options: &BlackboxReportOptions) -> Result<BlackboxReport> {
     if !options.artifact_dir.is_dir() {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "blackbox artifact_dir does not exist or is not a directory".to_string(),
         ));
     }
     let generated_unix_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| SkeinError::Execution(format!("system clock before unix epoch: {error}")))?
+        .map_err(|error| HawDBError::Execution(format!("system clock before unix epoch: {error}")))?
         .as_secs();
     let run_id = options
         .run_id
         .clone()
-        .unwrap_or_else(|| format!("skein-blackbox-{generated_unix_seconds}"));
+        .unwrap_or_else(|| format!("hawdb-blackbox-{generated_unix_seconds}"));
     let artifacts = collect_blackbox_artifacts(&options.artifact_dir)?;
     Ok(BlackboxReport {
         protocol: BLACKBOX_REPORT_PROTOCOL.to_string(),
@@ -663,7 +677,7 @@ pub fn write_blackbox_report_typed(options: &BlackboxReportOptions) -> Result<Bl
     write_blackbox_events(&options.output_dir.join("events.jsonl"), &manifest.events())?;
     let manifest_json = manifest.json();
     let manifest_bytes = serde_json::to_vec_pretty(&manifest_json).map_err(|_| {
-        SkeinError::Execution("blackbox manifest JSON error: serialization_error".to_string())
+        HawDBError::Execution("blackbox manifest JSON error: serialization_error".to_string())
     })?;
     fs::write(options.output_dir.join("manifest.json"), manifest_bytes)?;
     Ok(manifest)
@@ -1089,7 +1103,7 @@ fn blackbox_json_background_qos_summary_ready(value: &serde_json::Value, name: &
     };
     artifact.get("format").and_then(serde_json::Value::as_str) == Some("json")
         && blackbox_json_nested_str(artifact, &["background_qos", "protocol"])
-            == Some("skein-background-maintenance-report")
+            == Some("hawdb-background-maintenance-report")
         && blackbox_json_nested_bool(artifact, &["background_qos", "ready"]) == Some(true)
         && blackbox_json_nested_u64(artifact, &["background_qos", "total_candidates"]).is_some()
         && blackbox_json_nested_u64(artifact, &["background_qos", "admitted_count"]).is_some()
@@ -1196,7 +1210,7 @@ fn write_blackbox_events(events_path: &Path, events: &[BlackboxEventReport]) -> 
     let mut file = fs::File::create(events_path)?;
     for event in events {
         let event_line = serde_json::to_string(&event.json()).map_err(|_| {
-            SkeinError::Execution("blackbox event JSON error: serialization_error".to_string())
+            HawDBError::Execution("blackbox event JSON error: serialization_error".to_string())
         })?;
         writeln!(file, "{event_line}")?;
     }
@@ -1204,7 +1218,7 @@ fn write_blackbox_events(events_path: &Path, events: &[BlackboxEventReport]) -> 
 }
 
 fn checksum_bytes(bytes: &[u8]) -> u64 {
-    skein_integrity::checksum_u64(bytes)
+    hawdb_integrity::checksum_u64(bytes)
 }
 
 #[cfg(test)]
@@ -1223,7 +1237,7 @@ mod tests {
         fs::write(
             artifact_dir.join("query-runtime-preflight.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
-                "protocol": "skein-nowledge-query-runtime-preflight-v1",
+                "protocol": "hawdb-nowledge-query-runtime-preflight-v1",
                 "ready": false,
                 "blocker_codes": ["query_runtime_probe_failed"],
                 "query": "MATCH (secret {token: $token}) RETURN secret",
@@ -1276,7 +1290,7 @@ mod tests {
         fs::write(
             artifact_dir.join("replacement-summary.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
-                "protocol": "skein-nowledge-replacement-summary",
+                "protocol": "hawdb-nowledge-replacement-summary",
                 "production_cutover_ready": false,
                 "production_replacement_per_million": 500_000,
                 "blocking_categories": ["query_runtime_preflight"],
@@ -1287,7 +1301,7 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            artifact_dir.join("skein-log.jsonl"),
+            artifact_dir.join("hawdb-log.jsonl"),
             "{\"event\":\"started\"}\n\n",
         )
         .unwrap();
@@ -1317,7 +1331,7 @@ mod tests {
         assert!(summary.parse_ready);
         assert_eq!(
             summary.protocol.as_deref(),
-            Some("skein-nowledge-replacement-summary")
+            Some("hawdb-nowledge-replacement-summary")
         );
         assert_eq!(summary.ready, Some(false));
         assert_eq!(
@@ -1328,7 +1342,7 @@ mod tests {
         let log = report
             .artifacts
             .iter()
-            .find(|artifact| artifact.name == "skein-log.jsonl")
+            .find(|artifact| artifact.name == "hawdb-log.jsonl")
             .unwrap();
         assert_eq!(log.jsonl.as_ref().unwrap().line_count, 2);
         assert_eq!(log.jsonl.as_ref().unwrap().nonempty_line_count, 1);
@@ -1387,7 +1401,7 @@ mod tests {
         fs::write(
             artifact_dir.join("background-maintenance.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
-                "protocol": "skein-background-maintenance-report",
+                "protocol": "hawdb-background-maintenance-report",
                 "ready": false,
                 "total_candidates": 7,
                 "admitted_count": 3,
@@ -1474,7 +1488,7 @@ mod tests {
         fs::write(
             artifact_dir.join("background-maintenance.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
-                "protocol": "skein-background-maintenance-report",
+                "protocol": "hawdb-background-maintenance-report",
                 "ready": true,
                 "total_candidates": 1,
                 "admitted_count": 1,
@@ -1539,7 +1553,7 @@ mod tests {
         fs::write(
             artifact_dir.join("background-maintenance.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
-                "protocol": "skein-background-maintenance-report",
+                "protocol": "hawdb-background-maintenance-report",
                 "ready": true,
                 "total_candidates": 1,
                 "admitted_count": 1,
@@ -1587,7 +1601,7 @@ mod tests {
         fs::write(
             artifact_dir.join("background-maintenance.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
-                "protocol": "skein-background-maintenance-report",
+                "protocol": "hawdb-background-maintenance-report",
                 "ready": true,
                 "total_candidates": 1,
                 "admitted_count": 1,
@@ -1628,7 +1642,7 @@ mod tests {
 
     fn unique_test_dir(prefix: &str) -> PathBuf {
         let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("skein-{prefix}-{}-{id}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("hawdb-{prefix}-{}-{id}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
     }

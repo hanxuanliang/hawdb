@@ -1,11 +1,25 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
-use skein_analytics::{
+use hawdb_analytics::{
     LouvainOptions, PageRankOptions, ProjectedGraph, ProjectionLayout, ProjectionMemoryBudget,
     ProjectionScanControl, ProjectionSource,
 };
-use skein_core::{RelTypeId, SkeinError};
-use skein_executor::store::{GraphExecutionRead, ScanControl};
-use skein_storage::{NodeRecord, RelId, RelRecord};
+use hawdb_core::{HawDBError, RelTypeId};
+use hawdb_executor::store::{GraphExecutionRead, ScanControl};
+use hawdb_storage::{NodeRecord, RelId, RelRecord};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -39,7 +53,7 @@ impl Fixture {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let path = loop {
             let path = std::env::temp_dir().join(format!(
-                "skein-projection-{mode:?}-{seed}-{}-{}",
+                "hawdb-projection-{mode:?}-{seed}-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed),
             ));
@@ -240,7 +254,7 @@ impl Fixture {
                     &mut |record| {
                         prefix.push(record);
                         if fail {
-                            Err(SkeinError::Semantic(
+                            Err(HawDBError::Semantic(
                                 "relationship callback sentinel".into(),
                             ))
                         } else {
@@ -256,7 +270,7 @@ impl Fixture {
                 match (selected.is_empty(), fail, result) {
                     (true, _, Ok(ScanControl::Continue))
                     | (false, false, Ok(ScanControl::Stop)) => {}
-                    (false, true, Err(SkeinError::Semantic(message))) => {
+                    (false, true, Err(HawDBError::Semantic(message))) => {
                         assert_eq!(message, "relationship callback sentinel", "{receipt}");
                     }
                     (_, _, result) => panic!("unexpected callback result {result:?}: {receipt}"),
@@ -349,7 +363,7 @@ fn frontier(path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         .unwrap()
         .map(|entry| entry.unwrap())
         .filter(|entry| {
-            entry.file_name() == "manifest.skein"
+            entry.file_name() == "manifest.hawdb"
                 || entry.file_name().to_string_lossy().starts_with("wal.")
         })
         .map(|entry| {
@@ -359,7 +373,7 @@ fn frontier(path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
             )
         })
         .collect();
-    assert!(result.contains_key(Path::new("manifest.skein")));
+    assert!(result.contains_key(Path::new("manifest.hawdb")));
     assert!(
         result.len() >= 2,
         "frontier must include an actual WAL generation"
@@ -570,7 +584,7 @@ fn projected_graph_relationship_corruption_fails_without_partial_results() {
             .storage_residency_report()
             .canonical_generation
             .unwrap();
-        let canonical = fixture.path.join(format!("canonical.{generation}.skein"));
+        let canonical = fixture.path.join(format!("canonical.{generation}.hawdb"));
         let mut bytes = std::fs::read(&canonical).unwrap();
         *bytes.last_mut().unwrap() ^= 0xff;
         std::fs::write(canonical, bytes).unwrap();

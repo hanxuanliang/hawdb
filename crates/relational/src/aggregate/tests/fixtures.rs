@@ -1,5 +1,19 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
-use skein_storage::RelationalOverflowRef;
+use hawdb_storage::RelationalOverflowRef;
 use std::collections::BTreeMap;
 
 pub(super) type TestRow = [RelationalValue; 7];
@@ -20,7 +34,7 @@ pub(super) const HAVING: [&str; 10] = [
 ];
 
 pub(super) fn select(sql: &str) -> SelectStatement {
-    let skein_sql::SqlStatement::Select(select) = skein_sql::prepare_postgres_sql(sql)
+    let hawdb_sql::SqlStatement::Select(select) = hawdb_sql::prepare_postgres_sql(sql)
         .unwrap_or_else(|error| panic!("{sql}: {error}"))
         .statement
     else {
@@ -88,7 +102,7 @@ pub(super) fn bind<'a>(
         "flag" => (5, RelationalScalarType::Boolean),
         "payload" => (6, RelationalScalarType::Bytea),
         _ => {
-            return Err(SkeinError::Semantic(format!(
+            return Err(HawDBError::Semantic(format!(
                 "unknown test column {}",
                 column.name
             )))
@@ -126,14 +140,14 @@ pub(super) fn execute(
     validate_having(select, parameters, state)?;
     let template = projection_template(select, parameters, state)?;
     let budget = std::num::NonZeroUsize::new(1024 * 1024).unwrap();
-    let ledger = skein_executor::QueryMemoryLedger::new(budget);
+    let ledger = hawdb_executor::QueryMemoryLedger::new(budget);
     let mut output = Vec::new();
     for (key, rows) in groups(rows, !select.group_by.is_empty()) {
         let mut projections = template.clone();
         let mut tracker = OperatorMemoryTracker::with_account(
             budget,
             ledger.account(
-                skein_executor::QueryMemoryClass::BlockingState,
+                hawdb_executor::QueryMemoryClass::BlockingState,
                 "aggregate test",
                 budget,
             ),

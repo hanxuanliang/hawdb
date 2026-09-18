@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use std::collections::VecDeque;
 
@@ -111,7 +125,7 @@ fn seeded_shortest_paths_match_full_path_bfs_including_order_and_multiplicity() 
         random ^= random << 17;
         random
     };
-    let visible = skein_storage::PropertyFilter::Eq {
+    let visible = hawdb_storage::PropertyFilter::Eq {
         property: "visible".to_string(),
         value: Value::Bool(true),
     };
@@ -279,7 +293,7 @@ fn shortest_path_failures_release_query_memory() {
         if cancelled {
             context.cancellation().cancel();
         }
-        let result = skein_executor::traversal::all_shortest_paths(
+        let result = hawdb_executor::traversal::all_shortest_paths(
             &fixture.store,
             ShortestPathSearch {
                 source: fixture.nodes[0],
@@ -294,7 +308,7 @@ fn shortest_path_failures_release_query_memory() {
             10,
             account,
             Some(&context),
-            &skein_executor::observer::NoopExecutionObserver,
+            &hawdb_executor::observer::NoopExecutionObserver,
         );
         assert!(result.is_err());
         assert_eq!(ledger.snapshot().used_bytes, 0);

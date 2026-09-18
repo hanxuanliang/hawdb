@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::super::{
     append_sidecar_payload_with_context, SearchOutOfCoreLayoutBody, SearchOutOfCoreSegmentLayout,
     OUT_OF_CORE_LAYOUT_FORMAT,
@@ -13,14 +27,14 @@ use crate::build_memory::{
 use crate::document_encoding::{
     DescriptorEncoding, DocumentEncoding, SegmentEncoding, SegmentKind, HEX_BUFFER_BYTES,
 };
-use crate::error::{Result, SkeinError};
+use crate::error::{HawDBError, Result};
 use crate::{
     SearchDocument, SearchSegmentDescriptor, SearchSegmentDescriptorEntry,
     SearchSegmentPayloadRange, SEARCH_FILTER_SEGMENT_TARGET_DOCUMENTS,
     SEARCH_SEGMENT_PAYLOAD_ARTIFACT_ID, SEARCH_SEGMENT_PAYLOAD_FILE,
 };
-use skein_core::RuntimeTaskContext;
-use skein_executor::QueryMemoryLease;
+use hawdb_core::RuntimeTaskContext;
+use hawdb_executor::QueryMemoryLease;
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -86,7 +100,7 @@ impl<'a> SegmentArtifactBuilder<'a> {
             generation,
             fields,
             options,
-            BuildMemory::new(&skein_core::RuntimeTaskContext::default())?,
+            BuildMemory::new(&hawdb_core::RuntimeTaskContext::default())?,
         )
     }
 
@@ -125,12 +139,12 @@ impl<'a> SegmentArtifactBuilder<'a> {
         documents
             .try_reserve_exact(SEARCH_FILTER_SEGMENT_TARGET_DOCUMENTS)
             .map_err(|error| {
-                SkeinError::Execution(format!(
+                HawDBError::Execution(format!(
                     "search segment document allocation failed: {error}"
                 ))
             })?;
         if documents.capacity() > SEARCH_FILTER_SEGMENT_TARGET_DOCUMENTS {
-            return Err(SkeinError::Execution(
+            return Err(HawDBError::Execution(
                 "search segment document capacity exceeded admission".into(),
             ));
         }
@@ -227,7 +241,7 @@ impl<'a> SegmentArtifactBuilder<'a> {
             self.flush_segment()?;
         }
         if encoded_bytes.saturating_add(64) > self.options.max_segment_uncompressed_bytes.get() {
-            return Err(SkeinError::Storage(format!(
+            return Err(HawDBError::Storage(format!(
                 "search generation document {} cannot fit the admitted segment buffer",
                 document.id
             )));
@@ -246,7 +260,7 @@ impl<'a> SegmentArtifactBuilder<'a> {
 
     fn check_healthy(&self) -> Result<()> {
         if self.failed {
-            return Err(SkeinError::Storage(
+            return Err(HawDBError::Storage(
                 "search segment writer already failed".into(),
             ));
         }
@@ -289,7 +303,7 @@ impl<'a> SegmentArtifactBuilder<'a> {
         self.document_offset = self
             .document_offset
             .checked_add(document_length)
-            .ok_or_else(|| SkeinError::Storage("search generation payload overflow".to_string()))?;
+            .ok_or_else(|| HawDBError::Storage("search generation payload overflow".to_string()))?;
         drop(document_payload);
 
         let vector_ordinal_base = self.next_vector_ordinal;

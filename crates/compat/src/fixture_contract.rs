@@ -1,8 +1,22 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::{
     CompatibilityCheck, CompatibilityFixture, CypherExecutionMode, CypherFixtureStatement,
     ExpectedErrorClass, ExpectedRows, ProjectedGraphFixtureCheck,
 };
-use skein_core::Value;
+use hawdb_core::Value;
 use std::collections::BTreeMap;
 
 pub fn nowledge_fixture_contract_usage() -> String {
@@ -11,7 +25,7 @@ pub fn nowledge_fixture_contract_usage() -> String {
 
 pub fn nowledge_fixture_contract_json(fixture: &CompatibilityFixture) -> serde_json::Value {
     serde_json::json!({
-        "protocol": "skein-nowledge-fixture-contract",
+        "protocol": "hawdb-nowledge-fixture-contract",
         "protocol_version": 1,
         "fixture": fixture.name,
         "setup_count": fixture.setup.len(),
@@ -249,7 +263,7 @@ mod tests {
         let fixture = crate::nowledge_memory_core_fixture();
         let json = nowledge_fixture_contract_json(&fixture);
 
-        assert_eq!(json["protocol"], "skein-nowledge-fixture-contract");
+        assert_eq!(json["protocol"], "hawdb-nowledge-fixture-contract");
         assert_eq!(json["fixture"], "nowledge-memory-core");
         assert_eq!(json["setup_count"], fixture.setup.len());
         assert_eq!(json["check_count"], fixture.checks.len());

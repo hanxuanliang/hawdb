@@ -1,15 +1,29 @@
-use serde_json::json;
-use skein::optimizer::{
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use hawdb::optimizer::{
     CascadesOptimizer, OptimizerCatalog, OptimizerCatalogIndexes, OptimizerCatalogStatistics,
     OptimizerConfig, PlanCost,
 };
-use skein::planner::{
+use hawdb::planner::{
     AggregateFunction, AggregateTarget, Aggregation, ComparisonOp, LogicalPlan, PhysicalPlan,
     Predicate, Projection, ProjectionExpression, RelationshipCountLeg, SortDirection, SortItem,
     SortKey,
 };
-use skein::RelationshipDirection;
-use skein::Value;
+use hawdb::RelationshipDirection;
+use hawdb::Value;
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
@@ -89,7 +103,7 @@ struct OptimizerSmokeCaseReport<'a> {
 }
 
 impl<'a> OptimizerSmokeCaseReport<'a> {
-    fn new(case: &'a OptimizerSmokeCase, trace: &skein::optimizer::OptimizerTrace) -> Self {
+    fn new(case: &'a OptimizerSmokeCase, trace: &hawdb::optimizer::OptimizerTrace) -> Self {
         Self {
             case: case.name,
             groups: trace.groups,
@@ -156,7 +170,7 @@ struct OptimizerSmokeCase {
 fn assert_trace(
     case: &OptimizerSmokeCase,
     plan: &PhysicalPlan,
-    trace: &skein::optimizer::OptimizerTrace,
+    trace: &hawdb::optimizer::OptimizerTrace,
 ) {
     assert!(
         trace.warnings.is_empty(),

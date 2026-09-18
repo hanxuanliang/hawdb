@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use crate::{
     SearchNumericRange, SearchSegmentDescriptorEntry, SearchSegmentFieldSummary,
@@ -6,7 +20,7 @@ use crate::{
 use std::collections::{BTreeMap, BTreeSet};
 
 thread_local! {
-    static CANCEL_DIGEST: std::cell::RefCell<Option<(usize, skein_core::RuntimeCancellationToken)>> = const { std::cell::RefCell::new(None) };
+    static CANCEL_DIGEST: std::cell::RefCell<Option<(usize, hawdb_core::RuntimeCancellationToken)>> = const { std::cell::RefCell::new(None) };
 }
 
 pub(super) fn record_digest(bytes: usize) {
@@ -355,7 +369,7 @@ fn descriptor_short_writes_preserve_prefix_and_error_through_footer() {
 #[test]
 fn descriptor_admission_precedes_opening_or_replacing_files() {
     let root = std::env::temp_dir().join(format!(
-        "skein-descriptor-admission-{}-{}",
+        "hawdb-descriptor-admission-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -365,7 +379,7 @@ fn descriptor_admission_precedes_opening_or_replacing_files() {
     std::fs::create_dir(&root).unwrap();
     let _cleanup = TestDirectory(root.clone());
     let path = root.join(crate::SEARCH_SEGMENT_DESCRIPTOR_FILE);
-    let tmp = path.with_extension("skein.tmp");
+    let tmp = path.with_extension("hawdb.tmp");
     std::fs::write(&path, b"previous descriptor").unwrap();
     std::fs::write(&tmp, b"previous temporary file").unwrap();
     let descriptor = sample();

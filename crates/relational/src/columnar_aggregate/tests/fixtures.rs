@@ -1,5 +1,19 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
-use skein_storage::RelationalOverflowRef;
+use hawdb_storage::RelationalOverflowRef;
 
 pub(super) const PROJECTION: &str = "COUNT(*) AS rows, COUNT(r.n) AS present, SUM(n) AS total, COALESCE(SUM(n), NULL, 0, 9) AS fallback, SUM(OCTET_LENGTH(body)) AS body_bytes, SUM(OCTET_LENGTH(payload)) AS payload_bytes, COUNT(body) AS body_present";
 
@@ -8,8 +22,8 @@ pub(super) fn select(projection: &str) -> SelectStatement {
 }
 
 pub(super) fn parse(sql: &str) -> SelectStatement {
-    let skein_sql::SqlStatement::Select(select) =
-        skein_sql::prepare_postgres_sql(sql).unwrap().statement
+    let hawdb_sql::SqlStatement::Select(select) =
+        hawdb_sql::prepare_postgres_sql(sql).unwrap().statement
     else {
         panic!("expected SELECT: {sql}");
     };

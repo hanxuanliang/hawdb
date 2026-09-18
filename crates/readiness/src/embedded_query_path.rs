@@ -1,9 +1,23 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Readiness contract for embedded query facades.
 
 /// Stable protocol identifier for embedded query-path readiness reports.
-pub const EMBEDDED_QUERY_PATH_READINESS_PROTOCOL: &str = "skein-embedded-query-path-readiness-v1";
+pub const EMBEDDED_QUERY_PATH_READINESS_PROTOCOL: &str = "hawdb-embedded-query-path-readiness-v1";
 
-/// One public query entrypoint exposed by an embedded Skein facade.
+/// One public query entrypoint exposed by an embedded HawDB facade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddedQueryEntrypoint {
     AdmittedSync,
@@ -14,8 +28,8 @@ pub enum EmbeddedQueryEntrypoint {
 impl EmbeddedQueryEntrypoint {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::AdmittedSync => "skein_embedded_admitted",
-            Self::AdmittedTokio => "skein_tokio_embedded_admitted",
+            Self::AdmittedSync => "hawdb_embedded_admitted",
+            Self::AdmittedTokio => "hawdb_tokio_embedded_admitted",
             Self::RawDatabase => "raw_database",
         }
     }

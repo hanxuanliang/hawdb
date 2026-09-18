@@ -1,4 +1,18 @@
-use crate::{Result, SkeinError};
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use crate::{HawDBError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RuntimeCapability {
@@ -65,7 +79,7 @@ impl RuntimeCapabilities {
         if self.is_enabled(capability) {
             return Ok(());
         }
-        Err(SkeinError::CapabilityUnavailable { capability })
+        Err(HawDBError::CapabilityUnavailable { capability })
     }
 
     pub const fn with(mut self, capability: RuntimeCapability, enabled: bool) -> Self {
@@ -119,7 +133,7 @@ mod tests {
 
         assert_eq!(
             error,
-            SkeinError::CapabilityUnavailable {
+            HawDBError::CapabilityUnavailable {
                 capability: RuntimeCapability::GraphAnalytics
             }
         );

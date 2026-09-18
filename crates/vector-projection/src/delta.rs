@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Un-indexed writes held ahead of an immutable base projection.
 //!
 //! This is an experimental upsert-only buffer, not the embedded search write
@@ -33,7 +47,7 @@
 
 use crate::error::{ProjectionError, Result};
 use crate::scan::{compare_best, ProjectionHit, ProjectionSearchOptions, ProjectionSearchOutput};
-use skein_core::RuntimeTaskContext;
+use hawdb_core::RuntimeTaskContext;
 use std::collections::HashSet;
 
 const DEFAULT_OPTIMIZE_THRESHOLD: f64 = 0.02;
@@ -557,7 +571,7 @@ mod tests {
 
     #[test]
     fn search_with_delta_honors_a_cancelled_task_context() {
-        use skein_core::{RuntimeCancellationToken, RuntimeTaskContext};
+        use hawdb_core::{RuntimeCancellationToken, RuntimeTaskContext};
 
         let base = sample_base();
         let mut delta = DeltaBuffer::new(4);

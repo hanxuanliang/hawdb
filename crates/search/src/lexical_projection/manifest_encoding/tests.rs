@@ -1,10 +1,24 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use crate::lexical_projection::{
     artifact_file, BlockDescriptor, BlockKind, ManifestBody, ManifestEnvelope, TermStatistics,
     ARTIFACT_HEADER, DEFAULT_MAX_MANIFEST_BYTES,
 };
+use hawdb_integrity::Crc32cHasher;
 use serde::ser::Error as _;
-use skein_integrity::Crc32cHasher;
 use std::cell::Cell;
 
 pub(in crate::lexical_projection) fn manifest(mut terms: Vec<String>) -> ManifestBody {
@@ -38,7 +52,7 @@ pub(in crate::lexical_projection) fn manifest(mut terms: Vec<String>) -> Manifes
         ]
     };
     ManifestBody {
-        format: "SKEIN_LEXICAL_MANIFEST_V1".into(),
+        format: "HAWDB_LEXICAL_MANIFEST_V1".into(),
         generation: 7,
         source_graph_commit_epoch: Some(8),
         analyzer_digest: u64::MAX,
@@ -195,7 +209,7 @@ fn serialization_growth_shrinkage_and_errors_fail_closed() {
 
 #[test]
 fn operation_output_admission_is_exact_and_retained_with_the_bytes() {
-    use skein_core::{RuntimeMemoryReservation, RuntimeTaskContext};
+    use hawdb_core::{RuntimeMemoryReservation, RuntimeTaskContext};
     let body = manifest(vec!["alpha".into(), "\"".repeat(9000)]);
     let expected = legacy_encode(&body);
     for short in [0, 1] {
@@ -222,7 +236,7 @@ fn operation_output_admission_is_exact_and_retained_with_the_bytes() {
 
 #[test]
 fn cancellation_in_any_json_pass_releases_output_and_stops_later_passes() {
-    use skein_core::{RuntimeCancellationToken, RuntimeTaskContext};
+    use hawdb_core::{RuntimeCancellationToken, RuntimeTaskContext};
     struct CancelBody {
         pass: Cell<usize>,
         cancel_at: usize,

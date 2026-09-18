@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! What a restart pays to rebuild the property index.
 //!
 //! Materialized open has to scan every canonical node regardless, because the
@@ -6,8 +20,8 @@
 //! index could skip. Measured as the difference between opening the same graph
 //! with and without index declarations.
 
+use hawdb::{Database, DatabaseConfig};
 use serde_json::json;
-use skein::{Database, DatabaseConfig};
 use std::hint::black_box;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -39,7 +53,7 @@ fn main() {
 
 fn measure(declared_indexes: usize) -> serde_json::Value {
     let path = std::env::temp_dir().join(format!(
-        "skein-index-restart-{declared_indexes}-{}-{}",
+        "hawdb-index-restart-{declared_indexes}-{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -49,7 +63,7 @@ fn measure(declared_indexes: usize) -> serde_json::Value {
     let config = DatabaseConfig {
         // Pin the residency mode so the comparison is not silently decided by
         // the artifact happening to cross the auto-materialize threshold.
-        storage_residency_mode: skein_storage::StorageResidencyMode::Materialized,
+        storage_residency_mode: hawdb_storage::StorageResidencyMode::Materialized,
         ..DatabaseConfig::default()
     };
     {

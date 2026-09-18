@@ -1,6 +1,20 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::BTreeMap;
 
-use skein_core::Result;
+use hawdb_core::Result;
 
 use super::super::ast::*;
 use super::{keyword_matches, Parser};
@@ -727,7 +741,7 @@ impl Parser<'_> {
         let preserve = self.parse_value()?;
         self.expect_char('=')?;
         let preserve_true = self.parse_value()?;
-        if preserve_true.kind != ValueExpressionKind::Literal(skein_core::Value::Bool(true)) {
+        if preserve_true.kind != ValueExpressionKind::Literal(hawdb_core::Value::Bool(true)) {
             return Err(self.error("CASE preserve SET only supports comparison to true"));
         }
         self.expect_keyword("AND")?;
@@ -781,7 +795,7 @@ impl Parser<'_> {
         let condition_property = self.parse_ident()?;
         self.expect_char('>')?;
         let threshold = self.parse_value()?;
-        if threshold.kind != ValueExpressionKind::Literal(skein_core::Value::Int(0)) {
+        if threshold.kind != ValueExpressionKind::Literal(hawdb_core::Value::Int(0)) {
             return Err(self.error("CASE decrement SET only supports a zero threshold"));
         }
         self.expect_keyword("THEN")?;
@@ -793,12 +807,12 @@ impl Parser<'_> {
         }
         self.expect_char('-')?;
         let decrement = self.parse_value()?;
-        if decrement.kind != ValueExpressionKind::Literal(skein_core::Value::Int(1)) {
+        if decrement.kind != ValueExpressionKind::Literal(hawdb_core::Value::Int(1)) {
             return Err(self.error("CASE decrement SET only supports decrement by one"));
         }
         self.expect_keyword("ELSE")?;
         let floor = self.parse_value()?;
-        if floor.kind != ValueExpressionKind::Literal(skein_core::Value::Int(0)) {
+        if floor.kind != ValueExpressionKind::Literal(hawdb_core::Value::Int(0)) {
             return Err(self.error("CASE decrement SET only supports a zero floor"));
         }
         self.expect_keyword("END")?;

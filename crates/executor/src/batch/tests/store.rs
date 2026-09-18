@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Fail-closed read fixture: a test must explicitly implement every storage read it needs.
 
 use super::*;
@@ -6,9 +20,9 @@ use crate::store::{
     GraphExecutionRead, PrunedNodeScan, PrunedRelationshipScan, SourceScanCandidateRow,
     SourceScanCandidateVisit, SourceScanReadLimits,
 };
-use skein_core::{LabelId, RelTypeId};
-use skein_plan::{CompositeRangeSeek, NodeProjectionAccess};
-use skein_storage::{
+use hawdb_core::{LabelId, RelTypeId};
+use hawdb_plan::{CompositeRangeSeek, NodeProjectionAccess};
+use hawdb_storage::{
     AdjacencyDirection, ProjectedGraphDefinition, ProjectedNodeRecord, RelRecord, ScanPredicate,
 };
 use std::collections::BTreeSet;
@@ -170,7 +184,7 @@ impl GraphExecutionRead for ReadFixture {
             graph_epoch: 1,
             skipped_segment_count: 0,
             candidate_count: candidates.len(),
-            report: skein_storage::SegmentReadExecutionReport {
+            report: hawdb_storage::SegmentReadExecutionReport {
                 wave_count: 1,
                 range_count: 1,
                 bytes_read: 1,

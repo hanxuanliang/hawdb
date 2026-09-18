@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -87,7 +101,7 @@ mod tests {
         );
         assert_eq!(
             evidence["routes"][0]["query_reports"][0]["protocol"],
-            "skein-nowledge-mem-query-report-v1"
+            "hawdb-nowledge-mem-query-report-v1"
         );
         assert_eq!(
             evidence["routes"][0]["query_reports"][0]["query_name"],
@@ -1160,7 +1174,7 @@ mod tests {
                     "route": "/graph/overview",
                     "ready": true,
                     "matched_per_million": 999999,
-                    "primary_engine": "skein",
+                    "primary_engine": "hawdb",
                     "shadow_engine": "kuzu"
                 }
             ]
@@ -1247,7 +1261,7 @@ mod tests {
                         "ready": true,
                         "matched_per_million": 1000000,
                         "primary_engine": "kuzu",
-                        "shadow_engine": "skein"
+                        "shadow_engine": "hawdb"
                     })
                 })
                 .collect::<Vec<_>>()
@@ -1260,6 +1274,6 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("skein_{name}_{}_{nanos}", std::process::id()))
+        std::env::temp_dir().join(format!("hawdb_{name}_{}_{nanos}", std::process::id()))
     }
 }

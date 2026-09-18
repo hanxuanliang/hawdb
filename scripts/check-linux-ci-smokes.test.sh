@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
+# Copyright 2026 Nowledge
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 set -euo pipefail
 
 python3 - "$@" <<'PY'
@@ -33,15 +47,15 @@ with tempfile.TemporaryDirectory(
     runner.write_text(
         '#!/usr/bin/env bash\n'
         'name="$(basename "$0")"\n'
-        'echo "$name" >> "$SKEIN_SMOKE_TEST_CALLS"\n'
+        'echo "$name" >> "$HAWDB_SMOKE_TEST_CALLS"\n'
         'echo "output:$name"\n'
-        'if [[ "$name" == "${SKEIN_SMOKE_TEST_FAIL:-}" ]]; then exit 17; fi\n',
+        'if [[ "$name" == "${HAWDB_SMOKE_TEST_FAIL:-}" ]]; then exit 17; fi\n',
         encoding="utf-8",
     )
     runner.chmod(0o755)
     executables = []
     for name in manifest:
-        executable = root / f"skein_bench_{name}"
+        executable = root / f"hawdb_bench_{name}"
         executable.symlink_to(runner)
         executables.append(str(executable))
 
@@ -51,8 +65,8 @@ with tempfile.TemporaryDirectory(
         env.update(
             TEST_TMPDIR=str(root / "tmp"),
             TEST_UNDECLARED_OUTPUTS_DIR=str(root / "outputs"),
-            SKEIN_SMOKE_TEST_CALLS=str(calls),
-            SKEIN_SMOKE_TEST_FAIL=fail,
+            HAWDB_SMOKE_TEST_CALLS=str(calls),
+            HAWDB_SMOKE_TEST_FAIL=fail,
         )
         result = subprocess.run(
             ["bash", checker, smoke, *([str(runner)] * 6), *benchmarks],
@@ -66,18 +80,18 @@ with tempfile.TemporaryDirectory(
 
     result, legacy_calls = run("optimizer_group_2")
     assert result.returncode == 0, result.stderr
-    assert legacy_calls == [f"skein_bench_{name}" for name in expected]
+    assert legacy_calls == [f"hawdb_bench_{name}" for name in expected]
     individual_calls = []
     for name in selected:
         # Named dispatch must not depend on the positional group layout.
         result, observed = run(f"benchmark:{name}", list(reversed(executables)))
         assert result.returncode == 0, result.stderr
-        assert observed == [f"skein_bench_{name}"], observed
-        assert f"benchmark started: skein_bench_{name}" in result.stderr
-        assert f"benchmark completed: skein_bench_{name}" in result.stderr
-        outputs = list((root / "outputs").glob(f"*/skein_bench_{name}.txt"))
+        assert observed == [f"hawdb_bench_{name}"], observed
+        assert f"benchmark started: hawdb_bench_{name}" in result.stderr
+        assert f"benchmark completed: hawdb_bench_{name}" in result.stderr
+        outputs = list((root / "outputs").glob(f"*/hawdb_bench_{name}.txt"))
         assert outputs and all(
-            path.read_text().strip() == f"output:skein_bench_{name}"
+            path.read_text().strip() == f"output:hawdb_bench_{name}"
             for path in outputs
         )
         individual_calls.extend(observed)
@@ -93,17 +107,17 @@ with tempfile.TemporaryDirectory(
     assert "duplicate optimizer benchmark" in result.stderr
 
     for name in selected:
-        executable = f"skein_bench_{name}"
+        executable = f"hawdb_bench_{name}"
         result, observed = run(f"benchmark:{name}", fail=executable)
         assert result.returncode == 17, result.stderr
         assert observed == [executable]
         assert f"output:{executable}" in result.stderr
         assert f"benchmark failed: {executable} (exit 17)" in result.stderr
         assert "benchmark completed:" not in result.stderr
-    result, observed = run("optimizer_group_2", fail="skein_bench_integrity_checksum")
+    result, observed = run("optimizer_group_2", fail="hawdb_bench_integrity_checksum")
     assert result.returncode == 17
     assert observed == [
-        "skein_bench_index_restart_cost", "skein_bench_integrity_checksum"
+        "hawdb_bench_index_restart_cost", "hawdb_bench_integrity_checksum"
     ]
 
 print(

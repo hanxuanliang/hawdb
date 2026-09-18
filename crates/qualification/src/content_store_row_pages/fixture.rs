@@ -1,10 +1,24 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::ContentStoreInitialRowPageQualificationConfig;
 use crate::{
     nowledge_content_store_schema_statements, ContentStoreSqlCorpus, ContentStoreSqlStatementSpec,
 };
-use skein::{
-    Database, DatabaseConfig, DurabilityPolicy, QueryOutput, RelationalIndexMode, Result,
-    SkeinError, StorageResidencyMode, Value,
+use hawdb::{
+    Database, DatabaseConfig, DurabilityPolicy, HawDBError, QueryOutput, RelationalIndexMode,
+    Result, StorageResidencyMode, Value,
 };
 use std::collections::BTreeMap;
 
@@ -87,7 +101,7 @@ pub(super) fn bootstrap_checkpoint(
     let item_count = required_i64(&summary, "item_count")?;
     let size_bytes = required_i64(&summary, "size_bytes")?;
     if item_count != i64::try_from(config.base_chunk_count).unwrap_or(i64::MAX) {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store base source summary counted {item_count} chunks, expected {}",
             config.base_chunk_count
         )));
@@ -106,7 +120,7 @@ pub(super) fn bootstrap_checkpoint(
     let report = database
         .relational_index_shadow_checkpoint_report()
         .ok_or_else(|| {
-            SkeinError::Execution(
+            HawDBError::Execution(
                 "content-store row-page qualification checkpoint did not publish relational indexes"
                     .to_string(),
             )
@@ -190,7 +204,7 @@ pub(super) fn corpus_statement<'a>(
     name: &str,
 ) -> Result<&'a ContentStoreSqlStatementSpec> {
     corpus.statement(name).ok_or_else(|| {
-        SkeinError::Semantic(format!(
+        HawDBError::Semantic(format!(
             "content-store row-page qualification requires statement {name}"
         ))
     })
@@ -366,14 +380,14 @@ fn graph_identity_parameters(id_name: &str, id: &str) -> BTreeMap<String, Value>
 
 pub(super) fn required_i64(output: &QueryOutput, field: &str) -> Result<i64> {
     if output.rows.len() != 1 {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store expected one row for {field}, got {}",
             output.rows.len()
         )));
     }
     match output.rows[0].get(field) {
         Some(Value::Int(value)) => Ok(*value),
-        other => Err(SkeinError::Execution(format!(
+        other => Err(HawDBError::Execution(format!(
             "content-store expected integer field {field}, got {other:?}"
         ))),
     }

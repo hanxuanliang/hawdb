@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 
 #[test]
@@ -114,7 +128,7 @@ fn nowledge_graph_adapter_transaction_rolls_back_on_parameter_error() {
 #[test]
 fn nowledge_graph_adapter_retrieves_knowledge_with_external_projection() {
     let mut db = Database::new();
-    db.query("CREATE (:Memory {id: 'root', title: 'Root retrieval', content: 'Adapter knowledge retrieval'})-[:MENTIONS]->(:Entity {id: 'entity_1', name: 'Skein'})")
+    db.query("CREATE (:Memory {id: 'root', title: 'Root retrieval', content: 'Adapter knowledge retrieval'})-[:MENTIONS]->(:Entity {id: 'entity_1', name: 'HawDB'})")
             .unwrap();
 
     let mut search_index = SearchIndex::in_memory();

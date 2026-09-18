@@ -1,8 +1,22 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::binding::{binding_payload_bytes, Binding};
 use crate::{QueryMemoryAccount, QueryMemoryLease};
-use skein_core::Result;
-use skein_plan::GraphExpansionBudget;
-use skein_storage::NodeId;
+use hawdb_core::Result;
+use hawdb_plan::GraphExpansionBudget;
+use hawdb_storage::NodeId;
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,7 +232,7 @@ mod tests {
         let binding = Binding {
             values: std::collections::BTreeMap::from([(
                 "value".to_string(),
-                skein_core::Value::String("payload".to_string()),
+                hawdb_core::Value::String("payload".to_string()),
             )]),
             nodes: std::collections::BTreeMap::new(),
             relationships: std::collections::BTreeMap::new(),
@@ -245,7 +259,7 @@ mod tests {
         let binding = Binding {
             values: std::collections::BTreeMap::from([(
                 "value".to_string(),
-                skein_core::Value::String("payload".to_string()),
+                hawdb_core::Value::String("payload".to_string()),
             )]),
             nodes: std::collections::BTreeMap::new(),
             relationships: std::collections::BTreeMap::new(),

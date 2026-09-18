@@ -1,11 +1,25 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use crate::observer::NoopExecutionObserver;
 use crate::store::{
     PrunedNodeScan, PrunedRelationshipScan, SourceScanCandidateRow, SourceScanCandidateVisit,
     SourceScanReadLimits,
 };
-use skein_plan::{CompositeRangeSeek, NodeProjectionAccess};
-use skein_storage::{
+use hawdb_plan::{CompositeRangeSeek, NodeProjectionAccess};
+use hawdb_storage::{
     ProjectedGraphDefinition, ProjectedNodeRecord, RelId, ScanPredicate, ScanPruningReport,
 };
 use std::cell::Cell;
@@ -57,7 +71,7 @@ impl GraphExecutionRead for ChainStore {
         if self.visits.get() == self.stop_after {
             assert!(!self.panic, "injected adjacency panic");
             if self.failure {
-                return Err(SkeinError::Execution(
+                return Err(HawDBError::Execution(
                     "injected adjacency failure".to_string(),
                 ));
             }

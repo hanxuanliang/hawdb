@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+# Copyright 2026 Nowledge
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 set -euo pipefail
 
@@ -26,18 +39,18 @@ _CARGO_WORKSPACE_PACKAGES = [
     "crates/member",
 ]
 
-_SKEIN_PRESUBMIT_CRATE_EXCLUSIONS = {}
+_HAWDB_PRESUBMIT_CRATE_EXCLUSIONS = {}
 
 rust_test(
     name = "root_tests",
 )
 
 test_suite(
-    name = "skein_presubmit_crate_tests",
+    name = "hawdb_presubmit_crate_tests",
     tests = [
         "//%s:presubmit_tests" % package
         for package in _CARGO_WORKSPACE_PACKAGES
-        if package not in _SKEIN_PRESUBMIT_CRATE_EXCLUSIONS
+        if package not in _HAWDB_PRESUBMIT_CRATE_EXCLUSIONS
     ],
 )
 EOF
@@ -98,14 +111,14 @@ missing_registration="${fixture_root}/missing-registration"
 make_fixture "${missing_registration}"
 cat >"${missing_registration}/BUILD.bazel" <<'EOF'
 _CARGO_WORKSPACE_PACKAGES = []
-_SKEIN_PRESUBMIT_CRATE_EXCLUSIONS = {}
+_HAWDB_PRESUBMIT_CRATE_EXCLUSIONS = {}
 
 rust_test(
     name = "root_tests",
 )
 
 test_suite(
-    name = "skein_presubmit_crate_tests",
+    name = "hawdb_presubmit_crate_tests",
 )
 EOF
 if "${checker}" "${missing_registration}" >"${fixture_root}/missing-registration.out" 2>&1; then
@@ -122,7 +135,7 @@ _CARGO_WORKSPACE_PACKAGES = [
     "crates/member",
 ]
 
-_SKEIN_PRESUBMIT_CRATE_EXCLUSIONS = {
+_HAWDB_PRESUBMIT_CRATE_EXCLUSIONS = {
     "crates/member": ("local-only", "//crates/member:member_manual_tests"),
 }
 
@@ -131,7 +144,7 @@ rust_test(
 )
 
 test_suite(
-    name = "skein_presubmit_crate_tests",
+    name = "hawdb_presubmit_crate_tests",
 )
 EOF
 cat >"${excluded}/crates/member/BUILD.bazel" <<'EOF'
@@ -149,7 +162,7 @@ _CARGO_WORKSPACE_PACKAGES = [
     "crates/member",
 ]
 
-_SKEIN_PRESUBMIT_CRATE_EXCLUSIONS = {
+_HAWDB_PRESUBMIT_CRATE_EXCLUSIONS = {
     "crates/member": ("periodic", "//crates/member:member_periodic_tests"),
 }
 
@@ -158,7 +171,7 @@ rust_test(
 )
 
 test_suite(
-    name = "skein_presubmit_crate_tests",
+    name = "hawdb_presubmit_crate_tests",
 )
 EOF
 if "${checker}" "${missing_exclusion_target}" >"${fixture_root}/missing-exclusion-target.out" 2>&1; then

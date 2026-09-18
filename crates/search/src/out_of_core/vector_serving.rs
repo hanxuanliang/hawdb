@@ -1,5 +1,19 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{BoundedScoreCollector, CandidateSet, SearchOutOfCoreMetrics, SearchOutOfCoreReader};
-use crate::error::{Result, SkeinError};
+use crate::error::{HawDBError, Result};
 use crate::{cosine_similarity, CompressedVectorSearchMode, SearchFallbackReasonCode};
 use std::collections::BTreeMap;
 #[cfg(feature = "vector-search")]
@@ -119,7 +133,7 @@ impl SearchOutOfCoreReader {
                         metrics,
                     );
                 }
-                Err(SkeinError::Storage(
+                Err(HawDBError::Storage(
                     "out-of-core RaBitQ projection is required but unavailable for this generation"
                         .to_string(),
                 ))
@@ -197,12 +211,12 @@ impl SearchOutOfCoreReader {
     ) -> Result<VectorScoreScan> {
         let task_context = vector_execution_options.task_context;
         let projection = self.rabitq_projection.as_ref().ok_or_else(|| {
-            SkeinError::Storage("search out-of-core RaBitQ projection is unavailable".to_string())
+            HawDBError::Storage("search out-of-core RaBitQ projection is unavailable".to_string())
         })?;
         checkpoint_vector_task(task_context)?;
         let minimum_candidates = retained_limit.unwrap_or(1).max(1);
         if minimum_candidates > self.config.max_vector_candidates.get() {
-            return Err(SkeinError::Storage(format!(
+            return Err(HawDBError::Storage(format!(
                 "search vector rank window requires {minimum_candidates} candidates, exceeding {}",
                 self.config.max_vector_candidates
             )));
@@ -225,11 +239,11 @@ impl SearchOutOfCoreReader {
         let scan_working_bytes = total_working_bytes
             .checked_sub(allowlist_bytes)
             .ok_or_else(|| {
-                SkeinError::Storage(format!(
+                HawDBError::Storage(format!(
                     "search vector allowlist requires {allowlist_bytes} bytes, exceeding {total_working_bytes}"
                 ))
             })?;
-        let mut search_options = skein_vector_projection::ProjectionSearchOptions::new()
+        let mut search_options = hawdb_vector_projection::ProjectionSearchOptions::new()
             .with_max_parallelism(
                 NonZeroUsize::new(
                     self.config
@@ -261,7 +275,7 @@ impl SearchOutOfCoreReader {
             .collect::<Vec<_>>();
         selected_ordinals.sort_unstable();
         if selected_ordinals.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return Err(SkeinError::Storage(
+            return Err(HawDBError::Storage(
                 "search RaBitQ projection returned duplicate candidate ordinals".to_string(),
             ));
         }
@@ -274,7 +288,7 @@ impl SearchOutOfCoreReader {
         let score_working_bytes = total_working_bytes
             .checked_sub(retained_working_bytes)
             .ok_or_else(|| {
-                SkeinError::Storage(format!(
+                HawDBError::Storage(format!(
                     "search vector retained candidates require {retained_working_bytes} bytes, exceeding {total_working_bytes}"
                 ))
             })?;
@@ -316,7 +330,7 @@ impl SearchOutOfCoreReader {
             }
         }
         if reranked_candidate_count != selected_ordinals.len() {
-            return Err(SkeinError::Storage(format!(
+            return Err(HawDBError::Storage(format!(
                 "search RaBitQ raw rerank hydrated {reranked_candidate_count} of {} candidates",
                 selected_ordinals.len()
             )));
@@ -327,7 +341,7 @@ impl SearchOutOfCoreReader {
             matching_count,
             vector_document_count: projection.manifest().document_count,
             segment_scan_count: raw_segment_scan_count,
-            backend: "skein_rabitq_out_of_core_candidate_projection".to_string(),
+            backend: "hawdb_rabitq_out_of_core_candidate_projection".to_string(),
             candidate_score_source: "quantized_projection".to_string(),
             generated_candidate_count: projection_report.candidate_count,
             reranked_candidate_count,
@@ -353,13 +367,13 @@ fn checkpoint_vector_task(task_context: Option<&crate::RuntimeTaskContext>) -> R
     task_context.map_or(Ok(()), |task_context| {
         task_context
             .checkpoint()
-            .map_err(|reason| SkeinError::Execution(format!("search vector task {reason}")))
+            .map_err(|reason| HawDBError::Execution(format!("search vector task {reason}")))
     })
 }
 
 #[cfg(feature = "vector-search")]
 pub(super) fn vector_projection_error(
-    error: skein_vector_projection::ProjectionError,
-) -> SkeinError {
-    SkeinError::Storage(format!("search RaBitQ projection: {error}"))
+    error: hawdb_vector_projection::ProjectionError,
+) -> HawDBError {
+    HawDBError::Storage(format!("search RaBitQ projection: {error}"))
 }

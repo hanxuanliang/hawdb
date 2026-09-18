@@ -1,8 +1,22 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Own vector replacement admission until the candidate is accepted or dropped.
 
 use super::{checked_mul, reserved::Grant};
-use crate::{Result, SkeinError};
-use skein_executor::QueryMemoryLease;
+use crate::{HawDBError, Result};
+use hawdb_executor::QueryMemoryLease;
 use std::collections::TryReserveError;
 use std::mem::size_of;
 
@@ -84,10 +98,10 @@ fn reserve_with<T>(
     // returning its admission. The original allocation and elements stay owned.
     let mut replacement = Vec::new();
     allocate(&mut replacement, capacity).map_err(|error| {
-        SkeinError::Execution(format!("{description} allocation failed: {error}"))
+        HawDBError::Execution(format!("{description} allocation failed: {error}"))
     })?;
     if replacement.capacity() != capacity {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "{description} exceeded admission"
         )));
     }

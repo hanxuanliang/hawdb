@@ -1,9 +1,23 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Developer-facing search projection evidence and probe adapters.
 //!
 //! The typed evidence reducer lives in `projection_evidence`; this module only
 //! maps CLI and file inputs to the search owner APIs.
 use crate::{SearchIndex, SearchProjectionProbeOptions};
-use skein_core::{Result, SkeinError};
+use hawdb_core::{HawDBError, Result};
 use std::path::Path;
 
 pub use crate::projection_evidence::{
@@ -16,8 +30,8 @@ pub fn nowledge_search_projection_evidence_usage() -> String {
         .to_string()
 }
 
-pub fn skein_search_projection_probe_usage() -> String {
-    "skein-search-projection-probe requires [--active-model <model>] [--active-dimension <dimension>] <search-index-dir>"
+pub fn hawdb_search_projection_probe_usage() -> String {
+    "hawdb-search-projection-probe requires [--active-model <model>] [--active-dimension <dimension>] <search-index-dir>"
         .to_string()
 }
 
@@ -41,7 +55,7 @@ pub fn run_nowledge_search_projection_evidence(
             }
             path => {
                 if args.next().is_some() {
-                    return Err(SkeinError::Semantic(
+                    return Err(HawDBError::Semantic(
                         nowledge_search_projection_evidence_usage(),
                     ));
                 }
@@ -53,12 +67,12 @@ pub fn run_nowledge_search_projection_evidence(
             }
         }
     }
-    Err(SkeinError::Semantic(
+    Err(HawDBError::Semantic(
         nowledge_search_projection_evidence_usage(),
     ))
 }
 
-pub fn run_skein_search_projection_probe(
+pub fn run_hawdb_search_projection_probe(
     mut args: impl Iterator<Item = String>,
 ) -> Result<serde_json::Value> {
     let mut options = SearchProjectionProbeOptions::default();
@@ -67,26 +81,26 @@ pub fn run_skein_search_projection_probe(
             "--active-model" => {
                 options.active_embedding_model =
                     Some(args.next().ok_or_else(|| {
-                        SkeinError::Semantic(skein_search_projection_probe_usage())
+                        HawDBError::Semantic(hawdb_search_projection_probe_usage())
                     })?);
             }
             "--active-dimension" => {
                 let raw_dimension = args
                     .next()
-                    .ok_or_else(|| SkeinError::Semantic(skein_search_projection_probe_usage()))?;
+                    .ok_or_else(|| HawDBError::Semantic(hawdb_search_projection_probe_usage()))?;
                 options.active_embedding_dimension =
                     Some(parse_positive_usize("--active-dimension", &raw_dimension)?);
             }
             path => {
                 if args.next().is_some() {
-                    return Err(SkeinError::Semantic(skein_search_projection_probe_usage()));
+                    return Err(HawDBError::Semantic(hawdb_search_projection_probe_usage()));
                 }
                 let index = SearchIndex::open(path)?;
                 return Ok(index.nowledge_search_projection_probe_json(options));
             }
         }
     }
-    Err(SkeinError::Semantic(skein_search_projection_probe_usage()))
+    Err(HawDBError::Semantic(hawdb_search_projection_probe_usage()))
 }
 
 pub fn run_nowledge_search_projection_shadow_evidence(
@@ -102,27 +116,27 @@ pub fn run_nowledge_search_projection_shadow_evidence(
             }
             "--primary-probe-json" => {
                 let path = args.next().ok_or_else(|| {
-                    SkeinError::Semantic(nowledge_search_projection_shadow_evidence_usage())
+                    HawDBError::Semantic(nowledge_search_projection_shadow_evidence_usage())
                 })?;
                 primary_probe = Some(read_json_file(Path::new(&path))?);
             }
             "--shadow-probe-json" => {
                 let path = args.next().ok_or_else(|| {
-                    SkeinError::Semantic(nowledge_search_projection_shadow_evidence_usage())
+                    HawDBError::Semantic(nowledge_search_projection_shadow_evidence_usage())
                 })?;
                 shadow_probe = Some(read_json_file(Path::new(&path))?);
             }
             _ => {
-                return Err(SkeinError::Semantic(
+                return Err(HawDBError::Semantic(
                     nowledge_search_projection_shadow_evidence_usage(),
                 ));
             }
         }
     }
     let primary_probe = primary_probe
-        .ok_or_else(|| SkeinError::Semantic(nowledge_search_projection_shadow_evidence_usage()))?;
+        .ok_or_else(|| HawDBError::Semantic(nowledge_search_projection_shadow_evidence_usage()))?;
     let shadow_probe = shadow_probe
-        .ok_or_else(|| SkeinError::Semantic(nowledge_search_projection_shadow_evidence_usage()))?;
+        .ok_or_else(|| HawDBError::Semantic(nowledge_search_projection_shadow_evidence_usage()))?;
     Ok((
         nowledge_search_projection_shadow_evidence_json(&primary_probe, &shadow_probe),
         require_ready,
@@ -131,12 +145,12 @@ pub fn run_nowledge_search_projection_shadow_evidence(
 
 fn read_json_file(path: &Path) -> Result<serde_json::Value> {
     let content = std::fs::read_to_string(path).map_err(|_| {
-        SkeinError::Execution(
+        HawDBError::Execution(
             "failed to read search projection evidence JSON: io_error".to_string(),
         )
     })?;
     serde_json::from_str(&content).map_err(|_| {
-        SkeinError::Semantic(
+        HawDBError::Semantic(
             "failed to parse search projection evidence JSON: invalid_json".to_string(),
         )
     })
@@ -144,10 +158,10 @@ fn read_json_file(path: &Path) -> Result<serde_json::Value> {
 
 fn parse_positive_usize(flag: &str, value: &str) -> Result<usize> {
     let parsed = value.parse::<usize>().map_err(|error| {
-        SkeinError::Semantic(format!("invalid {flag} value '{value}': {error}"))
+        HawDBError::Semantic(format!("invalid {flag} value '{value}': {error}"))
     })?;
     if parsed == 0 {
-        return Err(SkeinError::Semantic(format!(
+        return Err(HawDBError::Semantic(format!(
             "invalid {flag} value '{value}': expected a positive integer"
         )));
     }
@@ -179,7 +193,7 @@ mod tests {
             )
         );
 
-        let probe_error = super::run_skein_search_projection_probe(
+        let probe_error = super::run_hawdb_search_projection_probe(
             ["--active-dimension".to_string()].into_iter(),
         )
         .unwrap_err()
@@ -188,7 +202,7 @@ mod tests {
             probe_error,
             format!(
                 "semantic error: {}",
-                super::skein_search_projection_probe_usage()
+                super::hawdb_search_projection_probe_usage()
             )
         );
 
@@ -209,7 +223,7 @@ mod tests {
     #[test]
     fn search_projection_evidence_owner_type_round_trips_contract_probe() {
         let contract = super::nowledge_search_projection_probe_contract_json();
-        let probe = &contract["example_skein_probe"];
+        let probe = &contract["example_hawdb_probe"];
         let report = super::NowledgeSearchProjectionEvidenceReport::from_probe(probe);
         assert!(report.ready);
         assert_eq!(
@@ -256,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn skein_probe_output_feeds_search_projection_evidence() {
+    fn hawdb_probe_output_feeds_search_projection_evidence() {
         let path = unique_test_dir("search_projection_probe_command");
         {
             let mut index = SearchIndex::open(&path).unwrap();
@@ -289,7 +303,7 @@ mod tests {
         // that backend must retain the complete probe and report its blocker.
         let vector_ready = cfg!(feature = "vector-search");
 
-        assert_eq!(probe["protocol"], "skein-nowledge-search-projection-probe");
+        assert_eq!(probe["protocol"], "hawdb-nowledge-search-projection-probe");
         assert_eq!(
             evidence["ready"], vector_ready,
             "probe={probe:#}\nevidence={evidence:#}"
@@ -297,7 +311,7 @@ mod tests {
         assert_eq!(evidence["covered_table_count"], 6);
         assert_eq!(evidence["source_chunk_ready"], true);
         assert_eq!(evidence["predicate_pushdown_ready"], true);
-        assert_eq!(evidence["skein_predicate_pushdown_ready"], true);
+        assert_eq!(evidence["hawdb_predicate_pushdown_ready"], true);
         assert_eq!(
             evidence["predicate_pushdown"]["segment_descriptor_scan_filter_fields_ready"],
             true
@@ -378,6 +392,6 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("skein_{name}_{}_{nanos}", std::process::id()))
+        std::env::temp_dir().join(format!("hawdb_{name}_{}_{nanos}", std::process::id()))
     }
 }

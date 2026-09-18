@@ -1,7 +1,21 @@
-use super::*;
-use skein_resource_profile::StorageResourceProfileObservation;
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-pub use skein_resource_profile::{
+use super::*;
+use hawdb_resource_profile::StorageResourceProfileObservation;
+
+pub use hawdb_resource_profile::{
     StorageResourceProfileLimits, StorageResourceProfileReport, STORAGE_RESOURCE_PROFILE_PROTOCOL,
 };
 
@@ -33,7 +47,7 @@ impl Database {
         evidence_binding.validate_for(&expected_identity)?;
         let commit_epoch = self.commit_epoch();
         if evidence_binding.identity.canonical_graph_commit_epoch != commit_epoch {
-            return Err(SkeinError::Semantic(format!(
+            return Err(HawDBError::Semantic(format!(
                 "production evidence canonical graph commit epoch {} does not match database epoch {commit_epoch}",
                 evidence_binding.identity.canonical_graph_commit_epoch
             )));
@@ -55,12 +69,12 @@ impl Database {
         limits: StorageResourceProfileLimits,
         evidence_binding: crate::ProductionEvidenceBinding,
         expected_identity: crate::ProductionQualificationIdentity,
-        task_context: &skein_core::RuntimeTaskContext,
+        task_context: &hawdb_core::RuntimeTaskContext,
     ) -> Result<StorageResourceProfileReport> {
         evidence_binding.validate_for(&expected_identity)?;
         let commit_epoch = self.commit_epoch();
         if evidence_binding.identity.canonical_graph_commit_epoch != commit_epoch {
-            return Err(SkeinError::Semantic(format!(
+            return Err(HawDBError::Semantic(format!(
                 "production evidence canonical graph commit epoch {} does not match database epoch {commit_epoch}",
                 evidence_binding.identity.canonical_graph_commit_epoch
             )));
@@ -82,7 +96,7 @@ impl Database {
         limits: StorageResourceProfileLimits,
         evidence_binding: Option<crate::ProductionEvidenceBinding>,
         expected_identity: Option<crate::ProductionQualificationIdentity>,
-        task_context: Option<&skein_core::RuntimeTaskContext>,
+        task_context: Option<&hawdb_core::RuntimeTaskContext>,
     ) -> Result<StorageResourceProfileReport> {
         limits.validate()?;
         let canonical_graph_commit_epoch = self.commit_epoch();

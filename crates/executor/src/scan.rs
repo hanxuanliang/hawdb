@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Storage-implementation-neutral node scan and lookup operators.
 
 use crate::binding::{binding_memory_bytes, Binding};
@@ -17,14 +31,14 @@ use crate::traversal::{
     OneHopRelationshipSpec,
 };
 use crate::{ExecutionLimit, QueryMemoryAccount};
-use skein_core::{
-    Catalog, LabelId, RelTypeId, RelationshipDirection, Result, RuntimeTaskContext, SkeinError,
+use hawdb_core::{
+    Catalog, HawDBError, LabelId, RelTypeId, RelationshipDirection, Result, RuntimeTaskContext,
     Value,
 };
-use skein_plan::{
+use hawdb_plan::{
     ComparisonOp, ExactPropertySeekBranch, NodeProjectionAccess, Predicate, Projection,
 };
-use skein_storage::{
+use hawdb_storage::{
     AdjacencyDirection, NodeId, NodeRecord, ProjectedNodeRecord, PropertyFilter, RangeBound,
     ScanPredicate, ScanPruningReport, ScanPruningStrategy, ScanPruningTargetKind,
 };
@@ -117,7 +131,7 @@ pub fn stream_expand_binding(
 ) -> Result<ScanControl> {
     runtime_checkpoint(task_context)?;
     let source = binding.nodes.get(spec.source_variable).ok_or_else(|| {
-        SkeinError::Execution(format!(
+        HawDBError::Execution(format!(
             "missing variable '{}' during expand",
             spec.source_variable
         ))
@@ -173,7 +187,7 @@ pub fn stream_expand_binding(
         )?
     } else {
         let Some(rel_type_id) = rel_type_id else {
-            return Err(SkeinError::Execution(
+            return Err(HawDBError::Execution(
                 "typed bounded expand is missing a relationship type".to_string(),
             ));
         };
@@ -245,7 +259,7 @@ pub fn adjacency_exists(
     runtime_checkpoint(task_context)?;
     let mut found = false;
     let mut visit_direction = |adjacency_direction: AdjacencyDirection| {
-        let mut visit = |relationship: skein_storage::RelRecord| {
+        let mut visit = |relationship: hawdb_storage::RelRecord| {
             runtime_checkpoint(task_context)?;
             let matches = match adjacency_direction {
                 AdjacencyDirection::Outgoing => {
@@ -291,7 +305,7 @@ fn ensure_expanded_binding_fits(
 ) -> Result<()> {
     let bytes = binding_memory_bytes(&expanded.binding);
     if bytes > memory_budget_bytes {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "AdjacencyExpandExec result uses {bytes} bytes, exceeding blocking_operator_bytes {memory_budget_bytes}"
         )));
     }
@@ -866,7 +880,7 @@ pub fn execute_node_column_lookup(
     let mut tracker = context.memory_tracker();
     for binding in input {
         let expected = binding.values.get(spec.column).ok_or_else(|| {
-            SkeinError::Execution(format!(
+            HawDBError::Execution(format!(
                 "missing column '{}' during node column lookup",
                 spec.column
             ))
@@ -918,7 +932,7 @@ fn execute_indexed_node_column_lookup(
     let mut lookup_values = BTreeSet::new();
     for binding in &input {
         let expected = binding.values.get(spec.column).ok_or_else(|| {
-            SkeinError::Execution(format!(
+            HawDBError::Execution(format!(
                 "missing column '{}' during node column lookup",
                 spec.column
             ))
@@ -1173,7 +1187,7 @@ mod tests {
     use super::*;
     use crate::observer::NoopExecutionObserver;
     use crate::store::{PrunedNodeScan, PrunedRelationshipScan};
-    use skein_storage::{AdjacencyDirection, RelId, RelRecord};
+    use hawdb_storage::{AdjacencyDirection, RelId, RelRecord};
     use std::cell::Cell;
 
     struct HighDegreeStore {
@@ -1239,7 +1253,7 @@ mod tests {
         fn visit_nodes_by_composite_range_owned(
             &self,
             _label_id: LabelId,
-            _seek: &skein_plan::CompositeRangeSeek,
+            _seek: &hawdb_plan::CompositeRangeSeek,
             _consumer: &mut dyn FnMut(NodeRecord) -> Result<ScanControl>,
         ) -> Result<ScanControl> {
             panic!("composite range scans are not used by adjacency expansion tests")
@@ -1269,7 +1283,7 @@ mod tests {
         fn projected_graph_definition(
             &self,
             _name: &str,
-        ) -> Option<skein_storage::ProjectedGraphDefinition> {
+        ) -> Option<hawdb_storage::ProjectedGraphDefinition> {
             panic!("graph projections are not used by adjacency expansion tests")
         }
 

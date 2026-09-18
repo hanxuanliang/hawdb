@@ -1,19 +1,32 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{
     bound_join_key, bound_relation_join_key, null_extended_tree_row, predicate_truth,
     relational_key_resident_bytes, typed_row_set_locator, visit_prepared_physical_join_plan_node,
     with_typed_locator_bound_row_for_scan, BindingId, BoundRow, DefaultHasher, ExecutorBinding,
-    Hash, HashMap, Hasher, NonZeroUsize, OperatorMemoryTracker, QueryMemoryClass,
+    Hash, HashMap, Hasher, HawDBError, NonZeroUsize, OperatorMemoryTracker, QueryMemoryClass,
     QueryMemoryLedger, RefCell, RelationalEquiJoinKeys, RelationalIndexRuntime, RelationalKey,
     RelationalLocatorLayout, RelationalOperatorId, RelationalPhysicalJoinExecution,
     RelationalPhysicalJoinNode, RelationalPhysicalOutputSchema, RelationalPhysicalRelation,
     RelationalPipelineState, RelationalRowRuntime, RelationalRowSetLocator, RelationalState,
-    Result, SkeinError, SpillBudgetTracker, SpillRun, SpillWriter, SqlJoinKind, SqlPredicate,
-    Value,
+    Result, SpillBudgetTracker, SpillRun, SpillWriter, SqlJoinKind, SqlPredicate, Value,
 };
 
 pub(super) const HASH_JOIN_MAP_ENTRY_OVERHEAD_BYTES: usize = 192;
 pub(super) const HASH_JOIN_GRACE_PARTITIONS: usize = 2;
-pub(super) const HASH_JOIN_SPILL_BINDING_NAME: &str = "__skein_relational_hash_locator";
+pub(super) const HASH_JOIN_SPILL_BINDING_NAME: &str = "__hawdb_relational_hash_locator";
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum HashJoinSpillSide {
@@ -36,7 +49,7 @@ pub(super) struct HashJoinGraceSpill {
 
 impl HashJoinGraceSpill {
     pub(super) fn new(
-        memory: &skein_executor::ExecutionMemoryConfig,
+        memory: &hawdb_executor::ExecutionMemoryConfig,
         memory_ledger: &QueryMemoryLedger,
     ) -> Self {
         let staging_budget = hash_join_partition_memory_budget(memory);
@@ -119,7 +132,7 @@ pub(super) fn write_hash_join_spill_record(
         Value::Binary(locator.encode_hash_spill_record()?),
     );
     let slot = runs.get_mut(partition).ok_or_else(|| {
-        SkeinError::Execution(format!(
+        HawDBError::Execution(format!(
             "hash join spill partition {partition} is out of bounds"
         ))
     })?;
@@ -137,7 +150,7 @@ pub(super) fn write_hash_join_spill_record(
         .writer
         .as_mut()
         .ok_or_else(|| {
-            SkeinError::Execution("hash join spill writer is already closed".to_string())
+            HawDBError::Execution("hash join spill writer is already closed".to_string())
         })?
         .write(*next_ordinal, &binding, budget);
     *slot = Some(run);
@@ -156,7 +169,7 @@ pub(super) fn finish_hash_join_spill_runs(runs: &mut [Option<HashJoinSpillRun>])
 }
 
 pub(super) fn map_hash_join_spill_record<T>(
-    reader: &mut skein_executor::spill::SpillReader,
+    reader: &mut hawdb_executor::spill::SpillReader,
     max_record_bytes: usize,
     spill_budget: &SpillBudgetTracker,
     tracker: &mut OperatorMemoryTracker,
@@ -178,12 +191,12 @@ pub(super) fn map_hash_join_spill_record<T>(
 
 pub(super) fn hash_join_spill_locator(binding: ExecutorBinding) -> Result<RelationalRowSetLocator> {
     if !binding.nodes.is_empty() || !binding.relationships.is_empty() || binding.values.len() != 1 {
-        return Err(SkeinError::StorageIntegrity(
+        return Err(HawDBError::StorageIntegrity(
             "hash join spill record has an invalid binding shape".to_string(),
         ));
     }
     let Some(Value::Binary(payload)) = binding.values.get(HASH_JOIN_SPILL_BINDING_NAME) else {
-        return Err(SkeinError::StorageIntegrity(
+        return Err(HawDBError::StorageIntegrity(
             "hash join spill record has no typed relational locator".to_string(),
         ));
     };
@@ -191,7 +204,7 @@ pub(super) fn hash_join_spill_locator(binding: ExecutorBinding) -> Result<Relati
 }
 
 pub(super) fn hash_join_partition_memory_budget(
-    memory: &skein_executor::ExecutionMemoryConfig,
+    memory: &hawdb_executor::ExecutionMemoryConfig,
 ) -> NonZeroUsize {
     // A spill handoff keeps a resident build entry and one staged record live at once.
     NonZeroUsize::new(
@@ -218,7 +231,7 @@ pub(super) fn try_insert_hash_join_build(
         tracker.try_charge(row_bytes)?;
         if let Err(error) = rows.try_reserve_exact(1) {
             tracker.release(row_bytes);
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "RelationalHashJoinBuild cannot reserve build row: {error}"
             )));
         }
@@ -235,14 +248,14 @@ pub(super) fn try_insert_hash_join_build(
     tracker.try_charge(entry_bytes)?;
     if let Err(error) = build.try_reserve(1) {
         tracker.release(entry_bytes);
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "RelationalHashJoinBuild cannot reserve hash table: {error}"
         )));
     }
     let mut rows = Vec::new();
     if let Err(error) = rows.try_reserve_exact(1) {
         tracker.release(entry_bytes);
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "RelationalHashJoinBuild cannot reserve build row: {error}"
         )));
     }
@@ -318,7 +331,7 @@ pub(super) fn relational_physical_relation_locator_layout<'a>(
     relation: &'a RelationalPhysicalRelation,
 ) -> Result<RelationalLocatorLayout<'a>> {
     let schema = state.table_schema(&relation.table).ok_or_else(|| {
-        SkeinError::Semantic(format!("unknown relational table {}", relation.table))
+        HawDBError::Semantic(format!("unknown relational table {}", relation.table))
     })?;
     RelationalLocatorLayout::from_bindings([(
         relation.binding,
@@ -351,7 +364,7 @@ pub(super) fn visit_hash_join<'a>(
     visit: &mut dyn FnMut(BoundRow<'a>) -> Result<bool>,
 ) -> Result<bool> {
     if outer.is_some() {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "hash join cannot run below a probe input".to_string(),
         ));
     }
@@ -360,12 +373,12 @@ pub(super) fn visit_hash_join<'a>(
         RelationalPhysicalJoinNode::Relation(right_relation),
     ) = (left, right)
     else {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "hash join requires two relation inputs".to_string(),
         ));
     };
     let right_schema = state.table_schema(&right_relation.table).ok_or_else(|| {
-        SkeinError::Semantic(format!("unknown relational table {}", right_relation.table))
+        HawDBError::Semantic(format!("unknown relational table {}", right_relation.table))
     })?;
     let left_locator_layout = relational_physical_relation_locator_layout(state, left_relation)?;
     let right_locator_layout = relational_physical_relation_locator_layout(state, right_relation)?;
@@ -440,7 +453,7 @@ pub(super) fn visit_hash_join<'a>(
         execution
             .reports
             .borrow_mut()
-            .push(skein_executor::blocking::spill_backed_report(
+            .push(hawdb_executor::blocking::spill_backed_report(
                 "RelationalHashJoinGrace",
                 &build_tracker,
                 build_tracker.peak_bytes.max(peak_partition_bytes),
@@ -452,7 +465,7 @@ pub(super) fn visit_hash_join<'a>(
             execution
                 .reports
                 .borrow_mut()
-                .push(skein_executor::blocking::spill_backed_report(
+                .push(hawdb_executor::blocking::spill_backed_report(
                     "RelationalHashJoinGraceHotPartition",
                     &build_tracker,
                     build_tracker.peak_bytes.max(peak_partition_bytes),
@@ -467,7 +480,7 @@ pub(super) fn visit_hash_join<'a>(
     execution
         .reports
         .borrow_mut()
-        .push(skein_executor::blocking::in_memory_report(
+        .push(hawdb_executor::blocking::in_memory_report(
             "RelationalHashJoinBuild",
             &build_tracker,
             build_tracker.peak_bytes,
@@ -561,7 +574,7 @@ pub(super) fn visit_grace_hash_join<'a>(
     visit: &mut dyn FnMut(BoundRow<'a>) -> Result<bool>,
 ) -> Result<(bool, usize, usize)> {
     let right_schema = state.table_schema(&right_relation.table).ok_or_else(|| {
-        SkeinError::Semantic(format!("unknown relational table {}", right_relation.table))
+        HawDBError::Semantic(format!("unknown relational table {}", right_relation.table))
     })?;
     let candidate_context = HashJoinCandidateContext {
         operator_id,
@@ -698,7 +711,7 @@ pub(super) fn visit_grace_hash_join<'a>(
                     |right_row| {
                         bound_relation_join_key(right_row, right_relation, equi_join_keys)?
                             .ok_or_else(|| {
-                                SkeinError::StorageIntegrity(
+                                HawDBError::StorageIntegrity(
                                     "hash join spill build row has a null join key".to_string(),
                                 )
                             })
@@ -756,7 +769,7 @@ pub(super) fn visit_grace_hash_join<'a>(
                         let left_key =
                             bound_join_key(left_row, right_schema, &equi_join_keys.columns)?
                                 .ok_or_else(|| {
-                                    SkeinError::StorageIntegrity(
+                                    HawDBError::StorageIntegrity(
                                         "hash join spill probe row has a null join key".to_string(),
                                     )
                                 })?;
@@ -782,7 +795,7 @@ pub(super) fn visit_grace_hash_join<'a>(
                                                 equi_join_keys,
                                             )?
                                             else {
-                                                return Err(SkeinError::StorageIntegrity(
+                                                return Err(HawDBError::StorageIntegrity(
                                                     "hash join spill build row has a null join key"
                                                         .to_string(),
                                                 ));

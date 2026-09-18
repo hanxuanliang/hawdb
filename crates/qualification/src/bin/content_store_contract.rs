@@ -1,4 +1,18 @@
-use skein_qualification::nowledge_content_store_sql_corpus_json;
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use hawdb_qualification::nowledge_content_store_sql_corpus_json;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -11,7 +25,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("skein-content-store-contract: {error}");
+            eprintln!("hawdb-content-store-contract: {error}");
             ExitCode::from(2)
         }
     }
@@ -19,7 +33,7 @@ fn main() -> ExitCode {
 
 fn run(args: impl IntoIterator<Item = String>) -> Result<serde_json::Value, String> {
     if args.into_iter().next().is_some() {
-        return Err("skein-content-store-contract does not accept arguments".to_string());
+        return Err("hawdb-content-store-contract does not accept arguments".to_string());
     }
     nowledge_content_store_sql_corpus_json().map_err(|error| error.to_string())
 }
@@ -34,11 +48,11 @@ mod tests {
 
         assert_eq!(
             json["schema"]["identity"]["protocol"],
-            "skein-nowledge-content-store-schema-v1"
+            "hawdb-nowledge-content-store-schema-v1"
         );
         assert_eq!(
             json["identity"]["protocol"],
-            "skein-nowledge-content-store-sql-corpus-v1"
+            "hawdb-nowledge-content-store-sql-corpus-v1"
         );
     }
 

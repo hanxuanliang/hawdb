@@ -1,4 +1,18 @@
-pub use skein_telemetry::*;
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+pub use hawdb_telemetry::*;
 
 #[cfg(test)]
 mod tests {
@@ -153,7 +167,7 @@ mod tests {
     fn embedded_open_wires_runtime_governor_to_the_host_sink() {
         let path = unique_test_dir("runtime_governor");
         let sink = Arc::new(RecordingSink::default());
-        let mut embedded = crate::SkeinEmbedded::open(&path).unwrap();
+        let mut embedded = crate::HawDBEmbedded::open(&path).unwrap();
         embedded
             .database_mut()
             .set_telemetry_sink(Some(sink.clone()));
@@ -362,7 +376,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "skein_telemetry_{name}_{}_{}",
+            "hawdb_telemetry_{name}_{}_{}",
             std::process::id(),
             nonce
         ))

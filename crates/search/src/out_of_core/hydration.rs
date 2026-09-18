@@ -1,6 +1,20 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use crate::{decode_search_document_line, parse_snapshot_header};
-use skein_integrity::Crc32cHasher;
+use hawdb_integrity::Crc32cHasher;
 use std::io::{self, BufRead, BufReader};
 
 const INPUT_BYTES: usize = 8192;
@@ -58,8 +72,8 @@ impl<R: Read> Read for CheckedReader<R> {
     }
 }
 
-fn invalid(reason: impl std::fmt::Display) -> SkeinError {
-    SkeinError::Storage(format!("search hydration {reason}"))
+fn invalid(reason: impl std::fmt::Display) -> HawDBError {
+    HawDBError::Storage(format!("search hydration {reason}"))
 }
 
 #[derive(Debug)]
@@ -239,7 +253,7 @@ fn select_documents(
             Some(line) => line.strip_suffix('\r').unwrap_or(line),
             None => &line,
         };
-        if line.is_empty() || line == "SKEIN_SEARCH_SEGMENT_V1" {
+        if line.is_empty() || line == "HAWDB_SEARCH_SEGMENT_V1" {
             continue;
         }
         let document = decode_search_document_line(line)?;

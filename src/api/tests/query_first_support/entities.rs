@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::super::super::*;
 
 type EntityKey = (String, String);
@@ -31,7 +45,7 @@ pub(in crate::api) fn knowledge_entity_details_via_query_runtime(
     request: &KnowledgeEntityDetailsRequest,
 ) -> Result<KnowledgeEntityDetailsOutput> {
     if request.external_id.is_empty() {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "knowledge entity details requires a non-empty external_id".to_string(),
         ));
     }
@@ -252,12 +266,12 @@ fn decode_entity_lookup_rows(
             .get("entity")
             .and_then(knowledge_entity_from_value)
             .ok_or_else(|| {
-                SkeinError::Execution(
+                HawDBError::Execution(
                     "knowledge entity lookup returned an invalid entity row".to_string(),
                 )
             })?;
         let external_id = entity.external_id.clone().ok_or_else(|| {
-            SkeinError::Execution(
+            HawDBError::Execution(
                 "knowledge entity lookup returned an entity without identity".to_string(),
             )
         })?;
@@ -303,7 +317,7 @@ mod tests {
 
         assert_eq!(
             error,
-            SkeinError::Execution(
+            HawDBError::Execution(
                 "knowledge entity lookup returned an invalid entity row".to_string()
             )
         );

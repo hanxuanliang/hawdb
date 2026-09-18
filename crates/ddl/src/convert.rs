@@ -1,5 +1,19 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::{SchemaObjectState, SchemaPropertyType, SchemaTableKind};
-use skein_core::schema::{PropertyType, TableKind};
+use hawdb_core::schema::{PropertyType, TableKind};
 
 pub const fn table_kind_to_core(kind: SchemaTableKind) -> TableKind {
     match kind {
@@ -22,14 +36,14 @@ pub const fn property_type_to_core(value_type: SchemaPropertyType) -> PropertyTy
 
 pub const fn object_state_to_core(
     state: SchemaObjectState,
-) -> skein_core::schema::SchemaObjectState {
+) -> hawdb_core::schema::SchemaObjectState {
     match state {
-        SchemaObjectState::DeleteOnly => skein_core::schema::SchemaObjectState::DeleteOnly,
-        SchemaObjectState::WriteOnly => skein_core::schema::SchemaObjectState::WriteOnly,
-        SchemaObjectState::Backfill => skein_core::schema::SchemaObjectState::Backfill,
-        SchemaObjectState::Validating => skein_core::schema::SchemaObjectState::Validating,
-        SchemaObjectState::Public => skein_core::schema::SchemaObjectState::Public,
-        SchemaObjectState::Gc => skein_core::schema::SchemaObjectState::Gc,
+        SchemaObjectState::DeleteOnly => hawdb_core::schema::SchemaObjectState::DeleteOnly,
+        SchemaObjectState::WriteOnly => hawdb_core::schema::SchemaObjectState::WriteOnly,
+        SchemaObjectState::Backfill => hawdb_core::schema::SchemaObjectState::Backfill,
+        SchemaObjectState::Validating => hawdb_core::schema::SchemaObjectState::Validating,
+        SchemaObjectState::Public => hawdb_core::schema::SchemaObjectState::Public,
+        SchemaObjectState::Gc => hawdb_core::schema::SchemaObjectState::Gc,
     }
 }
 
@@ -87,7 +101,7 @@ mod tests {
 
     #[test]
     fn maps_all_ddl_object_states_to_core_schema_states() {
-        use skein_core::schema::SchemaObjectState as CoreState;
+        use hawdb_core::schema::SchemaObjectState as CoreState;
 
         for (command, catalog) in [
             (SchemaObjectState::DeleteOnly, CoreState::DeleteOnly),

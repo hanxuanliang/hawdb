@@ -1,5 +1,19 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
-use crate::{QueryAccessControlContext, RuntimeCapabilities, RuntimeCapability, SkeinError};
+use crate::{HawDBError, QueryAccessControlContext, RuntimeCapabilities, RuntimeCapability};
 
 #[test]
 fn disabled_query_capabilities_fail_before_planning_or_catalog_mutation() {
@@ -41,7 +55,7 @@ fn disabled_search_capability_does_not_fall_back_to_another_retriever() {
 
     let error = search
         .try_search_with_options(
-            "skein",
+            "hawdb",
             None,
             SearchMode::Text,
             crate::search::SearchQueryOptions {
@@ -681,10 +695,10 @@ fn minimal_build_fails_closed_for_every_optional_capability() {
     );
 }
 
-fn assert_capability_error(error: SkeinError, expected: RuntimeCapability) {
+fn assert_capability_error(error: HawDBError, expected: RuntimeCapability) {
     assert_eq!(
         error,
-        SkeinError::CapabilityUnavailable {
+        HawDBError::CapabilityUnavailable {
             capability: expected
         }
     );

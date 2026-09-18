@@ -1,8 +1,22 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use crate::lexical_projection::{LexicalProjectionConfig, LexicalProjectionWriter};
 use crate::{SearchDocument, SearchIndex};
-use skein_core::RuntimeMemoryReservation;
-use skein_executor::QueryMemoryLedger;
+use hawdb_core::RuntimeMemoryReservation;
+use hawdb_executor::QueryMemoryLedger;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -89,7 +103,7 @@ impl Directory {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "skein-analyzer-entrypoints-{}-{}",
+            "hawdb-analyzer-entrypoints-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

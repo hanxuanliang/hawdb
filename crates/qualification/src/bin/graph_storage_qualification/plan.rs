@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::graph_qualification_input::{
     GraphDatabaseInput, ProcessLimitsInput, QueryLimitsInput, RuntimeProfileInput,
 };
@@ -5,14 +19,14 @@ use super::qualification_input::{
     read_bounded_json, EvidenceBindingInput, ProductionIdentityInput,
 };
 use super::qualification_value::value_from_json;
+use hawdb::{NowledgeGraphStatement, NowledgeMemGraphMode, NowledgeMemOpenOptions};
+use hawdb_qualification::ProductionGraphStorageQualificationConfig;
 use serde::Deserialize;
-use skein::{NowledgeGraphStatement, NowledgeMemGraphMode, NowledgeMemOpenOptions};
-use skein_qualification::ProductionGraphStorageQualificationConfig;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub(crate) const GRAPH_STORAGE_QUALIFICATION_PLAN_PROTOCOL: &str =
-    "skein-production-graph-storage-plan-v1";
+    "hawdb-production-graph-storage-plan-v1";
 
 pub(crate) fn read_plan(path: &Path) -> Result<GraphStorageQualificationPlan, String> {
     read_bounded_json(path, "graph storage qualification plan")
@@ -76,7 +90,7 @@ struct GraphStatementInput {
 
 struct ResolvedGraphStatement {
     statement: NowledgeGraphStatement,
-    limits: skein::StorageResourceProfileLimits,
+    limits: hawdb::StorageResourceProfileLimits,
 }
 
 impl GraphStatementInput {
@@ -105,8 +119,8 @@ impl GraphStatementInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skein::{StorageResidencyMode, PRODUCTION_QUALIFICATION_POLICY_VERSION};
-    use skein_qualification::{
+    use hawdb::{StorageResidencyMode, PRODUCTION_QUALIFICATION_POLICY_VERSION};
+    use hawdb_qualification::{
         CONTENT_STORE_512_MIB_CAPABILITY_BYTES, CONTENT_STORE_SHARED_HOST_MAX_CAPACITY_BYTES,
     };
 

@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::value::{binding_id, project_expression_value};
 use super::*;
 
@@ -521,7 +535,7 @@ pub fn property_filter_from_predicate(predicate: &Predicate) -> Result<PropertyF
         | Predicate::ExpressionContains { .. }
         | Predicate::ConstantBool(_)
         | Predicate::RelationshipExists { .. }
-        | Predicate::BoundRelationshipExists { .. } => Err(SkeinError::Execution(
+        | Predicate::BoundRelationshipExists { .. } => Err(HawDBError::Execution(
             "expression predicates are not supported in property filters".to_string(),
         )),
         Predicate::PropertyListContains {
@@ -746,7 +760,7 @@ fn property_filter_from_default_expression(
             value: value.clone(),
             negated,
         }),
-        _ => Err(SkeinError::Execution(
+        _ => Err(HawDBError::Execution(
             "expression predicates are not supported in property filters".to_string(),
         )),
     }
@@ -781,7 +795,7 @@ mod tests {
             ProjectionExpression::Literal(Value::Null),
             ProjectionExpression::Lower(Box::new(ProjectionExpression::Left {
                 expression: Box::new(ProjectionExpression::Literal(Value::String(
-                    "SKEIN".to_string(),
+                    "HAWDB".to_string(),
                 ))),
                 length: 3,
             })),
@@ -795,7 +809,7 @@ mod tests {
         let value = evaluate_projection_expression(&expression, &Catalog::default(), &binding)
             .expect("nested projection expression should evaluate");
 
-        assert_eq!(value, Value::String("ske".to_string()));
+        assert_eq!(value, Value::String("haw".to_string()));
     }
 
     #[test]

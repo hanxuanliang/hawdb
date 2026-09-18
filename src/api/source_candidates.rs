@@ -1,8 +1,22 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{Database, DatabaseReadTransaction};
 use crate::error::Result;
 use crate::schema::Catalog;
 use crate::store::{GraphStore, SourceScanCandidateRead};
-use skein_storage::{
+use hawdb_storage::{
     render_source_candidate_page, select_source_candidate, validate_source_candidate_scan_request,
     ScanSegmentFallback,
 };
@@ -11,7 +25,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 const SOURCE_SCAN_IO_DEPTH: usize = 2;
 const SOURCE_SCAN_MAX_COALESCED_BYTES: u64 = 512 * 1024;
 const SOURCE_SCAN_MAX_WAVE_BYTES: u64 = 2 * 1024 * 1024;
-pub use skein_storage::{
+pub use hawdb_storage::{
     SourceCandidateRow as KnowledgeSourceCandidateRow,
     SourceCandidateScanOrigin as KnowledgeSourceCandidateScanOrigin,
     SourceCandidateScanOutput as KnowledgeSourceCandidateScanOutput,
@@ -131,7 +145,7 @@ fn canonical_fallback(
 mod tests {
     use super::*;
     use crate::{DatabaseConfig, StorageResidencyMode, Value};
-    use skein_storage::ScanPredicate;
+    use hawdb_storage::ScanPredicate;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
@@ -141,7 +155,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "skein_source_candidates_{name}_{}_{}",
+            "hawdb_source_candidates_{name}_{}_{}",
             std::process::id(),
             nonce
         ))

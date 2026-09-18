@@ -1,6 +1,20 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::{SearchIndex, SearchProjectionCatchUpReport};
-use skein_core::{Result, SkeinError};
-use skein_storage::{SearchProjectionChangefeedReadiness, SearchProjectionChangefeedStatus};
+use hawdb_core::{HawDBError, Result};
+use hawdb_storage::{SearchProjectionChangefeedReadiness, SearchProjectionChangefeedStatus};
 use std::fmt;
 use std::num::NonZeroU64;
 
@@ -16,7 +30,7 @@ impl SearchProjectionConsumerId {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
         {
-            return Err(SkeinError::Semantic(
+            return Err(HawDBError::Semantic(
                 "consumer ID must contain 1-128 ASCII letters, digits, '.', '_' or '-'".into(),
             ));
         }
@@ -127,7 +141,7 @@ pub struct SearchProjectionConsumerCatchUpReport {
 
 #[derive(Debug)]
 pub enum SearchProjectionConsumerError {
-    Database(SkeinError),
+    Database(HawDBError),
     InvalidHandle,
     AlreadyRegistered,
     RegistryFull,
@@ -166,8 +180,8 @@ impl std::error::Error for SearchProjectionConsumerError {
     }
 }
 
-impl From<SkeinError> for SearchProjectionConsumerError {
-    fn from(error: SkeinError) -> Self {
+impl From<HawDBError> for SearchProjectionConsumerError {
+    fn from(error: HawDBError) -> Self {
         Self::Database(error)
     }
 }

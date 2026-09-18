@@ -1,6 +1,20 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::thread;
 
-pub const PARSER_FUZZ_PROTOCOL: &str = "skein-parser-fuzz-v1";
+pub const PARSER_FUZZ_PROTOCOL: &str = "hawdb-parser-fuzz-v1";
 const MAX_INPUT_BYTES: usize = 16 * 1024;
 const PARSER_WORKER_STACK_BYTES: usize = 2 * 1024 * 1024;
 
@@ -154,18 +168,18 @@ pub fn generate_parser_fuzz_case(campaign_seed: u64, index: usize) -> ParserFuzz
 pub fn run_parser_fuzz_case(case: &ParserFuzzCase) -> Result<ParserFuzzObservation, String> {
     let input = case.input.clone();
     let worker = thread::Builder::new()
-        .name(format!("skein-parser-fuzz-{}", case.index))
+        .name(format!("hawdb-parser-fuzz-{}", case.index))
         .stack_size(PARSER_WORKER_STACK_BYTES)
         .spawn(move || {
             let used_lossy_utf8 = std::str::from_utf8(&input).is_err();
             let input = String::from_utf8_lossy(&input);
             ParserFuzzObservation {
                 used_lossy_utf8,
-                cypher_accepted: skein::cypher::parse(&input).is_ok(),
-                relational_sql_accepted: skein::sql::prepare_postgres_sql(&input).is_ok(),
-                postgres_syntax_accepted: skein::sql::syntax::parse_postgres_statement(&input)
+                cypher_accepted: hawdb::cypher::parse(&input).is_ok(),
+                relational_sql_accepted: hawdb::sql::prepare_postgres_sql(&input).is_ok(),
+                postgres_syntax_accepted: hawdb::sql::syntax::parse_postgres_statement(&input)
                     .is_ok(),
-                pgq_accepted: skein::sql::syntax::parse_pgq_statement(&input).is_ok(),
+                pgq_accepted: hawdb::sql::syntax::parse_pgq_statement(&input).is_ok(),
             }
         })
         .map_err(|error| format!("failed to spawn bounded parser worker: {error}"))?;

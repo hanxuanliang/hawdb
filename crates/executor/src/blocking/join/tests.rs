@@ -1,7 +1,21 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use crate::blocking::hash_oracle::{values, Fixture};
-use skein_core::{RuntimeCancellationToken, RuntimeTaskContext};
-use skein_storage::{NodeId, NodeRecord};
+use hawdb_core::{RuntimeCancellationToken, RuntimeTaskContext};
+use hawdb_storage::{NodeId, NodeRecord};
 use std::collections::BTreeSet;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -300,7 +314,7 @@ fn graph_hash_join_limit_stop_error_cancel_and_panic_release_ownership() {
                         emitted += batch.len();
                         match mode {
                             1 => Ok(BatchControl::Stop),
-                            2 => Err(SkeinError::Execution("consumer error".into())),
+                            2 => Err(HawDBError::Execution("consumer error".into())),
                             3 => {
                                 token.cancel();
                                 Ok(BatchControl::Continue)
@@ -380,7 +394,7 @@ fn graph_hash_join_rejects_inconsistent_spill_hashes_and_releases_decode_lease()
         let mut tracker = state.replay_tracker();
         assert!(matches!(
             state.read(&mut reader, &mut tracker),
-            Err(SkeinError::StorageIntegrity(_))
+            Err(HawDBError::StorageIntegrity(_))
         ));
         assert_eq!(tracker.used_bytes, 0);
         drop(reader);

@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -68,7 +82,7 @@ fn graph_json(graph: &PropertyGraphSchema) -> Value {
 }
 
 fn check_fixture(fixture: &Value) -> std::result::Result<(), String> {
-    if fixture["protocol"] != "skein-pgq-create-corpus-v1"
+    if fixture["protocol"] != "hawdb-pgq-create-corpus-v1"
         || fixture["postgres_revision"] != "3d00537feb565c410baf41bb301eee338e4b2317"
         || fixture["source_corpus_sha256"] != format!("{:x}", Sha256::digest(FRONTEND.as_bytes()))
     {

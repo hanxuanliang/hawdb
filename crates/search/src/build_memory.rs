@@ -1,11 +1,25 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! One generation operation owns these accounts across all of its build stages.
 
 use crate::build_control::checkpoint;
-use crate::error::{Result, SkeinError};
+use crate::error::{HawDBError, Result};
 use crate::SearchDocument;
 use crate::SearchProjectionRow;
-use skein_core::RuntimeTaskContext;
-use skein_executor::{QueryMemoryAccount, QueryMemoryClass, QueryMemoryLease, QueryMemoryLedger};
+use hawdb_core::RuntimeTaskContext;
+use hawdb_executor::{QueryMemoryAccount, QueryMemoryClass, QueryMemoryLease, QueryMemoryLedger};
 use std::borrow::Borrow;
 use std::mem::size_of;
 use std::num::NonZeroUsize;
@@ -40,13 +54,13 @@ impl BuildMemory {
             .memory_reservation()
             .map_or(Ok(usize::MAX), |reservation| {
                 usize::try_from(reservation.memory_bytes()).map_err(|_| {
-                    SkeinError::Execution(
+                    HawDBError::Execution(
                         "search build memory reservation does not fit the address space".into(),
                     )
                 })
             })?;
         let limit = NonZeroUsize::new(limit).ok_or_else(|| {
-            SkeinError::Execution("search build has no admitted working memory".into())
+            HawDBError::Execution("search build has no admitted working memory".into())
         })?;
         let ledger = QueryMemoryLedger::new(limit);
         // The ledger retains account metadata until operation end. Reuse these
@@ -165,8 +179,8 @@ pub(crate) fn grow_slots<T>(values: &mut Vec<T>, lease: &mut QueryMemoryLease) -
     Ok(())
 }
 
-fn overflow() -> SkeinError {
-    SkeinError::Execution("search build memory accounting overflow".into())
+fn overflow() -> HawDBError {
+    HawDBError::Execution("search build memory accounting overflow".into())
 }
 
 pub(crate) fn document_bytes(document: &SearchDocument) -> Result<usize> {

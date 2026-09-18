@@ -1,8 +1,22 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{
     assess_compatibility_cutover, CompatibilityCheck, CompatibilityCutoverPolicy,
     CompatibilityCutoverReport, CompatibilityFixture, CompatibilityShadowReport,
 };
-pub use skein_evidence::query_inventory::{
+pub use hawdb_evidence::query_inventory::{
     build_compatibility_query_inventory, build_compatibility_query_inventory_from_json,
     build_compatibility_query_inventory_from_json_str, compatibility_query_inventory_to_json,
     CompatibilityQueryCallSite, CompatibilityQueryInventory, CompatibilityQueryInventoryItem,
@@ -235,7 +249,7 @@ fn cutover_dual_engine_evidence_to_json(report: &CompatibilityCutoverReport) -> 
             && report.total_checks > 0
             && report.matched_checks == report.total_checks
             && primary_only_check_count == 0,
-        "primary_engine": "skein",
+        "primary_engine": "hawdb",
         "shadow_engine": report.shadow_engine,
         "primary_check_count": report.primary_check_count,
         "shadow_check_count": report.total_checks,

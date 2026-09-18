@@ -1,7 +1,21 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{SearchProjectionConsumerId, SearchProjectionConsumerState};
+use hawdb_core::{HawDBError, Result, Uuid};
+use hawdb_integrity::IntegrityHasher;
 use serde::{Deserialize, Serialize};
-use skein_core::{Result, SkeinError, Uuid};
-use skein_integrity::IntegrityHasher;
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -10,7 +24,7 @@ use std::path::{Path, PathBuf};
 pub const MAX_CONSUMERS: usize = 64;
 const MAX_REGISTRY_BYTES: usize = 64 * 1024;
 const REGISTRY_FILE: &str = "projection_consumers.meta";
-const PROTOCOL: &str = "skein-projection-consumers-v1";
+const PROTOCOL: &str = "hawdb-projection-consumers-v1";
 
 // Declaration order is lexicographic for canonical payload serialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,7 +164,7 @@ impl ConsumerRegistry {
         file.sync_all()?;
         drop(file);
         before_replace()?;
-        skein_storage::durable_replace_file(&temporary, &target)?;
+        hawdb_storage::durable_replace_file(&temporary, &target)?;
         drop(guard);
         after_replace()?;
         Ok(())
@@ -266,8 +280,8 @@ fn digest(bytes: &[u8]) -> String {
     hasher.finish().sha256.to_string()
 }
 
-fn invalid(detail: &str) -> SkeinError {
-    SkeinError::Storage(format!("invalid projection consumer registry: {detail}"))
+fn invalid(detail: &str) -> HawDBError {
+    HawDBError::Storage(format!("invalid projection consumer registry: {detail}"))
 }
 
 fn bounded_records<'de, D: serde::Deserializer<'de>>(
@@ -342,13 +356,13 @@ mod tests {
             text.replacen("{", "{\"unknown\":0,", 1),
             text.replacen(
                 "\"protocol\":",
-                "\"protocol\":\"skein-projection-consumers-v1\",\"protocol\":",
+                "\"protocol\":\"hawdb-projection-consumers-v1\",\"protocol\":",
                 1,
             ),
             text.replacen("\"id\":", "\"id\":\"shadow\",\"id\":", 1),
             text.replacen(
-                "skein-projection-consumers-v1",
-                "skein-projection-consumers-v2",
+                "hawdb-projection-consumers-v1",
+                "hawdb-projection-consumers-v2",
                 1,
             ),
             format!("{text}\n"),

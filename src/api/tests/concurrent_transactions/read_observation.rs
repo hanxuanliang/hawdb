@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::release_autocommit_reads;
 use crate::telemetry::{QueryTelemetry, TelemetrySink};
 use crate::{ConcurrentDatabase, Database, DatabaseConfig, QueryOutput, Value};
@@ -91,7 +105,7 @@ fn assert_read_completion_does_not_wait_for_writer(language: ReadLanguage, fails
         ReadLanguage::Cypher => ("create_node", "CREATE (:Memory {id: 3})"),
         ReadLanguage::Sql => ("insert", "INSERT INTO messages (id) VALUES (3)"),
     };
-    let read_digest = skein_query::QueryIdentity::new(language.name(), read_query)
+    let read_digest = hawdb_query::QueryIdentity::new(language.name(), read_query)
         .query_digest()
         .to_string();
     let (writer_started, writer_events) = mpsc::channel();

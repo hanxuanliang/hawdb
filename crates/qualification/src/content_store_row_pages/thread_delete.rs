@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::evidence::{execute_qualified_read, message_point_parameters, message_point_statement};
 use super::fixture::corpus_statement;
 use super::thread_fixture::{
@@ -7,9 +21,9 @@ use super::thread_fixture::{
 use super::{ContentStoreRowPageReadPhase, ContentStoreThreadDeleteQualificationReport};
 use crate::evidence_digest::rows_sha256;
 use crate::ContentStoreSqlCorpus;
-use skein::{
-    Database, DatabaseConfig, DatabaseTransaction, DurabilityPolicy, QueryOutput,
-    QueryStreamOptions, Result, SkeinError, Value,
+use hawdb::{
+    Database, DatabaseConfig, DatabaseTransaction, DurabilityPolicy, HawDBError, QueryOutput,
+    QueryStreamOptions, Result, Value,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -111,7 +125,7 @@ pub(super) fn qualify_thread_delete(
         || target_state_sha256(&mut database)? != target_state_before
         || unrelated_state_sha256(&mut database)? != unrelated_state_sha256_before
     {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "content-store rolled-back whole-thread delete changed canonical state".to_string(),
         ));
     }
@@ -123,7 +137,7 @@ pub(super) fn qualify_thread_delete(
         .map_err(|error| delete_phase_error("commit publication", error))?;
     let committed_epoch = database.commit_epoch();
     if committed_epoch != seed_commit_epoch.saturating_add(1) {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store whole-thread delete published epoch {committed_epoch}, expected {}",
             seed_commit_epoch.saturating_add(1)
         )));
@@ -132,7 +146,7 @@ pub(super) fn qualify_thread_delete(
     require_target_absent_database(&mut database, corpus)?;
     let unrelated_state_sha256_after_live = unrelated_state_sha256(&mut database)?;
     if unrelated_state_sha256_after_live != unrelated_state_sha256_before {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "content-store whole-thread delete changed unrelated payloads".to_string(),
         ));
     }
@@ -150,7 +164,7 @@ pub(super) fn qualify_thread_delete(
         || deleted_tombstone_read.execution.index_runtime_path != "none"
         || deleted_tombstone_read.execution.overlay_entries == 0
     {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store whole-thread tombstone point read observed epoch {}, index path {}, and {} row overlay entries; expected epoch {committed_epoch}, a direct canonical point read, and a non-empty tombstone overlay",
             deleted_tombstone_read.execution.visible_commit_epoch,
             deleted_tombstone_read.execution.index_runtime_path,
@@ -166,14 +180,14 @@ pub(super) fn qualify_thread_delete(
     let checkpoint_generation = database
         .relational_index_shadow_checkpoint_report()
         .ok_or_else(|| {
-            SkeinError::Execution(
+            HawDBError::Execution(
                 "content-store whole-thread delete checkpoint published no relational generation"
                     .to_string(),
             )
         })?
         .generation;
     if checkpoint_generation <= seed_checkpoint_generation {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store whole-thread delete checkpoint generation {checkpoint_generation} did not advance beyond seed generation {seed_checkpoint_generation}"
         )));
     }
@@ -187,7 +201,7 @@ pub(super) fn qualify_thread_delete(
     require_target_absent_database(&mut database, corpus)?;
     let unrelated_state_sha256_after_reopen = unrelated_state_sha256(&mut database)?;
     if unrelated_state_sha256_after_reopen != unrelated_state_sha256_before {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "content-store whole-thread delete changed unrelated payloads after reopen".to_string(),
         ));
     }
@@ -195,7 +209,7 @@ pub(super) fn qualify_thread_delete(
     require_count(&reopened_count_output, 0)?;
     let reopened_count_sha256 = rows_sha256(&reopened_count_output.rows);
     if reopened_count_sha256 != live_count_sha256 || database.commit_epoch() != committed_epoch {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "content-store whole-thread delete changed across checkpoint/reopen".to_string(),
         ));
     }
@@ -328,7 +342,7 @@ fn seed_thread_delete(
     let seed_checkpoint_generation = database
         .relational_index_shadow_checkpoint_report()
         .ok_or_else(|| {
-            SkeinError::Execution(
+            HawDBError::Execution(
                 "content-store whole-thread delete seed published no relational generation"
                     .to_string(),
             )
@@ -445,7 +459,7 @@ fn stage_thread_delete(
     if output_document_ids(&owned_output)? != [OWNED_DOCUMENT_ID.to_string()]
         || output_document_ids(&message_document_output)? != [LEGACY_DOCUMENT_ID.to_string()]
     {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "content-store whole-thread delete did not distinguish the empty owned document from the message-only legacy document".to_string(),
         ));
     }
@@ -456,7 +470,7 @@ fn stage_thread_delete(
             OWNED_DOCUMENT_ID.to_string(),
         ]
     {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store whole-thread delete discovered unexpected documents {document_ids:?}"
         )));
     }
@@ -489,7 +503,7 @@ fn stage_thread_delete(
                 )?,
                 "anchor_count",
             )?)
-            .ok_or_else(|| SkeinError::Execution("anchor count overflow".to_string()))?;
+            .ok_or_else(|| HawDBError::Execution("anchor count overflow".to_string()))?;
     }
 
     run_graph_deletes(
@@ -572,7 +586,7 @@ fn exercise_noop_delete(
         &[Value::String(thread_storage_id.to_string())],
     )?;
     if !owned_output.rows.is_empty() || !message_output.rows.is_empty() {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store no-op whole-thread delete discovered documents for {thread_storage_id}"
         )));
     }
@@ -605,12 +619,12 @@ fn exercise_noop_delete(
         ]),
     )?;
     if !graph_thread.rows.is_empty() || required_count(&graph_identities, "identity_count")? != 0 {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store no-op whole-thread delete discovered graph state for {thread_id}"
         )));
     }
     if database.commit_epoch() != epoch_before {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store no-op whole-thread preflight advanced epoch from {epoch_before} to {}",
             database.commit_epoch()
         )));
@@ -643,7 +657,7 @@ fn require_target_absent_transaction(
         ],
     )?;
     if !documents.rows.is_empty() || !anchors.rows.is_empty() {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "content-store whole-thread workspace retained documents or anchors".to_string(),
         ));
     }
@@ -667,7 +681,7 @@ fn require_target_graph_absent(transaction: &mut DatabaseTransaction<'_>) -> Res
         || required_count(&identities, "identity_count")? != 0
         || required_count(&messages, "message_count")? != 0
     {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "content-store whole-thread workspace retained graph identity".to_string(),
         ));
     }
@@ -687,7 +701,7 @@ fn require_unrelated_transaction(transaction: &mut DatabaseTransaction<'_>) -> R
         )]),
     )?;
     if relational.rows.len() != 1 || graph.rows.len() != 1 {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "content-store whole-thread workspace changed unrelated state".to_string(),
         ));
     }
@@ -716,7 +730,7 @@ fn require_target_absent_database(
         state_query_options(2),
     )?;
     if !output.rows.is_empty() {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "content-store whole-thread delete retained target documents".to_string(),
         ));
     }
@@ -725,7 +739,7 @@ fn require_target_absent_database(
         &thread_identity_parameters(),
     )?;
     if !graph.rows.is_empty() {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "content-store whole-thread delete retained target graph Thread".to_string(),
         ));
     }
@@ -836,7 +850,7 @@ fn merge_document_ids(owned: &QueryOutput, messages: &QueryOutput) -> Result<Vec
         .chain(output_document_ids(messages)?)
         .collect::<BTreeSet<_>>();
     if document_ids.len() > 32 {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "content-store whole-thread delete document union exceeded 32 entries".to_string(),
         ));
     }
@@ -851,7 +865,7 @@ fn output_document_ids(output: &QueryOutput) -> Result<Vec<String>> {
                 document_ids.push(value.clone());
             }
             other => {
-                return Err(SkeinError::Execution(format!(
+                return Err(HawDBError::Execution(format!(
                     "content-store whole-thread delete expected document identity, got {other:?}"
                 )));
             }
@@ -877,7 +891,7 @@ fn live_count_read_output(
 fn require_count(output: &QueryOutput, expected: i64) -> Result<()> {
     let actual = required_count(output, "message_count")?;
     if actual != expected {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store whole-thread delete expected message_count={expected}, got {actual}"
         )));
     }
@@ -888,11 +902,11 @@ fn required_count(output: &QueryOutput, field: &str) -> Result<i64> {
     match output.rows.as_slice() {
         [row] => match row.get(field) {
             Some(Value::Int(value)) => Ok(*value),
-            other => Err(SkeinError::Execution(format!(
+            other => Err(HawDBError::Execution(format!(
                 "content-store whole-thread delete expected integer {field}, got {other:?}"
             ))),
         },
-        rows => Err(SkeinError::Execution(format!(
+        rows => Err(HawDBError::Execution(format!(
             "content-store whole-thread delete expected one {field} row, got {rows:?}"
         ))),
     }
@@ -1011,7 +1025,7 @@ fn string_values_sha256(values: &[String]) -> String {
     let rows = values
         .iter()
         .map(|value| {
-            let mut row = skein::Row::new();
+            let mut row = hawdb::Row::new();
             row.insert("value".to_string(), Value::String(value.clone()));
             row
         })
@@ -1026,8 +1040,8 @@ fn state_query_options(max_rows: usize) -> QueryStreamOptions {
     }
 }
 
-fn delete_phase_error(phase: &str, error: SkeinError) -> SkeinError {
-    SkeinError::Execution(format!(
+fn delete_phase_error(phase: &str, error: HawDBError) -> HawDBError {
+    HawDBError::Execution(format!(
         "content-store whole-thread delete {phase} failed: {error}"
     ))
 }

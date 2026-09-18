@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Test-only wire and bulk-summary oracle, independent of sidecar implementation.
 
 use super::*;
@@ -50,7 +64,7 @@ pub(super) fn value(value: &Value) -> String {
 }
 
 pub(super) fn payload(rows: &[SourceScanRow]) -> String {
-    let mut lines = vec!["SKEIN_SOURCE_SCAN_SEGMENT_V1".to_string()];
+    let mut lines = vec!["HAWDB_SOURCE_SCAN_SEGMENT_V1".to_string()];
     for row in rows {
         let properties = row
             .properties
@@ -71,7 +85,7 @@ pub(super) fn envelope(text: &str) -> Vec<u8> {
     frame.extend_from_slice(&(raw.len() as u32).to_le_bytes());
     frame.extend_from_slice(&(((raw.len() as u32) << 3) | 1).to_le_bytes()[..3]);
     frame.extend_from_slice(raw);
-    let mut result = format!("SKEIN_COMPRESSED_V1\ncodec\tzstd\nuncompressed_checksum\t{}\ncompressed_checksum\t{}\nuncompressed_len\t{}\ncompressed_len\t{}\n\n", crc(raw), crc(&frame), raw.len(), frame.len()).into_bytes();
+    let mut result = format!("HAWDB_COMPRESSED_V1\ncodec\tzstd\nuncompressed_checksum\t{}\ncompressed_checksum\t{}\nuncompressed_len\t{}\ncompressed_len\t{}\n\n", crc(raw), crc(&frame), raw.len(), frame.len()).into_bytes();
     result.extend(frame);
     result
 }
@@ -223,7 +237,7 @@ pub(super) fn descriptor(
     ranges: &[SegmentPayloadRange],
 ) -> String {
     let mut lines = vec![
-        "SKEIN_SOURCE_SCAN_SEGMENTS_V1".into(),
+        "HAWDB_SOURCE_SCAN_SEGMENTS_V1".into(),
         format!("graph_epoch\t{epoch}"),
     ];
     for (summary, range) in summaries.iter().zip(ranges) {

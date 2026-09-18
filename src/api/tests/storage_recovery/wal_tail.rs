@@ -1,6 +1,20 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use crate::store::{set_wal_append_failpoint, WalAppendFailure};
-use crate::SkeinError;
+use crate::HawDBError;
 use std::fs;
 use std::path::Path;
 
@@ -44,7 +58,7 @@ fn assert_repair_evidence(path: &Path, original: &[u8]) {
             .ends_with(".repair.pending.json")
     }));
     let audit: serde_json::Value = serde_json::from_slice(&fs::read(&records[0]).unwrap()).unwrap();
-    assert_eq!(audit["protocol"], "skein-wal-doctor-repair-v1");
+    assert_eq!(audit["protocol"], "hawdb-wal-doctor-repair-v1");
     assert_eq!(audit["state"], "applied");
     let quarantine = doctor
         .join("quarantine")
@@ -155,7 +169,7 @@ fn rollback_and_sync_failures_poison_the_handle() {
         let before = fs::metadata(&wal).unwrap().len();
         set_wal_append_failpoint(failure);
         let error = db.query("CREATE (:Memory {id: 'uncertain'})").unwrap_err();
-        assert!(matches!(error, SkeinError::StorageIntegrity(_)), "{error}");
+        assert!(matches!(error, HawDBError::StorageIntegrity(_)), "{error}");
         assert!(db.storage_handle_poisoned());
         let damaged = fs::read(&wal).unwrap();
         assert!(damaged.len() as u64 > before);
@@ -253,7 +267,7 @@ fn automatic_repair_rejects_complete_corruption() {
         let mut bytes = fs::read(&wal).unwrap();
         if orphan {
             let generation = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
-            let mut hasher = skein_integrity::Crc32cHasher::new();
+            let mut hasher = hawdb_integrity::Crc32cHasher::new();
             hasher.update(&[3]);
             hasher.update(&generation.to_le_bytes());
             let crc = hasher
@@ -305,12 +319,12 @@ fn automatic_repair_budget_preserves_prior_audit_evidence() {
 
 #[test]
 fn automatic_repair_rejects_nonzero_block_trailers() {
-    use skein_storage::wal::binary::encode_binary_wal_record;
-    use skein_storage::wal::frame::{
+    use hawdb_storage::wal::binary::encode_binary_wal_record;
+    use hawdb_storage::wal::frame::{
         encode_binary_wal_header, frame_binary_wal_record, WAL_BLOCK_BYTES,
         WAL_FRAGMENT_HEADER_BYTES,
     };
-    use skein_storage::wal::{WalEntry, WalOp};
+    use hawdb_storage::wal::{WalEntry, WalOp};
 
     let path = unique_test_dir("automatic_wal_trailer_corruption");
     seed_database(&path);
@@ -323,7 +337,7 @@ fn automatic_repair_rejects_nonzero_block_trailers() {
             &WalEntry {
                 lsn,
                 op: WalOp::CreateNode {
-                    id: skein_storage::NodeId(100),
+                    id: hawdb_storage::NodeId(100),
                     label: "Memory".to_string(),
                     properties: BTreeMap::from([(
                         "payload".to_string(),
@@ -353,7 +367,7 @@ const CRASH_CHILD: &str = "api::tests::storage_recovery::wal_tail::crash_child";
 
 #[test]
 fn crash_child() {
-    let Some(path) = std::env::var_os("SKEIN_TEST_AUTO_REPAIR_PATH") else {
+    let Some(path) = std::env::var_os("HAWDB_TEST_AUTO_REPAIR_PATH") else {
         return;
     };
     let mut db = Database::open_with_config(path, automatic_config()).unwrap();
@@ -373,8 +387,8 @@ fn subprocess_partial_append_and_interrupted_automatic_repair_recover() {
         let child = |stage: &str| {
             std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", CRASH_CHILD, "--nocapture"])
-                .env("SKEIN_TEST_AUTO_REPAIR_PATH", &path)
-                .env("SKEIN_TEST_PROCESS_CRASH_POINT", stage)
+                .env("HAWDB_TEST_AUTO_REPAIR_PATH", &path)
+                .env("HAWDB_TEST_PROCESS_CRASH_POINT", stage)
                 .status()
                 .unwrap()
         };

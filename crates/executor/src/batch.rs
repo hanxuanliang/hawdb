@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Streaming batch orchestration and pipeline dispatch.
 //!
 //! Internal execution over storage, resource, and observer contracts. The root
@@ -39,12 +53,12 @@ use crate::{
     ExecutionLimit, ExecutionMemoryConfig, ExternalReadOperator, QueryMemoryClass,
     QueryMemoryLedger,
 };
-use skein_core::{Catalog, RelationshipDirection, Result, RuntimeTaskContext, SkeinError, Value};
-use skein_plan::{
+use hawdb_core::{Catalog, HawDBError, RelationshipDirection, Result, RuntimeTaskContext, Value};
+use hawdb_plan::{
     Aggregation, PhysicalPlan, PlanChildren, Predicate, Projection, RelationshipCountLeg, SortItem,
 };
-use skein_storage::{NodeId, NodeRecord, PropertyFilter, ScanPruningReport};
-use skein_storage::{ScanPruningStrategy, ScanPruningTargetKind};
+use hawdb_storage::{NodeId, NodeRecord, PropertyFilter, ScanPruningReport};
+use hawdb_storage::{ScanPruningStrategy, ScanPruningTargetKind};
 use std::collections::BTreeMap;
 use std::num::{NonZeroU64, NonZeroUsize};
 
@@ -184,7 +198,7 @@ impl OptionalDegreeSpec<'_> {
                         0
                     } else {
                         let source = binding.nodes.get(source_variable).ok_or_else(|| {
-                            SkeinError::Execution(format!(
+                            HawDBError::Execution(format!(
                                 "missing variable '{source_variable}' during optional degree"
                             ))
                         })?;
@@ -393,7 +407,7 @@ fn emit_byte_bounded_batches(
     for binding in &batch {
         let binding_bytes = binding_memory_bytes(binding);
         if binding_bytes > max_payload_bytes {
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "intermediate row uses {binding_bytes} bytes, exceeding batch_payload_bytes {max_payload_bytes}"
             )));
         }
@@ -414,7 +428,7 @@ fn emit_byte_bounded_batches(
     for binding in batch {
         let binding_bytes = binding_memory_bytes(&binding);
         if binding_bytes > max_payload_bytes {
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "intermediate row uses {binding_bytes} bytes, exceeding batch_payload_bytes {max_payload_bytes}"
             )));
         }

@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -267,7 +281,7 @@ fn skips_non_production_graph_sources() {
 #[test]
 fn scanned_inventory_stat_error_redacts_path_and_io_details() {
     let root = std::env::temp_dir().join(format!(
-        "skein-nowledge-inventory-secret-missing-{}",
+        "hawdb-nowledge-inventory-secret-missing-{}",
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -291,7 +305,7 @@ fn scanned_inventory_source_read_error_redacts_path_and_io_details() {
     use std::os::unix::fs::PermissionsExt;
 
     let root = std::env::temp_dir().join(format!(
-        "skein-nowledge-inventory-secret-unreadable-{}",
+        "hawdb-nowledge-inventory-secret-unreadable-{}",
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()

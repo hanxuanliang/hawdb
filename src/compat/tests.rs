@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::test_support::*;
 use super::*;
 use crate::{Database, QueryOutput, Result, Value};
@@ -89,7 +103,7 @@ fn runs_nowledge_shaped_fixture_against_shadow_engine() {
         run_compatibility_fixture_with_shadow(&mut primary, &fixture, &mut shadow).unwrap();
 
     assert_eq!(report.fixture, "nowledge-memory-core");
-    assert_eq!(report.shadow_engine, "skein-shadow");
+    assert_eq!(report.shadow_engine, "hawdb-shadow");
     assert_eq!(report.primary_checks.len(), 644);
     assert_eq!(report.shadow_checks.len(), 644);
     assert_eq!(
@@ -1021,7 +1035,7 @@ struct DatabaseShadowEngine {
 
 impl CompatibilityShadowEngine for DatabaseShadowEngine {
     fn name(&self) -> &str {
-        "skein-shadow"
+        "hawdb-shadow"
     }
 
     fn execute(&mut self, statement: &CypherFixtureStatement) -> Result<QueryOutput> {

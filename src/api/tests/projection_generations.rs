@@ -1,5 +1,19 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
-use crate::error::SkeinError;
+use crate::error::HawDBError;
 use crate::{
     ProjectionGenerationBatchLimits, ProjectionGenerationBegin, ProjectionGenerationDigestBuilder,
     ProjectionGenerationIdentity, ProjectionGenerationMember, ProjectionGenerationReadLimits,
@@ -335,7 +349,7 @@ fn projection_relational_reads_pin_one_published_generation_for_postgres_sql() {
     .expect("valid mismatched binding");
     assert!(matches!(
         database.begin_projection_read_transaction(version_mismatch),
-        Err(SkeinError::StorageIntegrity(_))
+        Err(HawDBError::StorageIntegrity(_))
     ));
 
     let parameters = [
@@ -362,7 +376,7 @@ fn projection_relational_reads_pin_one_published_generation_for_postgres_sql() {
             },
         )
         .expect_err("projection payload exhaustion must fail the whole statement");
-    assert!(matches!(budget_error, SkeinError::Execution(_)));
+    assert!(matches!(budget_error, HawDBError::Execution(_)));
 
     let profiled = pinned_generation_two
         .query_sql_with_params_options_profiled(QUERY, &parameters, QueryStreamOptions::default())
@@ -462,7 +476,7 @@ fn projection_relational_reads_pin_one_published_generation_for_postgres_sql() {
     let row_budget_error = constrained_reader
         .query_sql("SELECT COUNT(*) AS count FROM community_entities")
         .expect_err("projection scan row exhaustion must fail the whole statement");
-    assert!(matches!(row_budget_error, SkeinError::Execution(_)));
+    assert!(matches!(row_budget_error, HawDBError::Execution(_)));
     drop(constrained_reader);
     drop(constrained);
 
@@ -481,7 +495,7 @@ fn projection_relational_reads_pin_one_published_generation_for_postgres_sql() {
         .expect_err("bound projection tables must reject canonical rows");
     assert!(matches!(
         mixed_source_error,
-        SkeinError::StorageIntegrity(message) if message.contains("canonical rows")
+        HawDBError::StorageIntegrity(message) if message.contains("canonical rows")
     ));
     drop(mixed_source);
     std::fs::remove_dir_all(path).expect("remove relational projection fixture");

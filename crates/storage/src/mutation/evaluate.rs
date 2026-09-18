@@ -1,10 +1,24 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Shared SET value semantics for storage mutation and executor preflight.
 //!
 //! Applying a sequence mutates the supplied staging map in assignment order.
 //! Callers retain validation, rollback, and publication responsibility.
 
 use super::{NodeSetAssignment, NodeSetValue};
-use skein_core::{Result, SkeinError, Value};
+use hawdb_core::{HawDBError, Result, Value};
 use std::collections::BTreeMap;
 
 #[cfg(test)]
@@ -25,13 +39,13 @@ pub fn evaluate_node_set_value(
                 None | Some(Value::Null) => 0,
                 Some(Value::Int(value)) => *value,
                 Some(value) => {
-                    return Err(SkeinError::Execution(format!(
+                    return Err(HawDBError::Execution(format!(
                         "property increment requires an integer or null value, got {value:?}"
                     )));
                 }
             };
             Ok(Value::Int(current.checked_add(*amount).ok_or_else(
-                || SkeinError::Execution("property increment overflowed i64".to_string()),
+                || HawDBError::Execution("property increment overflowed i64".to_string()),
             )?))
         }
         NodeSetValue::DecrementFloorZero => {
@@ -39,7 +53,7 @@ pub fn evaluate_node_set_value(
                 None | Some(Value::Null) => 0,
                 Some(Value::Int(value)) => *value,
                 Some(value) => {
-                    return Err(SkeinError::Execution(format!(
+                    return Err(HawDBError::Execution(format!(
                         "property decrement requires an integer or null value, got {value:?}"
                     )));
                 }

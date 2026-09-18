@@ -1,12 +1,26 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
-use skein_qos::{
+use hawdb_qos::{
     BackgroundWorkDecision, BackgroundWorkHint, BackgroundWorkPlan, LocalQosPolicy,
     LocalQosSnapshot, LocalQosState, QosAdmission, QosAdmissionCode, WorkClass, WorkPriority,
     WorkRequest,
 };
-use skein_search::{
+use hawdb_search::{
     SearchCandidateSetReport, SearchFallbackReasonCode, SearchFusionWeights, SearchMatchedSpan,
     SearchMode, SearchProjectionFreshness, SearchResultSet, SearchRetrieverCandidateSetReport,
     SearchTruncationReasonCode,
@@ -87,7 +101,7 @@ pub fn nowledge_deep_search_graph_seed_limit(page_end: usize) -> usize {
         )
 }
 
-pub use skein_search::{
+pub use hawdb_search::{
     KnowledgeRetrievalPipelineReport, KnowledgeRetrievalStage, SearchProjectionChangeBatch,
     SearchProjectionGraphDeltaRequest, SearchProjectionRelationalDelta,
 };
@@ -102,7 +116,7 @@ pub struct BackgroundMaintenanceOptions {
     pub include_search_projection_graph_delta_freshness: bool,
     pub include_search_projection_rebuild: bool,
     pub include_search_projection_metadata_repair: bool,
-    pub include_skein_lightning_bootstrap_export: bool,
+    pub include_hawdb_lightning_bootstrap_export: bool,
     pub include_external_content_artifact_jobs: bool,
     pub external_content_artifact_estimated_operations: usize,
     pub search_projection_graph_delta: Option<SearchProjectionGraphDeltaRequest>,
@@ -119,7 +133,7 @@ impl Default for BackgroundMaintenanceOptions {
             include_search_projection_graph_delta_freshness: true,
             include_search_projection_rebuild: true,
             include_search_projection_metadata_repair: true,
-            include_skein_lightning_bootstrap_export: true,
+            include_hawdb_lightning_bootstrap_export: true,
             include_external_content_artifact_jobs: true,
             external_content_artifact_estimated_operations: 1,
             search_projection_graph_delta: None,
@@ -210,7 +224,7 @@ pub enum BackgroundMaintenanceKind {
     SearchProjectionGraphDelta,
     SearchProjectionRebuild,
     SearchProjectionMetadataRepair,
-    SkeinLightningBootstrapExport,
+    HawDBLightningBootstrapExport,
     ExternalContentArtifactJob,
 }
 
@@ -228,8 +242,8 @@ impl BackgroundMaintenanceKind {
             BackgroundMaintenanceKind::SearchProjectionMetadataRepair => {
                 "search_projection_metadata_repair"
             }
-            BackgroundMaintenanceKind::SkeinLightningBootstrapExport => {
-                "skein_lightning_bootstrap_export"
+            BackgroundMaintenanceKind::HawDBLightningBootstrapExport => {
+                "hawdb_lightning_bootstrap_export"
             }
             BackgroundMaintenanceKind::ExternalContentArtifactJob => {
                 "external_content_artifact_job"
@@ -256,8 +270,8 @@ impl FromStr for BackgroundMaintenanceKind {
             "search_projection_metadata_repair" => {
                 Ok(BackgroundMaintenanceKind::SearchProjectionMetadataRepair)
             }
-            "skein_lightning_bootstrap_export" => {
-                Ok(BackgroundMaintenanceKind::SkeinLightningBootstrapExport)
+            "hawdb_lightning_bootstrap_export" => {
+                Ok(BackgroundMaintenanceKind::HawDBLightningBootstrapExport)
             }
             "external_content_artifact_job" => {
                 Ok(BackgroundMaintenanceKind::ExternalContentArtifactJob)
@@ -891,15 +905,15 @@ mod owner_tests {
     fn pipeline_contract_preserves_search_owner_identity() {
         assert_eq!(
             TypeId::of::<KnowledgeRetrievalStage>(),
-            TypeId::of::<skein_search::KnowledgeRetrievalStage>(),
+            TypeId::of::<hawdb_search::KnowledgeRetrievalStage>(),
         );
         assert_eq!(
             TypeId::of::<KnowledgeRetrievalPipelineReport>(),
-            TypeId::of::<skein_search::KnowledgeRetrievalPipelineReport>(),
+            TypeId::of::<hawdb_search::KnowledgeRetrievalPipelineReport>(),
         );
         assert_eq!(
             KnowledgeRetrievalStage::TopK.as_str(),
-            skein_search::KnowledgeRetrievalStage::TopK.as_str(),
+            hawdb_search::KnowledgeRetrievalStage::TopK.as_str(),
         );
     }
 }

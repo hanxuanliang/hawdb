@@ -1,6 +1,20 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Developer file and CLI adapters for graph route readiness.
 
-use skein_core::{Result, SkeinError};
+use hawdb_core::{HawDBError, Result};
 use std::path::Path;
 
 pub use crate::graph_route::{
@@ -23,17 +37,17 @@ pub fn run_nowledge_graph_route_readiness(
                 require_ready = true;
             }
             value if value.starts_with("--") => {
-                return Err(SkeinError::Semantic(nowledge_graph_route_readiness_usage()));
+                return Err(HawDBError::Semantic(nowledge_graph_route_readiness_usage()));
             }
             path => {
                 if evidence_path.replace(path.to_string()).is_some() {
-                    return Err(SkeinError::Semantic(nowledge_graph_route_readiness_usage()));
+                    return Err(HawDBError::Semantic(nowledge_graph_route_readiness_usage()));
                 }
             }
         }
     }
     let Some(evidence_path) = evidence_path else {
-        return Err(SkeinError::Semantic(nowledge_graph_route_readiness_usage()));
+        return Err(HawDBError::Semantic(nowledge_graph_route_readiness_usage()));
     };
     Ok((
         nowledge_graph_route_readiness_json(&read_json_file(Path::new(&evidence_path))?)?,
@@ -43,13 +57,13 @@ pub fn run_nowledge_graph_route_readiness(
 
 fn read_json_file(path: &Path) -> Result<serde_json::Value> {
     let raw = std::fs::read_to_string(path).map_err(|error| {
-        SkeinError::Execution(format!(
+        HawDBError::Execution(format!(
             "failed to read graph route readiness evidence: {}",
             error.kind()
         ))
     })?;
     serde_json::from_str(&raw).map_err(|_| {
-        SkeinError::Semantic(
+        HawDBError::Semantic(
             "failed to parse graph route readiness evidence: invalid_json".to_string(),
         )
     })
@@ -84,8 +98,8 @@ mod tests {
             "nmem-graph-route-evidence-v1"
         );
         assert_eq!(
-            skein_evidence::inventory::NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL,
-            "skein-nowledge-mem-query-report-v1"
+            hawdb_evidence::inventory::NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL,
+            "hawdb-nowledge-mem-query-report-v1"
         );
     }
 
@@ -120,14 +134,14 @@ mod tests {
         ] {
             assert!(matches!(
                 run_nowledge_graph_route_readiness(args.into_iter().map(str::to_string)),
-                Err(SkeinError::Semantic(message)) if message == nowledge_graph_route_readiness_usage()
+                Err(HawDBError::Semantic(message)) if message == nowledge_graph_route_readiness_usage()
             ));
         }
         let path = unique_test_file("private_graph_route_evidence");
         let error =
             run_nowledge_graph_route_readiness([path.to_str().unwrap().to_string()].into_iter())
                 .unwrap_err();
-        assert!(matches!(error, SkeinError::Execution(_)));
+        assert!(matches!(error, HawDBError::Execution(_)));
         let message = error.to_string();
         assert!(message.contains("failed to read graph route readiness evidence"));
         assert!(!message.contains("private_graph_route_evidence"));
@@ -158,6 +172,6 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("skein_{name}_{}_{nanos}.json", std::process::id()))
+        std::env::temp_dir().join(format!("hawdb_{name}_{}_{nanos}.json", std::process::id()))
     }
 }

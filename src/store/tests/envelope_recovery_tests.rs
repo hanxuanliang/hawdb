@@ -1,7 +1,21 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{active_checkpoint_path, refresh_manifest_checkpoint_metadata, unique_test_dir};
-use crate::{Database, DatabaseConfig, SkeinError, Value};
-use skein_storage::text::envelope::{encode_durable_text, read_durable_text_bytes};
-use skein_storage::DurableCompression;
+use crate::{Database, DatabaseConfig, HawDBError, Value};
+use hawdb_storage::text::envelope::{encode_durable_text, read_durable_text_bytes};
+use hawdb_storage::DurableCompression;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -48,7 +62,7 @@ fn assert_rejected_without_writes(root: &Path, limit: Option<u64>, expected: &st
             Err(error) => error,
             Ok(_) => panic!("invalid checkpoint admitted"),
         };
-        assert!(matches!(error, SkeinError::Storage(_)));
+        assert!(matches!(error, HawDBError::Storage(_)));
         assert!(error.to_string().contains(expected), "{error}");
         assert_eq!(
             files(root),
@@ -70,7 +84,7 @@ fn storage_owned_envelope_preserves_checkpoint_reopen_and_caller_limits() {
     }
     let checkpoint_path = active_checkpoint_path(&fixture.0);
     let checkpoint = fs::read(&checkpoint_path).unwrap();
-    let manifest = fs::read(fixture.0.join("manifest.skein")).unwrap();
+    let manifest = fs::read(fixture.0.join("manifest.hawdb")).unwrap();
     let text = read_durable_text_bytes(&checkpoint, "checkpoint").unwrap();
     assert_eq!(
         encode_durable_text(&text, DurableCompression::Zstd).unwrap(),
@@ -133,7 +147,7 @@ fn storage_owned_envelope_preserves_checkpoint_reopen_and_caller_limits() {
         refresh_manifest_checkpoint_metadata(&checkpoint_path);
         assert_rejected_without_writes(&fixture.0, limit, expected);
         fs::write(&checkpoint_path, &checkpoint).unwrap();
-        fs::write(fixture.0.join("manifest.skein"), &manifest).unwrap();
+        fs::write(fixture.0.join("manifest.hawdb"), &manifest).unwrap();
     }
     let mut database = Database::open(&fixture.0).unwrap();
     assert_eq!(

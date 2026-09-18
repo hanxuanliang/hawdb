@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Physical column chunk encodings (§3.2.1).
 //!
 //! A chunk body is `u32 row_count | u32 value_count | validity bitmap |
@@ -9,7 +23,7 @@
 //! group state is needed beyond the encoding id and compression flag.
 
 use super::{corrupt, unsupported, ColumnGroupError};
-use skein_core::Value;
+use hawdb_core::Value;
 use std::io::Read;
 
 /// Hard ceiling on rows in one chunk, defending decode-time allocations.
@@ -918,7 +932,7 @@ fn decode_scalar(cursor: &mut Cursor<'_>) -> Result<Value, ColumnGroupError> {
             Ok(Value::Binary(bytes.to_vec()))
         }
         SCALAR_UUID => cursor.read_bytes(16, "scalar UUID").map(|bytes| {
-            Value::Uuid(skein_core::Uuid::from_bytes(
+            Value::Uuid(hawdb_core::Uuid::from_bytes(
                 bytes.try_into().expect("UUID has a fixed length"),
             ))
         }),
@@ -1120,7 +1134,7 @@ mod tests {
         let values = vec![
             Value::String(String::new()),
             Value::Null,
-            Value::String("skein".to_string()),
+            Value::String("hawdb".to_string()),
             Value::String("列存储".to_string()),
             Value::String("z".repeat(300)),
         ];
@@ -1303,7 +1317,7 @@ mod tests {
             Some(vec![0u8, 255, 7, 0, 128]),
             None,
             Some(Vec::new()),
-            Some(b"skein".to_vec()),
+            Some(b"hawdb".to_vec()),
             None,
             Some(vec![0xde; 300]),
         ];

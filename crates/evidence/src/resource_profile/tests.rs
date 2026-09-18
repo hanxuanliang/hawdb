@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{
     production_resource_profile_blocker_codes, production_resource_profile_ready,
     STORAGE_RESOURCE_PROFILE_PROTOCOL,
@@ -29,7 +43,7 @@ fn ready_profile() -> Value {
         "canonical_graph_commit_epoch": 7
     });
     json!({
-        "protocol": "skein-storage-resource-profile-v2", "protocol_version": 2,
+        "protocol": "hawdb-storage-resource-profile-v2", "protocol_version": 2,
         "present": true, "ready": true, "resource_ready": true, "blocker_codes": [],
         "identity_matches_expected": true, "canonical_graph_commit_epoch": 7,
         "evidence_binding": {"identity": identity, "generated_at_unix_seconds": 1},
@@ -187,7 +201,7 @@ fn remove(profile: &mut Value, pointer: &str) {
 fn resource_profile_required_fields_fail_closed_without_coercion() {
     assert_eq!(
         STORAGE_RESOURCE_PROFILE_PROTOCOL,
-        "skein-storage-resource-profile-v2"
+        "hawdb-storage-resource-profile-v2"
     );
     assert_codes(&ready_profile(), []);
     for (path, codes) in required_fields() {

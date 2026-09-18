@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::sql::{Expr, ExprKind};
 mod coordinator;
 #[cfg(test)]
@@ -15,19 +29,19 @@ use super::{
     DatabaseTransactionRuntime, DatabaseTransactionSqlOptions, DatabaseTransactionState,
     QueryOutput, StatementExecutionContext, TransactionCommitResult,
 };
-use crate::error::{Result, SkeinError};
+use crate::error::{HawDBError, Result};
 use crate::sql::{
     SelectStatement, SqlComparisonOp, SqlLockStrength, SqlPredicate, SqlStatement, SqlTableName,
     SqlValue, UpdateStatement,
 };
 use crate::store::DurabilityPolicy;
 use crate::value::Value;
-use skein_storage::{
+use hawdb_storage::{
     AppendTransaction, RelationalConflictAction, RelationalIndexRole, RelationalKey, RelationalRow,
     RelationalState, RelationalTableSchema, RelationalTransaction, RelationalValue,
     RelationalWrite, StoragePressureSnapshot, StorageRecoveryReport,
 };
-pub use skein_storage::{
+pub use hawdb_storage::{
     WalGroupCommitActivation, WalGroupCommitAdaptiveColdStartEvidence,
     WalGroupCommitAdaptivePolicyEvidence, WalGroupCommitAdaptiveSteadyStateEvidence,
     WalGroupCommitConfig, WalGroupCommitDelayPolicy, WalGroupCommitEvidence,
@@ -382,7 +396,7 @@ impl ConcurrentDatabase {
             .execute_grouped(move |database| {
                 let result = database.append_transaction_with_result(transaction)?;
                 *result_slot.lock().map_err(|_| {
-                    SkeinError::Execution("concurrent append result slot is poisoned".to_string())
+                    HawDBError::Execution("concurrent append result slot is poisoned".to_string())
                 })? = Some(result);
                 Ok(QueryOutput {
                     rows: Vec::new().into(),
@@ -392,11 +406,11 @@ impl ConcurrentDatabase {
         committed_result
             .lock()
             .map_err(|_| {
-                SkeinError::Execution("concurrent append result slot is poisoned".to_string())
+                HawDBError::Execution("concurrent append result slot is poisoned".to_string())
             })?
             .take()
             .ok_or_else(|| {
-                SkeinError::Execution(
+                HawDBError::Execution(
                     "concurrent append completed without a commit result".to_string(),
                 )
             })
@@ -432,7 +446,7 @@ impl ConcurrentDatabase {
             .clone();
         if let Some(gate) = gate {
             gate.snapshot_acquired.send(()).map_err(|_| {
-                SkeinError::Execution(
+                HawDBError::Execution(
                     "concurrent autocommit read gate receiver was dropped".to_string(),
                 )
             })?;
@@ -631,7 +645,7 @@ impl ConcurrentDatabaseTransaction {
                     commit_database_transaction_state(database, &mut state, allow_stale_rebase)?;
                 let output = result.output.clone();
                 *result_slot.lock().map_err(|_| {
-                    SkeinError::Execution(
+                    HawDBError::Execution(
                         "concurrent transaction result slot is poisoned".to_string(),
                     )
                 })? = Some(result);
@@ -644,11 +658,11 @@ impl ConcurrentDatabaseTransaction {
         committed_result
             .lock()
             .map_err(|_| {
-                SkeinError::Execution("concurrent transaction result slot is poisoned".to_string())
+                HawDBError::Execution("concurrent transaction result slot is poisoned".to_string())
             })?
             .take()
             .ok_or_else(|| {
-                SkeinError::Execution(
+                HawDBError::Execution(
                     "concurrent transaction completed without a commit result".to_string(),
                 )
             })
@@ -687,7 +701,7 @@ impl ConcurrentDatabaseTransaction {
                 self.runtime = DatabaseTransactionRuntime::from_database(&database);
                 self.state = DatabaseTransactionState::from_database(&database);
             } else {
-                let error = SkeinError::Execution(format!(
+                let error = HawDBError::Execution(format!(
                     "pessimistic transaction {} cannot acquire a new lock after its snapshot changed from commit epoch {} to {}; retry the transaction",
                     self.transaction_id, self.base_commit_epoch, current_epoch
                 ));
@@ -739,7 +753,7 @@ impl ConcurrentDatabaseTransaction {
             // pinned snapshot. Refreshing here could change the matched graph
             // entities and make that access set incomplete. Fail closed and let
             // the caller retry from a new transaction instead.
-            let error = SkeinError::Execution(format!(
+            let error = HawDBError::Execution(format!(
                 "pessimistic transaction {} cannot acquire a graph lock after its snapshot changed from commit epoch {} to {}; retry the transaction",
                 self.transaction_id, self.base_commit_epoch, current_epoch
             ));
@@ -760,13 +774,13 @@ impl ConcurrentDatabaseTransaction {
 
     fn ensure_active(&self) -> Result<()> {
         if self.finished {
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "concurrent transaction {} is already finished",
                 self.transaction_id
             )));
         }
         if let Some(reason) = &self.abort_reason {
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "concurrent transaction {} is aborted: {reason}",
                 self.transaction_id
             )));
@@ -774,11 +788,11 @@ impl ConcurrentDatabaseTransaction {
         Ok(())
     }
 
-    fn map_commit_error(&self, error: SkeinError) -> SkeinError {
+    fn map_commit_error(&self, error: HawDBError) -> HawDBError {
         if self.options.mode == ConcurrentTransactionMode::Optimistic
             && error.to_string().contains("transaction snapshot is stale")
         {
-            return SkeinError::Execution(format!(
+            return HawDBError::Execution(format!(
                 "optimistic transaction conflict for transaction {}: {}",
                 self.transaction_id, error
             ));
@@ -806,7 +820,7 @@ fn reject_optimistic_locking_select(
         _ => false,
     };
     if locking_select {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "FOR UPDATE/SHARE requires a pessimistic concurrent transaction".to_string(),
         ));
     }
@@ -927,10 +941,10 @@ fn sql_lock_requests(
     prepared: &crate::relational_sql::PreparedRelationalSql,
     parameters: &[Value],
     state: &RelationalState,
-    append_state: &skein_storage::AppendState,
+    append_state: &hawdb_storage::AppendState,
 ) -> Result<Vec<LockRequest>> {
     if prepared.template.parameters.len() != parameters.len() {
-        return Err(SkeinError::Semantic(format!(
+        return Err(HawDBError::Semantic(format!(
             "PostgreSQL statement requires {} parameters, but {} parameters were supplied",
             prepared.template.parameters.len(),
             parameters.len()
@@ -983,7 +997,7 @@ fn sql_lock_requests(
     match prepared.statement() {
         SqlStatement::Select(select) => {
             if select.lock_strength.is_some() && system_sql::is_virtual_catalog_select(select) {
-                return Err(SkeinError::Semantic(
+                return Err(HawDBError::Semantic(
                     "system SQL does not support locking clauses".to_string(),
                 ));
             }
@@ -1611,19 +1625,19 @@ fn upper_is_before_lower(upper: &Bound<RelationalKey>, lower: &Bound<RelationalK
     }
 }
 
-fn checkpoint_coordinator_poisoned_error() -> SkeinError {
-    SkeinError::Execution("concurrent checkpoint coordinator is poisoned".to_string())
+fn checkpoint_coordinator_poisoned_error() -> HawDBError {
+    HawDBError::Execution("concurrent checkpoint coordinator is poisoned".to_string())
 }
 
 #[cfg(test)]
-fn autocommit_read_gate_poisoned_error() -> SkeinError {
-    SkeinError::Execution("concurrent autocommit read gate is poisoned".to_string())
+fn autocommit_read_gate_poisoned_error() -> HawDBError {
+    HawDBError::Execution("concurrent autocommit read gate is poisoned".to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skein_storage::{
+    use hawdb_storage::{
         AppendTableSchema, AppendWrite, RelationalColumnSchema, RelationalScalarType,
     };
 
@@ -1650,7 +1664,7 @@ mod tests {
     #[test]
     fn concurrent_append_transaction_uses_the_shared_commit_sequencer() {
         let path = std::env::temp_dir().join(format!(
-            "skein-concurrent-append-{}-{}",
+            "hawdb-concurrent-append-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1699,7 +1713,7 @@ mod tests {
 
     #[test]
     fn append_explain_analyze_takes_a_shared_database_lock() {
-        let append_state = skein_storage::AppendState::default()
+        let append_state = hawdb_storage::AppendState::default()
             .stage_transaction(
                 &AppendTransaction {
                     writes: vec![AppendWrite::CreateTable {
@@ -1715,7 +1729,7 @@ mod tests {
                         },
                     }],
                 },
-                skein_storage::AppendMutationLimits::default(),
+                hawdb_storage::AppendMutationLimits::default(),
             )
             .expect("stage append schema");
 

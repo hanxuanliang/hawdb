@@ -1,5 +1,19 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::nowledge_graph_route_readiness_json;
-use skein_route_ownership::graph::{
+use hawdb_route_ownership::graph::{
     nowledge_mem_graph_read_route_catalog_digest, nowledge_mem_graph_read_route_specs_json,
     NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
 };
@@ -234,7 +248,7 @@ fn route_readiness_recomputes_shadow_compare_detail_identity() {
         "source": "route_parity_evidence",
         "ready": true,
         "matched_per_million": 999999,
-        "primary_engine": "skein",
+        "primary_engine": "hawdb",
         "shadow_engine": "kuzu",
         "blocker_codes": []
     });
@@ -847,7 +861,7 @@ pub(super) fn ready_routes() -> Vec<serde_json::Value> {
 
 pub(super) fn ready_route(route: &str) -> serde_json::Value {
     let required_query_families =
-        skein_route_ownership::graph::nowledge_mem_required_query_families_for_route(route);
+        hawdb_route_ownership::graph::nowledge_mem_required_query_families_for_route(route);
     let query_family = required_query_families
         .first()
         .copied()
@@ -861,7 +875,7 @@ pub(super) fn ready_route(route: &str) -> serde_json::Value {
             "ready": true,
             "matched_per_million": 1000000,
             "primary_engine": "kuzu",
-            "shadow_engine": "skein",
+            "shadow_engine": "hawdb",
             "blocker_codes": []
         },
         "primary_ready": true,
@@ -879,7 +893,7 @@ fn ready_query_report(query_family: &str) -> serde_json::Value {
         "query_name": "overview-memory-lookup",
         "query_index": 0,
         "query_family": query_family,
-        "protocol": "skein-nowledge-mem-query-report-v1",
+        "protocol": "hawdb-nowledge-mem-query-report-v1",
         "statement_kind": "match_return",
         "execution_path": "fast_path",
         "fast_path_selected": true,

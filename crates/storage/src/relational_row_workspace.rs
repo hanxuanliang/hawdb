@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Bounded transaction row overlays and sparse live workspace hydration.
 //!
 //! The facade selects snapshots and policy. Storage owns row admission,
@@ -94,7 +108,7 @@ struct RelationalSparseLiveHydrator<'a> {
     requested_fields: BTreeMap<String, Arc<[usize]>>,
     resolved_probes: BTreeSet<RelationalSparseIndexProbe>,
     hydration: RelationalHydrationBudget,
-    task: skein_core::RuntimeTaskContext,
+    task: hawdb_core::RuntimeTaskContext,
     limits: RelationalRowPageSnapshotReadLimits,
     pages_read: usize,
     rows_decoded: usize,
@@ -139,7 +153,7 @@ impl<'a> RelationalSparseLiveHydrator<'a> {
                 max_memory_bytes: max_bytes,
                 ..RelationalHydrationBudget::default()
             },
-            task: skein_core::RuntimeTaskContext::default(),
+            task: hawdb_core::RuntimeTaskContext::default(),
             limits,
             pages_read: 0,
             rows_decoded: 0,

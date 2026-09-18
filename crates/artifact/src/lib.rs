@@ -1,10 +1,24 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #![deny(unsafe_code)]
 
 //! Contracts between the embedded database and external artifact runtimes.
 
-use skein_core::{Result, Value};
-use skein_executor::{QueryOutput, Row};
-use skein_qos::{WorkClass, WorkRequest};
+use hawdb_core::{Result, Value};
+use hawdb_executor::{QueryOutput, Row};
+use hawdb_qos::{WorkClass, WorkRequest};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -669,7 +683,7 @@ fn optional_string_value(value: Option<String>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skein_core::SkeinError;
+    use hawdb_core::HawDBError;
 
     fn job(
         id: u64,
@@ -855,7 +869,7 @@ mod tests {
         let claim = queue.claim_external().expect("first external job");
         assert_eq!(claim.job().id, first.id);
         let report = queue.run_external_with(claim, &mut |_| {
-            Err(SkeinError::Semantic("external runtime failed".to_string()))
+            Err(HawDBError::Semantic("external runtime failed".to_string()))
         });
         assert_eq!(report.job.status, DerivedArtifactJobStatus::Failed);
         assert_eq!(report.job.attempts, 1);

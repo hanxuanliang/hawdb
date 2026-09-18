@@ -1,8 +1,22 @@
-use serde_json::json;
-use skein_vector_projection::{
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use hawdb_vector_projection::{
     KernelPreference, ProjectionBuildConfig, ProjectionBuilder, ProjectionIdentity,
     ProjectionSearchOptions,
 };
+use serde_json::json;
 use std::hint::black_box;
 use std::num::NonZeroUsize;
 use std::time::Instant;
@@ -18,7 +32,7 @@ const KERNELS: [(&str, KernelPreference); 2] = [
 ];
 
 fn main() {
-    let dimension = std::env::var("SKEIN_BENCH_VECTOR_DIMENSION")
+    let dimension = std::env::var("HAWDB_BENCH_VECTOR_DIMENSION")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(384);
@@ -54,7 +68,7 @@ fn main() {
     );
 }
 
-fn build_projection(dimension: usize) -> skein_vector_projection::InMemoryProjection {
+fn build_projection(dimension: usize) -> hawdb_vector_projection::InMemoryProjection {
     let config =
         ProjectionBuildConfig::new(dimension, ProjectionIdentity::new(1)).with_segment_rows(1024);
     let mut builder = ProjectionBuilder::new(config).expect("benchmark projection must initialize");
@@ -78,7 +92,7 @@ fn vector(id: u64, dimension: usize) -> Vec<f32> {
 }
 
 fn measure(
-    projection: &skein_vector_projection::InMemoryProjection,
+    projection: &hawdb_vector_projection::InMemoryProjection,
     query: &[f32],
     requested_kernel: &str,
     kernel: KernelPreference,

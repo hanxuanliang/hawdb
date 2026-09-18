@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Shortest-path and relationship traversal operators.
 
 use crate::binding::{
@@ -18,15 +32,15 @@ use crate::store::{AdjacencyReadMemory, GraphExecutionRead, ScanControl};
 use crate::{
     ExecutionLimit, ExecutionMemoryConfig, QueryMemoryAccount, QueryMemoryClass, QueryMemoryLedger,
 };
-use skein_core::{
-    Catalog, LabelId, RelTypeId, RelationshipDirection, Result, RuntimeTaskContext, SkeinError,
+use hawdb_core::{
+    Catalog, HawDBError, LabelId, RelTypeId, RelationshipDirection, Result, RuntimeTaskContext,
     Value,
 };
-use skein_plan::{
+use hawdb_plan::{
     RelationshipCountFilter, RelationshipCountLeg, ShortestPathProjection,
     ShortestPathProjectionExpression,
 };
-use skein_storage::{AdjacencyDirection, NodeId, NodeRecord, PropertyFilter, RelRecord};
+use hawdb_storage::{AdjacencyDirection, NodeId, NodeRecord, PropertyFilter, RelRecord};
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
@@ -140,7 +154,7 @@ pub fn execute_shortest_path(
         let bytes = binding_memory_bytes(&binding).saturating_sub(std::mem::size_of::<Binding>());
         ensure_operator_item_fits("ShortestPathExec result", bytes, &output_tracker)?;
         if output_tracker.would_exceed(bytes) {
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "ShortestPathExec result state exceeds blocking_operator_bytes {}",
                 output_tracker.budget_bytes
             )));
@@ -318,7 +332,7 @@ pub fn visit_one_hop_relationships_with_budget(
             let match_bytes =
                 relationship_memory_bytes(&relationship).saturating_add(node_memory_bytes(&target));
             if match_bytes > memory.budget_bytes {
-                return Err(SkeinError::Execution(format!(
+                return Err(HawDBError::Execution(format!(
                     "adjacency result uses {match_bytes} bytes, exceeding blocking_operator_bytes {}",
                     memory.budget_bytes
                 )));
@@ -393,7 +407,7 @@ pub fn visit_bounded_expand_targets(
     consumer: &mut dyn FnMut(NodeRecord, usize) -> Result<ScanControl>,
 ) -> Result<ScanControl> {
     if spec.max_hops > MAX_STREAMING_EXPAND_RECURSION_DEPTH {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "AdjacencyExpandExec max_hops {} exceeds streaming recursion limit {MAX_STREAMING_EXPAND_RECURSION_DEPTH}",
             spec.max_hops
         )));
@@ -404,7 +418,7 @@ pub fn visit_bounded_expand_targets(
         .saturating_add(1)
         .saturating_mul(traversal_frame_bytes);
     if traversal_state_bytes > memory.budget_bytes {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "AdjacencyExpandExec traversal frames use {traversal_state_bytes} bytes, exceeding blocking_operator_bytes {}",
             memory.budget_bytes
         )));
@@ -426,7 +440,7 @@ pub fn visit_bounded_expand_targets(
         {
             let item_bytes = node_memory_bytes(&node).saturating_add(std::mem::size_of::<usize>());
             if item_bytes > memory.budget_bytes {
-                return Err(SkeinError::Execution(format!(
+                return Err(HawDBError::Execution(format!(
                     "AdjacencyExpandExec result uses {item_bytes} bytes, exceeding blocking_operator_bytes {}",
                     memory.budget_bytes
                 )));
@@ -658,7 +672,7 @@ pub fn thread_repair_stats_rows(
             } else {
                 let bytes = thread_repair_identity_entry_bytes(&identity_ref);
                 if tracker.would_exceed(bytes) {
-                    return Err(SkeinError::Execution(format!(
+                    return Err(HawDBError::Execution(format!(
                         "ThreadRepairStatsExec state exceeds blocking_operator_bytes {}",
                         tracker.budget_bytes
                     )));
@@ -672,14 +686,14 @@ pub fn thread_repair_stats_rows(
             let thread = ThreadRepairThread::from_node(node, thread_id_property);
             let bytes = thread.memory_bytes();
             if tracker.would_exceed(bytes) {
-                return Err(SkeinError::Execution(format!(
+                return Err(HawDBError::Execution(format!(
                     "ThreadRepairStatsExec state exceeds blocking_operator_bytes {}",
                     tracker.budget_bytes
                 )));
             }
             tracker.try_charge(bytes)?;
             threads.try_reserve(1).map_err(|_| {
-                SkeinError::Execution(
+                HawDBError::Execution(
                     "ThreadRepairStatsExec cannot reserve thread state".to_string(),
                 )
             })?;

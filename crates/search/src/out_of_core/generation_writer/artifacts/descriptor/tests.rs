@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use std::path::PathBuf;
 
@@ -171,7 +185,7 @@ fn descriptor_value_failure_does_not_select_csv_fallback_or_visit_tail() {
         let mut calls = 0;
         let error = values::visit(&source, "labels", &mut |_| {
             calls += 1;
-            Err(SkeinError::Storage(
+            Err(HawDBError::Storage(
                 "injected descriptor budget failure".into(),
             ))
         })
@@ -179,7 +193,7 @@ fn descriptor_value_failure_does_not_select_csv_fallback_or_visit_tail() {
         assert_eq!(calls, 1);
         assert_eq!(
             error.to_string(),
-            SkeinError::Storage("injected descriptor budget failure".into()).to_string()
+            HawDBError::Storage("injected descriptor budget failure".into()).to_string()
         );
     }
 }
@@ -268,7 +282,7 @@ fn seeded_descriptor_builders_match_unique_counts_and_range_summaries() {
 #[test]
 fn descriptor_budget_stops_before_appending_any_segment_payload() {
     let root = std::env::temp_dir().join(format!(
-        "skein-descriptor-builder-{}-{}",
+        "hawdb-descriptor-builder-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

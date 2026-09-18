@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::super::{
     nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,
     NowledgeReplacementSummaryOptions,
@@ -237,7 +251,7 @@ fn rejected_mutations() -> Vec<(&'static str, Value, &'static str)> {
         ("/search_projection_shadow_evidence/document_count_parity", json!(false), "search_projection_shadow_evidence"),
         ("/search_candidate_shadow_evidence/primary_only_candidate_count", json!(1), "search_candidate_shadow_evidence"),
         ("/search_route_ownership/lancedb_route_count", json!(1), "search_route_ownership"),
-        ("/active_search_route_ownership/skein_route_count", json!(0), "active_search_route_ownership"),
+        ("/active_search_route_ownership/hawdb_route_count", json!(0), "active_search_route_ownership"),
         ("/active_search_route_readiness/lancedb_handle_required_route_count", json!(1), "active_search_route_readiness"),
         ("/bounded_read_evidence/payload_budget_exceeded", json!(true), "bounded_read_evidence"),
         ("/graph_route_readiness/protocol", json!("wrong-protocol"), "graph_route_readiness"),

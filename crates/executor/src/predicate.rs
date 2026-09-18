@@ -1,10 +1,24 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Storage record predicates shared by execution operators.
 
-use skein_core::{Catalog, LabelId, Value};
-use skein_plan::ComparisonOp;
-pub use skein_storage::predicate::property_filter_matches as property_filter_matches_values;
-use skein_storage::predicate::{comparable_value_ordering, properties_contain_all};
-use skein_storage::{NodeRecord, PropertyFilter, RelRecord};
+use hawdb_core::{Catalog, LabelId, Value};
+use hawdb_plan::ComparisonOp;
+pub use hawdb_storage::predicate::property_filter_matches as property_filter_matches_values;
+use hawdb_storage::predicate::{comparable_value_ordering, properties_contain_all};
+use hawdb_storage::{NodeRecord, PropertyFilter, RelRecord};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 

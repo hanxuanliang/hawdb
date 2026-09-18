@@ -1,7 +1,21 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use crate::generation_cleanup::SearchProjectionCleanupState;
 use crate::test_allocation as allocation;
-use skein_core::RuntimeMemoryReservation;
+use hawdb_core::RuntimeMemoryReservation;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,7 +25,7 @@ impl Fixture {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "skein-cleanup-once-{}-{}",
+            "hawdb-cleanup-once-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -24,16 +38,16 @@ impl Fixture {
                 "search_projection_segments.",
             ] {
                 fs::write(
-                    path.join(format!("{prefix}{generation}.skein")),
+                    path.join(format!("{prefix}{generation}.hawdb")),
                     b"artifact",
                 )
                 .unwrap();
             }
         }
         for name in [
-            "search_rabitq.8.skein.corrupt.12.34",
+            "search_rabitq.8.hawdb.corrupt.12.34",
             "unrelated",
-            "search_lexical.invalid.skein",
+            "search_lexical.invalid.hawdb",
         ] {
             fs::write(path.join(name), b"keep or quarantine").unwrap();
         }
@@ -126,13 +140,13 @@ fn cleanup_admission_accepts_exact_capacity_and_defers_one_byte_short() {
                     ..Default::default()
                 }
             );
-            assert!(fixture.0.join("search_lexical.1.skein").exists());
+            assert!(fixture.0.join("search_lexical.1.hawdb").exists());
         } else {
             assert!(report.deleted_files > 0);
             assert!(!report.retry_required);
-            assert!(!fixture.0.join("search_lexical.1.skein").exists());
-            assert!(fixture.0.join("search_lexical.6.skein").exists());
-            assert!(fixture.0.join("search_lexical.7.skein").exists());
+            assert!(!fixture.0.join("search_lexical.1.hawdb").exists());
+            assert!(fixture.0.join("search_lexical.6.hawdb").exists());
+            assert!(fixture.0.join("search_lexical.7.hawdb").exists());
         }
         assert_eq!(memory.ledger.snapshot().used_bytes, 0);
     }

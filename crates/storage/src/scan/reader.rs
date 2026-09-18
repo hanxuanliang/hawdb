@@ -1,10 +1,24 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{SegmentReadRange, SegmentReadSchedule};
 use crate::io::read_exact_at;
 use crate::{
     content_digest, ManifestGeneration, RepresentationKind, SegmentBytes, SegmentCache,
     SegmentCacheError, SegmentCacheKey, StoreId,
 };
-use skein_core::{RuntimeCancellationReason, RuntimeIoWaveError, RuntimeTaskContext};
+use hawdb_core::{RuntimeCancellationReason, RuntimeIoWaveError, RuntimeTaskContext};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -333,7 +347,7 @@ impl SegmentReadPool {
     pub fn new(worker_count: NonZeroUsize) -> Result<Self, SegmentReadPoolError> {
         let inner = rayon::ThreadPoolBuilder::new()
             .num_threads(worker_count.get())
-            .thread_name(|index| format!("skein-segment-read-{index}"))
+            .thread_name(|index| format!("hawdb-segment-read-{index}"))
             .build()
             .map_err(|error| SegmentReadPoolError(error.to_string()))?;
         Ok(Self {
@@ -666,7 +680,7 @@ fn range_io_error(range: &SegmentReadRange, source: std::io::Error) -> SegmentRe
 mod tests {
     use super::*;
     use crate::scan::SegmentReadScheduler;
-    use skein_core::{
+    use hawdb_core::{
         RuntimeCancellationReason, RuntimeCancellationToken, RuntimeIoWaveController,
         RuntimeIoWaveError, RuntimeIoWavePermit, RuntimeTaskContext,
     };
@@ -1300,7 +1314,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "skein_storage_segment_reader_{name}_{}_{}",
+            "hawdb_storage_segment_reader_{name}_{}_{}",
             std::process::id(),
             nonce
         ))

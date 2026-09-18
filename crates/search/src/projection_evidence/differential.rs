@@ -1,11 +1,25 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
+use hawdb_integrity::IntegrityHasher;
 use serde_json::{json, Value as Json};
-use skein_integrity::IntegrityHasher;
 
 // Captured on unchanged main cc36de143a276696c99a6ddba897003dbe9f33e5.
 // These bind the complete ordered input/output corpus, not just ready flags.
-const SMOKE_DIGEST: &str = "98fe747bf60593db2df72a246d9237f5d3a103fe12c2f10c83d4c24f3d94bbce";
-const CAMPAIGN_DIGEST: &str = "3e691e9dccb12ea0e265f9ec060ecf8e220ede1153187736cf082904649ace83";
+const SMOKE_DIGEST: &str = "b147b0f76e9b5ee75710b2ec61b2d1c9897bd944f1e441f5659a7d064c51a58d";
+const CAMPAIGN_DIGEST: &str = "1ef7fde9e212b76a43f4ec097558befceb78d648bb9e422589dcb8265fbf4aa8";
 
 fn next(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9e3779b97f4a7c15);
@@ -101,7 +115,7 @@ fn model_case(base: &Json, mask: u64, index: usize) -> (Json, Vec<String>) {
         probe["blocker_codes"] = json!(["generated_blocker", "generated_blocker", 17]);
     }
     if bad(17) {
-        probe["protocol"] = json!("skein-nowledge-search-projection-probe");
+        probe["protocol"] = json!("hawdb-nowledge-search-projection-probe");
     }
     if bad(18) {
         let identity = probe
@@ -114,7 +128,7 @@ fn model_case(base: &Json, mask: u64, index: usize) -> (Json, Vec<String>) {
 
     // Derive gates from generated facts, without reading any report or using
     // the production field lists, fallback helpers, or readiness functions.
-    let is_skein = base["engine"] == "skein" || bad(17);
+    let is_hawdb = base["engine"] == "hawdb" || bad(17);
     let all_tables = present.iter().all(|value| *value);
     let fts_ready = (0..6).all(|i| present[i] && fts[i]);
     let vector_ready = [0, 2, 3, 4, 5].iter().all(|&i| present[i] && vector[i]);
@@ -133,15 +147,15 @@ fn model_case(base: &Json, mask: u64, index: usize) -> (Json, Vec<String>) {
         (!source_ready, "source_chunks_index_not_ready"),
         (bad(10), "predicate_pushdown_not_ready"),
         (
-            is_skein && (bad(11) || bad(12)),
-            "skein_predicate_pushdown_descriptor_not_ready",
+            is_hawdb && (bad(11) || bad(12)),
+            "hawdb_predicate_pushdown_descriptor_not_ready",
         ),
         (
-            is_skein && (bad(13) || bad(14)),
-            "skein_production_filter_pruning_not_ready",
+            is_hawdb && (bad(13) || bad(14)),
+            "hawdb_production_filter_pruning_not_ready",
         ),
         (
-            is_skein && vector_ready && bad(15),
+            is_hawdb && vector_ready && bad(15),
             "compressed_vector_projection_not_ready",
         ),
         (bad(16), "generated_blocker"),
@@ -239,7 +253,7 @@ fn count_case(state: &mut u64, case: usize) -> (Json, bool) {
 fn campaign(seeds: u64, expected_digest: &str) {
     let contract = nowledge_search_projection_probe_contract_json();
     let primary = &contract["example_primary_probe"];
-    let bases = [primary, &contract["example_skein_probe"]];
+    let bases = [primary, &contract["example_hawdb_probe"]];
     let mut hasher = IntegrityHasher::new();
     record(&mut hasher, &contract);
     let mut cases = 0;

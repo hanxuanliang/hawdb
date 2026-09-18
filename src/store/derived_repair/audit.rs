@@ -1,8 +1,22 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{
     plan_identity, DerivedArtifactKind, DerivedArtifactRepairPlan, DerivedArtifactRepairReport,
     DERIVED_ARTIFACT_REPAIR_PROTOCOL,
 };
-use crate::error::{Result, SkeinError};
+use crate::error::{HawDBError, Result};
 use crate::store::{
     canonical_adjacency_artifact_generation_file, file_checksum,
     property_projection_artifact_generation_file, property_projection_manifest_generation_file,
@@ -65,7 +79,7 @@ pub(super) fn prepare_repair(
             let source_identity = file_checksum(&source)?;
             let destination_identity = file_checksum(&destination)?;
             if source_identity != destination_identity {
-                return Err(SkeinError::Storage(format!(
+                return Err(HawDBError::Storage(format!(
                     "existing derived repair quarantine file has the wrong identity: {name}"
                 )));
             }
@@ -133,7 +147,7 @@ pub(super) fn validate_pending_record(
     if manifest.checkpoint_epoch != record.plan.source_generation
         && manifest.checkpoint_epoch != record.plan.target_generation
     {
-        return Err(SkeinError::Storage(
+        return Err(HawDBError::Storage(
             "pending derived repair does not match the published generation".to_string(),
         ));
     }
@@ -164,7 +178,7 @@ pub(super) fn load_single_pending_record(path: &Path) -> Result<Option<DerivedRe
     match pending_record_paths(path)?.as_slice() {
         [] => Ok(None),
         [record] => load_audit_record(record).map(Some),
-        _ => Err(SkeinError::Storage(
+        _ => Err(HawDBError::Storage(
             "database has multiple pending derived artifact repair records".to_string(),
         )),
     }
@@ -178,7 +192,7 @@ pub(super) fn load_matching_pending_record(
         return Ok(None);
     };
     if record.plan.plan_id != plan_id {
-        return Err(SkeinError::Storage(
+        return Err(HawDBError::Storage(
             "database has a pending derived repair for a different plan".to_string(),
         ));
     }
@@ -200,7 +214,7 @@ fn validate_quarantine(path: &Path, record: &DerivedRepairAuditRecord) -> Result
             || actual.1 != expected.crc32c
             || actual.2.to_string() != expected.sha256
         {
-            return Err(SkeinError::Storage(format!(
+            return Err(HawDBError::Storage(format!(
                 "derived repair quarantine identity changed: {}",
                 expected.name
             )));
@@ -210,7 +224,7 @@ fn validate_quarantine(path: &Path, record: &DerivedRepairAuditRecord) -> Result
                 || actual.1 != record.plan.manifest_crc32c
                 || actual.2.to_string() != record.plan.manifest_sha256)
         {
-            return Err(SkeinError::Storage(
+            return Err(HawDBError::Storage(
                 "derived repair quarantine manifest does not match the planned source".to_string(),
             ));
         }
@@ -242,7 +256,7 @@ fn validate_quarantined_file_names(record: &DerivedRepairAuditRecord) -> Result<
         || actual.len() != unique_len
         || actual.iter().any(|name| !allowed.contains(name))
     {
-        return Err(SkeinError::Storage(
+        return Err(HawDBError::Storage(
             "derived repair quarantine file set is invalid".to_string(),
         ));
     }
@@ -253,26 +267,26 @@ fn target_files(kind: DerivedArtifactKind, generation: u64) -> Vec<String> {
     match kind {
         DerivedArtifactKind::CanonicalAdjacency => vec![
             canonical_adjacency_artifact_generation_file(generation),
-            skein_storage::canonical_adjacency_descriptor_page_file(generation),
-            skein_storage::canonical_adjacency_descriptor_root_file(generation),
+            hawdb_storage::canonical_adjacency_descriptor_page_file(generation),
+            hawdb_storage::canonical_adjacency_descriptor_root_file(generation),
         ],
         DerivedArtifactKind::PersistentPropertyProjection => vec![
             property_projection_artifact_generation_file(generation),
             property_projection_manifest_generation_file(generation),
-            skein_storage::property_projection_descriptor_page_file(generation),
-            skein_storage::property_projection_descriptor_root_file(generation),
+            hawdb_storage::property_projection_descriptor_page_file(generation),
+            hawdb_storage::property_projection_descriptor_root_file(generation),
         ],
     }
 }
 
 fn write_audit_record(path: &Path, record: &DerivedRepairAuditRecord) -> Result<()> {
     let parent = path.parent().ok_or_else(|| {
-        SkeinError::Storage("derived repair audit path has no parent".to_string())
+        HawDBError::Storage("derived repair audit path has no parent".to_string())
     })?;
     fs::create_dir_all(parent)?;
     sync_parent_dir(parent)?;
     let encoded = serde_json::to_vec_pretty(record).map_err(|error| {
-        SkeinError::Storage(format!("failed to encode derived repair audit: {error}"))
+        HawDBError::Storage(format!("failed to encode derived repair audit: {error}"))
     })?;
     let temporary = path.with_extension("json.tmp");
     {
@@ -284,25 +298,25 @@ fn write_audit_record(path: &Path, record: &DerivedRepairAuditRecord) -> Result<
         file.write_all(&encoded)?;
         file.sync_all()?;
     }
-    skein_storage::durable_replace_file(&temporary, path)
-        .map_err(|error| SkeinError::Storage(error.to_string()))
+    hawdb_storage::durable_replace_file(&temporary, path)
+        .map_err(|error| HawDBError::Storage(error.to_string()))
 }
 
 fn load_audit_record(path: &Path) -> Result<DerivedRepairAuditRecord> {
     if fs::metadata(path)?.len() > MAX_REPAIR_AUDIT_BYTES {
-        return Err(SkeinError::Storage(format!(
+        return Err(HawDBError::Storage(format!(
             "derived repair audit exceeds the {MAX_REPAIR_AUDIT_BYTES} byte limit"
         )));
     }
     let record =
         serde_json::from_slice::<DerivedRepairAuditRecord>(&fs::read(path)?).map_err(|error| {
-            SkeinError::Storage(format!("invalid derived repair audit record: {error}"))
+            HawDBError::Storage(format!("invalid derived repair audit record: {error}"))
         })?;
     if record.protocol != DERIVED_ARTIFACT_REPAIR_PROTOCOL
         || record.plan.protocol != DERIVED_ARTIFACT_REPAIR_PROTOCOL
         || record.plan.plan_id != plan_identity(&record.plan)
     {
-        return Err(SkeinError::Storage(
+        return Err(HawDBError::Storage(
             "derived repair audit identity is invalid".to_string(),
         ));
     }
@@ -326,5 +340,5 @@ fn file_name(path: &Path) -> Result<String> {
     path.file_name()
         .and_then(|name| name.to_str())
         .map(str::to_string)
-        .ok_or_else(|| SkeinError::Storage("derived repair path has no file name".to_string()))
+        .ok_or_else(|| HawDBError::Storage("derived repair path has no file name".to_string()))
 }

@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 
 #[test]
@@ -23,7 +37,7 @@ fn satisfied_order_and_missing_reports_do_not_invent_execution_nodes() {
 
 #[test]
 fn planning_diagnostics_preserve_attempt_order_cost_and_fallback() {
-    use skein_optimizer::{
+    use hawdb_optimizer::{
         RelationalJoinPlanningAttempt, RelationalJoinPlanningCost,
         RelationalJoinPlanningFallbackClass, RelationalJoinPlanningReason,
         RelationalJoinPlanningStrategy,
@@ -67,7 +81,7 @@ fn planning_diagnostics_preserve_attempt_order_cost_and_fallback() {
 }
 mod fixtures;
 use fixtures::*;
-use skein_executor::binding::map_payload_bytes;
+use hawdb_executor::binding::map_payload_bytes;
 use std::cell::Cell;
 
 fn case(seed: usize, index: usize) -> Case {
@@ -209,7 +223,7 @@ fn explain_output_limits_accept_exact_boundary_and_refuse_truncation() {
             )
             .unwrap_err();
             assert!(
-                matches!(error, skein_core::SkeinError::Execution(message) if message == expected)
+                matches!(error, hawdb_core::HawDBError::Execution(message) if message == expected)
             );
         }
     }
@@ -254,7 +268,7 @@ fn output_push_preserves_utf8_and_refusal_accounting() {
     assert_eq!(bytes, 5);
     let error = push_relational_output(row.clone(), &mut output, &mut bytes, exact).unwrap_err();
     assert!(
-        matches!(error, skein_core::SkeinError::Execution(message) if message == "relational SQL output exceeds max_output_rows 1")
+        matches!(error, hawdb_core::HawDBError::Execution(message) if message == "relational SQL output exceeds max_output_rows 1")
     );
     assert_eq!(bytes, 5);
     assert_eq!(output, vec![row.clone()]);
@@ -271,7 +285,7 @@ fn output_push_preserves_utf8_and_refusal_accounting() {
     )
     .unwrap_err();
     assert!(
-        matches!(error, skein_core::SkeinError::Execution(message) if message == "relational SQL output exceeds max_output_payload_bytes 4")
+        matches!(error, hawdb_core::HawDBError::Execution(message) if message == "relational SQL output exceeds max_output_payload_bytes 4")
     );
     assert!(output.is_empty());
     assert_eq!(bytes, 5);

@@ -1,16 +1,30 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! SQL-shaped columnar aggregation over caller-bound borrowed values.
 
 use crate::query_value::expression_name;
-use skein_core::{LogicalType, Result, SkeinError, Value};
-use skein_executor::{
+use hawdb_core::{HawDBError, LogicalType, Result, Value};
+use hawdb_executor::{
     BindingSchema, ColumnVector, ColumnarBatch, QueryMemoryClass, QueryMemoryLease,
     QueryMemoryLedger, SlotDescriptor, SlotId, SlotType, ValidityBuilder,
 };
-use skein_sql::{
+use hawdb_sql::{
     Expr, ExprKind, SelectProjection, SelectStatement, SqlColumnRef, SqlExpression,
     SqlFunctionArgument, SqlValue,
 };
-use skein_storage::{RelationalScalarType, RelationalTableSchema, RelationalValue};
+use hawdb_storage::{RelationalScalarType, RelationalTableSchema, RelationalValue};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -107,7 +121,7 @@ impl ColumnarAggregateExecutor {
             batch_payload_bytes.get(),
         )
         .ok_or_else(|| {
-            SkeinError::Execution(format!(
+            HawDBError::Execution(format!(
                 "relational columnar aggregate cannot fit one row within batch_payload_bytes {}",
                 batch_payload_bytes
             ))
@@ -153,7 +167,7 @@ impl ColumnarAggregateExecutor {
                         }
                     })
                     .saturating_add(projection.null_fallback.as_ref().map_or(0, |value| {
-                        skein_executor::binding::value_memory_bytes(value)
+                        hawdb_executor::binding::value_memory_bytes(value)
                     }))
             },
         )
@@ -191,7 +205,7 @@ impl ColumnarAggregateExecutor {
                         validity.push(true);
                     }
                     _ => {
-                        return Err(SkeinError::Semantic(
+                        return Err(HawDBError::Semantic(
                             "SUM requires BIGINT or DOUBLE PRECISION input".to_string(),
                         ));
                     }
@@ -218,7 +232,7 @@ impl ColumnarAggregateExecutor {
                         validity.push(true);
                     }
                     _ => {
-                        return Err(SkeinError::Semantic(
+                        return Err(HawDBError::Semantic(
                             "OCTET_LENGTH requires TEXT or BYTEA input".to_string(),
                         ));
                     }
@@ -290,14 +304,14 @@ impl ColumnarAggregateExecutor {
                 ) => {
                     let partial = batch.sum_int64(slot).map_err(|error| {
                         if error.to_string().contains("SUM overflow") {
-                            SkeinError::Execution("BIGINT SUM overflow".to_string())
+                            HawDBError::Execution("BIGINT SUM overflow".to_string())
                         } else {
                             error
                         }
                     })?;
                     if let Some(partial) = partial {
                         *sum = Some(sum.unwrap_or(0).checked_add(partial).ok_or_else(|| {
-                            SkeinError::Execution("BIGINT SUM overflow".to_string())
+                            HawDBError::Execution("BIGINT SUM overflow".to_string())
                         })?);
                     }
                 }

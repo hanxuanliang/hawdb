@@ -1,9 +1,23 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 
 #[test]
 fn retrieves_knowledge_entity_without_search_projection() {
     let mut db = Database::new();
-    db.query("CREATE (:Entity {id: 'entity_1', name: 'Skein', kind: 'database', score: 7})")
+    db.query("CREATE (:Entity {id: 'entity_1', name: 'HawDB', kind: 'database', score: 7})")
         .unwrap();
 
     let output = db
@@ -20,7 +34,7 @@ fn retrieves_knowledge_entity_without_search_projection() {
     assert_eq!(entity.external_id.as_deref(), Some("entity_1"));
     assert_eq!(
         entity.properties.get("name"),
-        Some(&Value::String("Skein".to_string()))
+        Some(&Value::String("HawDB".to_string()))
     );
     assert_eq!(entity.properties.get("score"), Some(&Value::Int(7)));
 }

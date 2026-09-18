@@ -1,15 +1,29 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{
     qualification_probe_error, relational_keys_digest, RelationalIndexViewQualificationOptions,
 };
-use crate::store::{GraphStore, SkeinError};
-use skein_storage::{
+use crate::store::{GraphStore, HawDBError};
+use hawdb_storage::{
     relational_foreign_key_index_name, RelationalForeignKeySchema, RelationalIndexDefinition,
     RelationalIndexRole, RelationalKey, RelationalScalarType, RelationalState,
     RelationalTableSchema, RelationalValue, RELATIONAL_PRIMARY_INDEX_NAME,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub use skein_storage::relational_index_view::{
+pub use hawdb_storage::relational_index_view::{
     ConstraintProbeIdentity, RelationalConstraintQualificationProbeReport,
     RelationalConstraintQualificationReport, RelationalConstraintQualificationUse,
     RELATIONAL_CONSTRAINT_QUALIFICATION_PROTOCOL,
@@ -25,12 +39,12 @@ impl GraphStore {
     ) -> crate::Result<RelationalConstraintQualificationReport> {
         self.relational_state
             .require_materialized_rows("relational constraint differential qualification")
-            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            .map_err(|error| HawDBError::Storage(error.to_string()))?;
         let view = self
             .relational_index_shadow
             .current_read_view(self.commit_epoch)
             .ok_or_else(|| {
-                SkeinError::Storage(format!(
+                HawDBError::Storage(format!(
                     "relational constraint read view is unavailable at commit epoch {}",
                     self.commit_epoch
                 ))
@@ -66,7 +80,7 @@ impl GraphStore {
                         .count(),
                 )
                 .ok_or_else(|| {
-                    SkeinError::Storage(
+                    HawDBError::Storage(
                         "relational constraint qualification row counter overflow".to_string(),
                     )
                 })?;
@@ -88,7 +102,7 @@ impl GraphStore {
                     .relational_state
                     .table_schema(&foreign_key.referenced_table)
                     .ok_or_else(|| {
-                        SkeinError::Storage(format!(
+                        HawDBError::Storage(format!(
                             "foreign key from {} references missing table {}",
                             schema.name, foreign_key.referenced_table
                         ))
@@ -96,7 +110,7 @@ impl GraphStore {
                 let referenced_definition = referenced_schema
                     .unique_index_definition(&foreign_key.referenced_columns)
                     .ok_or_else(|| {
-                        SkeinError::Storage(format!(
+                        HawDBError::Storage(format!(
                             "foreign key from {} references non-unique columns on {}",
                             schema.name, foreign_key.referenced_table
                         ))
@@ -153,12 +167,12 @@ impl GraphStore {
             mismatches = mismatches
                 .checked_add(usize::from(!matched))
                 .ok_or_else(|| {
-                    SkeinError::Storage(
+                    HawDBError::Storage(
                         "relational constraint mismatch counter overflow".to_string(),
                     )
                 })?;
             uses_covered = uses_covered.checked_add(uses.len()).ok_or_else(|| {
-                SkeinError::Storage("relational constraint use counter overflow".to_string())
+                HawDBError::Storage("relational constraint use counter overflow".to_string())
             })?;
             let uses = uses.into_iter().collect::<Vec<_>>();
             probes.push(RelationalConstraintQualificationProbeReport {
@@ -474,14 +488,14 @@ fn synthetic_value(kind: RelationalScalarType, ordinal: usize, salt: usize) -> R
             RelationalValue::DoublePrecision(-1.0e300 + salt as f64 + ordinal as f64 / 64.0)
         }
         RelationalScalarType::Text => {
-            RelationalValue::Text(format!("__skein_constraint_absent_{ordinal}_{salt}"))
+            RelationalValue::Text(format!("__hawdb_constraint_absent_{ordinal}_{salt}"))
         }
         RelationalScalarType::Bytea => RelationalValue::Bytea(vec![
             0xff,
             u8::try_from(ordinal % 256).expect("ordinal was reduced modulo 256"),
             u8::try_from(salt % 256).expect("salt was reduced modulo 256"),
         ]),
-        RelationalScalarType::Uuid => RelationalValue::Uuid(skein_core::Uuid::from_u128(
+        RelationalScalarType::Uuid => RelationalValue::Uuid(hawdb_core::Uuid::from_u128(
             ((salt as u128) << 64) | ordinal as u128,
         )),
     }
@@ -489,7 +503,7 @@ fn synthetic_value(kind: RelationalScalarType, ordinal: usize, salt: usize) -> R
 
 fn key_from_row(
     schema: &RelationalTableSchema,
-    row: &skein_storage::RelationalRow,
+    row: &hawdb_storage::RelationalRow,
     columns: &[String],
 ) -> RelationalKey {
     RelationalKey(
@@ -527,7 +541,7 @@ fn relational_constraint_oracle_rows(
         state
             .index_prefix_lookup(table, index, key, max_rows.saturating_add(1))
             .ok_or_else(|| {
-                SkeinError::Storage(format!(
+                HawDBError::Storage(format!(
                     "relational constraint oracle is missing {table}.{index}"
                 ))
             })?
@@ -536,7 +550,7 @@ fn relational_constraint_oracle_rows(
             .collect()
     };
     if rows.len() > max_rows {
-        return Err(SkeinError::Storage(format!(
+        return Err(HawDBError::Storage(format!(
             "relational constraint oracle on {table}.{index} contains {} rows, exceeding limit {max_rows}",
             rows.len()
         )));

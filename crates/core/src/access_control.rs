@@ -1,4 +1,18 @@
-use crate::{Result, SkeinError};
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use crate::{HawDBError, Result};
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -50,17 +64,17 @@ impl QueryAccessControlContext {
 
     pub fn validate(&self) -> Result<()> {
         if self.policy_epoch == 0 {
-            return Err(SkeinError::Semantic(
+            return Err(HawDBError::Semantic(
                 "access control policy epoch must be non-zero".to_string(),
             ));
         }
         if self.visibility_property.trim().is_empty() {
-            return Err(SkeinError::Semantic(
+            return Err(HawDBError::Semantic(
                 "access control visibility property must be non-empty".to_string(),
             ));
         }
         if self.allowed_visibility_values.is_empty() {
-            return Err(SkeinError::Semantic(
+            return Err(HawDBError::Semantic(
                 "access control visibility scope must not be empty".to_string(),
             ));
         }
@@ -69,7 +83,7 @@ impl QueryAccessControlContext {
             .iter()
             .any(|value| value.trim().is_empty())
         {
-            return Err(SkeinError::Semantic(
+            return Err(HawDBError::Semantic(
                 "access control visibility scope values must be non-empty".to_string(),
             ));
         }

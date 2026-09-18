@@ -1,8 +1,22 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use crate::build_memory::{checked_add, checked_mul, BuildMemory};
 use crate::build_term::Term;
-use crate::{RuntimeTaskContext, SkeinError};
-use skein_executor::QueryMemoryLease;
+use crate::{HawDBError, RuntimeTaskContext};
+use hawdb_executor::QueryMemoryLease;
 use std::collections::hash_map::Entry;
 use std::mem::size_of;
 
@@ -80,10 +94,10 @@ impl<'a> Dedup<'a> {
             _memory: memory,
         };
         candidate.terms.try_reserve(capacity).map_err(|error| {
-            SkeinError::Execution(format!("reserve search identifier deduplication: {error}"))
+            HawDBError::Execution(format!("reserve search identifier deduplication: {error}"))
         })?;
         if table_bytes::<(Text<'_>, ())>(candidate.terms.capacity())? > bytes {
-            return Err(SkeinError::Execution(
+            return Err(HawDBError::Execution(
                 "search identifier deduplication exceeded admitted capacity".into(),
             ));
         }
@@ -107,7 +121,7 @@ fn table_bytes<T>(capacity: usize) -> Result<usize> {
         checked_mul(capacity, 8)?
             .checked_div(7)
             .and_then(usize::checked_next_power_of_two)
-            .ok_or_else(|| SkeinError::Execution("search dedup capacity overflow".into()))?
+            .ok_or_else(|| HawDBError::Execution("search dedup capacity overflow".into()))?
     };
     checked_add(checked_mul(buckets, checked_add(size_of::<T>(), 1)?)?, 32)
 }

@@ -1,5 +1,19 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
-use skein_storage::statistics_refresh::{
+use hawdb_storage::statistics_refresh::{
     OptimizerStatisticsRefreshAccounting, RefreshSpillDirectory, StatsRecord, StatsRunOptions,
     StatsRunWriter,
 };
@@ -63,12 +77,12 @@ impl GraphStore {
     ) -> Result<OptimizerStatisticsRefreshReport> {
         options.validate()?;
         if !self.canonical_base_out_of_core {
-            return Err(SkeinError::Execution(
+            return Err(HawDBError::Execution(
                 "external optimizer statistics refresh requires out-of-core storage".to_string(),
             ));
         }
         if self.durable.is_none() {
-            return Err(SkeinError::Execution(
+            return Err(HawDBError::Execution(
                 "external optimizer statistics refresh requires durable storage".to_string(),
             ));
         }
@@ -109,14 +123,14 @@ impl GraphStore {
                 writer.push_relationship_property(relationship.rel_type, property, value)?;
             }
             let source = self.node_owned(relationship.source)?.ok_or_else(|| {
-                SkeinError::Storage(format!(
+                HawDBError::Storage(format!(
                     "optimizer statistics refresh found relationship {} with missing source {}",
                     relationship.id.0, relationship.source.0
                 ))
             })?;
             work.read_node()?;
             let target = self.node_owned(relationship.target)?.ok_or_else(|| {
-                SkeinError::Storage(format!(
+                HawDBError::Storage(format!(
                     "optimizer statistics refresh found relationship {} with missing target {}",
                     relationship.id.0, relationship.target.0
                 ))
@@ -176,7 +190,7 @@ impl GraphStore {
         let basic = self.basic_statistics();
         let (statistics, merge_report) = writer.finish(graph_statistics_from_basic(basic, true))?;
         if source_commit_epoch != self.commit_epoch {
-            return Err(SkeinError::Execution(
+            return Err(HawDBError::Execution(
                 "optimizer statistics refresh source epoch changed before publication".to_string(),
             ));
         }
@@ -252,7 +266,7 @@ fn collect_bounded_path_facts(
             work.read_relationship()?;
             work.expand_path()?;
             let target = store.node_owned(relationship.target)?.ok_or_else(|| {
-                SkeinError::Storage(format!(
+                HawDBError::Storage(format!(
                     "optimizer statistics refresh found relationship {} with missing target {}",
                     relationship.id.0, relationship.target.0
                 ))
@@ -296,15 +310,15 @@ mod facade_tests {
     fn root_facade_preserves_storage_statistics_refresh_contract_identity() {
         assert_eq!(
             TypeId::of::<OptimizerStatisticsRefreshOptions>(),
-            TypeId::of::<skein_storage::OptimizerStatisticsRefreshOptions>()
+            TypeId::of::<hawdb_storage::OptimizerStatisticsRefreshOptions>()
         );
         assert_eq!(
             TypeId::of::<OptimizerStatisticsRefreshReport>(),
-            TypeId::of::<skein_storage::OptimizerStatisticsRefreshReport>()
+            TypeId::of::<hawdb_storage::OptimizerStatisticsRefreshReport>()
         );
         assert_eq!(
             TypeId::of::<OptimizerStatisticsRefreshWork>(),
-            TypeId::of::<skein_storage::statistics_refresh::OptimizerStatisticsRefreshWork>()
+            TypeId::of::<hawdb_storage::statistics_refresh::OptimizerStatisticsRefreshWork>()
         );
     }
 }

@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{
     codec, durability, relational_row_delta_manifest_generation_file,
     relational_row_delta_run_file, RelationalRowDeltaBaseBinding, RelationalRowDeltaConfig,
@@ -38,7 +52,7 @@ pub struct RelationalRowDeltaBuilder {
     expected_previous: Option<RelationalRowDeltaGeneration>,
     config: RelationalRowDeltaConfig,
     tables: Vec<RelationalRowDeltaTableMetadata>,
-    schema_set_digest: skein_integrity::Sha256Digest,
+    schema_set_digest: hawdb_integrity::Sha256Digest,
     visible_commit_epoch: u64,
     replayed_batches: u64,
     dirty: BTreeMap<RowDeltaKey, RowDeltaValue>,
@@ -428,7 +442,7 @@ impl RelationalRowDeltaBuilder {
                     manifest.base.generation,
                     manifest.delta_generation,
                 ));
-        let generation_tmp = generation_manifest.with_extension("skein.tmp");
+        let generation_tmp = generation_manifest.with_extension("hawdb.tmp");
         remove_if_exists(&generation_tmp)?;
         write_synced(&generation_tmp, &encoded_manifest)?;
         durable_publish_immutable(&generation_tmp, &generation_manifest)?;
@@ -474,7 +488,7 @@ impl RelationalRowDeltaBuilder {
             stop_after,
             RelationalRowDeltaPublicationPhase::BaseRevalidated,
         )?;
-        let latest_tmp = latest.with_extension("skein.tmp");
+        let latest_tmp = latest.with_extension("hawdb.tmp");
         remove_if_exists(&latest_tmp)?;
         write_synced(&latest_tmp, &encoded_manifest)?;
         durable_replace_file(&latest_tmp, &latest)
@@ -681,7 +695,7 @@ impl RelationalRowDeltaBuilder {
                 final_path.display()
             )));
         }
-        let tmp_path = final_path.with_extension("skein.tmp");
+        let tmp_path = final_path.with_extension("hawdb.tmp");
         remove_if_exists(&tmp_path)?;
         let estimated_run_bytes = codec::estimated_run_encoded_len(&self.dirty)?;
         let next_run_bytes = self

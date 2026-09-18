@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::corpus_support::{clock_nanos, normalize_clock_slots, parameters};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -16,7 +30,7 @@ fn migration_corpus_preserves_bindings_and_logical_plans() {
         let query = case["query"].as_str().unwrap();
         let kind = case["plan"]["kind"].as_str().unwrap();
         *outcomes.entry(kind.to_owned()).or_insert(0usize) += 1;
-        let statement = skein_cypher::parse(query);
+        let statement = hawdb_cypher::parse(query);
         if kind == "parse_rejected" {
             assert!(statement.is_err(), "{id}: expected parser rejection");
             continue;
@@ -63,8 +77,8 @@ fn clock_normalization_preserves_literal_values_in_the_same_time_window() {
     let mut plan = crate::LogicalPlan::CreateNode {
         label: "ClockProbe".to_owned(),
         properties: BTreeMap::from([
-            ("generated".to_owned(), skein_core::Value::Int(100)),
-            ("literal".to_owned(), skein_core::Value::Int(100)),
+            ("generated".to_owned(), hawdb_core::Value::Int(100)),
+            ("literal".to_owned(), hawdb_core::Value::Int(100)),
         ]),
     };
     normalize_clock_slots(
@@ -77,6 +91,6 @@ fn clock_normalization_preserves_literal_values_in_the_same_time_window() {
     let crate::LogicalPlan::CreateNode { properties, .. } = plan else {
         unreachable!()
     };
-    assert_eq!(properties["generated"], skein_core::Value::Int(0));
-    assert_eq!(properties["literal"], skein_core::Value::Int(100));
+    assert_eq!(properties["generated"], hawdb_core::Value::Int(0));
+    assert_eq!(properties["literal"], hawdb_core::Value::Int(100));
 }

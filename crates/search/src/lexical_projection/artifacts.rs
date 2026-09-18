@@ -1,14 +1,28 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Pending block and retained directory ownership for one lexical build.
 
 use super::{
-    block_encoding, visit_merged_postings_with_control, BlockDescriptor, Digest,
-    LexicalProjectionConfig, Posting, Result, SkeinError, SpillControl, TermStatistics,
-    ARTIFACT_HEADER, SPILL_IO_BUFFER_BYTES,
+    block_encoding, visit_merged_postings_with_control, BlockDescriptor, Digest, HawDBError,
+    LexicalProjectionConfig, Posting, Result, SpillControl, TermStatistics, ARTIFACT_HEADER,
+    SPILL_IO_BUFFER_BYTES,
 };
 use crate::build_control::{checkpoint, CheckedWriter};
 use crate::build_memory::{checked_add, grow_slots, path::OwnedPath, BuildMemory};
-use skein_core::RuntimeTaskContext;
-use skein_executor::QueryMemoryLease;
+use hawdb_core::RuntimeTaskContext;
+use hawdb_executor::QueryMemoryLease;
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::Path;
@@ -124,7 +138,7 @@ impl ArtifactBuilder {
 
     fn check(&self) -> Result<()> {
         if self.failed {
-            return Err(SkeinError::Storage(
+            return Err(HawDBError::Storage(
                 "lexical artifact builder is poisoned".into(),
             ));
         }
@@ -225,11 +239,11 @@ impl ArtifactBuilder {
                     .document_frequency
                     .checked_add(1)
                     .ok_or_else(|| {
-                        SkeinError::Storage("lexical term document frequency exceeds u64".into())
+                        HawDBError::Storage("lexical term document frequency exceeds u64".into())
                     })?;
             }
             Some(statistics) if statistics.term.as_str() > posting.term.as_str() => {
-                return Err(SkeinError::Storage(
+                return Err(HawDBError::Storage(
                     "lexical merge produced unordered term statistics".into(),
                 ));
             }
@@ -325,7 +339,7 @@ impl ArtifactBuilder {
             digest.update(&scratch[..count]);
             length = length
                 .checked_add(count as u64)
-                .ok_or_else(|| SkeinError::Storage("lexical artifact length exceeds u64".into()))?;
+                .ok_or_else(|| HawDBError::Storage("lexical artifact length exceeds u64".into()))?;
         }
         checkpoint(&self.task)?;
         Ok(ArtifactSummary {

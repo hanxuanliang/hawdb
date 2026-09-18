@@ -1,15 +1,29 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 
 #[test]
 fn compatibility_facade_preserves_types_and_query_output() {
-    let fixture: skein_compat::CompatibilityFixture = crate::nowledge_memory_core_fixture();
+    let fixture: hawdb_compat::CompatibilityFixture = crate::nowledge_memory_core_fixture();
     let _: crate::CompatibilityFixture = fixture;
-    let inventory: skein_compat::CompatibilityQueryInventory =
+    let inventory: hawdb_compat::CompatibilityQueryInventory =
         crate::nowledge_memory_core_inventory();
     let _: crate::CompatibilityQueryInventory = inventory;
     let _: fn(&mut Database, &CompatibilityFixture) -> Result<CompatibilityReport> =
         crate::run_compatibility_fixture;
-    let output: skein_executor::QueryOutput =
+    let output: hawdb_executor::QueryOutput =
         crate::QueryOutput::from_rows(vec![BTreeMap::from([("value".to_string(), Value::Int(7))])]);
     let facade: crate::QueryOutput = output.clone();
     assert_eq!(facade, output);

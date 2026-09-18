@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 
 pub(super) fn plan_graph_algorithm_kind(kind: CypherGraphAlgorithmKind) -> GraphAlgorithmKind {
@@ -39,17 +53,17 @@ pub(super) fn bind_vector_embedding(
         ..
     } = expression
     else {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "vector search embedding must be a parameter".to_string(),
         ));
     };
     let Some(Value::List(values)) = parameters.get(name) else {
-        return Err(SkeinError::Semantic(format!(
+        return Err(HawDBError::Semantic(format!(
             "vector search parameter '${name}' must be a numeric list"
         )));
     };
     if values.is_empty() {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "vector search embedding must not be empty".to_string(),
         ));
     }
@@ -58,7 +72,7 @@ pub(super) fn bind_vector_embedding(
         Value::Int(_) => false,
         _ => true,
     }) {
-        return Err(SkeinError::Semantic(format!(
+        return Err(HawDBError::Semantic(format!(
             "vector search parameter '${name}' must contain finite numbers"
         )));
     }
@@ -79,7 +93,7 @@ pub(super) fn bind_vector_seed(
         .transpose()?
         .unwrap_or(10);
     if top_k == 0 {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "vector search topK must be greater than zero".to_string(),
         ));
     }
@@ -102,7 +116,7 @@ pub(super) fn bind_properties(
 }
 
 pub(super) fn bind_relationship_count_legs(
-    legs: &[skein_cypher::OptionalRelationshipCountLeg],
+    legs: &[hawdb_cypher::OptionalRelationshipCountLeg],
     parameters: &BTreeMap<String, Value>,
 ) -> Result<Vec<RelationshipCountLeg>> {
     legs.iter()
@@ -122,11 +136,11 @@ pub(super) fn bind_relationship_count_legs(
 }
 
 pub(super) fn bind_relationship_count_filter(
-    filter: &skein_cypher::OptionalRelationshipCountFilter,
+    filter: &hawdb_cypher::OptionalRelationshipCountFilter,
     parameters: &BTreeMap<String, Value>,
 ) -> Result<RelationshipCountFilter> {
     match filter {
-        skein_cypher::OptionalRelationshipCountFilter::PropertyNotEqOrEmpty { property, value } => {
+        hawdb_cypher::OptionalRelationshipCountFilter::PropertyNotEqOrEmpty { property, value } => {
             Ok(RelationshipCountFilter::PropertyNotEqOrEmpty {
                 property: property.clone(),
                 value: bind_value(value, parameters)?,
@@ -144,20 +158,20 @@ pub(super) fn bind_on_create_set_properties(
         return Ok(BTreeMap::new());
     }
     let Some(variable) = variable else {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "MERGE ON CREATE SET requires a bound node variable".to_string(),
         ));
     };
     let mut properties = BTreeMap::new();
     for set in sets {
         if set.variable != variable {
-            return Err(SkeinError::Semantic(format!(
+            return Err(HawDBError::Semantic(format!(
                 "MERGE ON CREATE SET variable '{}' does not match bound variable '{variable}'",
                 set.variable
             )));
         }
         let SetValueExpression::Value(value) = &set.value else {
-            return Err(SkeinError::Semantic(
+            return Err(HawDBError::Semantic(
                 "MERGE ON CREATE SET supports only value assignments".to_string(),
             ));
         };
@@ -175,14 +189,14 @@ pub(super) fn bind_on_match_set_assignments(
         return Ok(Vec::new());
     }
     let Some(variable) = variable else {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "MERGE ON MATCH SET requires a bound node variable".to_string(),
         ));
     };
     sets.iter()
         .map(|set| {
             if set.variable != variable {
-                return Err(SkeinError::Semantic(format!(
+                return Err(HawDBError::Semantic(format!(
                     "MERGE ON MATCH SET variable '{}' does not match bound variable '{variable}'",
                     set.variable
                 )));
@@ -204,14 +218,14 @@ pub(super) fn bind_post_merge_set_assignments(
         return Ok(Vec::new());
     }
     let Some(variable) = variable else {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "MERGE SET requires a bound node variable".to_string(),
         ));
     };
     sets.iter()
         .map(|set| {
             if set.variable != variable {
-                return Err(SkeinError::Semantic(format!(
+                return Err(HawDBError::Semantic(format!(
                     "MERGE SET variable '{}' does not match bound variable '{variable}'",
                     set.variable
                 )));
@@ -233,20 +247,20 @@ pub(super) fn bind_relationship_on_create_set_properties(
         return Ok(BTreeMap::new());
     }
     let Some(variable) = variable else {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "relationship MERGE ON CREATE SET requires a bound relationship variable".to_string(),
         ));
     };
     let mut properties = BTreeMap::new();
     for set in sets {
         if set.variable != variable {
-            return Err(SkeinError::Semantic(format!(
+            return Err(HawDBError::Semantic(format!(
                 "relationship MERGE ON CREATE SET variable '{}' does not match bound relationship variable '{variable}'",
                 set.variable
             )));
         }
         let SetValueExpression::Value(value) = &set.value else {
-            return Err(SkeinError::Semantic(
+            return Err(HawDBError::Semantic(
                 "relationship MERGE ON CREATE SET supports only value assignments".to_string(),
             ));
         };
@@ -265,13 +279,13 @@ pub(super) fn bind_relationship_copy_on_create_set_properties(
         return Ok(BTreeMap::new());
     }
     let Some(new_variable) = new_variable else {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "relationship-copy MERGE ON CREATE SET requires a bound new relationship variable"
                 .to_string(),
         ));
     };
     let Some(old_variable) = old_variable else {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "relationship-copy MERGE ON CREATE SET requires a bound matched relationship variable"
                 .to_string(),
         ));
@@ -279,7 +293,7 @@ pub(super) fn bind_relationship_copy_on_create_set_properties(
     let mut properties = BTreeMap::new();
     for set in sets {
         if set.variable != new_variable {
-            return Err(SkeinError::Semantic(format!(
+            return Err(HawDBError::Semantic(format!(
                 "relationship-copy MERGE ON CREATE SET variable '{}' does not match bound relationship variable '{new_variable}'",
                 set.variable
             )));
@@ -294,7 +308,7 @@ pub(super) fn bind_relationship_copy_on_create_set_properties(
                 }
             }
             SetValueExpression::Property { variable, .. } => {
-                return Err(SkeinError::Semantic(format!(
+                return Err(HawDBError::Semantic(format!(
                     "relationship-copy MERGE ON CREATE SET cannot read property from variable '{variable}'"
                 )));
             }
@@ -303,7 +317,7 @@ pub(super) fn bind_relationship_copy_on_create_set_properties(
             | SetValueExpression::DecrementFloorZero { .. }
             | SetValueExpression::PreserveNewerExisting { .. }
             | SetValueExpression::CoalescePropertyAdd { .. } => {
-                return Err(SkeinError::Semantic(
+                return Err(HawDBError::Semantic(
                     "relationship-copy MERGE ON CREATE SET supports only values and matched relationship properties"
                         .to_string(),
                 ));
@@ -318,7 +332,7 @@ pub(super) fn plan_match_pattern_predicate(
     source_variable: &str,
     source_properties: &BTreeMap<String, ValueExpression>,
     expand: Option<&CypherRelationshipExpand>,
-    post_expand: Option<&skein_cypher::PostMatchRelationshipExpand>,
+    post_expand: Option<&hawdb_cypher::PostMatchRelationshipExpand>,
     parameters: &BTreeMap<String, Value>,
 ) -> Result<Option<Predicate>> {
     let mut predicates =
@@ -421,7 +435,7 @@ pub(super) fn bind_endpoint_equality_predicate(
         } if variable == target_variable => {
             insert_endpoint_property(target, property, bind_value(value, parameters)?)
         }
-        _ => Err(SkeinError::Semantic(
+        _ => Err(HawDBError::Semantic(
             "two-node relationship CREATE supports only AND-connected equality predicates on matched node properties".to_string(),
         )),
     }
@@ -434,7 +448,7 @@ pub(super) fn insert_endpoint_property(
 ) -> Result<()> {
     if let Some(existing) = properties.get(property) {
         if existing != &value {
-            return Err(SkeinError::Semantic(format!(
+            return Err(HawDBError::Semantic(format!(
                 "conflicting equality predicates for matched node property '{property}'"
             )));
         }
@@ -558,7 +572,7 @@ pub(super) fn bind_value(
         ValueExpressionKind::Parameter(name) => parameters
             .get(name)
             .cloned()
-            .ok_or_else(|| SkeinError::Semantic(format!("missing parameter '${name}'"))),
+            .ok_or_else(|| HawDBError::Semantic(format!("missing parameter '${name}'"))),
         ValueExpressionKind::List(values) => values
             .iter()
             .map(|value| bind_value(value, parameters))
@@ -585,14 +599,14 @@ pub(super) fn timestamp_value(value: Value) -> Result<Value> {
         Value::Float(value) if value.is_finite() => {
             let nanos = (value * 1_000_000_000.0).round();
             if nanos < i64::MIN as f64 || nanos > i64::MAX as f64 {
-                return Err(SkeinError::Semantic(format!(
+                return Err(HawDBError::Semantic(format!(
                     "timestamp() value is out of range: {value}"
                 )));
             }
             Ok(Value::Int(nanos as i64))
         }
         Value::String(value) => parse_timestamp_string(&value).map(Value::Int),
-        value => Err(SkeinError::Semantic(format!(
+        value => Err(HawDBError::Semantic(format!(
             "timestamp() expects an ISO string or numeric epoch, got {value:?}"
         ))),
     }
@@ -618,7 +632,7 @@ pub(super) fn parse_timestamp_string(input: &str) -> Result<i64> {
         .split_once('T')
         .or_else(|| input.split_once(' '))
         .ok_or_else(|| {
-            SkeinError::Semantic(format!(
+            HawDBError::Semantic(format!(
                 "timestamp() expects YYYY-MM-DDTHH:MM:SS, got '{input}'"
             ))
         })?;
@@ -631,13 +645,13 @@ pub(super) fn parse_timestamp_string(input: &str) -> Result<i64> {
         .and_then(|value| value.checked_add((minute as i64) * 60))
         .and_then(|value| value.checked_add(second as i64))
         .ok_or_else(|| {
-            SkeinError::Semantic(format!("timestamp() value is out of range: '{input}'"))
+            HawDBError::Semantic(format!("timestamp() value is out of range: '{input}'"))
         })?;
     seconds
         .checked_mul(1_000_000_000)
         .and_then(|value| value.checked_add(nanos as i64))
         .ok_or_else(|| {
-            SkeinError::Semantic(format!("timestamp() value is out of range: '{input}'"))
+            HawDBError::Semantic(format!("timestamp() value is out of range: '{input}'"))
         })
 }
 
@@ -662,9 +676,9 @@ pub(super) fn parse_timestamp_time(input: &str) -> Result<(u32, u32, u32, u32)> 
     let minute = parse_timestamp_part::<u32>(parts.next(), "minute", input)?;
     let second_part = parts
         .next()
-        .ok_or_else(|| SkeinError::Semantic(format!("invalid timestamp time: '{input}'")))?;
+        .ok_or_else(|| HawDBError::Semantic(format!("invalid timestamp time: '{input}'")))?;
     if parts.next().is_some() {
-        return Err(SkeinError::Semantic(format!(
+        return Err(HawDBError::Semantic(format!(
             "invalid timestamp time: '{input}'"
         )));
     }
@@ -674,9 +688,9 @@ pub(super) fn parse_timestamp_time(input: &str) -> Result<(u32, u32, u32, u32)> 
         .unwrap_or((second_part, None));
     let second = second_text
         .parse::<u32>()
-        .map_err(|_| SkeinError::Semantic(format!("invalid timestamp time: '{input}'")))?;
+        .map_err(|_| HawDBError::Semantic(format!("invalid timestamp time: '{input}'")))?;
     if hour > 23 || minute > 59 || second > 59 {
-        return Err(SkeinError::Semantic(format!(
+        return Err(HawDBError::Semantic(format!(
             "invalid timestamp time: '{input}'"
         )));
     }
@@ -689,12 +703,12 @@ pub(super) fn parse_timestamp_time(input: &str) -> Result<(u32, u32, u32, u32)> 
 
 pub(super) fn parse_fractional_nanos(input: &str) -> Result<u32> {
     if input.is_empty() || input.len() > 9 || !input.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(SkeinError::Semantic(format!(
+        return Err(HawDBError::Semantic(format!(
             "invalid timestamp fractional seconds: '{input}'"
         )));
     }
     let mut nanos = input.parse::<u32>().map_err(|_| {
-        SkeinError::Semantic(format!("invalid timestamp fractional seconds: '{input}'"))
+        HawDBError::Semantic(format!("invalid timestamp fractional seconds: '{input}'"))
     })?;
     for _ in input.len()..9 {
         nanos *= 10;
@@ -706,13 +720,13 @@ pub(super) fn parse_timestamp_part<T>(part: Option<&str>, name: &str, full: &str
 where
     T: std::str::FromStr,
 {
-    part.ok_or_else(|| SkeinError::Semantic(format!("invalid timestamp {name}: '{full}'")))?
+    part.ok_or_else(|| HawDBError::Semantic(format!("invalid timestamp {name}: '{full}'")))?
         .parse::<T>()
-        .map_err(|_| SkeinError::Semantic(format!("invalid timestamp {name}: '{full}'")))
+        .map_err(|_| HawDBError::Semantic(format!("invalid timestamp {name}: '{full}'")))
 }
 
-pub(super) fn invalid_timestamp_date(input: &str) -> SkeinError {
-    SkeinError::Semantic(format!("invalid timestamp date: '{input}'"))
+pub(super) fn invalid_timestamp_date(input: &str) -> HawDBError {
+    HawDBError::Semantic(format!("invalid timestamp date: '{input}'"))
 }
 
 pub(super) fn days_in_month(year: i32, month: u32) -> u32 {
@@ -746,7 +760,7 @@ pub(super) fn bind_id_value(
 ) -> Result<Value> {
     match bind_value(expression, parameters)? {
         Value::Int(value) if value >= 0 => Ok(Value::Int(value)),
-        value => Err(SkeinError::Semantic(format!(
+        value => Err(HawDBError::Semantic(format!(
             "id() predicate requires a non-negative integer value, got {value:?}"
         ))),
     }
@@ -758,7 +772,7 @@ pub(super) fn validate_predicate(
 ) -> Result<()> {
     for variable in predicate_variables(predicate) {
         if !scope.contains(&variable) {
-            return Err(SkeinError::Semantic(format!(
+            return Err(HawDBError::Semantic(format!(
                 "unknown variable '{variable}' in predicate"
             )));
         }
@@ -829,7 +843,7 @@ pub(super) fn plan_predicate(
                 variable: variable.clone(),
                 values,
             }),
-            value => Err(SkeinError::Semantic(format!(
+            value => Err(HawDBError::Semantic(format!(
                 "IN predicate requires a list value, got {value:?}"
             ))),
         },
@@ -906,7 +920,7 @@ pub(super) fn plan_predicate(
                 property: property.clone(),
                 value: value.to_lowercase(),
             }),
-            value => Err(SkeinError::Semantic(format!(
+            value => Err(HawDBError::Semantic(format!(
                 "list_contains_lower predicate requires a string value, got {value:?}"
             ))),
         },
@@ -920,7 +934,7 @@ pub(super) fn plan_predicate(
                 property: property.clone(),
                 value,
             }),
-            value => Err(SkeinError::Semantic(format!(
+            value => Err(HawDBError::Semantic(format!(
                 "CONTAINS predicate requires a string value, got {value:?}"
             ))),
         },
@@ -934,7 +948,7 @@ pub(super) fn plan_predicate(
                 property: property.clone(),
                 value,
             }),
-            value => Err(SkeinError::Semantic(format!(
+            value => Err(HawDBError::Semantic(format!(
                 "STARTS WITH predicate requires a string value, got {value:?}"
             ))),
         },
@@ -948,7 +962,7 @@ pub(super) fn plan_predicate(
                 property: property.clone(),
                 value,
             }),
-            value => Err(SkeinError::Semantic(format!(
+            value => Err(HawDBError::Semantic(format!(
                 "ENDS WITH predicate requires a string value, got {value:?}"
             ))),
         },
@@ -962,7 +976,7 @@ pub(super) fn plan_predicate(
                 property: property.clone(),
                 pattern: ValidatedRegex::new(pattern)?,
             }),
-            value => Err(SkeinError::Semantic(format!(
+            value => Err(HawDBError::Semantic(format!(
                 "regex match predicate requires a string value, got {value:?}"
             ))),
         },
@@ -1008,7 +1022,7 @@ pub(super) fn plan_predicate(
                 property: property.clone(),
                 values,
             }),
-            value => Err(SkeinError::Semantic(format!(
+            value => Err(HawDBError::Semantic(format!(
                 "IN predicate requires a list value, got {value:?}"
             ))),
         },
@@ -1093,7 +1107,7 @@ pub(super) fn split_relationship_mutation_predicate(
         PropertyPredicate::Or(_) => {
             let variables = predicate_variables(predicate);
             if variables.len() != 1 {
-                return Err(SkeinError::Semantic(
+                return Err(HawDBError::Semantic(
                     "relationship mutation OR predicates cannot mix node and relationship variables"
                         .to_string(),
                 ));
@@ -1114,7 +1128,7 @@ pub(super) fn split_relationship_mutation_predicate(
         PropertyPredicate::Not(_) => {
             let variables = predicate_variables(predicate);
             if variables.len() != 1 {
-                return Err(SkeinError::Semantic(
+                return Err(HawDBError::Semantic(
                     "relationship mutation NOT predicates cannot mix node and relationship variables"
                         .to_string(),
                 ));
@@ -1135,12 +1149,12 @@ pub(super) fn split_relationship_mutation_predicate(
         _ => {
             let variables = predicate_variables(predicate);
             if variables.len() != 1 {
-                return Err(SkeinError::Semantic(
+                return Err(HawDBError::Semantic(
                     "relationship mutation predicate must bind one variable".to_string(),
                 ));
             }
             let variable = variables.iter().next().ok_or_else(|| {
-                SkeinError::Semantic(
+                HawDBError::Semantic(
                     "relationship mutation predicate must bind one variable".to_string(),
                 )
             })?;
@@ -1178,11 +1192,11 @@ pub(super) fn predicate_for_relationship_mutation_variable(
         return Ok((None, Some(predicate)));
     }
     if variable == target_variable {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "relationship mutation target predicates support only equality filters".to_string(),
         ));
     }
-    Err(SkeinError::Semantic(format!(
+    Err(HawDBError::Semantic(format!(
         "unknown variable '{variable}' in relationship mutation predicate"
     )))
 }
@@ -1202,7 +1216,7 @@ pub(super) fn bind_relationship_mutation_target_predicate(
             insert_endpoint_property(target_properties, property, bind_value(value, parameters)?)?;
             Ok((None, None))
         }
-        _ => Err(SkeinError::Semantic(
+        _ => Err(HawDBError::Semantic(
             "relationship mutation target predicates support only equality filters".to_string(),
         )),
     }

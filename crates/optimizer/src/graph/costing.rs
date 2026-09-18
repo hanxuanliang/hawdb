@@ -1,11 +1,25 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::cardinality::{
     estimate_aggregate_rows, estimate_aggregate_work_rows, estimate_filter_rows,
     estimate_full_text_rows, estimate_optional_degree_work, PlanBindings,
 };
 use super::{OptimizerCatalog, PhysicalPlan, PlanCost, PlanCostBreakdown};
-use skein_core::Value;
-use skein_cypher::RelationshipDirection;
-use skein_plan::{
+use hawdb_core::Value;
+use hawdb_cypher::RelationshipDirection;
+use hawdb_plan::{
     CompositeRangeSeek, ExactPropertySeekBranch, NodeProjectionAccess, PlanChildren,
     RelationshipCountLeg,
 };
@@ -534,9 +548,9 @@ fn estimate_local_operator_cost(
     }
 }
 
-fn vector_top_k(plan: &skein_plan::VectorPhysicalPlan) -> usize {
+fn vector_top_k(plan: &hawdb_plan::VectorPhysicalPlan) -> usize {
     match plan {
-        skein_plan::VectorPhysicalPlan::TopK { limit, .. } => *limit,
+        hawdb_plan::VectorPhysicalPlan::TopK { limit, .. } => *limit,
         _ => 1,
     }
 }

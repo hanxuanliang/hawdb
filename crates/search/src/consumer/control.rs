@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Admitted control-record inspection while the publication lease is held.
 
 use super::invalid;
@@ -6,7 +20,7 @@ use crate::build_memory::{
     decoder::Decoder, path::OwnedPath, reserved::native_path, BuildMemory, SPOOL_BUFFER_BYTES,
 };
 use crate::{Result, SEARCH_COMPRESSION_HEADER, SEARCH_SNAPSHOT_FILE};
-use skein_core::RuntimeTaskContext;
+use hawdb_core::RuntimeTaskContext;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::Path;
@@ -71,7 +85,7 @@ fn probe(input: impl Read, memory: &BuildMemory, task: &RuntimeTaskContext) -> R
 }
 
 fn check_control_records(first: &str, second: &[u8]) -> Result<()> {
-    if first != "SKEIN_SEARCH_PROJECTION_V1\n" {
+    if first != "HAWDB_SEARCH_PROJECTION_V1\n" {
         return Err(invalid("invalid snapshot header"));
     }
     // The reserved ASCII prefix is unchanged by the old lossy UTF-8 conversion.

@@ -1,8 +1,22 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{active_checkpoint_path, read_durable_text, rewrite_checksummed_file, unique_test_dir};
-use crate::error::SkeinError;
+use crate::error::HawDBError;
 use crate::value::Value;
 use crate::{Database, DatabaseConfig};
-use skein_storage::text::encode_string;
+use hawdb_storage::text::encode_string;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -46,7 +60,7 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 
 fn assert_corrupt_checkpoint_rejected(fixture: &Fixture, from: &str, to: &str, expected: &str) {
     let checkpoint = active_checkpoint_path(&fixture.0);
-    let manifest = fixture.0.join("manifest.skein");
+    let manifest = fixture.0.join("manifest.hawdb");
     let valid_checkpoint = fs::read(&checkpoint).unwrap();
     let valid_manifest = fs::read(&manifest).unwrap();
     assert!(read_durable_text(&checkpoint, "checkpoint")
@@ -74,7 +88,7 @@ fn assert_corrupt_checkpoint_rejected(fixture: &Fixture, from: &str, to: &str, e
             Ok(_) => panic!("corrupted checkpoint opened"),
             Err(error) => error,
         };
-        assert!(matches!(error, SkeinError::Storage(_)));
+        assert!(matches!(error, HawDBError::Storage(_)));
         assert!(error.to_string().contains(expected), "{error}");
         assert!(error.to_string().len() < 256);
         assert_eq!(snapshot(&fixture.0), before);

@@ -1,6 +1,20 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use crate::{SearchProjectionKind, SearchProjectionRow};
-use skein_core::RuntimeMemoryReservation;
+use hawdb_core::RuntimeMemoryReservation;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,7 +25,7 @@ impl Fixture {
     fn new() -> Self {
         static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
-            "skein-delta-context-{}-{}",
+            "hawdb-delta-context-{}-{}",
             std::process::id(),
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
@@ -213,7 +227,7 @@ fn delta_finish_rechecks_consumer_ownership_before_publication() {
     use crate::out_of_core::{SearchProjectionPublishLease, OUT_OF_CORE_MANIFEST_FILE};
     use crate::SEARCH_SNAPSHOT_FILE;
 
-    let header = "SKEIN_SEARCH_PROJECTION_V1\nprojection_consumer_binding\towner\n";
+    let header = "HAWDB_SEARCH_PROJECTION_V1\nprojection_consumer_binding\towner\n";
     for with_context in [false, true] {
         for binding in [
             None,

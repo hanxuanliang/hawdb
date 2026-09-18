@@ -1,17 +1,31 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{
     cosine_similarity, SearchDocument, SearchFallbackReasonCode, VectorSearchBackend,
     VectorSearchExecutionOptions,
 };
-use crate::error::{Result, SkeinError};
-use skein_executor::{
+use crate::error::{HawDBError, Result};
+use hawdb_executor::{
     execute_vector_plan, VectorCandidate, VectorCandidateBatch, VectorCandidateScanMetrics,
     VectorCandidateScanRequest, VectorExecutionReport, VectorExecutionSource,
     VectorRawRerankRequest, VectorRawScore, VectorResidualFilterRequest, VectorScoreSource,
 };
-use skein_optimizer::{
+use hawdb_optimizer::{
     plan_vector_search, OptimizerContext, QueryFamily, ResourceHints, VectorPrecision,
 };
-use skein_plan::VectorSearchLogicalPlan;
+use hawdb_plan::VectorSearchLogicalPlan;
 use std::collections::BTreeMap;
 #[cfg(feature = "qualification")]
 use std::collections::BTreeSet;
@@ -73,7 +87,7 @@ pub(super) fn execute_search_vector_plan(
             max_parallelism: vector_execution_options.max_parallelism.get(),
         });
     let planned = plan_vector_search(&logical, &context)
-        .map_err(|error| SkeinError::Storage(format!("vector planning failed: {error}")))?;
+        .map_err(|error| HawDBError::Storage(format!("vector planning failed: {error}")))?;
     debug_assert_eq!(planned.properties.precision, VectorPrecision::RawReranked);
     let vector_execution_options = VectorSearchExecutionOptions {
         max_parallelism: std::num::NonZeroUsize::new(
@@ -105,7 +119,7 @@ pub(super) fn execute_search_vector_plan(
         vector_execution_options,
     };
     let output = execute_vector_plan(&planned.plan, &mut source).map_err(|error| {
-        SkeinError::Storage(format!("vector physical execution failed: {error}"))
+        HawDBError::Storage(format!("vector physical execution failed: {error}"))
     })?;
     Ok(SearchVectorExecution {
         candidate_ids: output.candidate_ids,
@@ -133,7 +147,7 @@ struct SearchVectorSource<'a, 'b> {
 }
 
 impl VectorExecutionSource for SearchVectorSource<'_, '_> {
-    type Error = SkeinError;
+    type Error = HawDBError;
 
     fn scan_candidates(
         &mut self,
@@ -203,7 +217,7 @@ impl VectorExecutionSource for SearchVectorSource<'_, '_> {
                                 SearchFallbackReasonCode::CompressedVectorProjectionUnavailable,
                             );
                             self.fallback_reasons.push(format!(
-                                "Skein RaBitQ projection is required but candidate scan failed: {error}"
+                                "HawDB RaBitQ projection is required but candidate scan failed: {error}"
                             ));
                             Ok(VectorCandidateBatch {
                                 score_source: VectorScoreSource::Unavailable,
@@ -213,7 +227,7 @@ impl VectorExecutionSource for SearchVectorSource<'_, '_> {
                             self.fallback_reason_codes
                                 .push(SearchFallbackReasonCode::VectorIndexEmpty);
                             self.fallback_reasons.push(format!(
-                                "Skein RaBitQ projection unavailable; fell back to scalar vector scan: {error}"
+                                "HawDB RaBitQ projection unavailable; fell back to scalar vector scan: {error}"
                             ));
                             self.raw_vector_candidates()
                         }
@@ -258,7 +272,7 @@ impl VectorExecutionSource for SearchVectorSource<'_, '_> {
             .saturating_mul(std::mem::size_of::<(&str, &SearchDocument)>().saturating_mul(3));
         let required_working_bytes = candidate_bytes.saturating_add(lookup_bytes);
         if required_working_bytes > self.vector_execution_options.max_working_bytes {
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "raw vector rerank requires {required_working_bytes} estimated bytes, exceeding admitted working memory {}",
                 self.vector_execution_options.max_working_bytes
             )));
@@ -324,7 +338,7 @@ impl SearchVectorSource<'_, '_> {
         match self.vector_execution_options.task_context {
             Some(task_context) => task_context
                 .checkpoint()
-                .map_err(|reason| SkeinError::Execution(format!("vector search task {reason}"))),
+                .map_err(|reason| HawDBError::Execution(format!("vector search task {reason}"))),
             None => Ok(()),
         }
     }
@@ -332,7 +346,7 @@ impl SearchVectorSource<'_, '_> {
     #[cfg(feature = "vector-search")]
     fn record_candidate_scan_metrics(
         &mut self,
-        report: &skein_vector_projection::ProjectionSearchReport,
+        report: &hawdb_vector_projection::ProjectionSearchReport,
     ) {
         let next = VectorCandidateScanMetrics {
             kernel: report.kernel.as_str().to_string(),
@@ -403,7 +417,7 @@ impl SearchVectorSource<'_, '_> {
                 .saturating_mul(std::mem::size_of::<VectorCandidate>())
                 .saturating_add(id_bytes);
             if candidate_bytes > self.vector_execution_options.max_working_bytes {
-                return Err(SkeinError::Execution(format!(
+                return Err(HawDBError::Execution(format!(
                     "scalar vector candidates require {candidate_bytes} bytes, exceeding admitted working memory {}",
                     self.vector_execution_options.max_working_bytes
                 )));

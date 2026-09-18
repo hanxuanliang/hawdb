@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use std::cmp::Ordering;
 
@@ -63,7 +77,7 @@ fn assignment_failure_does_not_publish_or_rollback_a_callers_staging_map() {
     )
     .unwrap_err();
     assert!(
-        matches!(error, SkeinError::Execution(message) if message == "property increment overflowed i64")
+        matches!(error, HawDBError::Execution(message) if message == "property increment overflowed i64")
     );
     assert_eq!(original, properties(Some(Value::Int(1))));
     assert_eq!(staging, properties(Some(Value::Int(i64::MAX))));
@@ -208,7 +222,7 @@ fn campaign(seeds: u64) -> usize {
                 for operation in operations {
                     let actual =
                         evaluate(current.clone(), operation.clone()).map_err(|error| match error {
-                            SkeinError::Execution(message) => message,
+                            HawDBError::Execution(message) => message,
                             error => panic!("unexpected error kind: {error}"),
                         });
                     assert_eq!(

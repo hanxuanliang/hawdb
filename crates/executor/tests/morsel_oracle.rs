@@ -1,5 +1,19 @@
-use skein_core::{Result, RuntimeCancellationToken, RuntimeTaskContext, SkeinError};
-use skein_executor::{
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use hawdb_core::{HawDBError, Result, RuntimeCancellationToken, RuntimeTaskContext};
+use hawdb_executor::{
     execute_morsels_ordered, BoundedExecutor, Morsel, MorselAdmission, MorselAdmissionRequest,
     MorselOrdinal, MorselOutput, MorselStreamControl, MorselStreamResources, PipelineId,
     QueryMemoryClass, QueryMemoryLedger, SequentialMorselScheduler, SharedExecutorPool,
@@ -328,7 +342,7 @@ fn assert_stream(
             let output = TrackedOutput::new(fixture.work(morsel, &calls, gate), &lifetimes);
             let index = morsel.ordinal.0 as usize;
             if exit == Exit::WorkerError(index) {
-                return Err(SkeinError::Execution("injected worker failure".into()));
+                return Err(HawDBError::Execution("injected worker failure".into()));
             }
             assert_ne!(exit, Exit::WorkerPanic(index), "injected worker panic");
             if exit == Exit::CancelWorker(index) {
@@ -354,7 +368,7 @@ fn assert_stream(
             });
             assert_ne!(exit, Exit::ConsumerPanic(index), "injected consumer panic");
             if exit == Exit::ConsumerError(index) {
-                return Err(SkeinError::Execution("injected consumer failure".into()));
+                return Err(HawDBError::Execution("injected consumer failure".into()));
             }
             Ok(if exit == Exit::Stop(index) {
                 MorselStreamControl::Stop
@@ -571,7 +585,7 @@ fn materializing_error_order_does_not_imply_parallel_fail_fast() {
         let work = |morsel: Morsel| -> Result<u64> {
             calls.fetch_add(1, Ordering::SeqCst);
             match morsel.ordinal.0 {
-                2 | 4 => Err(SkeinError::Execution(format!(
+                2 | 4 => Err(HawDBError::Execution(format!(
                     "failure {}",
                     morsel.ordinal.0
                 ))),

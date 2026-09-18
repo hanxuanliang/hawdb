@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Memory-bounded blocking operators and spill-backed execution.
 
 use crate::binding::{binding_memory_bytes, value_memory_bytes, Binding, TopNBinding};
@@ -15,8 +29,8 @@ use crate::{
     BlockingOperatorMemoryReport, ExecutionLimit, ExecutionMemoryConfig, QueryMemoryAccount,
     QueryMemoryClass, QueryMemoryLedger,
 };
-use skein_core::{Catalog, Result, RuntimeTaskContext, SkeinError, Value};
-use skein_plan::{
+use hawdb_core::{Catalog, HawDBError, Result, RuntimeTaskContext, Value};
+use hawdb_plan::{
     AggregateFunction, AggregateTarget, Aggregation, PhysicalPlan, Projection, SortDirection,
     SortItem,
 };
@@ -551,7 +565,7 @@ mod tests {
         stream_top_n_batches(
             &input,
             &[SortItem {
-                key: skein_plan::SortKey::Column("value".to_string()),
+                key: hawdb_plan::SortKey::Column("value".to_string()),
                 direction: SortDirection::Asc,
             }],
             1,

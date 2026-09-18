@@ -1,9 +1,23 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Operation-owned opaque analyzer state; leases survive native TLS destruction.
 
 use crate::build_control::checkpoint;
 use crate::build_memory::{checked_add, BuildMemory};
-use crate::{Result, RuntimeTaskContext, SkeinError};
-use skein_executor::QueryMemoryLease;
+use crate::{HawDBError, Result, RuntimeTaskContext};
+use hawdb_executor::QueryMemoryLease;
 use std::cell::RefCell;
 use std::mem::size_of;
 
@@ -125,7 +139,7 @@ where
                 work(worker_workspace)
             })
             .map_err(|error| {
-                SkeinError::Execution(format!("search analyzer worker creation failed: {error}"))
+                HawDBError::Execution(format!("search analyzer worker creation failed: {error}"))
             })?;
         match handle.join() {
             Ok(result) => result,
@@ -135,7 +149,7 @@ where
 }
 
 fn required(bytes: Option<usize>) -> Result<usize> {
-    bytes.ok_or_else(|| SkeinError::Execution("search analyzer capacity overflow".into()))
+    bytes.ok_or_else(|| HawDBError::Execution("search analyzer capacity overflow".into()))
 }
 
 #[cfg(test)]

@@ -1,7 +1,21 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use skein_sql_syntax::{
+use hawdb_sql_syntax::{
     BinaryOperatorSyntax, ExpressionKindSyntax, ExpressionSyntax, GraphElementPatternSyntax,
     GraphPathPrimarySyntax, GraphPathSyntax, GraphTable, Identifier, LiteralSyntax,
     PostgresFromItemSyntax, PostgresSelectSyntax, QualifiedName, Span, TableAlias,
@@ -408,7 +422,7 @@ impl<'a> GraphTableBinder<'a> {
 
     fn bind_columns(
         &self,
-        columns: &[skein_sql_syntax::GraphTableColumn],
+        columns: &[hawdb_sql_syntax::GraphTableColumn],
     ) -> Result<Vec<BoundPgqColumn>, PgqBindError> {
         let mut names = BTreeSet::new();
         columns
@@ -529,12 +543,12 @@ impl<'a> GraphTableBinder<'a> {
             } => {
                 let inner = self.bind_expression(inner)?;
                 let data_type = match operator {
-                    skein_sql_syntax::UnaryOperatorSyntax::Not => {
+                    hawdb_sql_syntax::UnaryOperatorSyntax::Not => {
                         require_boolean(inner.data_type, expression.span)?;
                         PgqDataType::Boolean
                     }
-                    skein_sql_syntax::UnaryOperatorSyntax::Plus
-                    | skein_sql_syntax::UnaryOperatorSyntax::Minus => {
+                    hawdb_sql_syntax::UnaryOperatorSyntax::Plus
+                    | hawdb_sql_syntax::UnaryOperatorSyntax::Minus => {
                         require_numeric(inner.data_type, expression.span)?;
                         inner.data_type
                     }

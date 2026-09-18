@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -16,13 +30,13 @@ impl QueryIdentity {
         let query_language = query_language.trim().to_ascii_lowercase();
         let normalized_query = normalize_query(&query_language, query_text);
         let query_digest = versioned_hash(
-            "skein-query-digest",
+            "hawdb-query-digest",
             QUERY_DIGEST_PROTOCOL_VERSION,
             "q",
             &[query_language.as_bytes(), normalized_query.as_bytes()],
         );
         let query_text_hash = versioned_hash(
-            "skein-query-text",
+            "hawdb-query-text",
             QUERY_TEXT_HASH_PROTOCOL_VERSION,
             "t",
             &[query_language.as_bytes(), query_text.as_bytes()],

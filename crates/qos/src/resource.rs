@@ -1,8 +1,22 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #![forbid(unsafe_code)]
 
 use crate::{StorageDeviceProfile, StorageMediaKind};
 #[cfg(any(target_os = "linux", test))]
-use skein_cgroup::{LinuxCgroupSnapshot, LinuxCgroupValue, LinuxCgroupVersion};
+use hawdb_cgroup::{LinuxCgroupSnapshot, LinuxCgroupValue, LinuxCgroupVersion};
 use std::num::NonZeroUsize;
 use sysinfo::System;
 
@@ -309,7 +323,7 @@ fn cgroup_cpu_limits_from(
 /// Whether the sensed cgroup hierarchy carries limits this crate reads.
 ///
 /// Cgroup v1 and hybrid hierarchies are deliberately not parsed. Their
-/// `V1Unsupported` marker means "limits may exist but Skein does not read
+/// `V1Unsupported` marker means "limits may exist but HawDB does not read
 /// them", not "sensing failed": treating it as a failure would derive a
 /// zero memory capacity and permanently reject every query on such hosts.
 /// Host totals govern instead, and any v1-enforced limit remains the

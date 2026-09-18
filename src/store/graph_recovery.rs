@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Checkpoint mounting, WAL replay, derived-state loading, and snapshot import paths for [`GraphStore`].
 
 use super::*;
@@ -10,20 +24,20 @@ impl GraphStore {
         relationships: Vec<GraphSnapshotRelationshipImport>,
     ) -> Result<()> {
         if self.basic_statistics.node_count != 0 || self.basic_statistics.relationship_count != 0 {
-            return Err(SkeinError::Storage(
-                "Skein Lightning initial import requires an empty target graph".to_string(),
+            return Err(HawDBError::Storage(
+                "HawDB Lightning initial import requires an empty target graph".to_string(),
             ));
         }
         let mut node_ids = BTreeSet::new();
         for (id, label, _) in &nodes {
             if label.is_empty() {
-                return Err(SkeinError::Storage(
-                    "Skein Lightning initial import node label is empty".to_string(),
+                return Err(HawDBError::Storage(
+                    "HawDB Lightning initial import node label is empty".to_string(),
                 ));
             }
             if !node_ids.insert(*id) {
-                return Err(SkeinError::Storage(format!(
-                    "Skein Lightning initial import duplicate node id {}",
+                return Err(HawDBError::Storage(format!(
+                    "HawDB Lightning initial import duplicate node id {}",
                     id.0
                 )));
             }
@@ -31,25 +45,25 @@ impl GraphStore {
         let mut relationship_ids = BTreeSet::new();
         for (id, source, target, rel_type, _) in &relationships {
             if rel_type.is_empty() {
-                return Err(SkeinError::Storage(
-                    "Skein Lightning initial import relationship type is empty".to_string(),
+                return Err(HawDBError::Storage(
+                    "HawDB Lightning initial import relationship type is empty".to_string(),
                 ));
             }
             if !relationship_ids.insert(*id) {
-                return Err(SkeinError::Storage(format!(
-                    "Skein Lightning initial import duplicate relationship id {}",
+                return Err(HawDBError::Storage(format!(
+                    "HawDB Lightning initial import duplicate relationship id {}",
                     id.0
                 )));
             }
             if !node_ids.contains(source) {
-                return Err(SkeinError::Storage(format!(
-                    "Skein Lightning initial import relationship {} references missing source node {}",
+                return Err(HawDBError::Storage(format!(
+                    "HawDB Lightning initial import relationship {} references missing source node {}",
                     id.0, source.0
                 )));
             }
             if !node_ids.contains(target) {
-                return Err(SkeinError::Storage(format!(
-                    "Skein Lightning initial import relationship {} references missing target node {}",
+                return Err(HawDBError::Storage(format!(
+                    "HawDB Lightning initial import relationship {} references missing target node {}",
                     id.0, target.0
                 )));
             }
@@ -102,12 +116,12 @@ impl GraphStore {
         Ok(())
     }
 
-    pub(crate) fn import_skein_snapshot_rows_with_source_fingerprint(
+    pub(crate) fn import_hawdb_snapshot_rows_with_source_fingerprint(
         &mut self,
         catalog: &mut Catalog,
-        import: SkeinSnapshotRowsImport,
+        import: HawDBSnapshotRowsImport,
     ) -> Result<()> {
-        let SkeinSnapshotRowsImport {
+        let HawDBSnapshotRowsImport {
             stable_id_mapping,
             source_fingerprint,
             nodes,
@@ -121,21 +135,21 @@ impl GraphStore {
             || (!self.relational_state.is_empty() && !target_has_only_engine_bootstrap)
             || !catalog.is_empty()
         {
-            return Err(SkeinError::Storage(
-                "skein lightning initial import requires an empty target database".to_string(),
+            return Err(HawDBError::Storage(
+                "hawdb lightning initial import requires an empty target database".to_string(),
             ));
         }
 
         let mut node_ids = BTreeSet::new();
         for (id, label, _) in &nodes {
             if label.is_empty() {
-                return Err(SkeinError::Storage(
-                    "skein lightning initial import node label is empty".to_string(),
+                return Err(HawDBError::Storage(
+                    "hawdb lightning initial import node label is empty".to_string(),
                 ));
             }
             if !node_ids.insert(*id) {
-                return Err(SkeinError::Storage(format!(
-                    "skein lightning initial import duplicate node id {}",
+                return Err(HawDBError::Storage(format!(
+                    "hawdb lightning initial import duplicate node id {}",
                     id.0
                 )));
             }
@@ -143,19 +157,19 @@ impl GraphStore {
         let mut relationship_ids = BTreeSet::new();
         for (id, source, target, rel_type, _) in &relationships {
             if rel_type.is_empty() {
-                return Err(SkeinError::Storage(
-                    "skein lightning initial import relationship type is empty".to_string(),
+                return Err(HawDBError::Storage(
+                    "hawdb lightning initial import relationship type is empty".to_string(),
                 ));
             }
             if !relationship_ids.insert(*id) {
-                return Err(SkeinError::Storage(format!(
-                    "skein lightning initial import duplicate relationship id {}",
+                return Err(HawDBError::Storage(format!(
+                    "hawdb lightning initial import duplicate relationship id {}",
                     id.0
                 )));
             }
             if !node_ids.contains(source) || !node_ids.contains(target) {
-                return Err(SkeinError::Storage(format!(
-                    "skein lightning initial import relationship {} references a missing endpoint",
+                return Err(HawDBError::Storage(format!(
+                    "hawdb lightning initial import relationship {} references a missing endpoint",
                     id.0
                 )));
             }
@@ -171,10 +185,10 @@ impl GraphStore {
         let target_commit_epoch = self
             .commit_epoch
             .checked_add(1)
-            .ok_or_else(|| SkeinError::Storage("commit epoch overflow".to_string()))?;
+            .ok_or_else(|| HawDBError::Storage("commit epoch overflow".to_string()))?;
         let relational_record =
             encode_relational_checkpoint(target_commit_epoch, &relational_state)
-                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                .map_err(|error| HawDBError::Storage(error.to_string()))?;
         let mut ops = Vec::with_capacity(nodes.len() + relationships.len() + 2);
         ops.push(WalOp::MarkInitialImportSource { source_fingerprint });
         ops.push(WalOp::RelationalSnapshot {
@@ -266,7 +280,7 @@ impl GraphStore {
         };
         if !durable.checkpoint_path.exists() {
             if durable.checkpoint_commit_epoch != 0 {
-                return Err(SkeinError::Storage(format!(
+                return Err(HawDBError::Storage(format!(
                     "manifest checkpoint generation {} is missing",
                     durable.checkpoint_epoch
                 )));
@@ -280,7 +294,7 @@ impl GraphStore {
         let (body, checksum) = split_checkpoint_checksum(&text)?;
         let actual = checksum_bytes(body.as_bytes());
         if checksum != actual {
-            return Err(SkeinError::Storage(format!(
+            return Err(HawDBError::Storage(format!(
                 "checkpoint checksum mismatch: expected {checksum}, got {actual}"
             )));
         }
@@ -305,14 +319,14 @@ impl GraphStore {
             let overflow = durable.open_bound_relational_overflow()?;
             let rows = durable.open_bound_relational_row_pages(&overflow)?;
             if !rows.manifest().tables.is_empty() {
-                return Err(SkeinError::Storage(
+                return Err(HawDBError::Storage(
                     "checkpoint stores canonical metadata-only relational rows; reopen requires OutOfCore residency with Authoritative relational indexes"
                         .to_string(),
                 ));
             }
         }
-        let mut decoded = skein_storage::checkpoint::DecodedCheckpoint::default();
-        skein_storage::checkpoint::parse_checkpoint(body, catalog, &mut decoded)?;
+        let mut decoded = hawdb_storage::checkpoint::DecodedCheckpoint::default();
+        hawdb_storage::checkpoint::parse_checkpoint(body, catalog, &mut decoded)?;
         self.next_node_id = decoded.next_node_id;
         self.next_rel_id = decoded.next_rel_id;
         if let Some(commit_epoch) = decoded.commit_epoch {
@@ -362,13 +376,13 @@ impl GraphStore {
             retain_valid_index_statistics_samples(&mut self.checkpoint_statistics, catalog);
         }
         if loaded_generation != Some(expected_generation) {
-            return Err(SkeinError::Storage(format!(
+            return Err(HawDBError::Storage(format!(
                 "checkpoint generation {:?} does not match manifest generation {expected_generation}",
                 loaded_generation
             )));
         }
         if loaded_commit_epoch != Some(expected_commit_epoch) {
-            return Err(SkeinError::Storage(format!(
+            return Err(HawDBError::Storage(format!(
                 "checkpoint commit epoch {:?} does not match manifest commit epoch {expected_commit_epoch}",
                 loaded_commit_epoch
             )));
@@ -379,7 +393,7 @@ impl GraphStore {
             let max_bytes = RelationalDecodeLimits::checkpoint().max_record_bytes;
             let file_len = fs::metadata(&path)?.len();
             if file_len > max_bytes as u64 {
-                return Err(SkeinError::Storage(format!(
+                return Err(HawDBError::Storage(format!(
                     "relational checkpoint contains {file_len} bytes, exceeding max_record_bytes {max_bytes}"
                 )));
             }
@@ -404,9 +418,9 @@ impl GraphStore {
                     RelationalDecodeLimits::checkpoint(),
                     index_load,
                 )
-                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                .map_err(|error| HawDBError::Storage(error.to_string()))?;
                 if checkpoint.epoch != self.commit_epoch {
-                    return Err(SkeinError::Storage(format!(
+                    return Err(HawDBError::Storage(format!(
                         "relational checkpoint epoch {} does not match graph commit epoch {}",
                         checkpoint.epoch, self.commit_epoch
                     )));
@@ -416,13 +430,13 @@ impl GraphStore {
         }
         if let Some(row_root) = canonical_relational_manifest.as_ref() {
             if row_root.source_commit_epoch != self.commit_epoch {
-                return Err(SkeinError::Storage(format!(
+                return Err(HawDBError::Storage(format!(
                     "relational row root epoch {} does not match graph commit epoch {}",
                     row_root.source_commit_epoch, self.commit_epoch
                 )));
             }
             self.relational_state = RelationalState::from_canonical_row_root(row_root)
-                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                .map_err(|error| HawDBError::Storage(error.to_string()))?;
         }
         match loaded_search_projection_change_log_start_epoch {
             Some(start_epoch) => {
@@ -433,7 +447,7 @@ impl GraphStore {
                 )?;
             }
             None => {
-                return Err(SkeinError::Storage(
+                return Err(HawDBError::Storage(
                     "checkpoint search projection changes are missing their start epoch"
                         .to_string(),
                 ));
@@ -445,7 +459,7 @@ impl GraphStore {
                 .as_ref()
                 .and_then(|durable| durable.canonical_segments.clone())
                 .ok_or_else(|| {
-                    SkeinError::Storage(
+                    HawDBError::Storage(
                         "checkpoint delegates records to missing canonical segments".to_string(),
                     )
                 })?;
@@ -468,7 +482,7 @@ impl GraphStore {
                         );
                         Ok(())
                     })
-                    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                    .map_err(|error| HawDBError::Storage(error.to_string()))?;
                 reader
                     .scan_relationships(|relationship| {
                         self.apply_create_relationship(
@@ -480,7 +494,7 @@ impl GraphStore {
                         );
                         Ok(())
                     })
-                    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                    .map_err(|error| HawDBError::Storage(error.to_string()))?;
             } else {
                 self.basic_statistics.node_count = reader.manifest().node_count;
                 self.basic_statistics.relationship_count = reader.manifest().relationship_count;
@@ -531,7 +545,7 @@ impl GraphStore {
         let wal_present = wal_path.exists();
         if !wal_path.exists() {
             if checkpoint_epoch > 0 {
-                return Err(SkeinError::Storage(format!(
+                return Err(HawDBError::Storage(format!(
                     "manifest WAL generation {wal_generation} is missing"
                 )));
             }
@@ -559,7 +573,7 @@ impl GraphStore {
         }
         let wal_len = fs::metadata(&wal_path)?.len();
         if config.max_bytes.is_some_and(|limit| wal_len > limit) {
-            return Err(SkeinError::Storage(format!(
+            return Err(HawDBError::Storage(format!(
                 "WAL replay byte limit exceeded: max_wal_replay_bytes={}",
                 config.max_bytes.unwrap_or_default()
             )));
@@ -567,12 +581,12 @@ impl GraphStore {
         let mut cursor = match WalRecordCursor::open(&wal_path, config.max_record_bytes)? {
             WalOpenOutcome::Cursor(cursor) => cursor,
             WalOpenOutcome::MissingHeader => {
-                return Err(SkeinError::Storage(format!(
+                return Err(HawDBError::Storage(format!(
                     "WAL generation {wal_generation} is missing its header"
                 )));
             }
             WalOpenOutcome::HeaderTorn { reason } => {
-                return Err(SkeinError::Storage(reason));
+                return Err(HawDBError::Storage(reason));
             }
             WalOpenOutcome::HeaderCorrupt { reason } => {
                 return reject_corrupt_wal_record(
@@ -586,7 +600,7 @@ impl GraphStore {
             }
         };
         if cursor.generation() != wal_generation || cursor.start_lsn() != wal_replay_start_lsn {
-            return Err(SkeinError::Storage(format!(
+            return Err(HawDBError::Storage(format!(
                 "WAL header generation/start ({}, {}) does not match manifest ({wal_generation}, {wal_replay_start_lsn})",
                 cursor.generation(),
                 cursor.start_lsn()
@@ -617,7 +631,7 @@ impl GraphStore {
                         break;
                     }
                     WalCursorEvent::TornTail { reason, .. } => {
-                        return Err(SkeinError::Storage(format!(
+                        return Err(HawDBError::Storage(format!(
                         "strict WAL recovery rejected torn tail: {reason}; use DatabaseDoctor to inspect and explicitly repair the incomplete final record"
                     )));
                     }
@@ -652,7 +666,7 @@ impl GraphStore {
                     read_only,
                     config.max_quarantine_bytes,
                 )?;
-                return Err(SkeinError::Storage(format!(
+                return Err(HawDBError::Storage(format!(
                     "WAL LSN sequence mismatch at byte offset {record_start}: expected {expected_lsn}, got {}",
                     entry.lsn
                 )));
@@ -660,7 +674,7 @@ impl GraphStore {
             if let Some(max_entries) = config.max_entries
                 && replayed_entries >= max_entries
             {
-                return Err(SkeinError::Storage(format!(
+                return Err(HawDBError::Storage(format!(
                     "WAL replay entry limit exceeded: max_wal_replay_entries={max_entries}"
                 )));
             }
@@ -669,7 +683,7 @@ impl GraphStore {
                     .max_batch_operations
                     .is_some_and(|limit| ops.len() > limit)
             {
-                return Err(SkeinError::Storage(format!(
+                return Err(HawDBError::Storage(format!(
                     "WAL batch operation limit exceeded: max_wal_batch_operations={}",
                     config.max_batch_operations.unwrap_or_default()
                 )));
@@ -678,10 +692,10 @@ impl GraphStore {
             replayed_bytes = replayed_bytes.saturating_add(record_encoded_len);
             relational_recovery_source
                 .record(entry.lsn, payload_len, payload_sha256)
-                .map_err(|reason| SkeinError::Storage(reason.to_string()))?;
+                .map_err(|reason| HawDBError::Storage(reason.to_string()))?;
             expected_lsn = expected_lsn
                 .checked_add(1)
-                .ok_or_else(|| SkeinError::Storage("WAL LSN overflow during replay".to_string()))?;
+                .ok_or_else(|| HawDBError::Storage("WAL LSN overflow during replay".to_string()))?;
             match entry.op {
                 WalOp::Batch(ops) => {
                     self.ensure_out_of_core_delta_replay_admission(&ops)?;
@@ -723,7 +737,7 @@ impl GraphStore {
             Some(
                 relational_recovery_source
                     .finish()
-                    .map_err(|reason| SkeinError::Storage(reason.to_string()))?,
+                    .map_err(|reason| HawDBError::Storage(reason.to_string()))?,
             )
         };
         self.finish_relational_row_page_recovery(relational_recovery_source);

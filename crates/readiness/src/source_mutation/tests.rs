@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 
 #[test]
@@ -35,7 +49,7 @@ fn source_mutation_dual_write_readiness_blocks_composite_source_ingest_gaps() {
         .find(|item| item.family == NOWLEDGE_MEM_SOURCE_MUTATION_FAMILY_INGEST_CREATE)
         .unwrap();
     ingest.payload_frozen = false;
-    ingest.skein_ack_recorded = false;
+    ingest.hawdb_ack_recorded = false;
     ingest.independent_watermarks_recorded = false;
     ingest.replay_idempotent = false;
     ingest.search_projection_payload_frozen = false;
@@ -60,7 +74,7 @@ fn source_mutation_dual_write_readiness_blocks_composite_source_ingest_gaps() {
         .contains(&"source_mutation_dual_write_payload_not_frozen".to_string()));
     assert!(report
         .blocker_codes
-        .contains(&"source_mutation_dual_write_skein_ack_missing".to_string()));
+        .contains(&"source_mutation_dual_write_hawdb_ack_missing".to_string()));
     assert!(report
         .blocker_codes
         .contains(&"source_mutation_dual_write_independent_watermarks_missing".to_string()));

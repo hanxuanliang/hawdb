@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 
 #[test]
@@ -40,7 +54,7 @@ fn adjacency_consolidation_is_bounded_and_background_admitted() {
         .create_node(&mut db.catalog, "Source", BTreeMap::new())
         .unwrap();
     let base_degree = crate::store::DENSE_ADJACENCY_DEGREE_THRESHOLD;
-    let delta_count = skein_storage::ADJACENCY_DELTA_CONSOLIDATION_ENTRIES;
+    let delta_count = hawdb_storage::ADJACENCY_DELTA_CONSOLIDATION_ENTRIES;
     let targets = (0..base_degree + delta_count)
         .map(|_| {
             db.store
@@ -155,8 +169,8 @@ fn background_maintenance_kinds_have_stable_string_encodings() {
             "search_projection_metadata_repair",
         ),
         (
-            BackgroundMaintenanceKind::SkeinLightningBootstrapExport,
-            "skein_lightning_bootstrap_export",
+            BackgroundMaintenanceKind::HawDBLightningBootstrapExport,
+            "hawdb_lightning_bootstrap_export",
         ),
         (
             BackgroundMaintenanceKind::ExternalContentArtifactJob,
@@ -226,7 +240,7 @@ fn stale_optimizer_statistics_are_caller_owned_background_work() {
             include_search_projection_graph_delta_freshness: false,
             include_search_projection_rebuild: false,
             include_search_projection_metadata_repair: false,
-            include_skein_lightning_bootstrap_export: false,
+            include_hawdb_lightning_bootstrap_export: false,
             include_external_content_artifact_jobs: false,
             ..BackgroundMaintenanceOptions::default()
         };
@@ -474,7 +488,7 @@ fn background_maintenance_includes_stale_search_projection_graph_delta() {
             include_property_index_projection: false,
             include_search_projection_rebuild: false,
             include_search_projection_metadata_repair: false,
-            include_skein_lightning_bootstrap_export: false,
+            include_hawdb_lightning_bootstrap_export: false,
             include_external_content_artifact_jobs: false,
             ..BackgroundMaintenanceOptions::default()
         },
@@ -512,7 +526,7 @@ fn background_maintenance_includes_stale_search_projection_graph_delta() {
             include_property_index_projection: false,
             include_search_projection_rebuild: false,
             include_search_projection_metadata_repair: false,
-            include_skein_lightning_bootstrap_export: false,
+            include_hawdb_lightning_bootstrap_export: false,
             include_external_content_artifact_jobs: false,
             ..BackgroundMaintenanceOptions::default()
         },
@@ -558,7 +572,7 @@ fn background_maintenance_can_disable_stale_search_projection_graph_delta() {
             include_search_projection_graph_delta_freshness: false,
             include_search_projection_rebuild: false,
             include_search_projection_metadata_repair: false,
-            include_skein_lightning_bootstrap_export: false,
+            include_hawdb_lightning_bootstrap_export: false,
             include_external_content_artifact_jobs: false,
             ..BackgroundMaintenanceOptions::default()
         },
@@ -607,13 +621,13 @@ fn background_maintenance_ranks_mixed_nowledge_background_work() {
     assert!(names.contains(&"property_index_projection"));
     assert!(names.contains(&"search_projection_graph_delta"));
     assert!(names.contains(&"search_projection_rebuild"));
-    assert!(names.contains(&"skein_lightning_bootstrap_export"));
+    assert!(names.contains(&"hawdb_lightning_bootstrap_export"));
     assert!(names.contains(&"external_content_artifact_job"));
     assert!(kinds.contains(&BackgroundMaintenanceKind::SchemaMaintenance));
     assert!(kinds.contains(&BackgroundMaintenanceKind::PropertyIndexProjection));
     assert!(kinds.contains(&BackgroundMaintenanceKind::SearchProjectionGraphDelta));
     assert!(kinds.contains(&BackgroundMaintenanceKind::SearchProjectionRebuild));
-    assert!(kinds.contains(&BackgroundMaintenanceKind::SkeinLightningBootstrapExport));
+    assert!(kinds.contains(&BackgroundMaintenanceKind::HawDBLightningBootstrapExport));
     assert!(kinds.contains(&BackgroundMaintenanceKind::ExternalContentArtifactJob));
     let graph_delta_candidate = candidates
         .iter()
@@ -728,7 +742,7 @@ fn background_maintenance_summary_exposes_qos_counts_and_stable_codes() {
             include_schema_maintenance: false,
             include_property_index_projection: false,
             include_search_projection_metadata_repair: false,
-            include_skein_lightning_bootstrap_export: false,
+            include_hawdb_lightning_bootstrap_export: false,
             include_external_content_artifact_jobs: false,
             ..BackgroundMaintenanceOptions::default()
         },
@@ -838,7 +852,7 @@ fn background_maintenance_summary_exposes_qos_counts_and_stable_codes() {
 }
 
 #[test]
-fn background_maintenance_includes_skein_lightning_bootstrap_import_work() {
+fn background_maintenance_includes_hawdb_lightning_bootstrap_import_work() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'root'})-[:LINKS]->(:Entity {id: 'mid'})")
         .unwrap();
@@ -855,13 +869,13 @@ fn background_maintenance_includes_skein_lightning_bootstrap_import_work() {
     );
 
     assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0].name, "skein_lightning_bootstrap_export");
+    assert_eq!(candidates[0].name, "hawdb_lightning_bootstrap_export");
     assert_eq!(candidates[0].plan.request.class, WorkClass::Import);
     assert_eq!(candidates[0].plan.request.estimated_operations, 3);
 }
 
 #[test]
-fn background_maintenance_can_disable_skein_lightning_bootstrap_candidate() {
+fn background_maintenance_can_disable_hawdb_lightning_bootstrap_candidate() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'root'})").unwrap();
     let candidates = db.background_maintenance_candidates(
@@ -871,7 +885,7 @@ fn background_maintenance_can_disable_skein_lightning_bootstrap_candidate() {
             include_property_index_projection: false,
             include_search_projection_rebuild: false,
             include_search_projection_metadata_repair: false,
-            include_skein_lightning_bootstrap_export: false,
+            include_hawdb_lightning_bootstrap_export: false,
             include_external_content_artifact_jobs: false,
             ..BackgroundMaintenanceOptions::default()
         },
@@ -881,7 +895,7 @@ fn background_maintenance_can_disable_skein_lightning_bootstrap_candidate() {
 }
 
 #[test]
-fn background_maintenance_ranks_skein_lightning_against_import_lane_budget() {
+fn background_maintenance_ranks_hawdb_lightning_against_import_lane_budget() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'root'})-[:LINKS]->(:Entity {id: 'mid'})")
         .unwrap();
@@ -906,7 +920,7 @@ fn background_maintenance_ranks_skein_lightning_against_import_lane_budget() {
     );
 
     assert_eq!(ranked.len(), 1);
-    assert_eq!(ranked[0].name, "skein_lightning_bootstrap_export");
+    assert_eq!(ranked[0].name, "hawdb_lightning_bootstrap_export");
     assert!(matches!(
         ranked[0].decision.admission,
         QosAdmission::Defer { .. }

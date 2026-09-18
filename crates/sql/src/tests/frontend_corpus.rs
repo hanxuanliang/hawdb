@@ -1,12 +1,26 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Migration evidence for the two existing frontends, without changing routing.
 
 use crate::{prepare_postgres_sql, SqlStatement};
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
-use skein_core::SkeinError;
-use skein_sql_syntax::{
+use hawdb_core::HawDBError;
+use hawdb_sql_syntax::{
     parse_postgres_statement, tokenize, PostgresFromItemSyntax, PostgresStatementSyntax, TokenKind,
 };
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod checks;
@@ -183,8 +197,8 @@ fn production(sql: &str) -> Result<(Outcome, Option<&'static str>), String> {
         }
         Err(error) => {
             let code = match error {
-                SkeinError::Parse(_) => "Parse",
-                SkeinError::Semantic(_) => "Semantic",
+                HawDBError::Parse(_) => "Parse",
+                HawDBError::Semantic(_) => "Semantic",
                 other => {
                     return Err(format!(
                         "unexpected production preparation error: {other:?}"

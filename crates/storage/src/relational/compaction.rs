@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Relational compaction configuration and report contracts.
 
 use super::{
@@ -5,7 +19,7 @@ use super::{
     RelationalRowPageRewriteConfig,
 };
 use crate::{CanonicalAdjacencyConfig, CanonicalSegmentConfig, PersistentPropertyProjectionConfig};
-use skein_core::{Result, SkeinError};
+use hawdb_core::{HawDBError, Result};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,7 +79,7 @@ impl RelationalRowPageCompactionConfig {
                 bytes.checked_add(canonical.target_segment_bytes.get().saturating_mul(2))
             })
             .ok_or_else(|| {
-                SkeinError::Storage("row-page compaction admission byte count overflow".to_string())
+                HawDBError::Storage("row-page compaction admission byte count overflow".to_string())
             })
     }
 }
@@ -130,12 +144,12 @@ impl RelationalOverflowCompactionConfig {
     pub fn admission_bytes(self) -> Result<u64> {
         let sort_bytes =
             u64::try_from(self.reference_sort.max_memory_bytes.get()).map_err(|_| {
-                SkeinError::Storage(
+                HawDBError::Storage(
                     "overflow compaction sort memory exceeds this target".to_string(),
                 )
             })?;
         let overlay_bytes = u64::try_from(self.max_overlay_bytes.get()).map_err(|_| {
-            SkeinError::Storage(
+            HawDBError::Storage(
                 "overflow compaction overlay memory exceeds this target".to_string(),
             )
         })?;
@@ -149,7 +163,7 @@ impl RelationalOverflowCompactionConfig {
                 )
             })
             .ok_or_else(|| {
-                SkeinError::Storage("overflow compaction admission byte count overflow".to_string())
+                HawDBError::Storage("overflow compaction admission byte count overflow".to_string())
             })
     }
 }

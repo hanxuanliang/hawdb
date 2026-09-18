@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! CD-C legality analysis and memo-backed join rewrite enumeration.
 
 use crate::{
@@ -5,7 +19,7 @@ use crate::{
     RelationalJoinEnumerationConfig, RelationalJoinEnumerationError, RelationalJoinPredicateId,
     RelationalJoinRelation, RequiredProperties,
 };
-use skein_expression::{prove_null_rejecting, BindingId, BindingSet, BoundPredicate};
+use hawdb_expression::{prove_null_rejecting, BindingId, BindingSet, BoundPredicate};
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
@@ -606,7 +620,7 @@ fn binding_intersection(left: &BindingSet, right: &BindingSet) -> BindingSet {
 mod tests {
     use super::*;
     use crate::{RelationalAccessPathDescriptor, RelationalAccessPathKind};
-    use skein_expression::{BoundScalarExpression, ScalarNullability};
+    use hawdb_expression::{BoundScalarExpression, ScalarNullability};
     use std::collections::BTreeSet;
 
     const A: BindingId = BindingId::new(1);

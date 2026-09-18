@@ -1,10 +1,24 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #[path = "../benches/wal_group_commit/recovery.rs"]
 mod recovery;
 
 #[cfg(test)]
 mod tests {
     use super::recovery::*;
-    use skein::Database;
+    use hawdb::Database;
     use std::io::Write;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,7 +32,7 @@ mod tests {
         fn create(rows: &[(i64, &str)]) -> Self {
             static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
             let path = std::env::temp_dir().join(format!(
-                "skein-wal-benchmark-recovery-{}-{}",
+                "hawdb-wal-benchmark-recovery-{}-{}",
                 std::process::id(),
                 SEQUENCE.fetch_add(1, Ordering::Relaxed),
             ));
@@ -168,7 +182,7 @@ mod tests {
                     .starts_with("wal.")
                     && path
                         .extension()
-                        .is_some_and(|extension| extension == "skein")
+                        .is_some_and(|extension| extension == "hawdb")
             })
             .expect("fixture must retain its WAL");
         std::fs::OpenOptions::new()

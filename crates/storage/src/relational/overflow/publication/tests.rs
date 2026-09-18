@@ -1,10 +1,24 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use crate::durability::fail_durable_replace_for_destination;
 use crate::relational::{
     RelationalHydrationBudget, RelationalOverflowConfig, RelationalOverflowReferenceSetBuilder,
     RelationalOverflowReferenceSortConfig, RelationalScalarType, RelationalValue,
 };
-use skein_core::{RuntimeCancellationToken, RuntimeTaskContext};
+use hawdb_core::{RuntimeCancellationToken, RuntimeTaskContext};
 use std::fs::{self, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
@@ -71,7 +85,7 @@ fn persisted_overflow_candidate_does_not_change_latest_selection() {
     fs::write(
         directory
             .join(RELATIONAL_OVERFLOW_MANIFEST_FILE)
-            .with_extension("skein.tmp"),
+            .with_extension("hawdb.tmp"),
         b"abandoned latest selector",
     )
     .unwrap();
@@ -125,7 +139,7 @@ fn bound_overflow_generation_verifies_the_canonical_manifest_image() {
     ));
 
     let mut wrong_root = report.generation_artifacts;
-    wrong_root.root_set_digest = skein_integrity::integrity_digest(b"wrong overflow root").sha256;
+    wrong_root.root_set_digest = hawdb_integrity::integrity_digest(b"wrong overflow root").sha256;
     assert!(matches!(
         RelationalOverflowRootReader::open_bound_generation(&directory, wrong_root, config),
         Err(RelationalOverflowPublicationError::Corrupt(message))
@@ -710,7 +724,7 @@ fn flip_byte(path: &std::path::Path, offset: u64) {
 fn unique_test_dir(name: &str) -> PathBuf {
     let sequence = TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "skein-relational-overflow-{name}-{}-{sequence}",
+        "hawdb-relational-overflow-{name}-{}-{sequence}",
         std::process::id()
     ))
 }

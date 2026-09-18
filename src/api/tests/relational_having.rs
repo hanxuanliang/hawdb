@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 
 fn having_fixture() -> Database {
@@ -294,7 +308,7 @@ fn relational_having_reads_hidden_overflow_metadata_and_hydrates_value_compariso
         let mut database = Database::open_with_config(
             &path,
             DatabaseConfig {
-                relational_index_mode: skein_storage::RelationalIndexMode::Shadow,
+                relational_index_mode: hawdb_storage::RelationalIndexMode::Shadow,
                 ..DatabaseConfig::default()
             },
         )
@@ -314,8 +328,8 @@ fn relational_having_reads_hidden_overflow_metadata_and_hydrates_value_compariso
     }
     let config = DatabaseConfig {
         read_only: true,
-        storage_residency_mode: skein_storage::StorageResidencyMode::OutOfCore,
-        relational_index_mode: skein_storage::RelationalIndexMode::Authoritative,
+        storage_residency_mode: hawdb_storage::StorageResidencyMode::OutOfCore,
+        relational_index_mode: hawdb_storage::RelationalIndexMode::Authoritative,
         max_relational_hydration_bytes: std::num::NonZeroUsize::new(32 * 1024).unwrap(),
         ..DatabaseConfig::default()
     };

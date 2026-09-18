@@ -1,10 +1,24 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::state::{
     aggregate_expression_base_memory_bytes, sql_expression_memory_bytes, AggregateExpressionState,
     AggregateMemoryDelta,
 };
 use super::*;
 use crate::predicate::predicate_truth_with;
-use skein_sql::{Expr, ExprKind};
+use hawdb_sql::{Expr, ExprKind};
 
 mod binding;
 use binding::{HavingBindings, ScalarState};
@@ -24,7 +38,7 @@ pub fn validate_having(
         return Ok(());
     }
     if select.lock_strength.is_some() {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "HAVING does not support row locking".into(),
         ));
     }
@@ -35,7 +49,7 @@ pub fn validate_having(
                 bindings.scalar(expression, true)?;
             }
             SelectProjection::Wildcard => {
-                return Err(SkeinError::Semantic(
+                return Err(HawDBError::Semantic(
                     "aggregate SELECT does not support wildcard projection".into(),
                 ))
             }
@@ -63,7 +77,7 @@ pub fn projection_template(
         .iter()
         .map(|projection| {
             let SelectProjection::Expression { expression, alias } = projection else {
-                return Err(SkeinError::Semantic(
+                return Err(HawDBError::Semantic(
                     "aggregate SELECT does not support wildcard projection".into(),
                 ));
             };
@@ -168,7 +182,7 @@ impl HavingState {
                 .parse::<usize>()
                 .ok()
                 .and_then(|index| values.get(index))
-                .ok_or_else(|| SkeinError::Execution("invalid HAVING value slot".into()))?;
+                .ok_or_else(|| HawDBError::Execution("invalid HAVING value slot".into()))?;
             Ok((&slot.0, slot.1))
         })?;
         Ok(truth == Some(true))
@@ -186,7 +200,7 @@ impl Compiler<'_, '_> {
         &mut self,
         mut scalar: ScalarState,
         target: Option<RelationalScalarType>,
-        span: skein_sql::SqlSourceSpan,
+        span: hawdb_sql::SqlSourceSpan,
     ) -> Result<Expr> {
         scalar.coerce(target)?;
         let index = self.slots.len();

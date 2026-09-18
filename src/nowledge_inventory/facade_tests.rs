@@ -1,8 +1,22 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 
 #[test]
 fn query_inventory_facade_preserves_owner_types_and_artifacts() {
-    use skein_evidence::query_inventory as owner;
+    use hawdb_evidence::query_inventory as owner;
 
     let site: owner::CompatibilityQueryCallSite =
         crate::CompatibilityQueryCallSite::new("lookup", "read", "client.rs:7")
@@ -44,7 +58,7 @@ fn query_inventory_facade_preserves_owner_types_and_artifacts() {
 
 #[test]
 fn cypher_inventory_coverage_facade_preserves_compat_owner_contracts() {
-    use skein_compat::nowledge_inventory as owner;
+    use hawdb_compat::nowledge_inventory as owner;
 
     let options: owner::NowledgeCypherMigrationGateJsonOptions = Default::default();
     let _: crate::NowledgeCypherMigrationGateJsonOptions = options;
@@ -57,7 +71,7 @@ fn cypher_inventory_coverage_facade_preserves_compat_owner_contracts() {
 #[test]
 fn inventory_health_facade_preserves_owner_types_and_entrypoints() {
     let report = serde_json::json!({"protocol": "wrong", "readiness": {}});
-    let owner: skein_evidence::inventory::StorageRecoveryEvidenceHealth =
+    let owner: hawdb_evidence::inventory::StorageRecoveryEvidenceHealth =
         storage_recovery_evidence_health(Some(&report), true);
     let facade: crate::StorageRecoveryEvidenceHealth = owner.clone();
     assert_eq!(
@@ -66,10 +80,10 @@ fn inventory_health_facade_preserves_owner_types_and_entrypoints() {
     );
     assert_eq!(
         owner,
-        skein_evidence::inventory::storage_recovery_evidence_health(Some(&report), true)
+        hawdb_evidence::inventory::storage_recovery_evidence_health(Some(&report), true)
     );
 
-    let owner: skein_evidence::inventory::BackgroundMaintenanceEvidenceHealth =
+    let owner: hawdb_evidence::inventory::BackgroundMaintenanceEvidenceHealth =
         background_maintenance_evidence_health(Some(&report), true);
     let facade: crate::BackgroundMaintenanceEvidenceHealth = owner.clone();
     assert_eq!(
@@ -78,11 +92,11 @@ fn inventory_health_facade_preserves_owner_types_and_entrypoints() {
     );
     assert_eq!(
         owner,
-        skein_evidence::inventory::background_maintenance_evidence_health(Some(&report), true)
+        hawdb_evidence::inventory::background_maintenance_evidence_health(Some(&report), true)
     );
 
     let families = serde_json::json!([]);
-    let owner: skein_evidence::inventory::ReplacementReadinessFamilyEvidenceHealth =
+    let owner: hawdb_evidence::inventory::ReplacementReadinessFamilyEvidenceHealth =
         replacement_readiness_family_evidence_health(Some(&families));
     let facade: crate::ReplacementReadinessFamilyEvidenceHealth = owner.clone();
     assert_eq!(
@@ -91,11 +105,11 @@ fn inventory_health_facade_preserves_owner_types_and_entrypoints() {
     );
     assert_eq!(
         owner,
-        skein_evidence::inventory::replacement_readiness_family_evidence_health(Some(&families))
+        hawdb_evidence::inventory::replacement_readiness_family_evidence_health(Some(&families))
     );
     assert_eq!(
         REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
-        skein_evidence::inventory::REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES
+        hawdb_evidence::inventory::REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES
     );
 }
 
@@ -112,20 +126,20 @@ fn inventory_health_bundle_facade_preserves_optional_and_required_evidence() {
         for required in [false, true] {
             assert_eq!(
                 crate::storage_recovery_evidence_health_from_bundle(&bundle, required),
-                skein_evidence::inventory::storage_recovery_evidence_health_from_bundle(
+                hawdb_evidence::inventory::storage_recovery_evidence_health_from_bundle(
                     &bundle, required
                 )
             );
             assert_eq!(
                 crate::background_maintenance_evidence_health_from_bundle(&bundle, required),
-                skein_evidence::inventory::background_maintenance_evidence_health_from_bundle(
+                hawdb_evidence::inventory::background_maintenance_evidence_health_from_bundle(
                     &bundle, required
                 )
             );
         }
         assert_eq!(
             crate::replacement_readiness_family_evidence_health_from_bundle(&bundle),
-            skein_evidence::inventory::replacement_readiness_family_evidence_health_from_bundle(
+            hawdb_evidence::inventory::replacement_readiness_family_evidence_health_from_bundle(
                 &bundle
             )
         );

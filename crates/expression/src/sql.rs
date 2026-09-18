@@ -1,9 +1,23 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Shared SQL expressions consumed by the frontend and relational optimizer.
 //!
 //! Syntax acceptance remains the SQL frontend's responsibility. Keeping the
 //! representation here lets optimizer analysis avoid depending on the parser.
 
-use skein_core::Value;
+use hawdb_core::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SqlValue {
@@ -103,17 +117,17 @@ impl Expr {
         }
     }
 
-    pub fn require_column(&self) -> skein_core::Result<&SqlColumnRef> {
+    pub fn require_column(&self) -> hawdb_core::Result<&SqlColumnRef> {
         self.as_column().ok_or_else(|| {
-            skein_core::SkeinError::Semantic(
+            hawdb_core::HawDBError::Semantic(
                 "this SQL expression position requires a column reference".to_owned(),
             )
         })
     }
 
-    pub fn require_value(&self) -> skein_core::Result<&SqlValue> {
+    pub fn require_value(&self) -> hawdb_core::Result<&SqlValue> {
         self.as_value().ok_or_else(|| {
-            skein_core::SkeinError::Semantic(
+            hawdb_core::HawDBError::Semantic(
                 "this SQL expression position requires a literal or parameter".to_owned(),
             )
         })

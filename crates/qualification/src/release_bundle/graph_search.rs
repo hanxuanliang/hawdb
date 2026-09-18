@@ -1,15 +1,29 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{
     require_bool, require_empty_array, require_nonzero, require_string, required_features,
     validate_common_artifact, validate_exact_binding,
 };
+use hawdb::ProductionQualificationIdentity;
 use serde_json::Value;
-use skein::ProductionQualificationIdentity;
 use std::collections::BTreeSet;
 
-const GRAPH_PROTOCOL: &str = "skein-production-graph-storage-qualification-v1";
-const SEARCH_PROTOCOL: &str = "skein-production-search-out-of-core-qualification-v1";
-const SEARCH_QUALIFICATION_PROTOCOL: &str = "skein-search-lexical-production-qualification";
-const STORAGE_PROFILE_PROTOCOL: &str = "skein-storage-resource-profile-v2";
+const GRAPH_PROTOCOL: &str = "hawdb-production-graph-storage-qualification-v1";
+const SEARCH_PROTOCOL: &str = "hawdb-production-search-out-of-core-qualification-v1";
+const SEARCH_QUALIFICATION_PROTOCOL: &str = "hawdb-search-lexical-production-qualification";
+const STORAGE_PROFILE_PROTOCOL: &str = "hawdb-storage-resource-profile-v2";
 const MINIMUM_SEARCH_DOCUMENT_COUNT: u64 = 100_000;
 
 pub(super) fn validate_graph(

@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::evidence::execute_qualified_read;
 use super::fixture::{
     corpus_statement, source_chunks_by_source_parameters, source_id_parameters, SOURCE_DOCUMENT_ID,
@@ -12,9 +26,9 @@ use super::{
 };
 use crate::evidence_digest::rows_sha256;
 use crate::ContentStoreSqlCorpus;
-use skein::{
-    Database, DatabaseConfig, DurabilityPolicy, QueryOutput, QueryStreamOptions, Result,
-    SkeinError, Value,
+use hawdb::{
+    Database, DatabaseConfig, DurabilityPolicy, HawDBError, QueryOutput, QueryStreamOptions,
+    Result, Value,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -141,7 +155,7 @@ pub(super) fn qualify_space_merge_ownership(
 
     let committed_epoch = database.commit_epoch();
     if committed_epoch <= base_epoch {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store space merge epoch {committed_epoch} did not advance beyond base epoch {base_epoch}"
         )));
     }
@@ -156,7 +170,7 @@ pub(super) fn qualify_space_merge_ownership(
     require_persisted_ownership(&mut database, corpus, &threads)?;
     let payload_sha256_after_live = ownership_payload_sha256(&mut database, &threads)?;
     if payload_sha256_after_live != payload_sha256_before {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "content-store space merge changed non-ownership payload fields".to_string(),
         ));
     }
@@ -165,7 +179,7 @@ pub(super) fn qualify_space_merge_ownership(
     let checkpoint_generation = database
         .relational_index_shadow_checkpoint_report()
         .ok_or_else(|| {
-            SkeinError::Execution(
+            HawDBError::Execution(
                 "content-store space merge checkpoint did not publish relational indexes"
                     .to_string(),
             )
@@ -190,7 +204,7 @@ pub(super) fn qualify_space_merge_ownership(
             || live.expected_space_id != reopened.expected_space_id
             || live.read.output_sha256 != reopened.read.output_sha256
         {
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "content-store space merge case {} changed across checkpoint/reopen",
                 live.case_name
             )));
@@ -199,7 +213,7 @@ pub(super) fn qualify_space_merge_ownership(
     require_persisted_ownership(&mut database, corpus, &threads)?;
     let payload_sha256_after_reopen = ownership_payload_sha256(&mut database, &threads)?;
     if payload_sha256_after_reopen != payload_sha256_before {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "content-store reopened space merge changed non-ownership payload fields".to_string(),
         ));
     }
@@ -240,7 +254,7 @@ fn require_changed_cases_use_live_overlay(
         }
         let overlay_entries = read.read.execution.overlay_entries;
         if overlay_entries == 0 {
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "content-store changed space merge case {} did not use the live overlay",
                 read.case_name
             )));
@@ -296,7 +310,7 @@ fn require_visible_epoch(
     case_name: &str,
 ) -> Result<()> {
     if read.execution.visible_commit_epoch != expected_epoch {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store space merge {case_name} observed epoch {}, expected {expected_epoch}",
             read.execution.visible_commit_epoch
         )));
@@ -437,7 +451,7 @@ fn ownership_payload_sha256(
             },
         )?;
         if document.rows.len() != 1 || messages.rows.len() != 1 {
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "content-store space merge expected one document and message for {}, got documents={} messages={}",
                 thread.thread_id,
                 document.rows.len(),
@@ -470,7 +484,7 @@ fn ownership_payload_sha256(
         },
     )?;
     if source_document.rows.len() != 1 || source_chunks.rows.len() != SOURCE_CHUNK_COUNT {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store space merge expected one source document and {SOURCE_CHUNK_COUNT} chunks, got documents={} chunks={}",
             source_document.rows.len(),
             source_chunks.rows.len()
@@ -494,7 +508,7 @@ fn require_space_and_timestamp(
         {
             Ok(())
         }
-        rows => Err(SkeinError::Execution(format!(
+        rows => Err(HawDBError::Execution(format!(
             "content-store space merge {phase} expected space={expected_space_id}, updated_at={expected_updated_at}, got {rows:?}"
         ))),
     }
@@ -515,7 +529,7 @@ fn require_document_space_and_timestamp(
         {
             Ok(())
         }
-        rows => Err(SkeinError::Execution(format!(
+        rows => Err(HawDBError::Execution(format!(
             "content-store space merge {phase} expected owner={expected_owner_id}, space={expected_space_id}, updated_at={expected_updated_at}, got {rows:?}"
         ))),
     }
@@ -537,7 +551,7 @@ fn require_source_graph_state(
         {
             Ok(())
         }
-        rows => Err(SkeinError::Execution(format!(
+        rows => Err(HawDBError::Execution(format!(
             "content-store space merge {phase} graph Source expected space={expected_space_id}, chunks={SOURCE_CHUNK_COUNT}, got {rows:?}"
         ))),
     }
@@ -560,7 +574,7 @@ fn require_source_document_state(
         {
             Ok(())
         }
-        rows => Err(SkeinError::Execution(format!(
+        rows => Err(HawDBError::Execution(format!(
             "content-store space merge {phase} source document expected owner={SOURCE_OWNER_ID}, space={expected_space_id}, chunks={SOURCE_CHUNK_COUNT}, got {rows:?}"
         ))),
     }
@@ -576,7 +590,7 @@ fn require_source_chunk_state(
             !matches!(row.get("space_id"), Some(Value::String(value)) if value == expected_space_id)
         })
     {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store space merge {phase} expected {SOURCE_CHUNK_COUNT} source chunks in {expected_space_id}, got {:?}",
             output.rows
         )));

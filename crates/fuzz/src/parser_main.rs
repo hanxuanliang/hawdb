@@ -1,8 +1,22 @@
-use serde_json::json;
-use skein_fuzz::{
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use hawdb_fuzz::{
     emit_fuzz_report, generate_parser_fuzz_case, parser_input_fingerprint, run_parser_fuzz_case,
     DEFAULT_FUZZ_LOG_DIRECTORY, PARSER_FUZZ_PROTOCOL,
 };
+use serde_json::json;
 use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -15,7 +29,7 @@ fn main() -> ExitCode {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(error) => {
-            eprintln!("skein-parser-fuzz: {error}");
+            eprintln!("hawdb-parser-fuzz: {error}");
             ExitCode::from(2)
         }
     }
@@ -34,7 +48,7 @@ fn run() -> Result<bool, String> {
         let fingerprint = parser_input_fingerprint(&case.input);
         let input_bytes = case.input.len();
         let reproduction_command = format!(
-            "bazel run //crates/fuzz:skein_parser_fuzz -- --seed {} --case-index {index}",
+            "bazel run //crates/fuzz:hawdb_parser_fuzz -- --seed {} --case-index {index}",
             options.seed
         );
         match run_parser_fuzz_case(&case) {
@@ -84,7 +98,7 @@ fn run() -> Result<bool, String> {
     });
     let paths = emit_fuzz_report(
         &options.log_directory,
-        "skein-parser-fuzz",
+        "hawdb-parser-fuzz",
         &run_id(&options),
         &report,
         success,
@@ -93,7 +107,7 @@ fn run() -> Result<bool, String> {
     )?;
     if let Some(path) = paths.failure {
         eprintln!(
-            "skein-parser-fuzz: parser panic detected; reproduction report: {}",
+            "hawdb-parser-fuzz: parser panic detected; reproduction report: {}",
             path.display()
         );
     }
@@ -165,7 +179,7 @@ fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<S
 }
 
 fn usage() -> &'static str {
-    "usage: skein-parser-fuzz [--seed <u64>] [--cases <usize>] [--case-index <usize>] [--log-directory <path>] [--print-report]"
+    "usage: hawdb-parser-fuzz [--seed <u64>] [--cases <usize>] [--case-index <usize>] [--log-directory <path>] [--print-report]"
 }
 
 fn run_id(options: &Options) -> String {

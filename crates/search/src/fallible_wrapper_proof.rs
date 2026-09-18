@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Public in-memory error propagation and payload-policy regressions.
 
 use super::*;
@@ -109,7 +123,7 @@ fn public_wrappers_return_the_first_unavailable_capability() {
                 else {
                     continue;
                 };
-                let expected = SkeinError::CapabilityUnavailable { capability };
+                let expected = HawDBError::CapabilityUnavailable { capability };
                 for wrapper in WRAPPERS {
                     assert_eq!(public_wrapper(&index, mode, wrapper).unwrap_err(), expected);
                 }
@@ -175,7 +189,7 @@ fn existing_try_api_is_not_a_drop_in_replacement_for_in_memory_access() {
         }
     }
     let root = Directory(std::env::temp_dir().join(format!(
-        "skein-fallible-contract-{}-{}", std::process::id(),
+        "hawdb-fallible-contract-{}-{}", std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
     )));
     let mut index = SearchIndex::open(&root.0).unwrap();

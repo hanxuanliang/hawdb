@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Ordered update hydration, retaining one admitted encoded/decoded document.
 
 use crate::build_control::checkpoint;
@@ -8,11 +22,11 @@ use crate::build_memory::{
 use crate::out_of_core::hydration::{CheckedReader, RangeReader};
 use crate::out_of_core::search_document_bytes;
 use crate::{
-    parse_snapshot_header, Result, SearchOutOfCoreMetrics, SearchOutOfCoreReader,
-    SearchSegmentDescriptorEntry, SkeinError,
+    parse_snapshot_header, HawDBError, Result, SearchOutOfCoreMetrics, SearchOutOfCoreReader,
+    SearchSegmentDescriptorEntry,
 };
-use skein_core::RuntimeTaskContext;
-use skein_executor::QueryMemoryLease;
+use hawdb_core::RuntimeTaskContext;
+use hawdb_executor::QueryMemoryLease;
 use std::io::{self, BufRead, BufReader, Read};
 
 const INPUT_BYTES: usize = 8192;
@@ -200,7 +214,7 @@ fn read_documents(
             Some(bytes) => bytes.strip_suffix(b"\r").unwrap_or(bytes),
             None => &line.bytes,
         };
-        if bytes.is_empty() || bytes == b"SKEIN_SEARCH_SEGMENT_V1" {
+        if bytes.is_empty() || bytes == b"HAWDB_SEARCH_SEGMENT_V1" {
             continue;
         }
         std::str::from_utf8(bytes).map_err(|_| invalid("document line is not UTF-8"))?;
@@ -297,8 +311,8 @@ impl<R: Read> Read for Controlled<'_, R> {
     }
 }
 
-fn invalid(reason: impl std::fmt::Display) -> SkeinError {
-    SkeinError::Storage(format!("search hydration {reason}"))
+fn invalid(reason: impl std::fmt::Display) -> HawDBError {
+    HawDBError::Storage(format!("search hydration {reason}"))
 }
 
 #[cfg(test)]

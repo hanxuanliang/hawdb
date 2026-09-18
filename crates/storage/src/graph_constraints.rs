@@ -1,12 +1,26 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Graph record and snapshot constraints shared by storage mutation and recovery.
 //!
 //! These are internal validation kernels. Root storage retains transaction
 //! orchestration, concrete out-of-core scans, and the WAL/publication boundary.
 
 use crate::{CowSegmentedMap, NodeId, NodeRecord, RelId, RelRecord};
-use skein_core::{
-    Catalog, ConstraintSubject, LabelId, PropertyType, RelTypeId, Result, SchemaObjectState,
-    SkeinError, TableKind, Value,
+use hawdb_core::{
+    Catalog, ConstraintSubject, HawDBError, LabelId, PropertyType, RelTypeId, Result,
+    SchemaObjectState, TableKind, Value,
 };
 use std::collections::BTreeMap;
 
@@ -101,7 +115,7 @@ pub fn validate_node_record_constraints(catalog: &Catalog, node: &NodeRecord) ->
                 .is_some_and(|value| value != &Value::Null)
         {
             let label = catalog.label_name(label_id).unwrap_or("<unknown>");
-            return Err(SkeinError::Storage(format!(
+            return Err(HawDBError::Storage(format!(
                 "node property exists constraint violation on :{label}({}) for node {}",
                 constraint.property, node.id.0
             )));
@@ -149,7 +163,7 @@ pub fn validate_relationship_record_constraints(
                 .is_some_and(|value| value != &Value::Null)
         {
             let rel_type = catalog.rel_type_name(rel_type_id).unwrap_or("<unknown>");
-            return Err(SkeinError::Storage(format!(
+            return Err(HawDBError::Storage(format!(
                 "relationship property exists constraint violation on :{rel_type}({}) for relationship {}",
                 constraint.property, relationship.id.0
             )));
@@ -210,8 +224,8 @@ pub fn validate_property_schema_value(
     }
 }
 
-fn property_schema_error(table: &str, property: &str, record: &str, reason: &str) -> SkeinError {
-    SkeinError::Storage(format!(
+fn property_schema_error(table: &str, property: &str, record: &str, reason: &str) -> HawDBError {
+    HawDBError::Storage(format!(
         "property schema violation on {record} in {table}({property}): {reason}"
     ))
 }
@@ -292,7 +306,7 @@ pub fn validate_node_property_exists(
             Some(value) if value != &Value::Null => {}
             _ => {
                 let label = catalog.label_name(label_id).unwrap_or("<unknown>");
-                return Err(SkeinError::Storage(format!(
+                return Err(HawDBError::Storage(format!(
                     "node property exists constraint violation on :{label}({property}) for node {}",
                     node.id.0
                 )));
@@ -316,7 +330,7 @@ pub fn validate_relationship_property_exists(
             Some(value) if value != &Value::Null => {}
             _ => {
                 let rel_type = catalog.rel_type_name(rel_type_id).unwrap_or("<unknown>");
-                return Err(SkeinError::Storage(format!(
+                return Err(HawDBError::Storage(format!(
                     "relationship property exists constraint violation on :{rel_type}({property}) for relationship {}",
                     relationship.id.0
                 )));
@@ -345,7 +359,7 @@ pub fn validate_unique_property(
         }
         if let Some(previous) = seen.insert(value.clone(), node.id) {
             let label = catalog.label_name(label_id).unwrap_or("<unknown>");
-            return Err(SkeinError::Storage(format!(
+            return Err(HawDBError::Storage(format!(
                 "unique constraint violation on :{label}({property}) for nodes {} and {}",
                 previous.0, node.id.0
             )));
@@ -373,7 +387,7 @@ pub fn validate_unique_relationship_property(
         }
         if let Some(previous) = seen.insert(value.clone(), relationship.id) {
             let rel_type = catalog.rel_type_name(rel_type_id).unwrap_or("<unknown>");
-            return Err(SkeinError::Storage(format!(
+            return Err(HawDBError::Storage(format!(
                 "relationship unique constraint violation on :{rel_type}({property}) for relationships {} and {}",
                 previous.0, relationship.id.0
             )));

@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 
 // Raw zstd framing and bitwise CRC are independent of the production encoder.
@@ -60,7 +74,7 @@ impl Envelope {
     }
 
     fn bytes(&self) -> Vec<u8> {
-        let mut bytes = b"SKEIN_COMPRESSED_V1\n".to_vec();
+        let mut bytes = b"HAWDB_COMPRESSED_V1\n".to_vec();
         for (key, value) in &self.fields {
             bytes.extend_from_slice(format!("{key}\t{value}\n").as_bytes());
         }
@@ -81,7 +95,7 @@ impl Envelope {
 
 fn error(bytes: &[u8], limit: Option<u64>) -> String {
     match read_durable_text_bytes_with_limit(bytes, "fixture", limit) {
-        Err(SkeinError::Storage(message)) => message,
+        Err(HawDBError::Storage(message)) => message,
         Err(other) => panic!("wrong error class: {other}"),
         Ok(_) => panic!("invalid envelope accepted"),
     }
@@ -90,7 +104,7 @@ fn error(bytes: &[u8], limit: Option<u64>) -> String {
 #[test]
 fn frozen_encoder_and_independent_decoder_fixtures() {
     assert_eq!(crc(b"123456789"), 0xe306_9283);
-    let mut encoded = b"SKEIN_COMPRESSED_V1\ncodec\tzstd\nuncompressed_checksum\t910901175\ncompressed_checksum\t3205880307\nuncompressed_len\t3\ncompressed_len\t12\n\n".to_vec();
+    let mut encoded = b"HAWDB_COMPRESSED_V1\ncodec\tzstd\nuncompressed_checksum\t910901175\ncompressed_checksum\t3205880307\nuncompressed_len\t3\ncompressed_len\t12\n\n".to_vec();
     encoded.extend_from_slice(&[
         0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x58, 0x19, 0, 0, b'a', b'b', b'c',
     ]);
@@ -231,7 +245,7 @@ fn header_order_and_legacy_tolerance_remain_unchanged() {
     assert_eq!(count, 120);
     fixture.set("uncompressed_len", "+003");
     let bytes = fixture.bytes();
-    let mut repeated = b"SKEIN_COMPRESSED_V1\n".to_vec();
+    let mut repeated = b"HAWDB_COMPRESSED_V1\n".to_vec();
     repeated.extend_from_slice(&bytes);
     assert_eq!(
         read_durable_text_bytes(&repeated, "fixture").unwrap(),
@@ -242,12 +256,12 @@ fn header_order_and_legacy_tolerance_remain_unchanged() {
         "fixture is missing the V1 compressed envelope"
     );
     assert_eq!(
-        error(b"SKEIN_COMPRESSED_V1", None),
+        error(b"HAWDB_COMPRESSED_V1", None),
         "fixture compressed envelope missing header terminator"
     );
-    assert!(error(b"SKEIN_COMPRESSED_V1\n\xff\n\n", None)
+    assert!(error(b"HAWDB_COMPRESSED_V1\n\xff\n\n", None)
         .starts_with("fixture compressed envelope header is invalid: "));
-    assert!(error(b"SKEIN_COMPRESSED_V1x\n\n", None).contains("invalid header line"));
+    assert!(error(b"HAWDB_COMPRESSED_V1x\n\n", None).contains("invalid header line"));
 }
 
 #[test]

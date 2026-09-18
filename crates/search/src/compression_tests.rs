@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use std::cell::Cell;
 
@@ -139,7 +153,7 @@ impl TestRoot {
     fn new() -> Self {
         static SEQUENCE: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "skein-compression-admission-{}-{}-{}",
+            "hawdb-compression-admission-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -170,7 +184,7 @@ fn public_reopen_rejects_a_false_length_without_inflating_the_whole_snapshot() {
         metadata: BTreeMap::new(),
     };
     let body = format!(
-        "SKEIN_SEARCH_PROJECTION_V1\n{}",
+        "HAWDB_SEARCH_PROJECTION_V1\n{}",
         encode_search_document_line(&document)
     );
     let text = format!("{body}checksum\t{}\n", checksum_bytes(body.as_bytes()));

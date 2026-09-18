@@ -1,11 +1,25 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::production_graph::{
     run_production_graph_storage_qualification, ProductionGraphQualificationError,
     ProductionGraphStorageQualificationConfig, ProductionGraphStorageQualificationReport,
 };
-use skein::PersistentGraphIndexClass;
+use hawdb::PersistentGraphIndexClass;
 
 pub const PRODUCTION_GRAPH_INDEX_QUALIFICATION_MATRIX_PROTOCOL: &str =
-    "skein-production-graph-index-qualification-matrix-v1";
+    "hawdb-production-graph-index-qualification-matrix-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductionGraphIndexQualificationMatrixConfig {
@@ -161,7 +175,7 @@ pub(crate) fn validate_persistent_graph_index_matrix_classes(
 mod tests {
     use super::*;
     use crate::production_graph::PersistentGraphIndexProductionRequirement;
-    use skein::{
+    use hawdb::{
         DatabaseConfig, NowledgeGraphStatement, NowledgeMemGraphMode, NowledgeMemOpenOptions,
         ProductionEvidenceBinding, ProductionQualificationIdentity, RuntimeGovernorConfig,
         StorageResidencyMode, StorageResourceProfileLimits,
@@ -270,7 +284,7 @@ mod tests {
 
     #[test]
     fn production_index_matrix_binds_one_replica_runtime_and_generation() {
-        let path = std::env::temp_dir().join("skein-production-index-matrix-validation");
+        let path = std::env::temp_dir().join("hawdb-production-index-matrix-validation");
         let cases = PersistentGraphIndexClass::ALL
             .into_iter()
             .map(|class| matrix_case_config(&path, class))

@@ -1,9 +1,23 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Facade integration helper for executor-owned shortest paths.
 
 use super::*;
 pub(super) use executor_traversal::ShortestPathSearch;
-use skein_executor::store::GraphExecutionRead;
-use skein_executor::traversal as executor_traversal;
+use hawdb_executor::store::GraphExecutionRead;
+use hawdb_executor::traversal as executor_traversal;
 
 #[cfg(test)]
 pub(super) fn all_shortest_paths(
@@ -26,6 +40,6 @@ pub(super) fn all_shortest_paths(
         result_limit,
         memory_account,
         task_context,
-        &skein_executor::observer::NoopExecutionObserver,
+        &hawdb_executor::observer::NoopExecutionObserver,
     )
 }

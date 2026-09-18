@@ -1,6 +1,20 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::BTreeSet;
 
-use skein_core::Result;
+use hawdb_core::Result;
 
 use super::super::ast::*;
 use super::Parser;
@@ -602,7 +616,7 @@ impl Parser<'_> {
                 self.expect_char(')')?;
                 self.expect_char(',')?;
                 let property = match self.parse_value()?.kind {
-                    ValueExpressionKind::Literal(skein_core::Value::String(property)) => property,
+                    ValueExpressionKind::Literal(hawdb_core::Value::String(property)) => property,
                     _ => return Err(self.error("node property projection requires a string key")),
                 };
                 self.expect_char(')')?;
@@ -1130,7 +1144,7 @@ impl Parser<'_> {
         }
         self.expect_char('=')?;
         let empty = self.parse_value()?;
-        if empty.kind != ValueExpressionKind::Literal(skein_core::Value::String(String::new())) {
+        if empty.kind != ValueExpressionKind::Literal(hawdb_core::Value::String(String::new())) {
             return Err(self.error(
                 "OPTIONAL relationship count filter only supports an empty-string fallback",
             ));

@@ -1,7 +1,21 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::binding::value_payload_bytes;
 use crate::columnar::ColumnarRowRef;
-use skein_core::{Result, SkeinError, Value, ValueRef};
-use skein_plan::{PhysicalOperatorId, PhysicalPlanKind};
+use hawdb_core::{HawDBError, Result, Value, ValueRef};
+use hawdb_plan::{PhysicalOperatorId, PhysicalPlanKind};
 use std::collections::BTreeMap;
 use std::ops::Index;
 use std::sync::{Arc, OnceLock};
@@ -22,7 +36,7 @@ impl QuerySchema {
             .iter()
             .find(|column| !unique.insert(column.as_str()))
         {
-            return Err(SkeinError::Semantic(format!(
+            return Err(HawDBError::Semantic(format!(
                 "query result schema contains duplicate column {duplicate}"
             )));
         }
@@ -459,7 +473,7 @@ impl QueryRowsBuilder {
         values: impl IntoIterator<Item = Result<Value>>,
     ) -> Result<()> {
         let schema = self.schema.as_ref().ok_or_else(|| {
-            SkeinError::Execution(
+            HawDBError::Execution(
                 "query result values require a schema before ordinal insertion".to_string(),
             )
         })?;
@@ -476,7 +490,7 @@ impl QueryRowsBuilder {
         let width = self.values.len().saturating_sub(start);
         if width != schema.len() {
             self.values.truncate(start);
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "query result row {} has width {width}, expected {}",
                 self.row_count,
                 schema.len()
@@ -496,7 +510,7 @@ impl QueryRowsBuilder {
         }
         let schema = self.schema.as_ref().expect("query result schema is bound");
         if row.len() != schema.len() {
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "query result row {} has width {}, expected {}",
                 self.row_count,
                 row.len(),
@@ -509,7 +523,7 @@ impl QueryRowsBuilder {
             .enumerate()
             .find(|(_, (name, expected))| *name != *expected)
         {
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "query result row {} column {ordinal} is {name}, expected {expected}",
                 self.row_count
             )));
@@ -915,7 +929,7 @@ mod tests {
     use crate::{
         BindingSchema, ColumnVector, ColumnarBatch, SlotDescriptor, SlotId, SlotType, Validity,
     };
-    use skein_core::LogicalType;
+    use hawdb_core::LogicalType;
     use std::sync::Arc;
 
     #[test]
@@ -1002,7 +1016,7 @@ mod tests {
         assert!(builder
             .try_push_values([
                 Ok(Value::Int(1)),
-                Err(SkeinError::Execution("projection failed".to_string())),
+                Err(HawDBError::Execution("projection failed".to_string())),
             ])
             .is_err());
         builder.push_values([Value::Int(2), Value::Int(3)]).unwrap();

@@ -1,10 +1,24 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Embedded facade paths and developer CLI help for replacement summaries.
 
-pub use skein_readiness::graph_summary::{
+pub use hawdb_readiness::graph_summary::{
     nowledge_graph_route_readiness_summary, nowledge_graph_route_readiness_summary_from_bundle,
     GraphRouteReadinessSummary,
 };
-pub use skein_readiness::replacement_summary::{
+pub use hawdb_readiness::replacement_summary::{
     nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,
     NowledgeReplacementSummaryOptions,
 };
@@ -20,7 +34,7 @@ mod tests {
 
     #[test]
     fn replacement_summary_facade_preserves_owner_type_and_entrypoints() {
-        use skein_readiness::replacement_summary as owner;
+        use hawdb_readiness::replacement_summary as owner;
 
         let options: owner::NowledgeReplacementSummaryOptions =
             crate::NowledgeReplacementSummaryOptions::default();
@@ -32,13 +46,13 @@ mod tests {
         let summary = summarize(&bundle, options);
         assert_eq!(summary, owner::nowledge_replacement_summary_json(&bundle));
         assert_eq!(summary, super::nowledge_replacement_summary_json(&bundle));
-        assert_eq!(summary["protocol"], "skein-nowledge-replacement-summary");
+        assert_eq!(summary["protocol"], "hawdb-nowledge-replacement-summary");
         assert_eq!(summary["production_cutover_ready"], false);
     }
 
     #[test]
     fn replacement_summary_facade_preserves_shared_evidence_contracts() {
-        use skein_evidence::replacement_contract as contract;
+        use hawdb_evidence::replacement_contract as contract;
 
         assert_eq!(
             crate::NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,

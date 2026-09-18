@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Relational EXPLAIN rendering from typed execution evidence.
 //!
 //! Physical coverage decisions remain with planning; rendering invokes the
@@ -8,13 +22,13 @@ use crate::index_runtime::RelationalIndexExecutionEvidence;
 use crate::query_output::{push_relational_output, RelationalQueryLimits, RelationalQueryOutput};
 use crate::query_value::bind_bound;
 use crate::row_runtime::RelationalRowExecutionEvidence;
-use skein_core::{Result, Value};
-use skein_executor::Row;
-use skein_optimizer::{
+use hawdb_core::{Result, Value};
+use hawdb_executor::Row;
+use hawdb_optimizer::{
     RelationalAccessPathDescriptor, RelationalAccessPathKind, RelationalJoinPlanningOutcome,
     RelationalJoinPlanningStatus, RelationalOperatorCardinalityProfile, RelationalOperatorId,
 };
-use skein_sql::{
+use hawdb_sql::{
     Expr, ExprKind, RelationalSqlStageTimings, SelectProjection, SelectStatement, SqlColumnRef,
     SqlComparisonOp, SqlExpression, SqlFunctionArgument, SqlLikeEscape, SqlOrderDirection,
     SqlPredicate, SqlValue,
@@ -63,7 +77,7 @@ pub fn format_relational_explain(
     predicate_is_covered_by_access: impl Fn(
         Option<&SqlPredicate>,
         &RelationalAccessPathDescriptor,
-        &[skein_sql::SqlOrderItem],
+        &[hawdb_sql::SqlOrderItem],
         &str,
         &str,
     ) -> bool,
@@ -459,7 +473,7 @@ fn relational_index_evidence<'a>(
     descriptor: &RelationalAccessPathDescriptor,
 ) -> Option<&'a RelationalIndexExecutionEvidence> {
     let physical_index = match descriptor.kind {
-        RelationalAccessPathKind::PrimaryKey => skein_storage::RELATIONAL_PRIMARY_INDEX_NAME,
+        RelationalAccessPathKind::PrimaryKey => hawdb_storage::RELATIONAL_PRIMARY_INDEX_NAME,
         RelationalAccessPathKind::Index => descriptor.name.as_str(),
         RelationalAccessPathKind::FullScan => return None,
     };
@@ -572,7 +586,7 @@ fn optional_u64_text(value: Option<u64>) -> String {
         .unwrap_or_else(|| "none".to_string())
 }
 
-fn explain_order_by(order_by: &[skein_sql::SqlOrderItem]) -> String {
+fn explain_order_by(order_by: &[hawdb_sql::SqlOrderItem]) -> String {
     order_by
         .iter()
         .map(|item| {

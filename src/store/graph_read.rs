@@ -1,7 +1,21 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Read, scan, seek, and scan-pruning methods for [`GraphStore`].
 
 use super::*;
-use skein_storage::ids::project_node_record;
+use hawdb_storage::ids::project_node_record;
 
 impl GraphStore {
     pub fn canonical_node_from_segments(&self, id: NodeId) -> Result<Option<NodeRecord>> {
@@ -23,7 +37,7 @@ impl GraphStore {
     }
 
     pub fn node_records_owned(&self) -> GraphNodeIterator {
-        skein_storage::graph_overlay::node_records(
+        hawdb_storage::graph_overlay::node_records(
             self.canonical_base
                 .as_ref()
                 .map(CanonicalSegmentReader::node_records),
@@ -33,7 +47,7 @@ impl GraphStore {
     }
 
     pub fn relationship_records_owned(&self) -> GraphRelationshipIterator {
-        skein_storage::graph_overlay::relationship_records(
+        hawdb_storage::graph_overlay::relationship_records(
             self.canonical_base
                 .as_ref()
                 .map(CanonicalSegmentReader::relationship_records),
@@ -96,15 +110,15 @@ impl GraphStore {
     pub fn visit_projected_nodes_by_access_owned(
         &self,
         label_id: LabelId,
-        access: &skein_plan::NodeProjectionAccess,
+        access: &hawdb_plan::NodeProjectionAccess,
         required_properties: &BTreeSet<String>,
         consumer: impl FnMut(ProjectedNodeRecord) -> GraphScanControl,
     ) -> Result<GraphScanControl> {
         match access {
-            skein_plan::NodeProjectionAccess::LabelScan => {
+            hawdb_plan::NodeProjectionAccess::LabelScan => {
                 self.visit_projected_nodes_owned(Some(label_id), required_properties, consumer)
             }
-            skein_plan::NodeProjectionAccess::PropertyValues { property, values } => self
+            hawdb_plan::NodeProjectionAccess::PropertyValues { property, values } => self
                 .visit_projected_nodes_by_property_owned(
                     label_id,
                     property,
@@ -112,25 +126,25 @@ impl GraphStore {
                     required_properties,
                     consumer,
                 ),
-            skein_plan::NodeProjectionAccess::PropertyUnion { .. } => Err(SkeinError::Execution(
+            hawdb_plan::NodeProjectionAccess::PropertyUnion { .. } => Err(HawDBError::Execution(
                 "property-union projection access requires executor-owned deduplication admission"
                     .to_string(),
             )),
-            skein_plan::NodeProjectionAccess::CompositeEquality { predicates } => self
+            hawdb_plan::NodeProjectionAccess::CompositeEquality { predicates } => self
                 .visit_projected_nodes_by_composite_property_owned(
                     label_id,
                     predicates,
                     required_properties,
                     consumer,
                 ),
-            skein_plan::NodeProjectionAccess::CompositeRange { seek } => self
+            hawdb_plan::NodeProjectionAccess::CompositeRange { seek } => self
                 .visit_projected_nodes_by_composite_range_owned(
                     label_id,
                     seek,
                     required_properties,
                     consumer,
                 ),
-            skein_plan::NodeProjectionAccess::PropertyRange {
+            hawdb_plan::NodeProjectionAccess::PropertyRange {
                 property,
                 lower,
                 upper,
@@ -142,7 +156,7 @@ impl GraphStore {
                 required_properties,
                 consumer,
             ),
-            skein_plan::NodeProjectionAccess::FullText { property, query } => self
+            hawdb_plan::NodeProjectionAccess::FullText { property, query } => self
                 .visit_projected_nodes_by_full_text_property_owned(
                     label_id,
                     property,
@@ -999,7 +1013,7 @@ impl GraphStore {
                         }
                         Ok(CanonicalScanControl::Continue)
                     })
-                    .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+                    .map_err(|error| HawDBError::StorageIntegrity(error.to_string()))?;
                 self.graph_index_read_metrics
                     .record_property(PersistentGraphIndexClass::NodeEquality, report);
                 control
@@ -1103,7 +1117,7 @@ impl GraphStore {
                     }
                     Ok(CanonicalScanControl::Continue)
                 })
-                .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+                .map_err(|error| HawDBError::StorageIntegrity(error.to_string()))?;
             self.graph_index_read_metrics
                 .record_property(PersistentGraphIndexClass::NodeEquality, report);
             if projection_control == CanonicalScanControl::Stop {
@@ -1198,7 +1212,7 @@ impl GraphStore {
                             Ok(CanonicalScanControl::Continue)
                         },
                     )
-                    .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+                    .map_err(|error| HawDBError::StorageIntegrity(error.to_string()))?;
                 self.graph_index_read_metrics
                     .record_property(PersistentGraphIndexClass::NodeCompositeEquality, report);
                 if projection_control == CanonicalScanControl::Stop {
@@ -1296,7 +1310,7 @@ impl GraphStore {
                 }
                 Ok(CanonicalScanControl::Continue)
             })
-            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+            .map_err(|error| HawDBError::StorageIntegrity(error.to_string()))?;
         self.graph_index_read_metrics
             .record_property(PersistentGraphIndexClass::NodeCompositeEquality, report);
         if projection_control == CanonicalScanControl::Stop {
@@ -1319,7 +1333,7 @@ impl GraphStore {
     pub fn visit_nodes_by_composite_range_owned(
         &self,
         label_id: LabelId,
-        seek: &skein_plan::CompositeRangeSeek,
+        seek: &hawdb_plan::CompositeRangeSeek,
         mut consumer: impl FnMut(NodeRecord) -> GraphScanControl,
     ) -> Result<GraphScanControl> {
         validate_composite_range_seek(seek)?;
@@ -1370,7 +1384,7 @@ impl GraphStore {
                         Ok(CanonicalScanControl::Continue)
                     },
                 )
-                .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+                .map_err(|error| HawDBError::StorageIntegrity(error.to_string()))?;
             self.graph_index_read_metrics
                 .record_property(PersistentGraphIndexClass::NodeCompositeEquality, report);
             if projection_control == CanonicalScanControl::Stop {
@@ -1408,7 +1422,7 @@ impl GraphStore {
     fn visit_projected_nodes_by_composite_range_owned(
         &self,
         label_id: LabelId,
-        seek: &skein_plan::CompositeRangeSeek,
+        seek: &hawdb_plan::CompositeRangeSeek,
         required_properties: &BTreeSet<String>,
         mut consumer: impl FnMut(ProjectedNodeRecord) -> GraphScanControl,
     ) -> Result<GraphScanControl> {
@@ -1476,7 +1490,7 @@ impl GraphStore {
                     Ok(CanonicalScanControl::Continue)
                 },
             )
-            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+            .map_err(|error| HawDBError::StorageIntegrity(error.to_string()))?;
         self.graph_index_read_metrics
             .record_property(PersistentGraphIndexClass::NodeCompositeEquality, report);
         if projection_control == CanonicalScanControl::Stop {
@@ -1593,7 +1607,7 @@ impl GraphStore {
                 }
                 Ok(CanonicalScanControl::Continue)
             })
-            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+            .map_err(|error| HawDBError::StorageIntegrity(error.to_string()))?;
         self.graph_index_read_metrics
             .record_property(PersistentGraphIndexClass::NodeRange, report);
         if projection_control == CanonicalScanControl::Stop {
@@ -1679,7 +1693,7 @@ impl GraphStore {
                 }
                 Ok(CanonicalScanControl::Continue)
             })
-            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+            .map_err(|error| HawDBError::StorageIntegrity(error.to_string()))?;
         self.graph_index_read_metrics
             .record_property(PersistentGraphIndexClass::NodeRange, report);
         if projection_control == CanonicalScanControl::Stop {
@@ -1783,11 +1797,11 @@ impl GraphStore {
             });
         };
         let mut seed_token = None;
-        let mut estimate_report = skein_storage::PersistentPropertyProjectionReadReport::default();
+        let mut estimate_report = hawdb_storage::PersistentPropertyProjectionReadReport::default();
         for token in &query_tokens {
             let (estimated_entries, report) = projection
                 .estimate_full_text_token_entries(label_id, property, token)
-                .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+                .map_err(|error| HawDBError::StorageIntegrity(error.to_string()))?;
             accumulate_property_projection_report(&mut estimate_report, report);
             if seed_token
                 .as_ref()
@@ -1820,7 +1834,7 @@ impl GraphStore {
                 }
                 Ok(CanonicalScanControl::Continue)
             })
-            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+            .map_err(|error| HawDBError::StorageIntegrity(error.to_string()))?;
         accumulate_property_projection_report(&mut estimate_report, report);
         self.graph_index_read_metrics
             .record_property(PersistentGraphIndexClass::NodeFullText, estimate_report);
@@ -1883,11 +1897,11 @@ impl GraphStore {
             _ => false,
         };
         let mut seed_token = None;
-        let mut estimate_report = skein_storage::PersistentPropertyProjectionReadReport::default();
+        let mut estimate_report = hawdb_storage::PersistentPropertyProjectionReadReport::default();
         for token in &query_tokens {
             let (estimated_entries, report) = projection
                 .estimate_full_text_token_entries(label_id, property, token)
-                .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+                .map_err(|error| HawDBError::StorageIntegrity(error.to_string()))?;
             accumulate_property_projection_report(&mut estimate_report, report);
             if seed_token
                 .as_ref()
@@ -1922,7 +1936,7 @@ impl GraphStore {
                 }
                 Ok(CanonicalScanControl::Continue)
             })
-            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+            .map_err(|error| HawDBError::StorageIntegrity(error.to_string()))?;
         accumulate_property_projection_report(&mut estimate_report, report);
         self.graph_index_read_metrics
             .record_property(PersistentGraphIndexClass::NodeFullText, estimate_report);
@@ -2019,12 +2033,12 @@ impl GraphStore {
                                 reader
                                     .get_relationship(relationship_id)
                                     .map_err(|error| {
-                                        skein_storage::CanonicalAdjacencyError::Source(
+                                        hawdb_storage::CanonicalAdjacencyError::Source(
                                             error.to_string(),
                                         )
                                     })?
                                     .ok_or_else(|| {
-                                        skein_storage::CanonicalAdjacencyError::Corrupt(format!(
+                                        hawdb_storage::CanonicalAdjacencyError::Corrupt(format!(
                                             "canonical adjacency references missing relationship {}",
                                             relationship_id.0
                                         ))
@@ -2033,7 +2047,7 @@ impl GraphStore {
                         };
                         Ok(consume_canonical(relationship))
                     })
-                    .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+                    .map_err(|error| HawDBError::StorageIntegrity(error.to_string()))?;
                 let class = match direction {
                     AdjacencyDirection::Outgoing => PersistentGraphIndexClass::ForwardAdjacency,
                     AdjacencyDirection::Incoming => PersistentGraphIndexClass::ReverseAdjacency,
@@ -2091,7 +2105,7 @@ impl GraphStore {
         };
         for entry in entries.iter_copied() {
             let Some(relationship) = self.relationships.get(&entry.relationship_id) else {
-                return Err(SkeinError::StorageIntegrity(format!(
+                return Err(HawDBError::StorageIntegrity(format!(
                     "live adjacency references missing relationship {}",
                     entry.relationship_id.0
                 )));
@@ -2161,10 +2175,10 @@ impl GraphStore {
                     CanonicalAdjacencyEntry::CanonicalReference { relationship_id } => reader
                         .get_relationship(relationship_id)
                         .map_err(|error| {
-                            skein_storage::CanonicalAdjacencyError::Source(error.to_string())
+                            hawdb_storage::CanonicalAdjacencyError::Source(error.to_string())
                         })?
                         .ok_or_else(|| {
-                            skein_storage::CanonicalAdjacencyError::Corrupt(format!(
+                            hawdb_storage::CanonicalAdjacencyError::Corrupt(format!(
                                 "canonical adjacency references missing relationship {}",
                                 relationship_id.0
                             ))
@@ -2206,7 +2220,7 @@ impl GraphStore {
                     }
                 }
             })
-            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+            .map_err(|error| HawDBError::StorageIntegrity(error.to_string()))?;
         self.graph_index_read_metrics.record_adjacency(
             match direction {
                 AdjacencyDirection::Outgoing => PersistentGraphIndexClass::ForwardAdjacency,
@@ -2279,7 +2293,7 @@ impl GraphStore {
             );
         };
         let Some(probe) = relationship_projection_probe(projection, rel_type, filter)
-            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?
+            .map_err(|error| HawDBError::StorageIntegrity(error.to_string()))?
         else {
             return self.visit_adjacent_relationships_filter_fallback(
                 node_id,
@@ -2291,7 +2305,7 @@ impl GraphStore {
         };
         let adjacency_entries = adjacency
             .estimate_endpoint_entries(node_id, direction, Some(rel_type))
-            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+            .map_err(|error| HawDBError::StorageIntegrity(error.to_string()))?;
         if probe.estimated_entries() > adjacency_entries {
             self.graph_index_read_metrics
                 .record_property(probe.index_class(), probe.estimate_report());
@@ -2344,7 +2358,7 @@ impl GraphStore {
                 }
                 Ok(CanonicalScanControl::Continue)
             })
-            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+            .map_err(|error| HawDBError::StorageIntegrity(error.to_string()))?;
         self.graph_index_read_metrics
             .record_property(probe.index_class(), projection_read_report);
         if projection_control == CanonicalScanControl::Stop {
@@ -2406,7 +2420,7 @@ impl GraphStore {
                 for relationship_id in &candidate.rel_ids {
                     let relationship =
                         self.relationships.get(relationship_id).ok_or_else(|| {
-                            SkeinError::StorageIntegrity(format!(
+                            HawDBError::StorageIntegrity(format!(
                                 "relationship property index references missing relationship {}",
                                 relationship_id.0
                             ))
@@ -3196,7 +3210,7 @@ impl GraphStore {
         let candidate_count = plan.segments.iter().fold(0usize, |count, segment| {
             let segment_count = segment.candidates.as_ref().map_or_else(
                 || segment_row_counts[&segment.segment_id],
-                skein_storage::CandidateCursor::remaining,
+                hawdb_storage::CandidateCursor::remaining,
             );
             count.saturating_add(usize::try_from(segment_count).unwrap_or(usize::MAX))
         });
@@ -3212,39 +3226,39 @@ impl GraphStore {
         let mut consume = |payload: SegmentReadPayload| {
             for segment_id in &payload.range.segment_ids {
                 let range = ranges.get(segment_id).ok_or_else(|| {
-                    SkeinError::StorageIntegrity(format!(
+                    HawDBError::StorageIntegrity(format!(
                         "source scan reader returned unknown segment {segment_id}"
                     ))
                 })?;
                 let start = usize::try_from(range.offset.saturating_sub(payload.range.offset))
                     .map_err(|_| {
-                        SkeinError::StorageIntegrity(
+                        HawDBError::StorageIntegrity(
                             "source scan payload offset exceeds address space".to_string(),
                         )
                     })?;
                 let end = start
                     .checked_add(usize::try_from(range.length.get()).map_err(|_| {
-                        SkeinError::StorageIntegrity(
+                        HawDBError::StorageIntegrity(
                             "source scan payload length exceeds address space".to_string(),
                         )
                     })?)
                     .ok_or_else(|| {
-                        SkeinError::StorageIntegrity(
+                        HawDBError::StorageIntegrity(
                             "source scan payload slice overflows".to_string(),
                         )
                     })?;
                 let bytes = payload.bytes.get(start..end).ok_or_else(|| {
-                    SkeinError::StorageIntegrity(
+                    HawDBError::StorageIntegrity(
                         "source scan coalesced payload does not cover a segment".to_string(),
                     )
                 })?;
                 if checksum_bytes(bytes) != checksums[segment_id] {
-                    return Err(SkeinError::StorageIntegrity(format!(
+                    return Err(HawDBError::StorageIntegrity(format!(
                             "source scan segment {segment_id} checksum changed after manifest validation"
                         )));
                 }
                 let segment_rows = source_scan::decode_payload(bytes)
-                    .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+                    .map_err(|error| HawDBError::StorageIntegrity(error.to_string()))?;
                 let candidate_positions = candidates
                     .remove(segment_id)
                     .flatten()
@@ -3263,7 +3277,7 @@ impl GraphStore {
                         positions.len().saturating_mul(std::mem::size_of::<u64>())
                     }));
                 if max_live_candidate_bytes.is_some_and(|limit| live_candidate_bytes > limit) {
-                    return Err(SkeinError::Execution(format!(
+                    return Err(HawDBError::Execution(format!(
                         "SourceSegmentScan decoded segment uses {live_candidate_bytes} bytes, exceeding blocking_operator_bytes {}",
                         max_live_candidate_bytes.unwrap_or_default()
                     )));
@@ -3276,11 +3290,11 @@ impl GraphStore {
                         continue;
                     }
                     if consumer(row)? == GraphScanControl::Stop {
-                        return Ok(skein_storage::SegmentReadControl::Stop);
+                        return Ok(hawdb_storage::SegmentReadControl::Stop);
                     }
                 }
             }
-            Ok::<_, SkeinError>(skein_storage::SegmentReadControl::Continue)
+            Ok::<_, HawDBError>(hawdb_storage::SegmentReadControl::Continue)
         };
         let executor = SegmentReadExecutor::new(max_wave_bytes);
         let report = match task_context {
@@ -3291,9 +3305,9 @@ impl GraphStore {
         }
         .map_err(|error| match error {
             SegmentReadExecutionError::Stopped(reason) => {
-                SkeinError::Execution(format!("runtime task stopped: {reason}"))
+                HawDBError::Execution(format!("runtime task stopped: {reason}"))
             }
-            error => SkeinError::StorageIntegrity(error.to_string()),
+            error => HawDBError::StorageIntegrity(error.to_string()),
         })?;
         Ok(SourceScanCandidateVisit::Rows {
             graph_epoch,
@@ -3316,7 +3330,7 @@ impl GraphStore {
     }
 }
 
-fn validate_composite_range_seek(seek: &skein_plan::CompositeRangeSeek) -> Result<()> {
+fn validate_composite_range_seek(seek: &hawdb_plan::CompositeRangeSeek) -> Result<()> {
     let prefix_len = seek.equality_prefix.len();
     if prefix_len == 0
         || prefix_len >= seek.index_properties.len()
@@ -3328,27 +3342,27 @@ fn validate_composite_range_seek(seek: &skein_plan::CompositeRangeSeek) -> Resul
         || seek.index_properties[prefix_len] != seek.range_property
         || (seek.lower.is_none() && seek.upper.is_none())
     {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "invalid composite range seek shape".to_string(),
         ));
     }
     Ok(())
 }
 
-fn node_matches_composite_range(node: &NodeRecord, seek: &skein_plan::CompositeRangeSeek) -> bool {
+fn node_matches_composite_range(node: &NodeRecord, seek: &hawdb_plan::CompositeRangeSeek) -> bool {
     properties_match_composite_range(&node.properties, seek)
 }
 
 fn projected_node_matches_composite_range(
     node: &ProjectedNodeRecord,
-    seek: &skein_plan::CompositeRangeSeek,
+    seek: &hawdb_plan::CompositeRangeSeek,
 ) -> bool {
     properties_match_composite_range(&node.properties, seek)
 }
 
 fn properties_match_composite_range(
     properties: &BTreeMap<String, Value>,
-    seek: &skein_plan::CompositeRangeSeek,
+    seek: &hawdb_plan::CompositeRangeSeek,
 ) -> bool {
     seek.equality_prefix
         .iter()
@@ -3381,7 +3395,7 @@ fn push_compact_adjacency_key(
     let entry_bytes = std::mem::size_of::<OrderedAdjacencyEntry>();
     let required_bytes = entries.len().saturating_add(1).saturating_mul(entry_bytes);
     if required_bytes > memory_budget_bytes {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "ordered adjacency keys use {required_bytes} bytes, exceeding blocking_operator_bytes {memory_budget_bytes}"
         )));
     }
@@ -3403,7 +3417,7 @@ fn emit_compact_adjacency_before(
         }
         *index = index.saturating_add(1);
         let Some(relationship) = store.relationship_owned(entry.relationship_id)? else {
-            return Err(SkeinError::StorageIntegrity(format!(
+            return Err(HawDBError::StorageIntegrity(format!(
                 "ordered adjacency references missing relationship {}",
                 entry.relationship_id.0
             )));
@@ -3427,7 +3441,7 @@ fn emit_live_adjacency_before(
         }
         entries.next();
         let Some(relationship) = store.relationships.get(&entry.relationship_id) else {
-            return Err(SkeinError::StorageIntegrity(format!(
+            return Err(HawDBError::StorageIntegrity(format!(
                 "live ordered adjacency references missing relationship {}",
                 entry.relationship_id.0
             )));
@@ -3445,7 +3459,7 @@ enum RelationshipProjectionProbe<'a> {
         property: &'a str,
         values: Vec<&'a Value>,
         estimated_entries: u64,
-        estimate_report: skein_storage::PersistentPropertyProjectionReadReport,
+        estimate_report: hawdb_storage::PersistentPropertyProjectionReadReport,
     },
     Range {
         rel_type: RelTypeId,
@@ -3453,7 +3467,7 @@ enum RelationshipProjectionProbe<'a> {
         lower: Option<&'a (Value, bool)>,
         upper: Option<&'a (Value, bool)>,
         estimated_entries: u64,
-        estimate_report: skein_storage::PersistentPropertyProjectionReadReport,
+        estimate_report: hawdb_storage::PersistentPropertyProjectionReadReport,
     },
 }
 
@@ -3469,7 +3483,7 @@ impl RelationshipProjectionProbe<'_> {
         }
     }
 
-    fn estimate_report(&self) -> skein_storage::PersistentPropertyProjectionReadReport {
+    fn estimate_report(&self) -> hawdb_storage::PersistentPropertyProjectionReadReport {
         match self {
             Self::Equality {
                 estimate_report, ..
@@ -3482,7 +3496,7 @@ impl RelationshipProjectionProbe<'_> {
 
     fn replace_estimate_report(
         &mut self,
-        report: skein_storage::PersistentPropertyProjectionReadReport,
+        report: hawdb_storage::PersistentPropertyProjectionReadReport,
     ) {
         match self {
             Self::Equality {
@@ -3548,7 +3562,7 @@ impl RelationshipProjectionProbe<'_> {
         >,
     ) -> std::result::Result<
         (
-            skein_storage::PersistentPropertyProjectionReadReport,
+            hawdb_storage::PersistentPropertyProjectionReadReport,
             CanonicalScanControl,
         ),
         PersistentPropertyProjectionError,
@@ -3594,8 +3608,8 @@ impl RelationshipProjectionProbe<'_> {
 }
 
 fn accumulate_property_projection_report(
-    total: &mut skein_storage::PersistentPropertyProjectionReadReport,
-    report: skein_storage::PersistentPropertyProjectionReadReport,
+    total: &mut hawdb_storage::PersistentPropertyProjectionReadReport,
+    report: hawdb_storage::PersistentPropertyProjectionReadReport,
 ) {
     total.descriptor_pages_visited = total
         .descriptor_pages_visited
@@ -3642,7 +3656,7 @@ fn relationship_projection_probe<'a>(
         PropertyFilter::And(filters) => {
             let mut best = None;
             let mut selection_report =
-                skein_storage::PersistentPropertyProjectionReadReport::default();
+                hawdb_storage::PersistentPropertyProjectionReadReport::default();
             for filter in filters {
                 let Some(candidate) = relationship_projection_probe(projection, rel_type, filter)?
                 else {
@@ -3699,7 +3713,7 @@ fn relationship_projection_probe<'a>(
                 .collect::<Vec<_>>();
             let mut estimated_entries = 0u64;
             let mut estimate_report =
-                skein_storage::PersistentPropertyProjectionReadReport::default();
+                hawdb_storage::PersistentPropertyProjectionReadReport::default();
             for value in &values {
                 let (entries, report) =
                     projection.estimate_relationship_equality_entries(rel_type, property, value)?;

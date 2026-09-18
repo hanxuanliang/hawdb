@@ -1,16 +1,30 @@
-use serde_json::json;
-use skein::executor::{
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use hawdb::executor::{
     execute_with_row_limit_profile, ExecutionMemoryConfig, QueryRowRef, QueryRows,
 };
-use skein::optimizer::PhysicalPlan;
-use skein::planner::{ComparisonOp, Predicate, Projection, ProjectionExpression};
-use skein::schema::{Catalog, PropertyType, TableKind};
-use skein::store::{GraphSnapshotNodeImport, GraphStore, NodeId};
-use skein::Value;
-use skein_core::RuntimeTaskContext;
-use skein_executor::{
+use hawdb::optimizer::PhysicalPlan;
+use hawdb::planner::{ComparisonOp, Predicate, Projection, ProjectionExpression};
+use hawdb::schema::{Catalog, PropertyType, TableKind};
+use hawdb::store::{GraphSnapshotNodeImport, GraphStore, NodeId};
+use hawdb::Value;
+use hawdb_core::RuntimeTaskContext;
+use hawdb_executor::{
     filter_numeric_column, ColumnVector, NumericLiteral, NumericPredicate, Selection, Validity,
 };
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::hint::black_box;
 use std::num::NonZeroUsize;
@@ -26,10 +40,10 @@ const END_TO_END_ITERATIONS: usize = 16;
 const END_TO_END_PAYLOAD_BYTES: usize = 256;
 const SAMPLES: usize = 11;
 const MORSEL_MATRIX_SAMPLES: usize = 3;
-const LOCAL_MORSEL_BENCHMARK_PROTOCOL: &str = "skein-local-morsel-benchmark-v1";
-const LOCAL_MORSEL_SELECTIVITY_PROTOCOL: &str = "skein-local-morsel-selectivity-matrix-v1";
+const LOCAL_MORSEL_BENCHMARK_PROTOCOL: &str = "hawdb-local-morsel-benchmark-v1";
+const LOCAL_MORSEL_SELECTIVITY_PROTOCOL: &str = "hawdb-local-morsel-selectivity-matrix-v1";
 const MORSEL_SELECTIVITY_PERCENTAGES: [usize; 5] = [0, 1, 10, 50, 100];
-const EXECUTOR_BENCH_MODE_ENV: &str = "SKEIN_EXECUTOR_BENCH_MODE";
+const EXECUTOR_BENCH_MODE_ENV: &str = "HAWDB_EXECUTOR_BENCH_MODE";
 
 #[path = "executor_vectorization/adjacency.rs"]
 mod adjacency;
@@ -167,7 +181,7 @@ fn micro_benchmark() -> ComparisonReport {
                 let mut checksum = 0u64;
                 for row in black_box(&rows) {
                     let value = row.get("score").expect("score must exist");
-                    if skein_executor::predicate::compare_property_values(
+                    if hawdb_executor::predicate::compare_property_values(
                         value,
                         ComparisonOp::Gte,
                         &expected,
@@ -229,7 +243,7 @@ fn float_micro_benchmark() -> ComparisonReport {
                 let mut checksum = 0u64;
                 for row in black_box(&rows) {
                     let value = row.get("score").expect("score must exist");
-                    if skein_executor::predicate::compare_property_values(
+                    if hawdb_executor::predicate::compare_property_values(
                         value,
                         ComparisonOp::Gte,
                         &expected,

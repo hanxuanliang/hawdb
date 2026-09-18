@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use crate::lexical_projection::analysis_tests::reference_document_tokens;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,7 +24,7 @@ impl TestRoot {
     fn new() -> Self {
         static SEQUENCE: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "skein-document-frequency-{}-{}-{}",
+            "hawdb-document-frequency-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -169,7 +183,7 @@ fn drain(path: &Path, config: LexicalProjectionConfig) -> Result<Vec<(String, u8
 #[test]
 fn reserved_two_way_merge_progresses_with_live_input_and_frequencies_at_a_full_root() {
     use crate::build_memory::reserved::ReservedMemory;
-    use skein_core::RuntimeMemoryReservation;
+    use hawdb_core::RuntimeMemoryReservation;
     let root = TestRoot::new();
     let task = RuntimeTaskContext::default()
         .with_memory_reservation(RuntimeMemoryReservation::new(128 * 1024, 0));
@@ -372,7 +386,7 @@ fn admitted_frequency_run_and_reader_retain_control_after_the_pool_drops() {
 
 #[test]
 fn spilled_postings_enforce_the_logical_budget_and_clean_partial_output() {
-    use skein_core::RuntimeMemoryReservation;
+    use hawdb_core::RuntimeMemoryReservation;
 
     let id = "source";
     // The logical posting unit includes 32 bytes besides the term and ID.
@@ -425,7 +439,7 @@ fn spilled_postings_enforce_the_logical_budget_and_clean_partial_output() {
             }
             assert!(reader.next(limit).unwrap().is_none());
         } else {
-            assert!(matches!(result, Err(SkeinError::Storage(message))
+            assert!(matches!(result, Err(HawDBError::Storage(message))
                 if message == "one lexical posting exceeds the build memory budget"));
             assert!(pool.paths.is_empty());
             assert_eq!(root.entries(), 0);
@@ -441,7 +455,7 @@ fn spilled_postings_enforce_the_logical_budget_and_clean_partial_output() {
 #[test]
 fn native_spill_path_scratch_is_admitted_before_create_and_retained_through_cleanup() {
     use crate::build_memory::reserved::{native_path, ReservedMemory};
-    use skein_core::RuntimeMemoryReservation;
+    use hawdb_core::RuntimeMemoryReservation;
     let root = TestRoot::new();
     let mut directory = root.0.clone();
     for _ in 0..5 {
@@ -631,7 +645,7 @@ fn failed_consumer_and_merge_remove_all_document_runs() {
     .unwrap();
     let error = analyzed
         .visit(config, |_, _, _| {
-            Err(SkeinError::Execution("cancel consumer".into()))
+            Err(HawDBError::Execution("cancel consumer".into()))
         })
         .unwrap_err();
     assert!(error.to_string().contains("cancel consumer"));
@@ -833,7 +847,7 @@ fn document_record_buffer_admits_before_reserving_or_inserting() {
 
 #[test]
 fn document_record_slots_admit_replacement_overlap_before_mutation() {
-    use skein_core::RuntimeMemoryReservation;
+    use hawdb_core::RuntimeMemoryReservation;
     let root = TestRoot::new();
     for short in [0, 1] {
         let task = RuntimeTaskContext::default()
@@ -884,7 +898,7 @@ enum FlushOutcome {
 }
 
 fn assert_flush_releases_record_memory(outcome: FlushOutcome) {
-    use skein_core::{RuntimeCancellationToken, RuntimeMemoryReservation};
+    use hawdb_core::{RuntimeCancellationToken, RuntimeMemoryReservation};
 
     const BUDGET: usize = 256 * 1024;
     let root = TestRoot::new();

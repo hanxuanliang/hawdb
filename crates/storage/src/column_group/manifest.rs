@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Layered, generation-bound publication metadata for column groups.
 //!
 //! The active manifest is the only mutable publication point. It references
@@ -12,14 +26,14 @@ use super::group::ColumnGroupReader;
 use super::{corrupt, unsupported, ColumnGroupError};
 use crate::durability::durable_replace_file;
 use crate::ManifestGeneration;
-use skein_integrity::{crc32c, IntegrityHasher, Sha256Digest, SHA256_BYTES};
+use hawdb_integrity::{crc32c, IntegrityHasher, Sha256Digest, SHA256_BYTES};
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub const COLUMN_GROUP_MANIFEST_FILE: &str = "column-groups.manifest.skein";
+pub const COLUMN_GROUP_MANIFEST_FILE: &str = "column-groups.manifest.hawdb";
 
 const MANIFEST_MAGIC: &[u8; 9] = b"SKNCOLM01";
 const TABLE_DIRECTORY_MAGIC: &[u8; 10] = b"SKNCOLDIR1";
@@ -348,7 +362,7 @@ impl ColumnGroupTableDirectory {
 
     pub fn file_name(&self) -> String {
         format!(
-            "table-{}-{}-groups-{}.skein",
+            "table-{}-{}-groups-{}.hawdb",
             self.table.kind.file_tag(),
             self.table.table_id,
             self.publication_generation.0
@@ -384,7 +398,7 @@ impl ColumnGroupTableDirectory {
             directory_generation: self.publication_generation,
             file_name,
             byte_len: bytes.len() as u64,
-            sha256: skein_integrity::sha256(&bytes),
+            sha256: hawdb_integrity::sha256(&bytes),
         })
     }
 
@@ -768,7 +782,7 @@ impl ColumnGroupManifest {
             let path = root.join(&reference.file_name);
             let bytes = read_bounded(&path, MAX_METADATA_FILE_BYTES, "table directory")?;
             if bytes.len() as u64 != reference.byte_len
-                || skein_integrity::sha256(&bytes) != reference.sha256
+                || hawdb_integrity::sha256(&bytes) != reference.sha256
             {
                 return Err(corrupt(format!(
                     "table directory {} does not match its manifest identity",
@@ -1228,7 +1242,7 @@ mod tests {
     use super::*;
     use crate::column_group::group::ColumnGroupWriter;
     use crate::column_group::DeletionVectorBinding;
-    use skein_core::{PropertyId, Value};
+    use hawdb_core::{PropertyId, Value};
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Barrier};
     use std::thread;
@@ -1481,7 +1495,7 @@ mod tests {
             .unwrap();
 
         let mut stale_ref = first_ref;
-        stale_ref.file_name = "different-old-directory.skein".to_string();
+        stale_ref.file_name = "different-old-directory.hawdb".to_string();
         fs::copy(
             root.join(directory.file_name()),
             root.join(&stale_ref.file_name),
@@ -1554,7 +1568,7 @@ mod tests {
             fs::write(&path, b"torn candidate").unwrap();
             path
         };
-        let before_directory = write_orphan(".table-stale.skein.999-0.candidate");
+        let before_directory = write_orphan(".table-stale.hawdb.999-0.candidate");
         let directory = table_with_group(&root, ColumnGroupTableKind::Node, 1, 1, 1, None);
         let reference = directory.write_immutable(&root).unwrap();
         assert!(
@@ -1715,7 +1729,7 @@ mod tests {
     ) -> ColumnGroupTableDirectory {
         let group_generation =
             deletion.map_or(publication_generation, |(generation, _)| generation);
-        let group_file = format!("group-{group_id}-{group_generation}.skein");
+        let group_file = format!("group-{group_id}-{group_generation}.hawdb");
         if !root.join(&group_file).exists() {
             ColumnGroupWriter::default()
                 .write(
@@ -1731,7 +1745,7 @@ mod tests {
                 .unwrap();
         }
         let deletion_file = deletion.map(|(group_generation, row)| {
-            let file = format!("group-{group_id}-dv-{publication_generation}.skein");
+            let file = format!("group-{group_id}-dv-{publication_generation}.hawdb");
             let binding = DeletionVectorBinding::new(
                 group_id,
                 ManifestGeneration(group_generation),
@@ -1760,7 +1774,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "skein-column-manifest-{name}-{}-{nonce}",
+            "hawdb-column-manifest-{name}-{}-{nonce}",
             std::process::id()
         ))
     }

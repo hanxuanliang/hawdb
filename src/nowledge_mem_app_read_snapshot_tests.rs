@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{
     NowledgeMemEmbeddedStore, NowledgeMemEmbeddedStoreHandle, NowledgeMemGraph,
     NowledgeMemGraphMode, NowledgeMemReadSnapshotBudget, NowledgeMemSearchProjection,
@@ -130,7 +144,7 @@ fn bounded_read_snapshot_coordinates_search_graph_and_relational_queries() {
     let encoded_evidence = evidence.to_string();
     assert_eq!(
         evidence["protocol"],
-        "skein-nowledge-mem-read-snapshot-report-v1"
+        "hawdb-nowledge-mem-read-snapshot-report-v1"
     );
     assert_eq!(evidence["cypher_statement_count"], 2);
     assert_eq!(evidence["sql_statement_count"], 1);

@@ -1,6 +1,20 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
-use skein_cypher::ScalarBinaryOp as AstOp;
-use skein_expression::ScalarBinaryOp;
+use hawdb_cypher::ScalarBinaryOp as AstOp;
+use hawdb_expression::ScalarBinaryOp;
 
 pub(super) fn plan_case_scalar(
     scope: &BTreeSet<String>,
@@ -135,7 +149,7 @@ fn specialize_case(
                     } else {
                         "expression"
                     };
-                    return Err(SkeinError::Semantic(format!(
+                    return Err(HawDBError::Semantic(format!(
                         "unknown variable '{variable}' in {position}"
                     )));
                 }
@@ -204,7 +218,7 @@ mod tests {
 
     #[test]
     fn case_shape_specialization_respects_projected_column_shadowing() {
-        let statement = skein_cypher::parse("MATCH (n:Item) RETURN CASE WHEN lower(n.name) = 'first' THEN 0 WHEN lower(n.name) = 'second' THEN 0 WHEN list_contains(n.aliases, 'alias') THEN 1 ELSE 2 END").unwrap();
+        let statement = hawdb_cypher::parse("MATCH (n:Item) RETURN CASE WHEN lower(n.name) = 'first' THEN 0 WHEN lower(n.name) = 'second' THEN 0 WHEN list_contains(n.aliases, 'alias') THEN 1 ELSE 2 END").unwrap();
         let Statement::MatchReturn(query) = statement else {
             panic!("expected MATCH");
         };

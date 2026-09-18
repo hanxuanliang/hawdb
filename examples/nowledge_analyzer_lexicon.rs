@@ -1,7 +1,21 @@
-use skein::{SearchAnalyzerLexicon, SearchDocument, SearchIndex, SearchMode};
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use hawdb::{SearchAnalyzerLexicon, SearchDocument, SearchIndex, SearchMode};
 use std::collections::BTreeMap;
 
-fn main() -> skein::Result<()> {
+fn main() -> hawdb::Result<()> {
     let mut index = SearchIndex::in_memory().with_analyzer_lexicon(nowledge_application_lexicon());
 
     index

@@ -1,6 +1,20 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::{
     AppendGeneratedRow, AppendTransaction, AppendWrite, ConcurrentDatabase,
-    ConcurrentTransactionOptions, Database, RelationalValue, SkeinError, Value,
+    ConcurrentTransactionOptions, Database, HawDBError, RelationalValue, Value,
     WalGroupCommitActivation, WalGroupCommitAdaptiveColdStartEvidence,
     WalGroupCommitAdaptivePolicyEvidence, WalGroupCommitAdaptiveSteadyStateEvidence,
     WalGroupCommitConfig, WalGroupCommitDelayPolicy, WalGroupCommitEvidence,
@@ -207,7 +221,7 @@ fn optimistic_transactions_prepare_in_parallel_and_reject_the_stale_committer() 
         .iter()
         .find_map(|result| result.as_ref().err())
         .expect("one optimistic transaction must conflict");
-    assert!(matches!(conflict, SkeinError::Execution(_)));
+    assert!(matches!(conflict, HawDBError::Execution(_)));
     assert!(conflict
         .to_string()
         .contains("optimistic transaction conflict"));
@@ -1575,7 +1589,7 @@ fn wal_group_sync_failure_rejects_commit_and_poisons_until_reopen() {
 
     crate::store::set_wal_group_sync_failpoint(true);
     let error = transaction.commit().unwrap_err();
-    assert!(matches!(&error, SkeinError::StorageIntegrity(_)));
+    assert!(matches!(&error, HawDBError::StorageIntegrity(_)));
     assert!(error
         .to_string()
         .contains("WAL group durability barrier failed"));

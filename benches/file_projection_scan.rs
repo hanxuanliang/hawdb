@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Cost of repeated `FileProjection::search` against a disk-backed artifact.
 //!
 //! Every `search()` call pulls each scanned segment's payload off disk via
@@ -9,11 +23,11 @@
 //! allocation overhead, if present, shows up in wall-clock throughput and
 //! total bytes materialized.
 
-use serde_json::json;
-use skein_vector_projection::{
+use hawdb_vector_projection::{
     KernelPreference, ProjectionBuildConfig, ProjectionIdentity, ProjectionSearchOptions,
     ProjectionWriter,
 };
+use serde_json::json;
 use std::hint::black_box;
 use std::num::NonZeroUsize;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -31,7 +45,7 @@ const SEARCHES: usize = if SMOKE { 4 } else { 200 };
 const WORKERS: [usize; 2] = [1, 4];
 
 fn main() {
-    let dimension = std::env::var("SKEIN_BENCH_VECTOR_DIMENSION")
+    let dimension = std::env::var("HAWDB_BENCH_VECTOR_DIMENSION")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(384);
@@ -63,7 +77,7 @@ fn main() {
 
 fn artifact_path() -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
-        "skein-file-projection-scan-{}-{}.bin",
+        "hawdb-file-projection-scan-{}-{}.bin",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -75,7 +89,7 @@ fn artifact_path() -> std::path::PathBuf {
 fn build_artifact(
     path: &std::path::Path,
     dimension: usize,
-) -> skein_vector_projection::FileProjection {
+) -> hawdb_vector_projection::FileProjection {
     let config = ProjectionBuildConfig::new(dimension, ProjectionIdentity::new(1))
         .with_segment_rows(SEGMENT_ROWS);
     let mut writer =
@@ -100,7 +114,7 @@ fn vector(id: u64, dimension: usize) -> Vec<f32> {
 }
 
 fn measure(
-    projection: &skein_vector_projection::FileProjection,
+    projection: &hawdb_vector_projection::FileProjection,
     query: &[f32],
     workers: usize,
 ) -> serde_json::Value {

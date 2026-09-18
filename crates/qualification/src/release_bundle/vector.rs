@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{
     parse_binding, require_bool, require_empty_array, require_nonzero, require_string,
     require_unsigned, shared_identity_matches, validate_common_artifact,
@@ -5,8 +19,8 @@ use super::{
     ProductionVectorMatrixArtifactAssessment,
 };
 use crate::PRODUCTION_VECTOR_QUALIFICATION_PROTOCOL;
+use hawdb::ProductionQualificationIdentity;
 use serde_json::Value;
-use skein::ProductionQualificationIdentity;
 use std::collections::BTreeSet;
 
 const REQUIRED_TARGETS: [(&str, &str); 4] = [
@@ -16,8 +30,8 @@ const REQUIRED_TARGETS: [(&str, &str); 4] = [
     ("windows", "x86_64"),
 ];
 const MINIMUM_VECTOR_DOCUMENT_COUNT: u64 = 100_000;
-const RECALL_PROTOCOL: &str = "skein-vector-recall-validation-v1";
-const RABITQ_BACKEND: &str = "skein_rabitq_candidate_projection";
+const RECALL_PROTOCOL: &str = "hawdb-vector-recall-validation-v1";
+const RABITQ_BACKEND: &str = "hawdb_rabitq_candidate_projection";
 
 pub(super) fn evaluate_matrix(
     artifacts: &[Value],
@@ -445,7 +459,7 @@ fn validate_queries(artifact: &Value, blockers: &mut Vec<String>) {
         require_string(
             case,
             "/serving_metrics/backend",
-            "skein_rabitq_out_of_core_candidate_projection",
+            "hawdb_rabitq_out_of_core_candidate_projection",
             "vector_serving_backend_mismatch",
             blockers,
         );

@@ -1,7 +1,21 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::build_control::checkpoint;
 use crate::build_memory::{path::OwnedPath, reserved::native_path, BuildMemory};
-use crate::error::{Result, SkeinError};
-use skein_core::RuntimeTaskContext;
+use crate::error::{HawDBError, Result};
+use hawdb_core::RuntimeTaskContext;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::Path;
 
@@ -76,8 +90,8 @@ impl SearchProjectionPublishLease {
     }
 }
 
-fn active_publication() -> SkeinError {
-    SkeinError::Storage("another search projection publication is active".into())
+fn active_publication() -> HawDBError {
+    HawDBError::Storage("another search projection publication is active".into())
 }
 
 impl Drop for SearchProjectionPublishLease {
@@ -92,7 +106,7 @@ impl Drop for SearchProjectionPublishLease {
 #[cfg(unix)]
 mod registration {
     use super::*;
-    use skein_executor::QueryMemoryLease;
+    use hawdb_executor::QueryMemoryLease;
     use std::collections::LinkedList;
     use std::mem::size_of;
     use std::os::unix::fs::MetadataExt;
@@ -230,7 +244,7 @@ mod tests {
         let snapshot = root.join(crate::SEARCH_SNAPSHOT_FILE);
         let task = RuntimeTaskContext::default();
         let memory = BuildMemory::new(&task).unwrap();
-        let header = "SKEIN_SEARCH_PROJECTION_V1\nprojection_consumer_binding\towner\n";
+        let header = "HAWDB_SEARCH_PROJECTION_V1\nprojection_consumer_binding\towner\n";
         for contents in [
             header.as_bytes().to_vec(),
             crate::encode_search_snapshot_text(header).unwrap(),
@@ -271,7 +285,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let snapshot = root.join(crate::SEARCH_SNAPSHOT_FILE);
         let text = format!(
-            "SKEIN_SEARCH_PROJECTION_V1\nsource_graph_commit_epoch\t1\n{}",
+            "HAWDB_SEARCH_PROJECTION_V1\nsource_graph_commit_epoch\t1\n{}",
             "payload".repeat(2048)
         );
         let variants = [
@@ -312,11 +326,11 @@ mod tests {
 
     #[test]
     fn publication_control_probe_releases_exclusion_after_admission_denial() {
-        use skein_core::RuntimeMemoryReservation;
+        use hawdb_core::RuntimeMemoryReservation;
         let root = test_dir();
         fs::create_dir_all(&root).unwrap();
         let snapshot = root.join(crate::SEARCH_SNAPSHOT_FILE);
-        let contents = b"SKEIN_SEARCH_PROJECTION_V1\nsource_graph_commit_epoch\t1\n";
+        let contents = b"HAWDB_SEARCH_PROJECTION_V1\nsource_graph_commit_epoch\t1\n";
         for bytes in [
             contents.to_vec(),
             crate::encode_search_snapshot_text(std::str::from_utf8(contents).unwrap()).unwrap(),
@@ -366,7 +380,7 @@ mod tests {
     #[test]
     fn publication_registry_owns_each_node_until_removal_and_rejects_aliases() {
         use crate::test_allocation as allocation;
-        use skein_core::RuntimeMemoryReservation;
+        use hawdb_core::RuntimeMemoryReservation;
         let _serial = allocation::serial();
         assert_eq!(allocation::live(), 0);
         let root = test_dir();
@@ -412,7 +426,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "skein_search_publish_lease_{}_{}",
+            "hawdb_search_publish_lease_{}_{}",
             std::process::id(),
             nanos
         ))

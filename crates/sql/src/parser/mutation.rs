@@ -1,9 +1,23 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{
     lower_expression, lower_literal_expr, lower_table_factor, lower_table_name, normalize_ident,
     object_name_parts, ExpressionPosition,
 };
 use crate::ast::*;
-use skein_core::{Result, SkeinError};
+use hawdb_core::{HawDBError, Result};
 use sqlparser::ast::{
     Assignment, AssignmentTarget, BinaryOperator, Expr, FromTable, OnConflictAction, OnInsert,
     SelectItem, SetExpr, TableObject,
@@ -31,12 +45,12 @@ pub(super) fn lower_insert_statement(insert: &sqlparser::ast::Insert) -> Result<
         ],
     )?;
     let TableObject::TableName(table) = &insert.table else {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "INSERT table functions are not supported".to_string(),
         ));
     };
     let Some(source) = &insert.source else {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "INSERT requires an explicit VALUES clause".to_string(),
         ));
     };
@@ -50,17 +64,17 @@ pub(super) fn lower_insert_statement(insert: &sqlparser::ast::Insert) -> Result<
         || source.format_clause.is_some()
         || !source.pipe_operators.is_empty()
     {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "INSERT supports VALUES rows only".to_string(),
         ));
     }
     let SetExpr::Values(values) = source.body.as_ref() else {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "INSERT supports VALUES rows only".to_string(),
         ));
     };
     if values.explicit_row || values.value_keyword {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "INSERT requires the PostgreSQL VALUES form".to_string(),
         ));
     }
@@ -79,7 +93,7 @@ pub(super) fn lower_insert_statement(insert: &sqlparser::ast::Insert) -> Result<
         })
         .collect::<Result<Vec<_>>>()?;
     if rows.is_empty() || rows.iter().any(|row| row.len() != columns.len()) {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "INSERT VALUES rows must match the explicit column list".to_string(),
         ));
     }
@@ -100,7 +114,7 @@ pub(super) fn lower_insert_statement(insert: &sqlparser::ast::Insert) -> Result<
                 SelectItem::UnnamedExpr(_)
                 | SelectItem::ExprWithAlias { .. }
                 | SelectItem::QualifiedWildcard(_, _)
-                | SelectItem::Wildcard(_) => Err(SkeinError::Semantic(
+                | SelectItem::Wildcard(_) => Err(HawDBError::Semantic(
                     "INSERT RETURNING supports column references only".to_string(),
                 )),
             })
@@ -110,12 +124,12 @@ pub(super) fn lower_insert_statement(insert: &sqlparser::ast::Insert) -> Result<
 
 fn lower_on_conflict(on_insert: &OnInsert) -> Result<SqlOnConflict> {
     let OnInsert::OnConflict(conflict) = on_insert else {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "only PostgreSQL ON CONFLICT is supported".to_string(),
         ));
     };
     let Some(sqlparser::ast::ConflictTarget::Columns(columns)) = &conflict.conflict_target else {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "ON CONFLICT requires an explicit column target".to_string(),
         ));
     };
@@ -123,7 +137,7 @@ fn lower_on_conflict(on_insert: &OnInsert) -> Result<SqlOnConflict> {
         OnConflictAction::DoNothing => SqlConflictAction::DoNothing,
         OnConflictAction::DoUpdate(update) => {
             if update.selection.is_some() {
-                return Err(SkeinError::Semantic(
+                return Err(HawDBError::Semantic(
                     "ON CONFLICT DO UPDATE WHERE is not supported".to_string(),
                 ));
             }
@@ -144,7 +158,7 @@ pub(super) fn lower_update_statement(update: &sqlparser::ast::Update) -> Result<
         || update.limit.is_some()
         || !update.table.joins.is_empty()
     {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "unsupported PostgreSQL UPDATE clause".to_string(),
         ));
     }
@@ -166,13 +180,13 @@ fn lower_assignments(assignments: &[Assignment]) -> Result<Vec<SqlAssignment>> {
         .iter()
         .map(|assignment| {
             let AssignmentTarget::ColumnName(name) = &assignment.target else {
-                return Err(SkeinError::Semantic(
+                return Err(HawDBError::Semantic(
                     "tuple assignments are not supported".to_string(),
                 ));
             };
             let parts = object_name_parts(name)?;
             let [column] = parts.as_slice() else {
-                return Err(SkeinError::Semantic(
+                return Err(HawDBError::Semantic(
                     "assignment targets must be unqualified columns".to_string(),
                 ));
             };
@@ -211,7 +225,7 @@ fn lower_assignment_value(expr: &Expr) -> Result<SqlAssignmentValue> {
                     SqlArithmeticOperand::Value(_),
                 ) => {}
                 _ => {
-                    return Err(SkeinError::Semantic(
+                    return Err(HawDBError::Semantic(
                         "UPDATE arithmetic supports column + value, value + column, and column - value"
                             .to_string(),
                     ));
@@ -227,7 +241,7 @@ fn lower_assignment_value(expr: &Expr) -> Result<SqlAssignmentValue> {
                 right,
             })
         }
-        Expr::BinaryOp { .. } => Err(SkeinError::Semantic(
+        Expr::BinaryOp { .. } => Err(HawDBError::Semantic(
             "UPDATE arithmetic supports column + value, value + column, and column - value"
                 .to_string(),
         )),
@@ -252,7 +266,7 @@ pub(super) fn lower_delete_statement(delete: &sqlparser::ast::Delete) -> Result<
         || !delete.order_by.is_empty()
         || delete.limit.is_some()
     {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "unsupported PostgreSQL DELETE clause".to_string(),
         ));
     }
@@ -260,12 +274,12 @@ pub(super) fn lower_delete_statement(delete: &sqlparser::ast::Delete) -> Result<
         FromTable::WithFromKeyword(from) | FromTable::WithoutKeyword(from) => from,
     };
     let [from] = from.as_slice() else {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "DELETE supports exactly one base table".to_string(),
         ));
     };
     if !from.joins.is_empty() {
-        return Err(SkeinError::Semantic(
+        return Err(HawDBError::Semantic(
             "DELETE joins are not supported".to_string(),
         ));
     }

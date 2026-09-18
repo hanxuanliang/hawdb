@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #[cfg(test)]
 use std::ffi::OsString;
 #[cfg(not(windows))]
@@ -248,8 +262,8 @@ mod tests {
     fn durable_replace_publishes_and_replaces_content() {
         let root = unique_test_dir();
         fs::create_dir_all(&root).unwrap();
-        let candidate = root.join("candidate.skein");
-        let published = root.join("published.skein");
+        let candidate = root.join("candidate.hawdb");
+        let published = root.join("published.hawdb");
 
         write_synced(&candidate, b"first");
         durable_replace_file(&candidate, &published).unwrap();
@@ -267,8 +281,8 @@ mod tests {
     #[test]
     fn platform_obstruction_rejects_canonical_row_and_overflow_manifest_replace() {
         for destination_name in [
-            "relational-row-pages-1.manifest.skein",
-            "relational-overflow-1.manifest.skein",
+            "relational-row-pages-1.manifest.hawdb",
+            "relational-overflow-1.manifest.hawdb",
         ] {
             let root = unique_test_dir();
             fs::create_dir_all(&root).unwrap();
@@ -315,7 +329,7 @@ mod tests {
 
     fn unique_test_dir() -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
-            "skein-durable-replace-{}-{}",
+            "hawdb-durable-replace-{}-{}",
             std::process::id(),
             TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ))

@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Node, index, source-segment, and adjacency scan execution.
 
 use super::*;
@@ -136,7 +150,7 @@ pub(super) fn stream_index_node_seek_batches(
 pub(super) fn stream_index_node_union_seek_batches(
     variable: &str,
     label: &str,
-    branches: &[skein_plan::ExactPropertySeekBranch],
+    branches: &[hawdb_plan::ExactPropertySeekBranch],
     context: BatchReadContext<'_>,
     execution_limit: ExecutionLimit,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
@@ -275,7 +289,7 @@ pub(super) fn stream_source_segment_scan_batches(
                 return Ok(ScanControl::Stop);
             }
             let Some(node) = store.node_owned(NodeId(row.node_id))? else {
-                return Err(SkeinError::StorageIntegrity(
+                return Err(HawDBError::StorageIntegrity(
                     "SourceSegmentScan sidecar candidate is absent from the canonical graph"
                         .to_string(),
                 ));
@@ -283,7 +297,7 @@ pub(super) fn stream_source_segment_scan_batches(
             if source_label_id.is_none_or(|label_id| !node.labels.contains(&label_id))
                 || node.properties != row.properties
             {
-                return Err(SkeinError::StorageIntegrity(
+                return Err(HawDBError::StorageIntegrity(
                     "SourceSegmentScan sidecar candidate disagrees with the canonical graph"
                         .to_string(),
                 ));
@@ -318,7 +332,7 @@ pub(super) fn stream_source_segment_scan_batches(
         return stream_node_scan_batches(variable, "Source", None, context, execution_limit, emit);
     };
     observer.record_scan_pruning_report(ScanPruningReport {
-        target_kind: skein_storage::ScanPruningTargetKind::Node,
+        target_kind: hawdb_storage::ScanPruningTargetKind::Node,
         label_id: source_label_id,
         rel_type_id: None,
         strategy: source_scan_pruning_strategy(&storage_predicate),
@@ -453,7 +467,7 @@ pub(super) fn stream_adjacency_exists_batches(
         ..
     } = plan
     else {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "expected adjacency exists plan".to_string(),
         ));
     };
@@ -546,7 +560,7 @@ pub(super) fn stream_adjacency_expand_batches(
         ..
     } = plan
     else {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "expected adjacency expand plan".to_string(),
         ));
     };
@@ -623,7 +637,7 @@ pub(super) fn stream_adjacency_expand_batches(
                         runtime_checkpoint(context.task_context)?;
                         let candidate_bytes = binding_memory_bytes(&candidate.binding);
                         if candidate_bytes > batch_payload_bytes {
-                            return Err(SkeinError::Execution(format!(
+                            return Err(HawDBError::Execution(format!(
                                 "intermediate row uses {candidate_bytes} bytes, exceeding batch_payload_bytes {batch_payload_bytes}"
                             )));
                         }

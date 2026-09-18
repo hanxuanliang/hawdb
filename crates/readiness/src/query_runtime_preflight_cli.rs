@@ -1,9 +1,23 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Developer-facing input parsing for query runtime preflight.
 
 use crate::query_runtime_preflight::{
     parse_query_runtime_preflight_probes, NowledgeQueryRuntimePreflightProbe,
 };
-use skein_core::{Result, SkeinError};
+use hawdb_core::{HawDBError, Result};
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,22 +43,22 @@ pub fn parse_query_runtime_preflight_cli_inputs(
             "--require-ready" => require_ready = true,
             "--probe-json" => probe_path = Some(next_arg(&mut args)?),
             value if value.starts_with("--") => {
-                return Err(SkeinError::Semantic(
+                return Err(HawDBError::Semantic(
                     nowledge_query_runtime_preflight_usage(),
                 ));
             }
             value if database_path.replace(value.to_string()).is_none() => {}
             _ => {
-                return Err(SkeinError::Semantic(
+                return Err(HawDBError::Semantic(
                     nowledge_query_runtime_preflight_usage(),
                 ))
             }
         }
     }
     let probe_path =
-        probe_path.ok_or_else(|| SkeinError::Semantic(nowledge_query_runtime_preflight_usage()))?;
+        probe_path.ok_or_else(|| HawDBError::Semantic(nowledge_query_runtime_preflight_usage()))?;
     let database_path = database_path
-        .ok_or_else(|| SkeinError::Semantic(nowledge_query_runtime_preflight_usage()))?;
+        .ok_or_else(|| HawDBError::Semantic(nowledge_query_runtime_preflight_usage()))?;
     Ok(QueryRuntimePreflightCliInputs {
         require_ready,
         database_path,
@@ -54,18 +68,18 @@ pub fn parse_query_runtime_preflight_cli_inputs(
 
 fn next_arg(args: &mut impl Iterator<Item = String>) -> Result<String> {
     args.next()
-        .ok_or_else(|| SkeinError::Semantic(nowledge_query_runtime_preflight_usage()))
+        .ok_or_else(|| HawDBError::Semantic(nowledge_query_runtime_preflight_usage()))
 }
 
 fn read_json_file(path: &Path) -> Result<serde_json::Value> {
     let content = std::fs::read_to_string(path).map_err(|error| {
-        SkeinError::Execution(format!(
+        HawDBError::Execution(format!(
             "failed to read query runtime preflight JSON: {}",
             error.kind()
         ))
     })?;
     serde_json::from_str(&content).map_err(|_| {
-        SkeinError::Semantic(
+        HawDBError::Semantic(
             "failed to parse query runtime preflight JSON: invalid_json".to_string(),
         )
     })
@@ -78,7 +92,7 @@ mod tests {
     #[test]
     fn parser_preserves_probe_and_require_ready() {
         let root = std::env::temp_dir().join(format!(
-            "skein_preflight_cli_{}_{}",
+            "hawdb_preflight_cli_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

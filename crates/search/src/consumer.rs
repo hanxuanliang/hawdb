@@ -1,9 +1,23 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Internal projection ownership used by the embedded database facade.
 use super::{SearchIndex, SEARCH_SNAPSHOT_FILE};
-use crate::error::{Result, SkeinError};
+use crate::error::{HawDBError, Result};
 use crate::out_of_core::SearchProjectionPublishLease;
-use skein_core::Uuid;
-use skein_integrity::IntegrityHasher;
+use hawdb_core::Uuid;
+use hawdb_integrity::IntegrityHasher;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
@@ -165,7 +179,7 @@ impl ConsumerProjection {
             .consumer_binding
             .as_mut()
             .expect("bound consumer")
-            .checkpoint_uuid = skein_core::uuidv7::generate_uuidv7()?;
+            .checkpoint_uuid = hawdb_core::uuidv7::generate_uuidv7()?;
         self.index.checkpoint_with_lease(true)?;
         Ok(self.receipt())
     }
@@ -179,7 +193,7 @@ impl ConsumerProjection {
             }
             return Err(error.into());
         }
-        skein_storage::durability::sync_parent_directory(destination)?;
+        hawdb_storage::durability::sync_parent_directory(destination)?;
         // Readers hold paths into their generation. Reload those readers while
         // retaining the lease, receipt, and initializer's runtime configuration.
         self.index.path = Some(destination.to_path_buf());
@@ -278,7 +292,7 @@ impl SearchIndex {
                 return Ok(());
             }
         }
-        Err(SkeinError::StorageIntegrity(
+        Err(HawDBError::StorageIntegrity(
             "missing or inconsistent registered vector projection".into(),
         ))
     }
@@ -337,8 +351,8 @@ fn canonical_uuid(raw: &str) -> Result<Uuid> {
     }
     Ok(uuid)
 }
-fn invalid(detail: &str) -> SkeinError {
-    SkeinError::Storage(format!("projection consumer: {detail}"))
+fn invalid(detail: &str) -> HawDBError {
+    HawDBError::Storage(format!("projection consumer: {detail}"))
 }
 
 #[cfg(test)]
@@ -346,17 +360,17 @@ mod tests {
     use super::*;
     fn binding() -> ConsumerBinding {
         ConsumerBinding {
-            database_uuid: skein_core::generate_uuidv7().unwrap(),
-            projection_uuid: skein_core::generate_uuidv7().unwrap(),
+            database_uuid: hawdb_core::generate_uuidv7().unwrap(),
+            projection_uuid: hawdb_core::generate_uuidv7().unwrap(),
             consumer_id: "main".into(),
-            registration_uuid: skein_core::generate_uuidv7().unwrap(),
-            checkpoint_uuid: skein_core::generate_uuidv7().unwrap(),
+            registration_uuid: hawdb_core::generate_uuidv7().unwrap(),
+            checkpoint_uuid: hawdb_core::generate_uuidv7().unwrap(),
         }
     }
     fn directory() -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(
-            "skein-owned-projection-{}",
-            skein_core::generate_uuidv7().unwrap()
+            "hawdb-owned-projection-{}",
+            hawdb_core::generate_uuidv7().unwrap()
         ));
         fs::create_dir(&root).unwrap();
         root
@@ -468,8 +482,8 @@ mod tests {
                         policy_epoch: None,
                     }
                 ),
-                Err(SkeinError::CapabilityUnavailable {
-                    capability: skein_core::RuntimeCapability::FullTextSearch
+                Err(HawDBError::CapabilityUnavailable {
+                    capability: hawdb_core::RuntimeCapability::FullTextSearch
                 })
             ));
         }
@@ -511,7 +525,7 @@ mod tests {
         }
         assert!(matches!(
             ConsumerProjection::open(&root),
-            Err(SkeinError::StorageIntegrity(_))
+            Err(HawDBError::StorageIntegrity(_))
         ));
         fs::remove_dir_all(root).unwrap();
     }

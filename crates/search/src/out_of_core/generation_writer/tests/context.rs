@@ -1,5 +1,19 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
-use skein_core::{RuntimeCancellationToken, RuntimeMemoryReservation};
+use hawdb_core::{RuntimeCancellationToken, RuntimeMemoryReservation};
 
 fn context(bytes: u64) -> RuntimeTaskContext {
     RuntimeTaskContext::default().with_memory_reservation(RuntimeMemoryReservation::new(bytes, 0))
@@ -435,7 +449,7 @@ fn deferred_old_generation_cleanup_does_not_fail_a_committed_build() {
     assert_eq!(report.cleanup_deleted_files, 0);
     assert_eq!(report.cleanup_pending_files, 0);
     assert!(report.cleanup_retry_required);
-    assert!(root.join("search_lexical.2.skein").exists());
+    assert!(root.join("search_lexical.2.hawdb").exists());
     assert_eq!(stage_directories(&root), 0);
     assert_eq!(
         memory.ledger.snapshot().used_bytes,
@@ -458,7 +472,7 @@ fn deferred_old_generation_cleanup_does_not_fail_a_committed_build() {
     let report = retry.finish().unwrap();
     assert!(report.cleanup_deleted_files > 0);
     assert!(!report.cleanup_retry_required);
-    assert!(!root.join("search_lexical.2.skein").exists());
+    assert!(!root.join("search_lexical.2.hawdb").exists());
     fs::remove_dir_all(root).unwrap();
 }
 

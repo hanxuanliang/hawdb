@@ -1,5 +1,19 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::inventory::storage_recovery_evidence_health;
-use skein_core::{Result, SkeinError};
+use hawdb_core::{HawDBError, Result};
 use std::path::Path;
 
 pub fn nowledge_storage_recovery_evidence_usage() -> String {
@@ -21,7 +35,7 @@ pub fn run_nowledge_storage_recovery_evidence(
             }
             path => {
                 if args.next().is_some() {
-                    return Err(SkeinError::Semantic(
+                    return Err(HawDBError::Semantic(
                         nowledge_storage_recovery_evidence_usage(),
                     ));
                 }
@@ -33,7 +47,7 @@ pub fn run_nowledge_storage_recovery_evidence(
             }
         }
     }
-    Err(SkeinError::Semantic(
+    Err(HawDBError::Semantic(
         nowledge_storage_recovery_evidence_usage(),
     ))
 }
@@ -44,7 +58,7 @@ pub fn nowledge_storage_recovery_evidence_json(
 ) -> serde_json::Value {
     let health = storage_recovery_evidence_health(Some(report), required);
     serde_json::json!({
-        "protocol": "skein-nowledge-storage-recovery-evidence-v1",
+        "protocol": "hawdb-nowledge-storage-recovery-evidence-v1",
         "required": health.required,
         "present": health.present,
         "ready": health.ready,
@@ -73,13 +87,13 @@ pub fn nowledge_storage_recovery_evidence_json(
 
 fn read_json_file(path: &Path) -> Result<serde_json::Value> {
     let content = std::fs::read_to_string(path).map_err(|error| {
-        SkeinError::Execution(format!(
+        HawDBError::Execution(format!(
             "failed to read storage recovery report JSON: {}",
             error.kind()
         ))
     })?;
     serde_json::from_str(&content).map_err(|_| {
-        SkeinError::Semantic(
+        HawDBError::Semantic(
             "failed to parse storage recovery report JSON: invalid_json".to_string(),
         )
     })
@@ -106,7 +120,7 @@ mod tests {
         assert!(require_ready);
         assert_eq!(
             evidence["protocol"],
-            "skein-nowledge-storage-recovery-evidence-v1"
+            "hawdb-nowledge-storage-recovery-evidence-v1"
         );
         assert_eq!(evidence["ready"], true);
         assert_eq!(evidence["storage_recovery_required"], true);
@@ -248,8 +262,8 @@ mod tests {
 
     fn ready_report() -> serde_json::Value {
         serde_json::json!({
-            "protocol": "skein-storage-recovery-report",
-            "storage_version": "skein-storage-v1",
+            "protocol": "hawdb-storage-recovery-report",
+            "storage_version": "hawdb-storage-v1",
             "durable": true,
             "recovery_mode": "snapshot_and_wal",
             "max_wal_replay_entries": 1024,
@@ -276,6 +290,6 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("skein_{name}_{}_{nanos}.json", std::process::id()))
+        std::env::temp_dir().join(format!("hawdb_{name}_{}_{nanos}.json", std::process::id()))
     }
 }

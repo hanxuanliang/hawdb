@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use crate::build_control::checkpoint;
 use crate::build_memory::{checked_add, checked_mul, MAP_ENTRY_BYTES, SET_ENTRY_BYTES};
@@ -5,7 +19,7 @@ use crate::{
     normalized_projection_kind, search_document_field_value, search_field_is_enum_like,
     SearchSegmentFieldSummary,
 };
-use skein_core::RuntimeTaskContext;
+use hawdb_core::RuntimeTaskContext;
 use std::borrow::{Borrow, Cow};
 use std::collections::BTreeMap;
 
@@ -134,7 +148,7 @@ impl DescriptorBudget {
     fn reserve(&mut self, bytes: u64) -> Result<()> {
         let projected = self.bytes.saturating_add(bytes);
         if projected > self.max_bytes {
-            return Err(SkeinError::Storage(format!(
+            return Err(HawDBError::Storage(format!(
                 "search generation descriptor working set requires {projected} bytes, exceeding {}",
                 self.max_bytes
             )));
@@ -196,7 +210,7 @@ fn admitted_summary_value<'a>(
         trimmed.to_lowercase()
     };
     if normalized.capacity() > bytes {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "search summary normalization exceeded admission".into(),
         ));
     }

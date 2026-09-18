@@ -1,5 +1,19 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
-use skein_storage::{
+use hawdb_storage::{
     encode_projection_relational_member, ImmutableRelationalRowPage,
     ProjectionGenerationBatchLimits, ProjectionGenerationBegin, ProjectionGenerationDigestBuilder,
     ProjectionGenerationIdentity, ProjectionGenerationStore, RelationalOverflowPublicationConfig,
@@ -58,8 +72,8 @@ pub(super) fn apply(state: &mut RelationalState, sql: &str, parameters: &[Value]
 }
 
 pub(super) fn fields(sql: &str, state: &RelationalState) -> RelationalFieldPlan {
-    let skein_sql::SqlStatement::Select(select) =
-        skein_sql::prepare_postgres_sql(sql).unwrap().statement
+    let hawdb_sql::SqlStatement::Select(select) =
+        hawdb_sql::prepare_postgres_sql(sql).unwrap().statement
     else {
         panic!("expected SELECT");
     };
@@ -79,8 +93,8 @@ pub(super) struct Fixture {
 impl Fixture {
     pub fn new() -> Self {
         let directory = std::env::temp_dir().join(format!(
-            "skein-row-runtime-{}",
-            skein_core::generate_uuidv7().unwrap()
+            "hawdb-row-runtime-{}",
+            hawdb_core::generate_uuidv7().unwrap()
         ));
         std::fs::create_dir(&directory).unwrap();
         let state = state();

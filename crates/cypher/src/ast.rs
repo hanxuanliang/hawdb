@@ -1,9 +1,23 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 mod source;
 pub use source::{AstNode, SourceSpan};
 
-pub use skein_core::RelationshipDirection;
-use skein_core::Value;
-pub use skein_ddl::{SchemaObjectState, SchemaPropertyType, SchemaTableKind};
+pub use hawdb_core::RelationshipDirection;
+use hawdb_core::Value;
+pub use hawdb_ddl::{SchemaObjectState, SchemaPropertyType, SchemaTableKind};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -664,7 +678,7 @@ pub struct ReturnItemKind {
 /// Aggregates are return items, not scalar function arguments:
 ///
 /// ```compile_fail
-/// use skein_cypher::{AggregateExpression, AstNode, ScalarExpressionKind};
+/// use hawdb_cypher::{AggregateExpression, AstNode, ScalarExpressionKind};
 ///
 /// let nested = AstNode::synthetic(ScalarExpressionKind::Coalesce(vec![AggregateExpression::CountAll]));
 /// ```

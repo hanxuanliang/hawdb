@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use std::borrow::Borrow;
 
@@ -33,7 +47,7 @@ impl<'a, T: Borrow<SearchDocument>> SegmentEncoding<'a, T> {
     pub(crate) fn new_with_context(
         documents: &'a [T],
         kind: SegmentKind,
-        task: Option<&skein_core::RuntimeTaskContext>,
+        task: Option<&hawdb_core::RuntimeTaskContext>,
     ) -> Result<Self> {
         let mut length = EncodedLength::default();
         write_segment(
@@ -49,7 +63,7 @@ impl<'a, T: Borrow<SearchDocument>> SegmentEncoding<'a, T> {
             {
                 return error;
             }
-            SkeinError::Storage(format!(
+            HawDBError::Storage(format!(
                 "search {} segment encoded size overflow",
                 kind.name()
             ))
@@ -82,19 +96,19 @@ fn write_segment<T: Borrow<SearchDocument>>(
 ) -> fmt::Result {
     let mut ordinal = match kind {
         SegmentKind::Documents => {
-            sink.write_str("SKEIN_SEARCH_SEGMENT_V1\n")?;
+            sink.write_str("HAWDB_SEARCH_SEGMENT_V1\n")?;
             0
         }
         SegmentKind::Metadata {
             vector_ordinal_base,
         } => {
-            sink.write_str("SKEIN_SEARCH_METADATA_SEGMENT_V1\n")?;
+            sink.write_str("HAWDB_SEARCH_METADATA_SEGMENT_V1\n")?;
             vector_ordinal_base
         }
         SegmentKind::Vectors {
             vector_ordinal_base,
         } => {
-            sink.write_str("SKEIN_SEARCH_VECTOR_SEGMENT_V1\n")?;
+            sink.write_str("HAWDB_SEARCH_VECTOR_SEGMENT_V1\n")?;
             vector_ordinal_base
         }
     };

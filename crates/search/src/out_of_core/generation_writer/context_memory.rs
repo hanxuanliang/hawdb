@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Operation-owned build options and writer startup paths.
 
 use super::SearchOutOfCoreGenerationBuildOptions;
@@ -5,8 +19,8 @@ use crate::build_control::checkpoint;
 pub(super) use crate::build_memory::path::OwnedPath;
 use crate::build_memory::{checked_add as add, checked_mul as mul, BuildMemory, SET_ENTRY_BYTES};
 use crate::Result;
-use skein_core::RuntimeTaskContext;
-use skein_executor::QueryMemoryLease;
+use hawdb_core::RuntimeTaskContext;
+use hawdb_executor::QueryMemoryLease;
 use std::mem::size_of;
 use std::ops::Deref;
 
@@ -36,11 +50,11 @@ impl Options {
         reader: &crate::SearchOutOfCoreReader,
         source_graph_commit_epoch: Option<u64>,
     ) -> Result<()> {
-        use crate::SkeinError;
+        use crate::HawDBError;
         if self.value.source_graph_commit_epoch.is_some()
             && self.value.source_graph_commit_epoch != source_graph_commit_epoch
         {
-            return Err(SkeinError::Storage(
+            return Err(HawDBError::Storage(
                 "search generation update source graph epoch does not match the delta".into(),
             ));
         }
@@ -48,7 +62,7 @@ impl Options {
             && self.value.import_source_graph_commit_epoch
                 != reader.import_source_graph_commit_epoch()
         {
-            return Err(SkeinError::Storage(
+            return Err(HawDBError::Storage(
                 "search generation update import provenance does not match the active generation"
                     .into(),
             ));
@@ -73,13 +87,13 @@ impl Options {
             )
         });
         if requested.is_some() && requested != expected {
-            return Err(SkeinError::Storage(
+            return Err(HawDBError::Storage(
                 "search generation update embedding identity does not match the active generation"
                     .into(),
             ));
         }
         if self.value.analyzer_lexicon != *reader.analyzer_lexicon() {
-            return Err(SkeinError::Storage(
+            return Err(HawDBError::Storage(
                 "search generation update analyzer does not match the active generation".into(),
             ));
         }

@@ -1,4 +1,18 @@
-use crate::error::{Result, SkeinError};
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use crate::error::{HawDBError, Result};
 use crate::Uuid;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,7 +27,7 @@ static LAST_UNIX_NANOS: Mutex<Option<u128>> = Mutex::new(None);
 pub fn generate_uuidv7() -> Result<Uuid> {
     generate_uuidv7_with(next_system_unix_nanos, |bytes| {
         getrandom::fill(bytes).map_err(|error| {
-            SkeinError::Execution(format!("uuidv7 random source unavailable: {error}"))
+            HawDBError::Execution(format!("uuidv7 random source unavailable: {error}"))
         })
     })
 }
@@ -22,23 +36,23 @@ fn next_system_unix_nanos() -> Result<u128> {
     let observed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| {
-            SkeinError::Execution(format!("uuidv7 clock is before Unix epoch: {error}"))
+            HawDBError::Execution(format!("uuidv7 clock is before Unix epoch: {error}"))
         })?
         .as_nanos();
     if observed > MAX_UNIX_NANOS {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "uuidv7 clock exceeds the RFC 9562 timestamp range".to_string(),
         ));
     }
     let mut last = LAST_UNIX_NANOS
         .lock()
-        .map_err(|_| SkeinError::Execution("uuidv7 clock state is poisoned".to_string()))?;
+        .map_err(|_| HawDBError::Execution("uuidv7 clock state is poisoned".to_string()))?;
     let next = match *last {
         Some(previous) => observed.max(previous.saturating_add(MINIMUM_MONOTONIC_STEP_NANOS)),
         None => observed,
     };
     if next > MAX_UNIX_NANOS {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "uuidv7 clock exceeds the RFC 9562 timestamp range".to_string(),
         ));
     }
@@ -52,7 +66,7 @@ fn generate_uuidv7_with(
 ) -> Result<Uuid> {
     let unix_nanos = clock()?;
     if unix_nanos > MAX_UNIX_NANOS {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "uuidv7 clock exceeds the RFC 9562 timestamp range".to_string(),
         ));
     }
@@ -96,7 +110,7 @@ mod tests {
     #[test]
     fn uuidv7_generation_propagates_clock_and_randomness_errors() {
         let clock_error = generate_uuidv7_with(
-            || Err(SkeinError::Execution("clock unavailable".to_string())),
+            || Err(HawDBError::Execution("clock unavailable".to_string())),
             |_| Ok(()),
         )
         .expect_err("clock failure must be returned");
@@ -107,7 +121,7 @@ mod tests {
 
         let random_error = generate_uuidv7_with(
             || Ok(1),
-            |_| Err(SkeinError::Execution("entropy unavailable".to_string())),
+            |_| Err(HawDBError::Execution("entropy unavailable".to_string())),
         )
         .expect_err("randomness failure must be returned");
         assert_eq!(

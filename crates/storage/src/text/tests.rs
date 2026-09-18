@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 
 #[test]
@@ -19,7 +33,7 @@ fn fixed_value_encodings_preserve_tags_bits_and_container_framing() {
         (Value::String("\u{e9};=,\0".into()), "sc3a93b3d2c00"),
         (
             Value::Uuid(
-                skein_core::Uuid::parse_str("01890f3e-0e3c-7f9e-9b23-1bcdef012345").unwrap(),
+                hawdb_core::Uuid::parse_str("01890f3e-0e3c-7f9e-9b23-1bcdef012345").unwrap(),
             ),
             "u01890f3e-0e3c-7f9e-9b23-1bcdef012345",
         ),
@@ -69,7 +83,7 @@ fn decoding_preserves_legacy_tolerance_without_changing_binary_hex_rules() {
         "n0",
         "uinvalid",
     ] {
-        assert!(matches!(decode_value(encoded), Err(SkeinError::Storage(_))));
+        assert!(matches!(decode_value(encoded), Err(HawDBError::Storage(_))));
     }
 }
 
@@ -116,7 +130,7 @@ fn malformed_hex_returns_storage_errors_without_panicking() {
     for input in ["a\u{e9}a", "\u{1f980}", "00a\u{e9}a", "f", "gg"] {
         let result = std::panic::catch_unwind(|| decode_bytes(input));
         assert!(result.is_ok(), "hex decoder panicked for {input:?}");
-        assert!(matches!(result.unwrap(), Err(SkeinError::Storage(_))));
+        assert!(matches!(result.unwrap(), Err(HawDBError::Storage(_))));
     }
 }
 
@@ -137,7 +151,7 @@ fn malformed_value_tags_are_rejected_without_unbounded_diagnostics() {
     for input in ["\u{e9}", "\u{4e2d}", "\u{1f980}", "", "?", "nextra"] {
         let result = std::panic::catch_unwind(|| decode_value(input));
         assert!(result.is_ok(), "value decoder panicked for {input:?}");
-        assert!(matches!(result.unwrap(), Err(SkeinError::Storage(_))));
+        assert!(matches!(result.unwrap(), Err(HawDBError::Storage(_))));
     }
     let input = format!("?{}", "x".repeat(256 * 1024));
     let error = decode_value(&input).unwrap_err().to_string();
@@ -158,7 +172,7 @@ fn nested_value_paths_propagate_corruption_and_preserve_valid_values() {
     ] {
         let result = std::panic::catch_unwind(|| decode_value(&input));
         assert!(result.is_ok(), "nested decoder panicked for {input:?}");
-        assert!(matches!(result.unwrap(), Err(SkeinError::Storage(_))));
+        assert!(matches!(result.unwrap(), Err(HawDBError::Storage(_))));
     }
     assert!(decode_properties("6964=sa\u{e9}a").is_err());
     for value in [
@@ -166,7 +180,7 @@ fn nested_value_paths_propagate_corruption_and_preserve_valid_values() {
         Value::Bool(true),
         Value::Int(-7),
         Value::Float(1.25),
-        Value::Uuid(skein_core::Uuid::parse_str("01890f3e-0e3c-7f9e-9b23-1bcdef012345").unwrap()),
+        Value::Uuid(hawdb_core::Uuid::parse_str("01890f3e-0e3c-7f9e-9b23-1bcdef012345").unwrap()),
         Value::String("\u{4e2d}".into()),
         Value::Binary(vec![0, 255]),
         Value::List(vec![Value::String("\u{e9}".into()), Value::Null]),
@@ -202,7 +216,7 @@ fn campaign(cases: usize) {
         let expected = reference(&input);
         let decoded = decode_bytes(&input);
         if let Err(error) = &decoded {
-            assert!(matches!(error, SkeinError::Storage(_)));
+            assert!(matches!(error, HawDBError::Storage(_)));
             assert!(error.to_string().len() < 128, "case {case}");
         }
         assert_eq!(decoded.ok(), expected, "case {case}");
@@ -216,7 +230,7 @@ fn campaign(cases: usize) {
         let bad_tag = ["\u{e9}", "\u{4e2d}", "\u{1f980}"][case % 3];
         assert!(decode_value(&format!("{bad_tag}{input}")).is_err());
         let error = decode_value(&format!("?{input}")).unwrap_err();
-        assert!(matches!(error, SkeinError::Storage(_)));
+        assert!(matches!(error, HawDBError::Storage(_)));
         assert!(error.to_string().len() < 128, "case {case}");
     }
 }

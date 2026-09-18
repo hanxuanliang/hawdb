@@ -1,20 +1,35 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{
     account_intermediate, bound_row_resident_bytes, null_extended_tree_row, predicate_truth,
     project_bound_row, visit_base_entries, visit_batched_index_nested_loop, visit_hash_join,
     visit_index_merge_join, visit_join_entries, visit_tree_relation_entries, Arc, BatchControl,
-    Binding, BindingId, BindingSchema, BoundRow, ColumnVector, ColumnarBatch, NonZeroUsize,
-    OperatorMemoryTracker, QueryMemoryClass, QueryMemoryLease, QueryMemoryLedger, RefCell,
-    RelationalBaseAccess, RelationalIndexRuntime, RelationalJoinAccess, RelationalLocatorLayout,
-    RelationalOperatorCardinalityProfile, RelationalOperatorId, RelationalPhysicalAccess,
-    RelationalPhysicalJoinAlgorithm, RelationalPhysicalJoinExecution, RelationalPhysicalJoinNode,
-    RelationalPhysicalJoinPlan, RelationalQueryLimits, RelationalRowLocator, RelationalRowRuntime,
-    RelationalRowSetLocator, RelationalState, RelationalTableSchema, Result, Row, SelectStatement,
-    SkeinError, SlotDescriptor, SlotId, SlotType, SqlJoinKind, Value,
+    Binding, BindingId, BindingSchema, BoundRow, ColumnVector, ColumnarBatch, HawDBError,
+    NonZeroUsize, OperatorMemoryTracker, QueryMemoryClass, QueryMemoryLease, QueryMemoryLedger,
+    RefCell, RelationalBaseAccess, RelationalIndexRuntime, RelationalJoinAccess,
+    RelationalLocatorLayout, RelationalOperatorCardinalityProfile, RelationalOperatorId,
+    RelationalPhysicalAccess, RelationalPhysicalJoinAlgorithm, RelationalPhysicalJoinExecution,
+    RelationalPhysicalJoinNode, RelationalPhysicalJoinPlan, RelationalQueryLimits,
+    RelationalRowLocator, RelationalRowRuntime, RelationalRowSetLocator, RelationalState,
+    RelationalTableSchema, Result, Row, SelectStatement, SlotDescriptor, SlotId, SlotType,
+    SqlJoinKind, Value,
 };
 
 pub(super) struct PlannedJoin<'a> {
     pub(super) binding: BindingId,
-    pub(super) join: &'a skein_sql::SqlJoin,
+    pub(super) join: &'a hawdb_sql::SqlJoin,
     pub(super) schema: &'a RelationalTableSchema,
     pub(super) qualifier: String,
     pub(super) access: RelationalJoinAccess,
@@ -58,7 +73,7 @@ pub(super) fn relational_physical_join_plan_locator_layout<'a>(
                 schema,
             )),
             None => {
-                error = Some(SkeinError::Semantic(format!(
+                error = Some(HawDBError::Semantic(format!(
                     "unknown relational table {}",
                     relation.table
                 )));
@@ -72,7 +87,7 @@ pub(super) fn relational_physical_join_plan_locator_layout<'a>(
 }
 
 pub(super) struct RelationalPipelineState<'a> {
-    pub(super) task_context: Option<&'a skein_core::RuntimeTaskContext>,
+    pub(super) task_context: Option<&'a hawdb_core::RuntimeTaskContext>,
     pub(super) batch_rows: usize,
     pub(super) rows_until_checkpoint: usize,
     pub(super) intermediate_rows: usize,
@@ -138,7 +153,7 @@ impl AccountedRelationalLocatorBatch {
             .saturating_add(bytes)
             > self.byte_limit
         {
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "relational ordered locator uses {bytes} bytes, exceeding batch_payload_bytes {}",
                 self.byte_limit
             )));
@@ -180,7 +195,7 @@ impl AccountedRelationalLocatorBatch {
 
 impl<'a> RelationalPipelineState<'a> {
     pub(super) fn new(
-        task_context: Option<&'a skein_core::RuntimeTaskContext>,
+        task_context: Option<&'a hawdb_core::RuntimeTaskContext>,
         limits: RelationalQueryLimits,
         batch_rows: NonZeroUsize,
         operator_cardinality_profiles: Vec<RelationalOperatorCardinalityProfile>,
@@ -216,7 +231,7 @@ impl<'a> RelationalPipelineState<'a> {
             .operator_cardinality_profiles
             .get_mut(operator_id.get().saturating_sub(1))
             .ok_or_else(|| {
-                SkeinError::Execution(format!(
+                HawDBError::Execution(format!(
                     "relational operator {} has no cardinality profile",
                     operator_id.get()
                 ))
@@ -231,10 +246,10 @@ impl<'a> RelationalPipelineState<'a> {
 
     pub(super) fn account_candidate_work(&mut self) -> Result<()> {
         self.candidate_work = self.candidate_work.checked_add(1).ok_or_else(|| {
-            SkeinError::Execution("relational candidate work count overflow".to_string())
+            HawDBError::Execution("relational candidate work count overflow".to_string())
         })?;
         if self.candidate_work > self.max_candidate_work {
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "relational SQL exceeds max_candidate_work {}",
                 self.max_candidate_work
             )));
@@ -250,7 +265,7 @@ impl<'a> RelationalPipelineState<'a> {
     pub(super) fn checkpoint_after_work(&mut self) -> Result<()> {
         self.rows_until_checkpoint = self.rows_until_checkpoint.saturating_sub(1);
         if self.rows_until_checkpoint == 0 {
-            skein_executor::pipeline::runtime_checkpoint(self.task_context)?;
+            hawdb_executor::pipeline::runtime_checkpoint(self.task_context)?;
             self.rows_until_checkpoint = self.batch_rows;
         }
         Ok(())
@@ -271,7 +286,7 @@ impl<'a> RelationalPipelineState<'a> {
     }
 
     pub(super) fn finish(&self) -> Result<()> {
-        skein_executor::pipeline::runtime_checkpoint(self.task_context)
+        hawdb_executor::pipeline::runtime_checkpoint(self.task_context)
     }
 }
 
@@ -307,7 +322,7 @@ pub(super) fn visit_prepared_physical_join_plan_node<'a>(
                     pipeline.borrow_mut().account_unprofiled_row()?;
                 }
                 let schema = state.table_schema(&relation.table).ok_or_else(|| {
-                    SkeinError::Semantic(format!("unknown relational table {}", relation.table))
+                    HawDBError::Semantic(format!("unknown relational table {}", relation.table))
                 })?;
                 let bound = BoundRow {
                     bindings: vec![Binding {
@@ -337,7 +352,7 @@ pub(super) fn visit_prepared_physical_join_plan_node<'a>(
         } => {
             if *algorithm == RelationalPhysicalJoinAlgorithm::Merge {
                 let equi_join_keys = equi_join_keys.as_ref().ok_or_else(|| {
-                    SkeinError::Execution("merge join has no key contract".to_string())
+                    HawDBError::Execution("merge join has no key contract".to_string())
                 })?;
                 return visit_index_merge_join(
                     *operator_id,
@@ -359,7 +374,7 @@ pub(super) fn visit_prepared_physical_join_plan_node<'a>(
             }
             if *algorithm == RelationalPhysicalJoinAlgorithm::Hash {
                 let equi_join_keys = equi_join_keys.as_ref().ok_or_else(|| {
-                    SkeinError::Execution("hash join has no key contract".to_string())
+                    HawDBError::Execution("hash join has no key contract".to_string())
                 })?;
                 return visit_hash_join(
                     *operator_id,
@@ -425,7 +440,7 @@ pub(super) fn visit_prepared_physical_join_plan_node<'a>(
                     &mut |row| {
                         let bytes = bound_row_resident_bytes(&row);
                         if tracker.would_exceed(bytes) {
-                            return Err(SkeinError::Execution(format!(
+                            return Err(HawDBError::Execution(format!(
                                 "RelationalBushyJoinMaterialize state exceeds blocking_operator_bytes {}",
                                 execution.memory.blocking_operator_bytes
                             )));
@@ -438,7 +453,7 @@ pub(super) fn visit_prepared_physical_join_plan_node<'a>(
                 execution
                     .reports
                     .borrow_mut()
-                    .push(skein_executor::blocking::in_memory_report(
+                    .push(hawdb_executor::blocking::in_memory_report(
                         "RelationalBushyJoinMaterialize",
                         tracker,
                         tracker.peak_bytes,
@@ -713,7 +728,7 @@ pub(super) fn typed_row_set_locator(row: &BoundRow<'_>) -> Result<RelationalRowS
                     u32::try_from(table_id)
                         .map(|table_id| RelationalRowLocator::new(table_id, primary_key))
                         .map_err(|_| {
-                            SkeinError::Execution(
+                            HawDBError::Execution(
                                 "typed relational locator table count exceeds u32".to_string(),
                             )
                         })
@@ -774,7 +789,7 @@ pub(super) fn with_typed_locator_bound_row_mode<'a, T>(
             })
             .map(Some)
             .ok_or_else(|| {
-                SkeinError::StorageIntegrity(format!(
+                HawDBError::StorageIntegrity(format!(
                     "typed relational locator references a missing row in table {}",
                     binding.table
                 ))

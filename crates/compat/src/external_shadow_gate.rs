@@ -1,9 +1,23 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::{
     external_shadow_ready_missing_capabilities, external_shadow_trace_health_from_bundle,
     external_shadow_trace_report_json, ExternalShadowReady,
 };
-use skein_core::{Result, SkeinError};
-use skein_evidence::inventory::{
+use hawdb_core::{HawDBError, Result};
+use hawdb_evidence::inventory::{
     background_maintenance_evidence_health_from_bundle,
     replacement_readiness_family_evidence_health_from_bundle,
     storage_recovery_evidence_health_from_bundle, BackgroundMaintenanceEvidenceHealth,
@@ -16,7 +30,7 @@ pub fn add_shadow_ready_report(
     ready: &ExternalShadowReady,
 ) -> Result<()> {
     let object = bundle.as_object_mut().ok_or_else(|| {
-        SkeinError::Execution("migration gate bundle must be a JSON object".to_string())
+        HawDBError::Execution("migration gate bundle must be a JSON object".to_string())
     })?;
     object.insert(
         "shadow_ready".to_string(),
@@ -37,7 +51,7 @@ pub fn add_shadow_run_report(
     self_shadow: bool,
 ) -> Result<()> {
     let object = bundle.as_object_mut().ok_or_else(|| {
-        SkeinError::Execution("migration gate bundle must be a JSON object".to_string())
+        HawDBError::Execution("migration gate bundle must be a JSON object".to_string())
     })?;
     object.insert(
         "shadow_run".to_string(),
@@ -61,7 +75,7 @@ pub fn add_shadow_trace_report(
     request_count: u64,
 ) -> Result<()> {
     let object = bundle.as_object_mut().ok_or_else(|| {
-        SkeinError::Execution("migration gate bundle must be a JSON object".to_string())
+        HawDBError::Execution("migration gate bundle must be a JSON object".to_string())
     })?;
     object.insert(
         "shadow_trace".to_string(),
@@ -117,7 +131,7 @@ pub fn assess_external_shadow_cutover_evidence(
         .get("migration_gate")
         .and_then(serde_json::Value::as_object)
         .ok_or_else(|| {
-            SkeinError::Execution("migration gate bundle missing migration_gate".to_string())
+            HawDBError::Execution("migration gate bundle missing migration_gate".to_string())
         })?;
     let migration_gate_ready = migration_gate
         .get("decision")
@@ -225,7 +239,7 @@ mod tests {
             "cutover_evidence": { "eligible": true }
         });
 
-        add_shadow_run_report(&mut bundle, "skein-shadow-self", true).unwrap();
+        add_shadow_run_report(&mut bundle, "hawdb-shadow-self", true).unwrap();
 
         assert_eq!(bundle["shadow_run"]["evidence_kind"], "protocol_smoke");
         assert!(cutover_evidence_is_eligible(&bundle));

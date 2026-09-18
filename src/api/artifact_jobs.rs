@@ -1,16 +1,30 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{optional_u64_value, optional_usize_value, Database, QueryOutput};
-use crate::error::{Result, SkeinError};
+use crate::error::{HawDBError, Result};
 use crate::qos::{
     BackgroundWorkHint, BackgroundWorkPlan, LocalQosPolicy, LocalQosState, QosAdmission, WorkClass,
 };
 use crate::value::Value;
 use std::collections::BTreeMap;
 
-use skein_artifact::{
+use hawdb_artifact::{
     external_content_artifact_completion_output, is_external_content_artifact_job,
     DerivedArtifactJobClaim,
 };
-pub use skein_artifact::{
+pub use hawdb_artifact::{
     DerivedArtifactJob, DerivedArtifactJobReport, DerivedArtifactJobStatus,
     ExternalContentArtifactJobCompletion, ExternalContentArtifactJobSummary,
     ExternalContentArtifactRuntimeManifest,
@@ -186,17 +200,17 @@ impl Database {
         state: &LocalQosState,
         estimated_operations: usize,
     ) -> Result<Option<DerivedArtifactJobReport>> {
-        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
+        self.ensure_runtime_capability(hawdb_core::RuntimeCapability::BackgroundMaintenance)?;
         let Some(job) = self.derived_artifact_jobs.next_pending() else {
             return Ok(None);
         };
 
         match policy.admit(state, &job.background_work_request(estimated_operations)) {
             QosAdmission::Admit => self.run_next_derived_artifact_job(),
-            QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
+            QosAdmission::Defer { reason, .. } => Err(HawDBError::Storage(format!(
                 "background derived artifact job deferred: {reason}"
             ))),
-            QosAdmission::Reject { reason, .. } => Err(SkeinError::Storage(format!(
+            QosAdmission::Reject { reason, .. } => Err(HawDBError::Storage(format!(
                 "background derived artifact job rejected: {reason}"
             ))),
         }
@@ -206,7 +220,7 @@ impl Database {
         &mut self,
         estimated_operations: usize,
     ) -> Result<Option<DerivedArtifactJobReport>> {
-        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
+        self.ensure_runtime_capability(hawdb_core::RuntimeCapability::BackgroundMaintenance)?;
         let Some(job) = self.derived_artifact_jobs.next_pending() else {
             return Ok(None);
         };
@@ -215,12 +229,12 @@ impl Database {
         let permit = match scheduler.try_start(job.background_work_request(estimated_operations)) {
             Ok(permit) => permit,
             Err(QosAdmission::Defer { reason, .. }) => {
-                return Err(SkeinError::Storage(format!(
+                return Err(HawDBError::Storage(format!(
                     "background derived artifact job deferred: {reason}"
                 )));
             }
             Err(QosAdmission::Reject { reason, .. }) => {
-                return Err(SkeinError::Storage(format!(
+                return Err(HawDBError::Storage(format!(
                     "background derived artifact job rejected: {reason}"
                 )));
             }
@@ -251,7 +265,7 @@ impl Database {
         mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
         estimated_operations: usize,
     ) -> Result<Option<DerivedArtifactJobReport>> {
-        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
+        self.ensure_runtime_capability(hawdb_core::RuntimeCapability::BackgroundMaintenance)?;
         self.ensure_writable()?;
         let Some(job) = self.derived_artifact_jobs.next_external_claimable() else {
             return Ok(None);
@@ -265,10 +279,10 @@ impl Database {
                     .expect("admitted external artifact job must remain pending");
                 self.run_external_content_artifact_job_with_claim(claim, &mut runtime)
             }
-            QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
+            QosAdmission::Defer { reason, .. } => Err(HawDBError::Storage(format!(
                 "background external content artifact job deferred: {reason}"
             ))),
-            QosAdmission::Reject { reason, .. } => Err(SkeinError::Storage(format!(
+            QosAdmission::Reject { reason, .. } => Err(HawDBError::Storage(format!(
                 "background external content artifact job rejected: {reason}"
             ))),
         }
@@ -279,7 +293,7 @@ impl Database {
         mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
         estimated_operations: usize,
     ) -> Result<Option<DerivedArtifactJobReport>> {
-        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
+        self.ensure_runtime_capability(hawdb_core::RuntimeCapability::BackgroundMaintenance)?;
         self.ensure_writable()?;
         let Some(job) = self.derived_artifact_jobs.next_external_claimable() else {
             return Ok(None);
@@ -289,12 +303,12 @@ impl Database {
         let permit = match scheduler.try_start(job.background_work_request(estimated_operations)) {
             Ok(permit) => permit,
             Err(QosAdmission::Defer { reason, .. }) => {
-                return Err(SkeinError::Storage(format!(
+                return Err(HawDBError::Storage(format!(
                     "background external content artifact job deferred: {reason}"
                 )));
             }
             Err(QosAdmission::Reject { reason, .. }) => {
-                return Err(SkeinError::Storage(format!(
+                return Err(HawDBError::Storage(format!(
                     "background external content artifact job rejected: {reason}"
                 )));
             }
@@ -347,7 +361,7 @@ impl Database {
         mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
         estimated_operations: usize,
     ) -> Result<Option<DerivedArtifactJobReport>> {
-        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
+        self.ensure_runtime_capability(hawdb_core::RuntimeCapability::BackgroundMaintenance)?;
         self.ensure_writable()?;
         let Some(job) = self
             .derived_artifact_jobs
@@ -364,10 +378,10 @@ impl Database {
                     .expect("admitted external artifact job must remain pending");
                 self.run_external_content_artifact_job_with_claim(claim, &mut runtime)
             }
-            QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
+            QosAdmission::Defer { reason, .. } => Err(HawDBError::Storage(format!(
                 "background external content artifact job deferred: {reason}"
             ))),
-            QosAdmission::Reject { reason, .. } => Err(SkeinError::Storage(format!(
+            QosAdmission::Reject { reason, .. } => Err(HawDBError::Storage(format!(
                 "background external content artifact job rejected: {reason}"
             ))),
         }
@@ -379,7 +393,7 @@ impl Database {
         mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
         estimated_operations: usize,
     ) -> Result<Option<DerivedArtifactJobReport>> {
-        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
+        self.ensure_runtime_capability(hawdb_core::RuntimeCapability::BackgroundMaintenance)?;
         self.ensure_writable()?;
         let Some(job) = self
             .derived_artifact_jobs
@@ -392,12 +406,12 @@ impl Database {
         let permit = match scheduler.try_start(job.background_work_request(estimated_operations)) {
             Ok(permit) => permit,
             Err(QosAdmission::Defer { reason, .. }) => {
-                return Err(SkeinError::Storage(format!(
+                return Err(HawDBError::Storage(format!(
                     "background external content artifact job deferred: {reason}"
                 )));
             }
             Err(QosAdmission::Reject { reason, .. }) => {
-                return Err(SkeinError::Storage(format!(
+                return Err(HawDBError::Storage(format!(
                     "background external content artifact job rejected: {reason}"
                 )));
             }
@@ -420,7 +434,7 @@ impl Database {
         manifest: &ExternalContentArtifactRuntimeManifest,
         mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
     ) -> Result<Option<DerivedArtifactJobReport>> {
-        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
+        self.ensure_runtime_capability(hawdb_core::RuntimeCapability::BackgroundMaintenance)?;
         self.ensure_writable()?;
         let Some(job) = self
             .derived_artifact_jobs
@@ -440,10 +454,10 @@ impl Database {
                     .expect("admitted external artifact job must remain pending");
                 self.run_external_content_artifact_job_with_claim(claim, &mut runtime)
             }
-            QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
+            QosAdmission::Defer { reason, .. } => Err(HawDBError::Storage(format!(
                 "background external content artifact job deferred: {reason}"
             ))),
-            QosAdmission::Reject { reason, .. } => Err(SkeinError::Storage(format!(
+            QosAdmission::Reject { reason, .. } => Err(HawDBError::Storage(format!(
                 "background external content artifact job rejected: {reason}"
             ))),
         }
@@ -454,7 +468,7 @@ impl Database {
         manifest: &ExternalContentArtifactRuntimeManifest,
         mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
     ) -> Result<Option<DerivedArtifactJobReport>> {
-        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
+        self.ensure_runtime_capability(hawdb_core::RuntimeCapability::BackgroundMaintenance)?;
         self.ensure_writable()?;
         let Some(job) = self
             .derived_artifact_jobs
@@ -468,12 +482,12 @@ impl Database {
             match scheduler.try_start(job.background_work_request(manifest.estimated_operations)) {
                 Ok(permit) => permit,
                 Err(QosAdmission::Defer { reason, .. }) => {
-                    return Err(SkeinError::Storage(format!(
+                    return Err(HawDBError::Storage(format!(
                         "background external content artifact job deferred: {reason}"
                     )));
                 }
                 Err(QosAdmission::Reject { reason, .. }) => {
-                    return Err(SkeinError::Storage(format!(
+                    return Err(HawDBError::Storage(format!(
                         "background external content artifact job rejected: {reason}"
                     )));
                 }
@@ -642,7 +656,7 @@ impl Database {
         mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
         estimated_operations: usize,
     ) -> Result<Option<DerivedArtifactJobReport>> {
-        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
+        self.ensure_runtime_capability(hawdb_core::RuntimeCapability::BackgroundMaintenance)?;
         self.ensure_writable()?;
         let Some(job) = self
             .derived_artifact_jobs
@@ -659,10 +673,10 @@ impl Database {
                     .expect("admitted external artifact job must remain pending");
                 self.run_external_content_artifact_job_with_claim(claim, &mut runtime)
             }
-            QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
+            QosAdmission::Defer { reason, .. } => Err(HawDBError::Storage(format!(
                 "background external content artifact job deferred: {reason}"
             ))),
-            QosAdmission::Reject { reason, .. } => Err(SkeinError::Storage(format!(
+            QosAdmission::Reject { reason, .. } => Err(HawDBError::Storage(format!(
                 "background external content artifact job rejected: {reason}"
             ))),
         }
@@ -674,7 +688,7 @@ impl Database {
         mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
         estimated_operations: usize,
     ) -> Result<Option<DerivedArtifactJobReport>> {
-        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
+        self.ensure_runtime_capability(hawdb_core::RuntimeCapability::BackgroundMaintenance)?;
         self.ensure_writable()?;
         let Some(job) = self
             .derived_artifact_jobs
@@ -687,12 +701,12 @@ impl Database {
         let permit = match scheduler.try_start(job.background_work_request(estimated_operations)) {
             Ok(permit) => permit,
             Err(QosAdmission::Defer { reason, .. }) => {
-                return Err(SkeinError::Storage(format!(
+                return Err(HawDBError::Storage(format!(
                     "background external content artifact job deferred: {reason}"
                 )));
             }
             Err(QosAdmission::Reject { reason, .. }) => {
-                return Err(SkeinError::Storage(format!(
+                return Err(HawDBError::Storage(format!(
                     "background external content artifact job rejected: {reason}"
                 )));
             }
@@ -795,13 +809,13 @@ impl Database {
         action: &str,
     ) -> Result<QueryOutput> {
         if is_external_content_artifact_job(artifact_type) {
-            return Err(SkeinError::Semantic(format!(
+            return Err(HawDBError::Semantic(format!(
                 "derived artifact job {artifact_type}.{name} action {action} is outside the graph kernel; run it in the content artifact job runtime"
             )));
         }
 
         if artifact_type != "projected_graph" || action != "rebuild" {
-            return Err(SkeinError::Semantic(format!(
+            return Err(HawDBError::Semantic(format!(
                 "unsupported derived artifact job {artifact_type}.{name} action {action}"
             )));
         }
@@ -813,7 +827,7 @@ impl Database {
                 .iter()
                 .any(|status| status.name == name)
         {
-            return Err(SkeinError::Semantic(format!(
+            return Err(HawDBError::Semantic(format!(
                 "unknown projected graph artifact '{name}'"
             )));
         }

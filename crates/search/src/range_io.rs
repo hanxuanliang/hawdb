@@ -1,11 +1,25 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{
     checksum_bytes, decode_search_segment_documents, validate_search_segment_documents,
     SearchIndex, SearchPhysicalRangeRead, SearchPredicateSet, SEARCH_SEGMENT_PAYLOAD_ARTIFACT_ID,
     SEARCH_SEGMENT_PAYLOAD_FILE,
 };
-use crate::error::{Result, SkeinError};
-use skein_qos::{IoConcurrencyBudget, StorageDeviceProfile};
-use skein_storage::{
+use crate::error::{HawDBError, Result};
+use hawdb_qos::{IoConcurrencyBudget, StorageDeviceProfile};
+use hawdb_storage::{
     FileSegmentRangeReader, SegmentReadExecutor, SegmentReadRange, SegmentReadScheduler,
 };
 use std::collections::BTreeMap;
@@ -86,7 +100,7 @@ impl SearchIndex {
             .iter()
             .any(|segment| segment.payload_range.is_none())
         {
-            return Err(SkeinError::Storage(
+            return Err(HawDBError::Storage(
                 "search segment physical ranges are unavailable; checkpoint or rebuild the search projection"
                     .to_string(),
             ));
@@ -122,18 +136,18 @@ impl SearchIndex {
         let report = SegmentReadExecutor::new(self.range_read_config.max_wave_bytes)
             .execute(&reader, &schedule, |payload| {
                 let [segment_id] = payload.range.segment_ids.as_slice() else {
-                    return Err(SkeinError::Storage(
+                    return Err(HawDBError::Storage(
                         "search range reader unexpectedly coalesced independent segment frames"
                             .to_string(),
                     ));
                 };
                 let segment_index = usize::try_from(*segment_id).map_err(|_| {
-                    SkeinError::Storage(
+                    HawDBError::Storage(
                         "search range reader returned an unsupported segment id".to_string(),
                     )
                 })?;
                 let segment = descriptor.segments.get(segment_index).ok_or_else(|| {
-                    SkeinError::Storage(format!(
+                    HawDBError::Storage(format!(
                         "search range reader returned unknown segment id {segment_id}"
                     ))
                 })?;
@@ -142,7 +156,7 @@ impl SearchIndex {
                     .expect("physical range presence was validated");
                 let actual_checksum = checksum_bytes(&payload.bytes);
                 if actual_checksum != expected.checksum {
-                    return Err(SkeinError::Storage(format!(
+                    return Err(HawDBError::Storage(format!(
                         "search segment {segment_id} payload checksum mismatch: expected {}, got {actual_checksum}",
                         expected.checksum
                     )));
@@ -152,22 +166,22 @@ impl SearchIndex {
                 for document in segment_documents {
                     let document_id = document.id.clone();
                     if documents.insert(document_id.clone(), document).is_some() {
-                        return Err(SkeinError::Storage(format!(
+                        return Err(HawDBError::Storage(format!(
                             "search range reader returned duplicate document id {document_id}"
                         )));
                     }
                 }
-                Ok::<(), SkeinError>(())
+                Ok::<(), HawDBError>(())
             })
             .map_err(|error| {
-                SkeinError::Storage(format!("search segment range execution failed: {error}"))
+                HawDBError::Storage(format!("search segment range execution failed: {error}"))
             })?;
         let expected_document_count = matching_segments
             .iter()
             .map(|segment| segment.document_count)
             .sum::<usize>();
         if documents.len() != expected_document_count {
-            return Err(SkeinError::Storage(format!(
+            return Err(HawDBError::Storage(format!(
                 "search range reader loaded {} documents, expected {expected_document_count}",
                 documents.len()
             )));

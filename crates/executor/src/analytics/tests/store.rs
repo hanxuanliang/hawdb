@@ -1,11 +1,25 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Only the three reads used by projection execution are implemented.
 use super::*;
 use crate::store::{
     PrunedNodeScan, PrunedRelationshipScan, SourceScanCandidateRow, SourceScanCandidateVisit,
     SourceScanReadLimits,
 };
-use skein_plan::{CompositeRangeSeek, NodeProjectionAccess};
-use skein_storage::{AdjacencyDirection, ProjectedNodeRecord, ScanPredicate, ScanPruningReport};
+use hawdb_plan::{CompositeRangeSeek, NodeProjectionAccess};
+use hawdb_storage::{AdjacencyDirection, ProjectedNodeRecord, ScanPredicate, ScanPruningReport};
 
 impl GraphExecutionRead for Fixture {
     fn is_out_of_core(&self) -> bool {
@@ -44,7 +58,7 @@ impl GraphExecutionRead for Fixture {
         self.node_scans.set(self.node_scans.get() + 1);
         for (index, node) in self.nodes.iter().enumerate() {
             if self.fail_node_at == Some(index) {
-                return Err(SkeinError::StorageIntegrity("node scan sentinel".into()));
+                return Err(HawDBError::StorageIntegrity("node scan sentinel".into()));
             }
             self.node_visits.set(self.node_visits.get() + 1);
             if consumer(node.clone())? == ScanControl::Stop {
@@ -64,7 +78,7 @@ impl GraphExecutionRead for Fixture {
         assert!(rel_type.is_none());
         self.rel_scans.set(self.rel_scans.get() + 1);
         if self.fail_rel_scan == Some(self.rel_scans.get()) {
-            return Err(SkeinError::StorageIntegrity(
+            return Err(HawDBError::StorageIntegrity(
                 "relationship scan sentinel".into(),
             ));
         }

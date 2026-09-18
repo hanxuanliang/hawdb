@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 
 struct Rng(u64);
@@ -171,7 +185,7 @@ fn expected_rows(graph: &ProjectedGraph, options: &RunOptions) -> (Vec<Binding>,
                     .unwrap_or(PageRankOptions::default().iterations),
             };
             let scores = graph.page_rank_with_context(settings, None).unwrap();
-            let bytes = scores.len() * std::mem::size_of::<skein_analytics::PageRankScore>() * 2;
+            let bytes = scores.len() * std::mem::size_of::<hawdb_analytics::PageRankScore>() * 2;
             let rows = scores
                 .into_iter()
                 .map(|score| {
@@ -202,7 +216,7 @@ fn expected_rows(graph: &ProjectedGraph, options: &RunOptions) -> (Vec<Binding>,
                 .hierarchical_louvain_communities_with_context(settings, None)
                 .unwrap();
             let bytes = assignments.len()
-                * std::mem::size_of::<skein_analytics::HierarchicalCommunityAssignment>()
+                * std::mem::size_of::<hawdb_analytics::HierarchicalCommunityAssignment>()
                 * 2;
             let rows = assignments
                 .into_iter()
@@ -260,7 +274,7 @@ fn check_stream(fixture: &Fixture, options: &RunOptions, only_visible: bool, ide
     assert!(output.reports.graph_expansion.is_empty());
     if !expected.is_empty() && options.exit == Exit::Error {
         assert!(
-            matches!(output.result, Err(SkeinError::StorageIntegrity(ref message)) if message == "consumer sentinel"),
+            matches!(output.result, Err(HawDBError::StorageIntegrity(ref message)) if message == "consumer sentinel"),
             "{identity}"
         );
     } else {

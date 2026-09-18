@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::query::{
     execute_query, query_options, result_contains, result_digest, VectorExecutionProfile,
 };
@@ -6,7 +20,7 @@ use super::{
     ProductionVectorLifecycleReport, ProductionVectorQualificationConfig,
     ProductionVectorQualificationError,
 };
-use skein::{
+use hawdb::{
     AdaptiveVectorSearchOptions, CompressedVectorSearchMode, RuntimeCancellationToken,
     RuntimeTaskContext, SearchIndex, SearchProjectionDelta, SearchResultSet,
     VectorProjectionQualificationIdentity, VectorSearchKernelPreference,
@@ -19,7 +33,7 @@ use std::thread;
 use std::time::Instant;
 
 const RABITQ_ARTIFACT_PREFIX: &str = "search_rabitq.";
-const RABITQ_ARTIFACT_SUFFIX: &str = ".skein";
+const RABITQ_ARTIFACT_SUFFIX: &str = ".hawdb";
 
 pub(super) fn run_lifecycle(
     config: &ProductionVectorQualificationConfig,
@@ -210,7 +224,7 @@ fn execute_preferred(
         .try_search_with_options_adaptive_vector_projection_context(
             "",
             Some(&query_case.query_embedding),
-            skein::SearchMode::Vector,
+            hawdb::SearchMode::Vector,
             query_options(query_case, config)?,
             AdaptiveVectorSearchOptions::new(CompressedVectorSearchMode::Preferred),
             config.execution_options(task_context, VectorSearchKernelPreference::Auto),

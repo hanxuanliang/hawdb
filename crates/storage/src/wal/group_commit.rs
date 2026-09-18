@@ -1,8 +1,22 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! WAL group-commit policy, admission evidence, and runtime snapshots.
 //!
 //! The storage layer owns the durable-write contract. Host runtimes may own the
 //! queueing coordinator, but consume these types without redefining policy.
-use skein_core::{Result, SkeinError};
+use hawdb_core::{HawDBError, Result};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::time::Duration;
 
@@ -258,17 +272,17 @@ impl WalGroupCommitConfig {
         max_delay: Duration,
     ) -> Result<Self> {
         if max_entries.get() > MAX_WAL_GROUP_COMMIT_ENTRIES {
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "WAL group commit max_entries must be <= {MAX_WAL_GROUP_COMMIT_ENTRIES}"
             )));
         }
         if max_bytes.get() > MAX_WAL_GROUP_COMMIT_BYTES {
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "WAL group commit max_bytes must be <= {MAX_WAL_GROUP_COMMIT_BYTES}"
             )));
         }
         if max_delay > MAX_WAL_GROUP_COMMIT_DELAY {
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "WAL group commit max_delay must be <= {} ms",
                 MAX_WAL_GROUP_COMMIT_DELAY.as_millis()
             )));
@@ -386,7 +400,7 @@ fn validate_evidence(evidence: WalGroupCommitEvidence) -> Result<()> {
     if blockers.is_empty() {
         Ok(())
     } else {
-        Err(SkeinError::Execution(format!(
+        Err(HawDBError::Execution(format!(
             "WAL group commit evidence rejected: {}",
             blockers.join(",")
         )))
@@ -397,7 +411,7 @@ fn validate_adaptive_cold_start_evidence(
     evidence: Option<WalGroupCommitAdaptiveColdStartEvidence>,
 ) -> Result<()> {
     let Some(evidence) = evidence else {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "WAL group commit adaptive evidence rejected: cold_start_behavior_missing".to_string(),
         ));
     };
@@ -417,7 +431,7 @@ fn validate_adaptive_cold_start_evidence(
     if blockers.is_empty() {
         Ok(())
     } else {
-        Err(SkeinError::Execution(format!(
+        Err(HawDBError::Execution(format!(
             "WAL group commit adaptive evidence rejected: {}",
             blockers.join(",")
         )))
@@ -428,7 +442,7 @@ fn validate_adaptive_steady_state_evidence(
     evidence: Option<WalGroupCommitAdaptiveSteadyStateEvidence>,
 ) -> Result<()> {
     let Some(evidence) = evidence else {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "WAL group commit adaptive evidence rejected: steady_state_behavior_missing"
                 .to_string(),
         ));
@@ -450,7 +464,7 @@ fn validate_adaptive_steady_state_evidence(
         blockers.push("steady_state_grouping_not_observed");
     }
     if !blockers.is_empty() {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "WAL group commit adaptive evidence rejected: {}",
             blockers.join(",")
         )));
@@ -463,7 +477,7 @@ fn validate_adaptive_policy_evidence(
     evidence: Option<WalGroupCommitAdaptivePolicyEvidence>,
 ) -> Result<()> {
     let Some(evidence) = evidence else {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "WAL group commit adaptive evidence rejected: {shape}_fixed_policy_comparison_missing"
         )));
     };
@@ -502,7 +516,7 @@ fn validate_adaptive_policy_evidence(
     if blockers.is_empty() {
         Ok(())
     } else {
-        Err(SkeinError::Execution(format!(
+        Err(HawDBError::Execution(format!(
             "WAL group commit adaptive evidence rejected: {}",
             blockers.join(",")
         )))

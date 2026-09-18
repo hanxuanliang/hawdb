@@ -1,6 +1,20 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use crate::RuntimeTaskContext;
-use skein_core::RuntimeMemoryReservation;
+use hawdb_core::RuntimeMemoryReservation;
 use std::collections::{BTreeMap, HashMap};
 
 fn memory(bytes: usize) -> BuildMemory {
@@ -98,7 +112,7 @@ fn reserved_term_decodes_with_a_full_root_and_outlives_the_reservation_handle() 
     let term = Term::build_reserved(source.len(), &reservation, || {
         let mut bytes = vec![0; source.len()];
         source.as_slice().read_exact(&mut bytes)?;
-        String::from_utf8(bytes).map_err(|error| SkeinError::Storage(error.to_string()))
+        String::from_utf8(bytes).map_err(|error| HawDBError::Storage(error.to_string()))
     })
     .unwrap();
     assert_eq!(term.as_str(), "decoded spill term");
@@ -117,7 +131,7 @@ fn failed_reserved_decode_returns_its_grant_for_retry() {
     let memory = memory(8192);
     let reservation = ReservedMemory::new(&memory.spool, 1024).unwrap();
     assert!(Term::build_reserved(256, &reservation, || {
-        Err(SkeinError::Storage("short spill read".into()))
+        Err(HawDBError::Storage("short spill read".into()))
     })
     .is_err());
     let grant = reservation.reserve(1024).unwrap();

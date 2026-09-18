@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::{
     nowledge_mem_graph_augmentation_state_route_query,
     nowledge_mem_graph_community_members_route_query,
@@ -10,14 +24,14 @@ use crate::{
     RouteQuery, SearchFusionWeights, SearchIndex, SearchMode, SearchPredicatePushdownReport,
     SearchQueryOptions, SearchRebuildOptions, Value, DENSE_ADJACENCY_DEGREE_THRESHOLD,
 };
-use skein_core::{
+use hawdb_core::{
     GraphRagQueryBinding, GraphRagQueryDraft, GraphRagQueryPattern, GraphRagQueryPredicate,
     GraphRagQueryPredicateOperator, GraphRagQueryProjection, GraphRagSchemaContextOptions,
 };
 use std::collections::BTreeMap;
 
-pub use skein_evidence::replacement_contract::NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL;
-pub use skein_nowledge_contracts::{
+pub use hawdb_evidence::replacement_contract::NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL;
+pub use hawdb_nowledge_contracts::{
     NowledgeGraphRagWorkloadReport, NowledgeGraphRouteWorkloadBoundedExpansionReport,
     NowledgeGraphRouteWorkloadFixtureOptions, NowledgeGraphRouteWorkloadFixtureReport,
     NowledgeGraphRouteWorkloadQueryReport, NowledgeGraphRouteWorkloadRouteReport,
@@ -537,7 +551,7 @@ fn run_graph_rag_workload_probe(
 
 fn graph_rag_error_report(
     name: &str,
-    context: &skein_core::GraphRagSchemaContext,
+    context: &hawdb_core::GraphRagSchemaContext,
     error_class: &str,
 ) -> NowledgeGraphRagWorkloadReport {
     NowledgeGraphRagWorkloadReport {
@@ -660,15 +674,15 @@ fn seed_search_metadata_workload_fixture(graph: &mut NowledgeMemGraph) -> Result
     Ok(())
 }
 
-fn error_class(error: &crate::SkeinError) -> String {
+fn error_class(error: &crate::HawDBError) -> String {
     match error {
-        crate::SkeinError::Parse(_) => "parse",
-        crate::SkeinError::Semantic(_) => "semantic",
-        crate::SkeinError::Execution(_) => "execution",
-        crate::SkeinError::Storage(_)
-        | crate::SkeinError::StorageIntegrity(_)
-        | crate::SkeinError::AppendSequenceExhausted { .. } => "storage",
-        crate::SkeinError::CapabilityUnavailable { .. } => "capability_unavailable",
+        crate::HawDBError::Parse(_) => "parse",
+        crate::HawDBError::Semantic(_) => "semantic",
+        crate::HawDBError::Execution(_) => "execution",
+        crate::HawDBError::Storage(_)
+        | crate::HawDBError::StorageIntegrity(_)
+        | crate::HawDBError::AppendSequenceExhausted { .. } => "storage",
+        crate::HawDBError::CapabilityUnavailable { .. } => "capability_unavailable",
     }
     .to_string()
 }
@@ -741,40 +755,40 @@ mod tests {
     fn root_facade_preserves_workload_contract_type_identity() {
         assert_eq!(
             TypeId::of::<NowledgeMemQueryExecutionPath>(),
-            TypeId::of::<skein_nowledge_contracts::NowledgeMemQueryExecutionPath>()
+            TypeId::of::<hawdb_nowledge_contracts::NowledgeMemQueryExecutionPath>()
         );
         assert_eq!(
             TypeId::of::<NowledgeGraphRouteWorkloadFixtureOptions>(),
-            TypeId::of::<skein_nowledge_contracts::NowledgeGraphRouteWorkloadFixtureOptions>()
+            TypeId::of::<hawdb_nowledge_contracts::NowledgeGraphRouteWorkloadFixtureOptions>()
         );
         assert_eq!(
             TypeId::of::<NowledgeGraphRouteWorkloadFixtureReport>(),
-            TypeId::of::<skein_nowledge_contracts::NowledgeGraphRouteWorkloadFixtureReport>()
+            TypeId::of::<hawdb_nowledge_contracts::NowledgeGraphRouteWorkloadFixtureReport>()
         );
         assert_eq!(
             TypeId::of::<NowledgeGraphRouteWorkloadBoundedExpansionReport>(),
-            TypeId::of::<skein_nowledge_contracts::NowledgeGraphRouteWorkloadBoundedExpansionReport>(
+            TypeId::of::<hawdb_nowledge_contracts::NowledgeGraphRouteWorkloadBoundedExpansionReport>(
             )
         );
         assert_eq!(
             TypeId::of::<NowledgeSearchMetadataWorkloadReport>(),
-            TypeId::of::<skein_nowledge_contracts::NowledgeSearchMetadataWorkloadReport>()
+            TypeId::of::<hawdb_nowledge_contracts::NowledgeSearchMetadataWorkloadReport>()
         );
         assert_eq!(
             TypeId::of::<NowledgeGraphRagWorkloadReport>(),
-            TypeId::of::<skein_nowledge_contracts::NowledgeGraphRagWorkloadReport>()
+            TypeId::of::<hawdb_nowledge_contracts::NowledgeGraphRagWorkloadReport>()
         );
         assert_eq!(
             TypeId::of::<NowledgeSourceProjectionWorkloadReport>(),
-            TypeId::of::<skein_nowledge_contracts::NowledgeSourceProjectionWorkloadReport>()
+            TypeId::of::<hawdb_nowledge_contracts::NowledgeSourceProjectionWorkloadReport>()
         );
         assert_eq!(
             TypeId::of::<NowledgeGraphRouteWorkloadRouteReport>(),
-            TypeId::of::<skein_nowledge_contracts::NowledgeGraphRouteWorkloadRouteReport>()
+            TypeId::of::<hawdb_nowledge_contracts::NowledgeGraphRouteWorkloadRouteReport>()
         );
         assert_eq!(
             TypeId::of::<NowledgeGraphRouteWorkloadQueryReport>(),
-            TypeId::of::<skein_nowledge_contracts::NowledgeGraphRouteWorkloadQueryReport>()
+            TypeId::of::<hawdb_nowledge_contracts::NowledgeGraphRouteWorkloadQueryReport>()
         );
     }
 

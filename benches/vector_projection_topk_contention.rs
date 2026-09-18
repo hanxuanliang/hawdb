@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Isolates the cost of merging per-segment scan results into the query's
 //! top-k under high segment/worker fan-out.
 //!
@@ -7,11 +21,11 @@
 //! small segments, and a high worker count, so segments finish and contend
 //! for the merge as fast as possible.
 
-use serde_json::json;
-use skein_vector_projection::{
+use hawdb_vector_projection::{
     KernelPreference, ProjectionBuildConfig, ProjectionBuilder, ProjectionIdentity,
     ProjectionSearchOptions,
 };
+use serde_json::json;
 use std::hint::black_box;
 use std::num::NonZeroUsize;
 use std::time::Instant;
@@ -52,7 +66,7 @@ fn main() {
     );
 }
 
-fn build_projection() -> skein_vector_projection::InMemoryProjection {
+fn build_projection() -> hawdb_vector_projection::InMemoryProjection {
     let config = ProjectionBuildConfig::new(DIMENSION, ProjectionIdentity::new(1))
         .with_segment_rows(SEGMENT_ROWS);
     let mut builder = ProjectionBuilder::new(config).expect("benchmark projection must initialize");
@@ -76,7 +90,7 @@ fn vector(id: u64) -> Vec<f32> {
 }
 
 fn measure(
-    projection: &skein_vector_projection::InMemoryProjection,
+    projection: &hawdb_vector_projection::InMemoryProjection,
     query: &[f32],
     workers: usize,
 ) -> serde_json::Value {

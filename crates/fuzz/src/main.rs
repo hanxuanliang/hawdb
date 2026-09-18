@@ -1,10 +1,24 @@
-use serde_json::Value as JsonValue;
-use skein_fuzz::{
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use hawdb_fuzz::{
     campaign_progress_json, emit_fuzz_report, fuzz_current_report_path, merge_campaign_report_json,
     read_fuzz_current_report, run_campaign_with_case_observer, write_fuzz_current_report,
     CampaignExecutionOptions, CampaignOptions, FuzzError, CAMPAIGN_PROTOCOL,
     DEFAULT_FUZZ_LOG_DIRECTORY, DEFAULT_FUZZ_PROGRESS_INTERVAL,
 };
+use serde_json::Value as JsonValue;
 use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -19,7 +33,7 @@ fn main() -> ExitCode {
             }
         }
         Err(error) => {
-            eprintln!("skein-fuzz: {error}");
+            eprintln!("hawdb-fuzz: {error}");
             ExitCode::from(2)
         }
     }
@@ -30,7 +44,7 @@ fn run() -> Result<bool, FuzzError> {
     options.execution.validate(options.campaign)?;
     let run_id = run_id(options.campaign, options.execution);
     let current_path =
-        fuzz_current_report_path(&options.log_directory, "skein-optimizer-fuzz", &run_id);
+        fuzz_current_report_path(&options.log_directory, "hawdb-optimizer-fuzz", &run_id);
     let mut cases = if options.resume {
         load_resume_cases(&current_path, options.campaign, options.execution)?
     } else {
@@ -61,7 +75,7 @@ fn run() -> Result<bool, FuzzError> {
     let success = report_json["success"].as_bool() == Some(true);
     let paths = emit_fuzz_report(
         &options.log_directory,
-        "skein-optimizer-fuzz",
+        "hawdb-optimizer-fuzz",
         &run_id,
         &report_json,
         success,
@@ -71,7 +85,7 @@ fn run() -> Result<bool, FuzzError> {
     .map_err(FuzzError::new)?;
     if let Some(path) = paths.failure {
         eprintln!(
-            "skein-fuzz: {} failing case(s); reproduction report: {}",
+            "hawdb-fuzz: {} failing case(s); reproduction report: {}",
             report_json["failed_case_count"]
                 .as_u64()
                 .unwrap_or_default(),
@@ -166,7 +180,7 @@ fn next_usize(args: &mut impl Iterator<Item = String>, option: &str) -> Result<u
 }
 
 fn usage() -> &'static str {
-    "usage: skein-fuzz [--seed <u64>] [--cases <usize>] [--case-index <usize>] [--shard-index <usize>] [--shard-count <usize>] [--progress-interval <usize>] [--resume] [--log-directory <path>] [--print-report]"
+    "usage: hawdb-fuzz [--seed <u64>] [--cases <usize>] [--case-index <usize>] [--shard-index <usize>] [--shard-count <usize>] [--progress-interval <usize>] [--resume] [--log-directory <path>] [--print-report]"
 }
 
 fn run_id(options: CampaignOptions, execution: CampaignExecutionOptions) -> String {
@@ -251,7 +265,7 @@ mod tests {
         assert_eq!(options.campaign.case_index, None);
         assert_eq!(
             options.log_directory,
-            std::path::Path::new(skein_fuzz::DEFAULT_FUZZ_LOG_DIRECTORY)
+            std::path::Path::new(hawdb_fuzz::DEFAULT_FUZZ_LOG_DIRECTORY)
         );
         assert!(!options.print_report);
     }
@@ -274,14 +288,14 @@ mod tests {
     fn parses_output_options() {
         let options = parse_options([
             "--log-directory".to_string(),
-            "/tmp/skein-fuzz".to_string(),
+            "/tmp/hawdb-fuzz".to_string(),
             "--print-report".to_string(),
         ])
         .unwrap();
 
         assert_eq!(
             options.log_directory,
-            std::path::Path::new("/tmp/skein-fuzz")
+            std::path::Path::new("/tmp/hawdb-fuzz")
         );
         assert!(options.print_report);
     }

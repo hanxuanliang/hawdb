@@ -1,9 +1,23 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::evidence::{
     message_point_options, message_point_parameters, require_one_message, MESSAGE_POINT_SQL,
 };
 use super::ContentStoreCorruptionQualificationReport;
 use crate::evidence_digest::rows_sha256;
-use skein::{Database, DatabaseConfig, DurabilityPolicy, Result, SkeinError};
+use hawdb::{Database, DatabaseConfig, DurabilityPolicy, HawDBError, Result};
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -32,7 +46,7 @@ pub(super) fn qualify_content_store_corruption(
     let backup = database.backup_to(&backup_path)?;
     let restored = Database::restore_backup(&backup_path, &restored_path)?;
     if backup.generation != restored.generation {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store corruption probe restored generation {} from backup generation {}",
             restored.generation, backup.generation
         )));
@@ -50,7 +64,7 @@ pub(super) fn qualify_content_store_corruption(
     )?;
     let scrub_error = match corrupted.scrub_storage() {
         Ok(_) => {
-            return Err(SkeinError::Execution(
+            return Err(HawDBError::Execution(
                 "content-store corruption probe scrub accepted a bit-flipped row page".to_string(),
             ));
         }
@@ -61,12 +75,12 @@ pub(super) fn qualify_content_store_corruption(
         && !scrub_message.contains("CRC32C mismatch")
         && !scrub_message.contains("SHA-256 mismatch")
     {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store corruption probe returned an unexpected scrub error: {scrub_error}"
         )));
     }
     if !corrupted.storage_handle_poisoned() {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "content-store corruption probe did not poison the damaged handle".to_string(),
         ));
     }
@@ -76,14 +90,14 @@ pub(super) fn qualify_content_store_corruption(
         point_options,
     ) {
         Ok(_) => {
-            return Err(SkeinError::Execution(
+            return Err(HawDBError::Execution(
                 "content-store corruption probe served SQL after integrity failure".to_string(),
             ));
         }
         Err(error) => error,
     };
     if !service_error.to_string().contains("close and reopen") {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store corruption probe expected fail-closed service, got: {service_error}"
         )));
     }
@@ -96,7 +110,7 @@ pub(super) fn qualify_content_store_corruption(
     )?;
     require_one_message(&source_after.rows, content_message_id, "corruption probe")?;
     if rows_sha256(&source_after.rows) != source_sha256 {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "content-store corruption probe changed its healthy source database".to_string(),
         ));
     }
@@ -136,7 +150,7 @@ fn latest_non_empty_row_page_artifact(path: &Path) -> Result<(u64, String, PathB
         };
         let Some(generation) = name
             .strip_prefix("relational-row-pages-")
-            .and_then(|name| name.strip_suffix(".pages.skein"))
+            .and_then(|name| name.strip_suffix(".pages.hawdb"))
             .and_then(|generation| generation.parse::<u64>().ok())
         else {
             continue;
@@ -153,7 +167,7 @@ fn latest_non_empty_row_page_artifact(path: &Path) -> Result<(u64, String, PathB
         }
     }
     selected.ok_or_else(|| {
-        SkeinError::Execution(
+        HawDBError::Execution(
             "content-store corruption probe found no non-empty row-page artifact in the restored canonical closure"
                 .to_string(),
         )
@@ -166,7 +180,7 @@ fn probe_paths(database_path: &Path) -> Result<(PathBuf, PathBuf)> {
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
-            SkeinError::Semantic(
+            HawDBError::Semantic(
                 "content-store corruption probe requires a UTF-8 database directory name"
                     .to_string(),
             )
@@ -177,7 +191,7 @@ fn probe_paths(database_path: &Path) -> Result<(PathBuf, PathBuf)> {
     let restored = parent.join(format!(".{name}.corruption-restored-{suffix}"));
     for path in [&backup, &restored] {
         if path.exists() {
-            return Err(SkeinError::Execution(format!(
+            return Err(HawDBError::Execution(format!(
                 "content-store corruption probe path already exists: {}",
                 path.display()
             )));

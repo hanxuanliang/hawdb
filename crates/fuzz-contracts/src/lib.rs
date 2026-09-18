@@ -1,9 +1,23 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Portable contracts for deterministic Nowledge query fuzz harnesses.
 
-use skein_core::{SkeinError, Value};
+use hawdb_core::{HawDBError, Value};
 use std::collections::BTreeMap;
 
-pub const NOWLEDGE_QUERY_FUZZ_HARNESS_PROTOCOL: &str = "skein-nowledge-query-fuzz-harness-v1";
+pub const NOWLEDGE_QUERY_FUZZ_HARNESS_PROTOCOL: &str = "hawdb-nowledge-query-fuzz-harness-v1";
 pub const NOWLEDGE_QUERY_FUZZ_FIXTURE_MEMORY_COUNT: usize = 8;
 const DEFAULT_CASE_COUNT: usize = 64;
 const MAX_CASE_COUNT: usize = 512;
@@ -136,15 +150,15 @@ pub fn nowledge_query_fuzz_harness_report(
 }
 
 #[doc(hidden)]
-pub const fn nowledge_query_fuzz_error_class(error: &SkeinError) -> &'static str {
+pub const fn nowledge_query_fuzz_error_class(error: &HawDBError) -> &'static str {
     match error {
-        SkeinError::Parse(_) => "parse",
-        SkeinError::Semantic(_) => "semantic",
-        SkeinError::Execution(_) => "execution",
-        SkeinError::Storage(_)
-        | SkeinError::StorageIntegrity(_)
-        | SkeinError::AppendSequenceExhausted { .. } => "storage",
-        SkeinError::CapabilityUnavailable { .. } => "capability_unavailable",
+        HawDBError::Parse(_) => "parse",
+        HawDBError::Semantic(_) => "semantic",
+        HawDBError::Execution(_) => "execution",
+        HawDBError::Storage(_)
+        | HawDBError::StorageIntegrity(_)
+        | HawDBError::AppendSequenceExhausted { .. } => "storage",
+        HawDBError::CapabilityUnavailable { .. } => "capability_unavailable",
     }
 }
 

@@ -1,10 +1,24 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use crate::binding::binding_memory_bytes;
 use crate::observer::QueryExecutionReports;
-use skein_analytics::{ProjectionScanControl, ProjectionSource};
-use skein_core::{LabelId, RelTypeId, RuntimeCancellationToken};
-use skein_plan::GraphAlgorithmOptions;
-use skein_storage::{NodeId, ProjectedGraphDefinition, PropertyFilter, RelId};
+use hawdb_analytics::{ProjectionScanControl, ProjectionSource};
+use hawdb_core::{LabelId, RelTypeId, RuntimeCancellationToken};
+use hawdb_plan::GraphAlgorithmOptions;
+use hawdb_storage::{NodeId, ProjectedGraphDefinition, PropertyFilter, RelId};
 use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
@@ -266,7 +280,7 @@ fn run(fixture: &Fixture, options: &RunOptions, task: Option<&RuntimeTaskContext
             match options.exit {
                 Exit::Complete => Ok(BatchControl::Continue),
                 Exit::Stop => Ok(BatchControl::Stop),
-                Exit::Error => Err(SkeinError::StorageIntegrity("consumer sentinel".into())),
+                Exit::Error => Err(HawDBError::StorageIntegrity("consumer sentinel".into())),
             }
         },
     );

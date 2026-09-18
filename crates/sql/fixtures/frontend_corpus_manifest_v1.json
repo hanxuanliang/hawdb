@@ -1,5 +1,5 @@
 {
-  "protocol": "skein-sql-frontend-corpus-v1",
+  "protocol": "hawdb-sql-frontend-corpus-v1",
   "audited_base_revision": "1977888050c405adc873ebcccfec77c3352f4659",
   "case_count": 1007,
   "owned_families": [
@@ -10,7 +10,7 @@
   "sources": [
     {
       "path": "crates/sql/src/tests.rs",
-      "sha256": "5df364d1bf6f7e471ea7de0ffb3133831d4e12d8121a0b8828873cd052dcebd2",
+      "sha256": "67991100ae6624a8f2aaeabce8f98a40cb1513497448d292c82ea31a77cdd7f6",
       "case_ids": [
         "case-0001",
         "case-0002",
@@ -47,7 +47,7 @@
     },
     {
       "path": "crates/sql/src/tests/clause_diagnostics.rs",
-      "sha256": "4a523c50fdaa3c0b262b2db99180280cab2c62280385bd13fdde3320e7c74e66",
+      "sha256": "19433bb96ee648dd3fce017fbecb94bc7f4358d28ecd6265922cc77de3e24d8c",
       "case_ids": [
         "case-0032",
         "case-0033",
@@ -60,7 +60,7 @@
     },
     {
       "path": "crates/sql/src/parser/clause_tests.rs",
-      "sha256": "4e67c78a00d8f693d3ec2b5766c565f68ec9fc26db373f17669148cfd5b7fcf7",
+      "sha256": "58a17f6b03d65ec7d3c1555db8ceab8245d43825d96cc7181c4630c88b9de771",
       "case_ids": [
         "case-0039",
         "case-0040",
@@ -357,7 +357,7 @@
     },
     {
       "path": "crates/sql-syntax/tests/postgres_pgq.rs",
-      "sha256": "d852c2043eb385d34fc492966745b6e28b48f5b2e408099cff9d407997b924e4",
+      "sha256": "c3c4d296b620a212a2a663c79fa8f42ec06960188c0979592543f1d6f34f23f2",
       "case_ids": [
         "case-0042",
         "case-0043",
@@ -401,7 +401,7 @@
     },
     {
       "path": "crates/sql-syntax/tests/postgres_select_pgq.rs",
-      "sha256": "6bb25d38aad037963cd202ce6e3eb6037fb49ff09b2f2240db639376d384c488",
+      "sha256": "924b8dc8860f24cab7edfaf7b70a06e70bbb3125d6562737f27d90ae9592bbda",
       "case_ids": [
         "case-0080",
         "case-0081",
@@ -436,7 +436,7 @@
     },
     {
       "path": "crates/sql/src/pgq/tests.rs",
-      "sha256": "8b2aa05c34de2964f64d37665d3ad72debf6ba8413d60b5dccf9c60f7543d20d",
+      "sha256": "5a5f89f6241583a632e1bea09c4ef39a9280b0d61fb95afc51c3e0b6460a9c10",
       "case_ids": [
         "case-0109",
         "case-0110",
@@ -458,7 +458,7 @@
     },
     {
       "path": "crates/sql/src/pgq/lowering/tests.rs",
-      "sha256": "361d80b286a653d76d6c1f847d7f24038afbb858e11aa0f575399de0e849f74c",
+      "sha256": "f0bc02c99a0131e04b00e97c583259a1ca0a1977c8b041d813a820fa9fa2d222",
       "case_ids": [
         "case-0125",
         "case-0126",
@@ -471,7 +471,7 @@
     },
     {
       "path": "crates/sql-syntax/tests/support/alias_boundaries.rs",
-      "sha256": "21f03c44e9462adc33796b6919b34e5e15ac708702d7e35cdbe776c302d57845",
+      "sha256": "349cc7eab0d972cb42d820c1bb8b51fcc12f47960411a5a37bf9af00d26b9f84",
       "case_ids": [
         "case-0420",
         "case-0421",
@@ -983,7 +983,7 @@
     },
     {
       "path": "crates/qualification/fixtures/nowledge_content_store/postgres_statement_corpus_v1.json",
-      "sha256": "1bceae270388603f801bfe32a39ea7e4fc775e5e14003e2c77cd6c576916a915",
+      "sha256": "2598d4da007e372793cfc4f59e89e62951b1b2b11ec3cfb1a13ee87cfd29a896",
       "case_ids": [
         "case-0926",
         "case-0927",
@@ -1047,7 +1047,7 @@
     },
     {
       "path": "crates/sql/src/tests/cross_join.rs",
-      "sha256": "e752327fd50d3aa186474b69ee51ef10ec0dcb8ed26a46c4fe495fc6e327b602",
+      "sha256": "cbcfc3e62038dd902d0859cb7f98392aa5f2f4243e46264dbe05b7b0298288b0",
       "case_ids": [
         "case-0982",
         "case-0983",
@@ -1064,7 +1064,7 @@
     },
     {
       "path": "crates/sql/src/tests/having_from.rs",
-      "sha256": "6dc5809d41c641481d6ed6874332daf6bda99d94c6beae05c68850a8a751a408",
+      "sha256": "731fc51e7e6e5e51a54da3b5a5e72aa5ac00772e0ed3eb8a32ceaf9dce5bda97",
       "case_ids": [
         "case-0991",
         "case-0994",
@@ -1096,7 +1096,7 @@
         "delete"
       ],
       "direction": "upstream_accepts",
-      "issue": "https://github.com/nowledge-co/skein/issues/159",
+      "issue": "https://github.com/nowledge-co/hawdb/issues/159",
       "reason": "The owned statement router currently supports SELECT and CREATE PROPERTY GRAPH only; DDL/DML remain on the production frontend."
     },
     {
@@ -1105,7 +1105,7 @@
         "explain"
       ],
       "direction": "upstream_accepts",
-      "issue": "https://github.com/nowledge-co/skein/issues/159",
+      "issue": "https://github.com/nowledge-co/hawdb/issues/159",
       "reason": "Owned EXPLAIN routing is not implemented; production EXPLAIN retains its existing read-only contract."
     },
     {
@@ -1114,7 +1114,7 @@
         "select"
       ],
       "direction": "upstream_accepts",
-      "issue": "https://github.com/nowledge-co/skein/issues/159",
+      "issue": "https://github.com/nowledge-co/hawdb/issues/159",
       "reason": "The owned SELECT expression grammar does not yet accept aggregate FILTER in the qualified production shape."
     },
     {
@@ -1123,7 +1123,7 @@
         "select"
       ],
       "direction": "upstream_accepts",
-      "issue": "https://github.com/nowledge-co/skein/issues/159",
+      "issue": "https://github.com/nowledge-co/hawdb/issues/159",
       "reason": "The owned SELECT expression grammar does not yet accept the production LIKE/ILIKE/ESCAPE shape."
     },
     {
@@ -1132,7 +1132,7 @@
         "select"
       ],
       "direction": "upstream_accepts",
-      "issue": "https://github.com/nowledge-co/skein/issues/159",
+      "issue": "https://github.com/nowledge-co/hawdb/issues/159",
       "reason": "The upstream frontend accepts an empty target list while the owned SELECT slice explicitly rejects SELECT FROM source."
     },
     {
@@ -1141,7 +1141,7 @@
         "select"
       ],
       "direction": "upstream_accepts",
-      "issue": "https://github.com/nowledge-co/skein/issues/159",
+      "issue": "https://github.com/nowledge-co/hawdb/issues/159",
       "reason": "The upstream parser accepts these explicit keyword aliases; the owned alias boundary contract explicitly rejects them. PostgreSQL compatibility still needs qualification."
     },
     {
@@ -1151,7 +1151,7 @@
         "create_property_graph"
       ],
       "direction": "owned_accepts",
-      "issue": "https://github.com/nowledge-co/skein/issues/159",
+      "issue": "https://github.com/nowledge-co/hawdb/issues/159",
       "reason": "SQL/PGQ syntax is owned-only; upstream production preparation is not routed to the owned parser. Syntax acceptance does not qualify binding or execution."
     },
     {
@@ -1160,7 +1160,7 @@
         "select"
       ],
       "direction": "owned_accepts",
-      "issue": "https://github.com/nowledge-co/skein/issues/156",
+      "issue": "https://github.com/nowledge-co/hawdb/issues/156",
       "reason": "The production column-anchored predicate/projection AST cannot represent these expressions or scalar predicates. Preserve the expression-refactor gate."
     },
     {
@@ -1169,7 +1169,7 @@
         "select"
       ],
       "direction": "owned_accepts",
-      "issue": "https://github.com/nowledge-co/skein/issues/159",
+      "issue": "https://github.com/nowledge-co/hawdb/issues/159",
       "reason": "The owned syntax retains table column alias lists while production lowering rejects them; binding and result-column semantics remain unqualified."
     },
     {
@@ -1178,7 +1178,7 @@
         "select"
       ],
       "direction": "owned_accepts",
-      "issue": "https://github.com/nowledge-co/skein/issues/159",
+      "issue": "https://github.com/nowledge-co/hawdb/issues/159",
       "reason": "Production preparation validates dense parameter positions after parsing. The owned entry point is syntax-only and does not perform that preparation check."
     }
   ],

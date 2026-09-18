@@ -1,9 +1,23 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Private immutable terms retain their admitted payload through every consumer.
 
 use crate::build_memory::shared::Shared;
 use crate::build_memory::{checked_add, BuildMemory};
-use crate::{Result, SkeinError};
-use skein_executor::QueryMemoryLease;
+use crate::{HawDBError, Result};
+use hawdb_executor::QueryMemoryLease;
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
@@ -48,7 +62,7 @@ impl Term {
         let mut lease = memory.retained.reserve(checked_add(capacity, header)?)?;
         let text = build();
         if text.capacity() > capacity {
-            return Err(SkeinError::Execution(
+            return Err(HawDBError::Execution(
                 "search term allocation exceeded its admitted capacity".into(),
             ));
         }
@@ -67,7 +81,7 @@ impl Term {
         let mut lease = memory.reserve(Self::reserved_bytes(capacity)?)?;
         let text = build()?;
         if text.capacity() > capacity {
-            return Err(SkeinError::Execution(
+            return Err(HawDBError::Execution(
                 "search spill term allocation exceeded its admitted capacity".into(),
             ));
         }
@@ -128,10 +142,10 @@ impl Term {
     pub(crate) fn into_untracked(self) -> Result<String> {
         match self.0 {
             Value::Untracked(text) => Ok(text),
-            Value::Tracked(_) => Err(SkeinError::Execution(
+            Value::Tracked(_) => Err(HawDBError::Execution(
                 "admitted search term requires an ownership-preserving consumer".into(),
             )),
-            Value::Reserved(_) => Err(SkeinError::Execution(
+            Value::Reserved(_) => Err(HawDBError::Execution(
                 "reserved search term requires an ownership-preserving consumer".into(),
             )),
         }

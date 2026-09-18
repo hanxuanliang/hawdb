@@ -1,9 +1,23 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::{
     FileSegmentRangeReader, SegmentRangeReader, SegmentReadRange, SnapshotCommitError,
     SnapshotCoordinator, SnapshotReadGuard,
 };
-use skein_core::{LogicalType, Uuid};
-use skein_integrity::Sha256Digest;
+use hawdb_core::{LogicalType, Uuid};
+use hawdb_integrity::Sha256Digest;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -3531,7 +3545,7 @@ impl RelationalState {
     pub fn table_schema_digest(
         &self,
         table: &str,
-    ) -> Result<Option<skein_integrity::Sha256Digest>, RelationalError> {
+    ) -> Result<Option<hawdb_integrity::Sha256Digest>, RelationalError> {
         self.table_schema(table)
             .map(index_shadow::relational_schema_digest)
             .transpose()
@@ -3843,7 +3857,7 @@ impl RelationalState {
         table: &str,
         key: &RelationalKey,
         budget: &mut RelationalHydrationBudget,
-        task_context: Option<&skein_core::RuntimeTaskContext>,
+        task_context: Option<&hawdb_core::RuntimeTaskContext>,
     ) -> Result<Option<RelationalRow>, RelationalError> {
         let Some(row) = self.row(table, key) else {
             return Ok(None);
@@ -3858,7 +3872,7 @@ impl RelationalState {
         &self,
         row: &RelationalRow,
         budget: &mut RelationalHydrationBudget,
-        task_context: Option<&skein_core::RuntimeTaskContext>,
+        task_context: Option<&hawdb_core::RuntimeTaskContext>,
     ) -> Result<RelationalRow, RelationalError> {
         if self.materialized_rows_resident || !self.canonical_row_metadata_only {
             return Err(RelationalError::Admission(
@@ -3878,7 +3892,7 @@ impl RelationalState {
         table: &str,
         row: &mut RelationalProjectedRow,
         budget: &mut RelationalHydrationBudget,
-        task_context: Option<&skein_core::RuntimeTaskContext>,
+        task_context: Option<&hawdb_core::RuntimeTaskContext>,
     ) -> Result<(), RelationalError> {
         overflow::hydrate_projected_row(self, table, row, budget, task_context)
     }
@@ -3896,7 +3910,7 @@ impl RelationalState {
         row: &mut RelationalProjectedRow,
         required_fields: &[usize],
         budget: &mut RelationalHydrationBudget,
-        task_context: Option<&skein_core::RuntimeTaskContext>,
+        task_context: Option<&hawdb_core::RuntimeTaskContext>,
     ) -> Result<(), RelationalError> {
         overflow::hydrate_projected_row_fields(
             self,

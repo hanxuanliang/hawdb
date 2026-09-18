@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Point-lookup cost against canonical segments.
 //!
 //! Two shapes, because a lookup spends its time in two different places. Large
@@ -5,12 +19,12 @@
 //! the matching record is worth. Small segments make the descriptor search
 //! dominate, so they show what binary searching the manifest is worth.
 
-use serde_json::json;
-use skein_core::{LabelId, Value};
-use skein_storage::{
+use hawdb_core::{LabelId, Value};
+use hawdb_storage::{
     CanonicalSegmentConfig, CanonicalSegmentReader, CanonicalSegmentWriter, NodeId, NodeRecord,
     SegmentCache, StoreId,
 };
+use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hint::black_box;
 use std::num::NonZeroU64;
@@ -55,7 +69,7 @@ fn main() {
 
 fn measure(name: &str, segment_bytes: u64) -> serde_json::Value {
     let path = std::env::temp_dir().join(format!(
-        "skein-canonical-point-lookup-{name}-{}-{}",
+        "hawdb-canonical-point-lookup-{name}-{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -82,7 +96,7 @@ fn measure(name: &str, segment_bytes: u64) -> serde_json::Value {
     let manifest = CanonicalSegmentWriter::new(config)
         .write_fallible(
             &path,
-            skein_storage::ManifestGeneration(1),
+            hawdb_storage::ManifestGeneration(1),
             nodes,
             Vec::new(),
         )

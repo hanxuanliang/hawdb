@@ -1,12 +1,26 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use crate::observer::NoopExecutionObserver;
 use crate::pipeline::runtime_checkpoint;
 use crate::{ExecutionMemoryConfig, QueryMemoryLedger};
-use skein_core::{
-    Catalog, LabelId, RelTypeId, RuntimeCancellationToken, RuntimeTaskContext, SkeinError, Value,
+use hawdb_core::{
+    Catalog, HawDBError, LabelId, RelTypeId, RuntimeCancellationToken, RuntimeTaskContext, Value,
 };
-use skein_plan::ProjectionExpression;
-use skein_storage::{NodeId, NodeRecord, RelId, RelRecord};
+use hawdb_plan::ProjectionExpression;
+use hawdb_storage::{NodeId, NodeRecord, RelId, RelRecord};
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 
@@ -49,7 +63,7 @@ impl BindingBatchSource for Source<'_> {
         for batch in self.rows[..end].chunks(self.batch_rows) {
             runtime_checkpoint(self.task)?;
             if self.fail_at == Some(self.calls) {
-                return Err(SkeinError::Execution("source failure".into()));
+                return Err(HawDBError::Execution("source failure".into()));
             }
             self.calls += 1;
             if emit(batch.to_vec())? == BatchControl::Stop {
@@ -229,7 +243,7 @@ fn check_case(seed: usize, input_batch: usize, output_batch: usize, kernel: Kern
             match exit {
                 Exit::Complete => Ok(BatchControl::Continue),
                 Exit::Stop => Ok(BatchControl::Stop),
-                Exit::Error => Err(SkeinError::Execution("consumer failure".into())),
+                Exit::Error => Err(HawDBError::Execution("consumer failure".into())),
             }
         })
     });
@@ -360,7 +374,7 @@ fn predicate_and_projection_failures_release_partial_batches() {
             &mut |_| {
                 evaluated += 1;
                 if evaluated == 2 {
-                    Err(SkeinError::Execution("predicate failure".into()))
+                    Err(HawDBError::Execution("predicate failure".into()))
                 } else {
                     Ok(true)
                 }

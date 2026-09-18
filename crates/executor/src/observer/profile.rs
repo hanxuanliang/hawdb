@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Query-owned profile initialization and completion accounting.
 //!
 //! Process sampling and host policy remain in the embedded facade.
@@ -5,9 +19,9 @@
 use super::{blocking_operator_kinds, QueryExecutionObserver, QueryExecutionReports};
 use crate::result_delivery::OutputMetrics;
 use crate::{ExecutionLimit, PipelineMemoryReport, QueryMemoryLedger, ReadExecutionProfile};
-use skein_core::Result;
-use skein_plan::PhysicalPlan;
-use skein_storage::ScanPruningReport;
+use hawdb_core::Result;
+use hawdb_plan::PhysicalPlan;
+use hawdb_storage::ScanPruningReport;
 
 pub fn read_execution_profile(
     plan: &PhysicalPlan,

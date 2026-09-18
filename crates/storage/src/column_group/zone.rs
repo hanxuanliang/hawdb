@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Per-chunk zone maps (§3.2.2, §3.5.3(b)).
 //!
 //! Reuses the `FieldSummary` model from `scan::summary` for presence counts
@@ -7,7 +21,7 @@
 //! model cannot carry. Zone maps serialize as fixed-size records inside the
 //! group directory so scan planning reads directories, never chunks.
 //!
-//! Pruning soundness contract (mirror of `SkeinPropertyIndexPruning`): every
+//! Pruning soundness contract (mirror of `HawDBPropertyIndexPruning`): every
 //! `may_match_*` method returns `false` only when no row of the chunk can
 //! satisfy the predicate under the value-match semantics documented on
 //! `ColumnPredicate` in `group.rs`.
@@ -15,7 +29,7 @@
 use super::encoding::Cursor;
 use super::{corrupt, ColumnGroupError};
 use crate::scan::{DateTimeMinMax, FieldSummary, NumericMinMax, RangeBound};
-use skein_core::Value;
+use hawdb_core::Value;
 
 /// Serialized size of one zone-map record in the group directory.
 pub const ZONE_MAP_RECORD_BYTES: usize = 88;

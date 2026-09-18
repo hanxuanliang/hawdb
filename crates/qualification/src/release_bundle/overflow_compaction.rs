@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::content_store::{
     boolean, deduplicate, string, unsigned, valid_prefixed_sha256, valid_sha256,
     valid_statement_contract, validate_frozen_contract, StatementRole,
@@ -9,8 +23,8 @@ use crate::{
     CONTENT_STORE_SHARED_HOST_MAX_CAPACITY_BYTES,
     PRODUCTION_CONTENT_STORE_OVERFLOW_COMPACTION_QUALIFICATION_PROTOCOL,
 };
+use hawdb::ProductionQualificationIdentity;
 use serde_json::Value;
-use skein::ProductionQualificationIdentity;
 use std::collections::{BTreeMap, BTreeSet};
 
 const EVIDENCE_KIND: &str = "representative_production_relational_overflow_compaction";

@@ -1,9 +1,23 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Measure the real generation writer's rejected identifier path.
 
 #[path = "support/allocation.rs"]
 mod allocation;
 
-use skein_search::{
+use hawdb_search::{
     SearchAnalyzerLexicon, SearchDocument, SearchOutOfCoreGenerationBuildOptions,
     SearchOutOfCoreGenerationWriter,
 };
@@ -16,7 +30,7 @@ fn rejected_identifier_stops_before_collecting_all_parts_and_tokens() {
         let source = "alphaBeta".repeat(repeats);
         let source_bytes = source.len();
         let root = std::env::temp_dir().join(format!(
-            "skein-identifier-allocation-{}-{repeats}",
+            "hawdb-identifier-allocation-{}-{repeats}",
             std::process::id(),
         ));
         let mut writer = SearchOutOfCoreGenerationWriter::create(
@@ -41,7 +55,7 @@ fn rejected_identifier_stops_before_collecting_all_parts_and_tokens() {
         assert!(error.contains("lexical term uses"), "{error}");
         assert!(error.contains("exceeding 4096"), "{error}");
         assert!(!root
-            .join("search_projection.out_of_core.manifest.skein")
+            .join("search_projection.out_of_core.manifest.hawdb")
             .exists());
         println!("source_bytes={source_bytes} requested_bytes={requested_bytes}");
         measurements.push((source_bytes, requested_bytes));

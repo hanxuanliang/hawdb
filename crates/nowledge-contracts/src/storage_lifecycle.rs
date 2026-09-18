@@ -1,9 +1,23 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Host-neutral Nowledge storage-recovery lifecycle protocol.
 
-use skein_storage::{RecoveryMode, StorageOpenTimings, StorageRecoveryReport};
+use hawdb_storage::{RecoveryMode, StorageOpenTimings, StorageRecoveryReport};
 
 pub const NOWLEDGE_MEM_STORAGE_LIFECYCLE_DECISION_PROTOCOL: &str =
-    "skein-nowledge-mem-storage-lifecycle-decision-v1";
+    "hawdb-nowledge-mem-storage-lifecycle-decision-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NowledgeMemStorageRecoveryReport {
@@ -75,7 +89,7 @@ impl NowledgeMemStorageRecoveryReport {
         }
 
         Self {
-            protocol: "skein-storage-recovery-report".to_string(),
+            protocol: "hawdb-storage-recovery-report".to_string(),
             present: true,
             ready: blocker_codes.is_empty(),
             open_timings: report.open_timings,

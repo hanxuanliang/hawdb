@@ -1,22 +1,36 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Run the identical benchmark on the base and candidate revisions.
 //! Input construction is excluded; ordered output and admission are checked.
 
-use serde_json::json;
-use skein::optimizer::PhysicalPlan;
-use skein::planner::{
+use hawdb::optimizer::PhysicalPlan;
+use hawdb::planner::{
     AggregateFunction, AggregateTarget, Aggregation, Projection, ProjectionExpression,
 };
-use skein_core::{Catalog, Result, Value};
-use skein_executor::binding::Binding;
-use skein_executor::blocking::{
+use hawdb_core::{Catalog, Result, Value};
+use hawdb_executor::binding::Binding;
+use hawdb_executor::blocking::{
     stream_aggregate_batches, BindingBatchSource, BlockingExecutionContext,
 };
-use skein_executor::observer::ExecutionObserver;
-use skein_executor::pipeline::{BatchControl, BindingBatch};
-use skein_executor::{
+use hawdb_executor::observer::ExecutionObserver;
+use hawdb_executor::pipeline::{BatchControl, BindingBatch};
+use hawdb_executor::{
     BlockingOperatorMemoryReport, ExecutionLimit, ExecutionMemoryConfig, QueryMemoryLedger,
 };
-use skein_storage::{NodeId, NodeRecord};
+use hawdb_storage::{NodeId, NodeRecord};
+use serde_json::json;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hint::black_box;

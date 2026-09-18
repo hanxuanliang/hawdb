@@ -1,5 +1,19 @@
-use skein_core::{Result, SkeinError, ValidatedRegex, Value};
-use skein_cypher::{
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use hawdb_core::{HawDBError, Result, ValidatedRegex, Value};
+use hawdb_cypher::{
     AggregateExpression, ComparisonOp as CypherComparisonOp,
     GraphAlgorithmKind as CypherGraphAlgorithmKind,
     GraphAlgorithmOptions as CypherGraphAlgorithmOptions, MatchReturn,
@@ -11,11 +25,11 @@ use skein_cypher::{
     WithAliasFilterExpression, WithAliasFilterOp, WithCollect, WithDistinctProjection,
     WithProjection,
 };
-use skein_cypher::{
+use hawdb_cypher::{
     AstNode, ReturnExpressionKind, ReturnItemKind, ScalarExpressionKind, ValueExpressionKind,
 };
-pub use skein_ddl::{SchemaObjectState, SchemaPropertyType, SchemaTableKind};
-pub use skein_expression::{
+pub use hawdb_ddl::{SchemaObjectState, SchemaPropertyType, SchemaTableKind};
+pub use hawdb_expression::{
     CaseColumnSearchRankProjection, CaseEntitySearchRankProjection,
     CoalesceDifferenceProjectionTerm, ComparisonOp, DatePart, Predicate, ProjectionExpression,
     ScalarBinaryOp,

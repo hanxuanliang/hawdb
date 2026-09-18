@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Keep the admitted delta batch alive across row conversion and spool handoff.
 
 use crate::build_control::checkpoint;
@@ -5,9 +19,9 @@ use crate::build_memory::{
     checked_add as add, checked_mul as mul, document_bytes, projection_row_bytes, shared::Shared,
     AdmittedDocument, BuildMemory, MAP_ENTRY_BYTES,
 };
-use crate::{Result, SearchDocument, SearchProjectionDelta, SearchProjectionRow, SkeinError};
-use skein_core::RuntimeTaskContext;
-use skein_executor::QueryMemoryLease;
+use crate::{HawDBError, Result, SearchDocument, SearchProjectionDelta, SearchProjectionRow};
+use hawdb_core::RuntimeTaskContext;
+use hawdb_executor::QueryMemoryLease;
 use std::collections::VecDeque;
 use std::mem::size_of;
 
@@ -51,10 +65,10 @@ impl Pending {
         let slots = mul(count, size_of::<SearchDocument>())?;
         input.memory.grow(slots)?;
         input.upserts.try_reserve_exact(count).map_err(|error| {
-            SkeinError::Execution(format!("cannot allocate search delta slots: {error}"))
+            HawDBError::Execution(format!("cannot allocate search delta slots: {error}"))
         })?;
         if input.upserts.capacity() > count {
-            return Err(SkeinError::Execution(
+            return Err(HawDBError::Execution(
                 "search delta slots exceeded admission".into(),
             ));
         }
@@ -68,7 +82,7 @@ impl Pending {
             let actual = document_bytes(&document)? - size_of::<SearchDocument>();
             let covered = add(old, extra)?;
             if actual > covered {
-                return Err(SkeinError::Execution(
+                return Err(HawDBError::Execution(
                     "search delta conversion exceeded admission".into(),
                 ));
             }

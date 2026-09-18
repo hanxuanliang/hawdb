@@ -1,10 +1,24 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::store::{GraphStore, RelationalIndexProbeStatistics};
-use skein_relational::index_runtime::RelationalIndexStoreReader;
-use skein_storage::relational_index_view::RelationalIndexReadViewReport;
-use skein_storage::{RelationalIndexReadLimits, RelationalIndexShadowError, RelationalKey};
+use hawdb_relational::index_runtime::RelationalIndexStoreReader;
+use hawdb_storage::relational_index_view::RelationalIndexReadViewReport;
+use hawdb_storage::{RelationalIndexReadLimits, RelationalIndexShadowError, RelationalKey};
 
 pub(crate) type RelationalIndexReadMode<'a> =
-    skein_relational::index_runtime::RelationalIndexReadMode<'a, GraphStore>;
+    hawdb_relational::index_runtime::RelationalIndexReadMode<'a, GraphStore>;
 
 impl RelationalIndexStoreReader for GraphStore {
     fn relational_index_probe_statistics(
@@ -48,7 +62,7 @@ impl RelationalIndexStoreReader for GraphStore {
         &self,
         table: &str,
         index: &str,
-        scan: &skein_storage::RelationalIndexRangeScan,
+        scan: &hawdb_storage::RelationalIndexRangeScan,
         limits: RelationalIndexReadLimits,
         visit: impl FnMut(&RelationalKey, &RelationalKey) -> bool,
     ) -> Option<std::result::Result<RelationalIndexReadViewReport, RelationalIndexShadowError>>

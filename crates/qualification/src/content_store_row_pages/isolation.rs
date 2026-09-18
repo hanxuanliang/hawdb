@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::evidence::{
     message_point_options, message_point_parameters, require_one_message,
     MESSAGE_POINT_MAX_PAYLOAD_BYTES, MESSAGE_POINT_MAX_ROWS, MESSAGE_POINT_SQL,
@@ -6,9 +20,9 @@ use super::fixture::{corpus_statement, thread_message_parameters};
 use super::ContentStoreIsolationQualificationReport;
 use crate::evidence_digest::rows_sha256;
 use crate::ContentStoreSqlCorpus;
-use skein::{
-    ConcurrentTransactionOptions, Database, Result, RuntimeCancellationToken, RuntimeTaskContext,
-    SkeinError,
+use hawdb::{
+    ConcurrentTransactionOptions, Database, HawDBError, Result, RuntimeCancellationToken,
+    RuntimeTaskContext,
 };
 use std::time::Duration;
 
@@ -38,14 +52,14 @@ pub(super) fn qualify_content_store_isolation(
         &cancelled_context,
     ) {
         Ok(_) => {
-            return Err(SkeinError::Execution(
+            return Err(HawDBError::Execution(
                 "pre-cancelled Content Store point read completed".to_string(),
             ));
         }
         Err(error) => error,
     };
     if !cancellation_error.to_string().contains("cancelled") {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store isolation expected cancellation, got: {cancellation_error}"
         )));
     }
@@ -57,13 +71,13 @@ pub(super) fn qualify_content_store_isolation(
     let cancellation_pinned_bytes_after = database
         .segment_cache_snapshot()
         .ok_or_else(|| {
-            SkeinError::Execution(
+            HawDBError::Execution(
                 "content-store isolation requires an out-of-core segment cache".to_string(),
             )
         })?
         .pinned_bytes;
     if cancellation_pinned_bytes_after != 0 {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store cancelled read leaked {cancellation_pinned_bytes_after} pinned bytes"
         )));
     }
@@ -86,7 +100,7 @@ pub(super) fn qualify_content_store_isolation(
         &thread_message_parameters(message_position, payload_bytes, "lock-waiter"),
     ) {
         Ok(_) => {
-            return Err(SkeinError::Execution(
+            return Err(HawDBError::Execution(
                 "same-key Content Store UPSERT bypassed the point lock".to_string(),
             ));
         }
@@ -96,20 +110,20 @@ pub(super) fn qualify_content_store_isolation(
         .to_string()
         .contains("transaction lock wait timed out")
     {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store isolation expected a bounded lock timeout, got: {waiter_error}"
         )));
     }
     let aborted_error = match waiter.query_sql_with_params(MESSAGE_POINT_SQL, &point_parameters) {
         Ok(_) => {
-            return Err(SkeinError::Execution(
+            return Err(HawDBError::Execution(
                 "timed-out pessimistic transaction accepted another statement".to_string(),
             ));
         }
         Err(error) => error,
     };
     if !aborted_error.to_string().contains("is aborted") {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store isolation expected an aborted waiter, got: {aborted_error}"
         )));
     }
@@ -119,13 +133,13 @@ pub(super) fn qualify_content_store_isolation(
     let after_lock = concurrent.query_sql_with_params(MESSAGE_POINT_SQL, &point_parameters)?;
     require_one_message(&after_lock.rows, &content_message_id, "isolation")?;
     if rows_sha256(&after_lock.rows) != row_sha256 {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "content-store timed-out UPSERT changed the locked row".to_string(),
         ));
     }
     let commit_epoch_after = concurrent.commit_epoch()?;
     if commit_epoch_after != commit_epoch_before {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "content-store isolation changed commit epoch from {commit_epoch_before} to {commit_epoch_after}"
         )));
     }

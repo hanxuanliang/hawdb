@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use crate::hex_test_support::{campaign_inputs, reference_decode};
 use std::path::PathBuf;
@@ -24,7 +38,7 @@ fn persisted_hex_rejects_non_ascii_without_panicking() {
     for input in ["a\u{e9}a", "\u{1f980}", "00a\u{e9}a", "f", "gg", "ff"] {
         let result = std::panic::catch_unwind(|| decode_string(input));
         assert!(result.is_ok(), "decoder panicked for {input:?}");
-        assert!(matches!(result.unwrap(), Err(SkeinError::Storage(_))));
+        assert!(matches!(result.unwrap(), Err(HawDBError::Storage(_))));
     }
 }
 
@@ -44,7 +58,7 @@ impl TestDirectory {
             .unwrap()
             .as_nanos();
         let path =
-            std::env::temp_dir().join(format!("skein-backup-hex-{}-{nonce}", std::process::id()));
+            std::env::temp_dir().join(format!("hawdb-backup-hex-{}-{nonce}", std::process::id()));
         fs::create_dir(&path).unwrap();
         Self(path)
     }
@@ -65,7 +79,7 @@ fn persisted_hex_public_load_rejects_checksum_valid_corruption_without_writes() 
         7,
         11,
         vec![BackupFileEntry {
-            name: "checkpoint.7.skein".to_string(),
+            name: "checkpoint.7.hawdb".to_string(),
             encoded_len: 42,
             encoded_checksum: 9,
             sha256: Sha256Digest::from_bytes([3; 32]),
@@ -76,13 +90,13 @@ fn persisted_hex_public_load_rejects_checksum_valid_corruption_without_writes() 
     assert_eq!(BackupManifest::load(&path).unwrap(), manifest);
     let (body, _) = split_backup_manifest_checksum(&valid).unwrap();
     for invalid in ["a\u{e9}a", "\u{1f980}", "gg", "ff"] {
-        let body = body.replace(&encode_string("checkpoint.7.skein"), invalid);
+        let body = body.replace(&encode_string("checkpoint.7.hawdb"), invalid);
         let corrupt = format!("{body}checksum\t{}\n", checksum_u64(body.as_bytes()));
         fs::write(&path, &corrupt).unwrap();
         let result = std::panic::catch_unwind(|| BackupManifest::load(&path));
         assert!(result.is_ok(), "public load panicked for {invalid:?}");
         let error = result.unwrap().unwrap_err();
-        assert!(matches!(error, SkeinError::Storage(_)));
+        assert!(matches!(error, HawDBError::Storage(_)));
         let expected = if invalid == "ff" {
             "invalid utf-8"
         } else {

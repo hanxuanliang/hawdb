@@ -1,12 +1,26 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Borrowed-row streaming projection owned by the relational runtime.
 
 use crate::predicate::bind_streaming_column;
 use crate::query_value::relational_ref_to_value;
 use crate::row_runtime::RelationalReadRowRef;
-use skein_core::{Result, SkeinError, Value};
-use skein_executor::{QueryRowsBuilder, QuerySchema};
-use skein_sql::{Expr, ExprKind, SelectProjection};
-use skein_storage::RelationalTableSchema;
+use hawdb_core::{HawDBError, Result, Value};
+use hawdb_executor::{QueryRowsBuilder, QuerySchema};
+use hawdb_sql::{Expr, ExprKind, SelectProjection};
+use hawdb_storage::RelationalTableSchema;
 
 #[doc(hidden)]
 pub struct BoundStreamingProjection {
@@ -77,7 +91,7 @@ impl BoundStreamingProjection {
                         });
                     }
                     _ => {
-                        return Err(SkeinError::Semantic(
+                        return Err(HawDBError::Semantic(
                             "non-aggregate relational projection expressions are not supported"
                                 .to_string(),
                         ));
@@ -90,7 +104,7 @@ impl BoundStreamingProjection {
             .iter()
             .find(|column| !names.insert(column.output_name.as_str()))
         {
-            return Err(SkeinError::Semantic(format!(
+            return Err(HawDBError::Semantic(format!(
                 "relational projection contains duplicate output column {}",
                 duplicate.output_name
             )));
@@ -124,12 +138,12 @@ impl BoundStreamingProjection {
                 BoundStreamingValue::Column(ordinal) => {
                     relational_ref_to_value(row.value(ordinal)?)?
                 }
-                BoundStreamingValue::UuidV7 => Value::Uuid(skein_core::generate_uuidv7()?),
+                BoundStreamingValue::UuidV7 => Value::Uuid(hawdb_core::generate_uuidv7()?),
             };
             *payload_bytes =
-                payload_bytes.saturating_add(skein_executor::query_value_payload_bytes(&value));
+                payload_bytes.saturating_add(hawdb_executor::query_value_payload_bytes(&value));
             if *payload_bytes > max_payload_bytes {
-                return Err(SkeinError::Execution(format!(
+                return Err(HawDBError::Execution(format!(
                     "relational SQL output exceeds max_output_payload_bytes {max_payload_bytes}"
                 )));
             }
@@ -145,9 +159,9 @@ impl BoundStreamingProjection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skein_executor::Row;
-    use skein_sql::SqlStatement;
-    use skein_storage::{
+    use hawdb_executor::Row;
+    use hawdb_sql::SqlStatement;
+    use hawdb_storage::{
         RelationalColumnSchema, RelationalKey, RelationalProjectedField, RelationalProjectedRow,
         RelationalScalarType, RelationalValue,
     };
@@ -224,7 +238,7 @@ mod tests {
 
         assert_eq!(
             error,
-            SkeinError::Execution(
+            HawDBError::Execution(
                 "relational SQL output exceeds max_output_payload_bytes 1".to_string()
             )
         );
@@ -242,14 +256,14 @@ mod tests {
         };
         assert_eq!(
             error,
-            SkeinError::Semantic(
+            HawDBError::Semantic(
                 "relational projection contains duplicate output column value".to_string()
             )
         );
     }
 
     fn projection(source: &str) -> Vec<SelectProjection> {
-        let prepared = skein_sql::prepare_postgres_sql(source).expect("parse select");
+        let prepared = hawdb_sql::prepare_postgres_sql(source).expect("parse select");
         let SqlStatement::Select(select) = prepared.statement else {
             panic!("expected SELECT");
         };

@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::executor::execute_with_row_limit_profile;
 use crate::optimizer::PhysicalPlan;
 use crate::schema::Catalog;
@@ -8,12 +22,12 @@ use std::collections::BTreeMap;
 fn root_profile_constructor_preserves_public_types_and_defaults() {
     let profile: crate::executor::ReadExecutionProfile =
         crate::executor::read_execution_profile(&PhysicalPlan::EmptyExec, Some(3)).unwrap();
-    let owner: skein_executor::ReadExecutionProfile<crate::store::ScanPruningReport> = profile;
+    let owner: hawdb_executor::ReadExecutionProfile<crate::store::ScanPruningReport> = profile;
     assert_eq!(owner.max_rows, Some(3));
     assert_eq!(owner.detection_row_cap, Some(4));
     assert_eq!(
         owner.pipeline_memory_report,
-        skein_executor::PipelineMemoryReport::default()
+        hawdb_executor::PipelineMemoryReport::default()
     );
 }
 

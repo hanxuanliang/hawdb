@@ -1,6 +1,20 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
-use skein_optimizer::estimate_relational_access_cost;
-use skein_sql::SqlStatement;
+use hawdb_optimizer::estimate_relational_access_cost;
+use hawdb_sql::SqlStatement;
 use std::num::NonZeroUsize;
 
 mod fixtures;
@@ -22,7 +36,7 @@ fn physical_join_plan_rejects_output_schema_drift() {
         requires_row_fetch: false,
         estimated_rows: 1,
     };
-    let join_predicate = match skein_sql::prepare_postgres_sql(
+    let join_predicate = match hawdb_sql::prepare_postgres_sql(
             "SELECT left_table.id FROM left_table INNER JOIN right_table ON left_table.id = right_table.id",
         )
         .expect("parse join predicate")
@@ -298,7 +312,7 @@ fn ndv_uses_fresh_metadata_or_complete_non_null_unique_keys_without_scanning() {
     }
     let reader = Reader {
         statistics: Some(
-            skein_storage::relational_index_view::RelationalIndexProbeStatistics {
+            hawdb_storage::relational_index_view::RelationalIndexProbeStatistics {
                 source_commit_epoch: 4,
                 distinct_non_null_values: 2,
                 non_null_rows: 3,
@@ -412,7 +426,7 @@ fn execution_mode_and_memory_shape_preserve_order_aggregate_and_distinct_boundar
         blocking_operator_count: usize::MAX,
     };
     assert_eq!(shape.estimated_bytes(&Default::default()), usize::MAX);
-    let memory = skein_executor::ExecutionMemoryConfig {
+    let memory = hawdb_executor::ExecutionMemoryConfig {
         batch_payload_bytes: NonZeroUsize::new(7).unwrap(),
         blocking_operator_bytes: NonZeroUsize::new(11).unwrap(),
         ..Default::default()
@@ -453,14 +467,14 @@ fn prepared_validation_rejects_divergent_statement_access_and_execution_before_r
 
 #[test]
 fn authoritative_transaction_statistics_do_not_enable_materialized_merge() {
-    use skein_storage::relational_index_view::{
+    use hawdb_storage::relational_index_view::{
         RelationalIndexReadView, RelationalTransactionIndexView,
     };
-    use skein_storage::{RelationalIndexShadowReader, RelationalIndexShadowWriter};
+    use hawdb_storage::{RelationalIndexShadowReader, RelationalIndexShadowWriter};
     let state = state();
     let directory = std::env::temp_dir().join(format!(
-        "skein-physical-plan-{}",
-        skein_core::generate_uuidv7().unwrap(),
+        "hawdb-physical-plan-{}",
+        hawdb_core::generate_uuidv7().unwrap(),
     ));
     std::fs::create_dir(&directory).unwrap();
     RelationalIndexShadowWriter::new(Default::default())
@@ -685,5 +699,5 @@ fn physical_plan_differential_smoke() {
 fn physical_plan_differential_campaign() {
     let checks = campaign(128, 64);
     assert_eq!(checks, 40_960);
-    println!("skein-relational-physical-plan-fuzz-v1: 128 seeds, 8192 cases, {checks} complete plan outcomes");
+    println!("hawdb-relational-physical-plan-fuzz-v1: 128 seeds, 8192 cases, {checks} complete plan outcomes");
 }

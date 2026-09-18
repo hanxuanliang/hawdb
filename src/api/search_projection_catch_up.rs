@@ -1,13 +1,27 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::Database;
 use crate::search::{
     run_scheduled_search_projection_catch_up, run_search_projection_catch_up,
     validate_search_projection_catch_up_request, SearchIndex,
 };
 use crate::{
-    DatabaseReadTransaction, Result, SearchProjectionChangeBatch, SearchProjectionRelationalDelta,
-    SkeinError,
+    DatabaseReadTransaction, HawDBError, Result, SearchProjectionChangeBatch,
+    SearchProjectionRelationalDelta,
 };
-pub use skein_search::{
+pub use hawdb_search::{
     ScheduledSearchProjectionCatchUpReport, SearchProjectionCatchUpReport,
     SearchProjectionCatchUpStopReason,
 };
@@ -43,7 +57,7 @@ impl Database {
     ///
     /// The hydrator receives the exact selected batch and one pinned database
     /// read transaction. It must account for every relational primary key in
-    /// the batch. Skein validates that count before applying either the graph
+    /// the batch. HawDB validates that count before applying either the graph
     /// or relational delta, then checkpoints the combined projection before
     /// selecting another batch. Hydration errors and incomplete accounting do
     /// not advance the projection watermark.
@@ -82,7 +96,7 @@ impl Database {
     /// Unlike [`Self::catch_up_search_projection_with_relational`], the
     /// hydrator runs for graph-only batches. This supports bounded host-owned
     /// dependency fan-out without moving application projection semantics into
-    /// Skein. The hydrator must still account for every relational primary key
+    /// HawDB. The hydrator must still account for every relational primary key
     /// in the batch. `max_change_operations_per_batch` bounds changefeed
     /// selection, while `max_projection_operations_per_batch` independently
     /// bounds the combined graph and host-derived projection delta. Hydration
@@ -108,7 +122,7 @@ impl Database {
             max_batches,
         )?;
         if max_projection_operations_per_batch == 0 {
-            return Err(SkeinError::Semantic(
+            return Err(HawDBError::Semantic(
                 "search projection catch-up max_projection_operations_per_batch must be greater than zero"
                     .to_string(),
             ));
@@ -161,7 +175,7 @@ impl Database {
         max_operations_per_batch: usize,
         max_batches: usize,
     ) -> Result<ScheduledSearchProjectionCatchUpReport> {
-        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
+        self.ensure_runtime_capability(hawdb_core::RuntimeCapability::BackgroundMaintenance)?;
         let scheduler = self.local_qos_scheduler_for_work();
         run_scheduled_search_projection_catch_up(
             search_index,

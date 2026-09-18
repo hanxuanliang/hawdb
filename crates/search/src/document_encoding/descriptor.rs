@@ -1,8 +1,22 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use crate::build_control::{checkpoint, CheckedWriter};
 use crate::{SearchSegmentDescriptor, SearchSegmentPayloadRange};
-use skein_core::RuntimeTaskContext;
-use skein_integrity::Crc32cHasher;
+use hawdb_core::RuntimeTaskContext;
+use hawdb_integrity::Crc32cHasher;
 use std::io::Write as _;
 
 pub(crate) struct DescriptorEncoding<'a> {
@@ -56,7 +70,7 @@ impl<'a> DescriptorEncoding<'a> {
             .checked_add(encoding.footer_len)
             .ok_or_else(size_overflow)?;
         if encoding.bytes as u64 > max_bytes {
-            return Err(SkeinError::Storage(format!(
+            return Err(HawDBError::Storage(format!(
                 "search generation descriptor requires {} bytes, exceeding {max_bytes}",
                 encoding.bytes,
             )));
@@ -84,8 +98,8 @@ impl<'a> DescriptorEncoding<'a> {
     }
 }
 
-fn size_overflow() -> SkeinError {
-    SkeinError::Storage("search segment descriptor encoded size overflow".into())
+fn size_overflow() -> HawDBError {
+    HawDBError::Storage("search segment descriptor encoded size overflow".into())
 }
 
 struct DigestWriter(Crc32cHasher);
@@ -104,7 +118,7 @@ impl io::Write for DigestWriter {
 }
 
 fn write_body(sink: &mut impl DocumentSink, descriptor: &SearchSegmentDescriptor) -> fmt::Result {
-    sink.write_str("SKEIN_SEARCH_SEGMENTS_V3\n")?;
+    sink.write_str("HAWDB_SEARCH_SEGMENTS_V3\n")?;
     writeln!(sink, "target_documents\t{}", descriptor.target_documents)?;
     writeln!(sink, "document_count\t{}", descriptor.document_count)?;
     for segment in &descriptor.segments {

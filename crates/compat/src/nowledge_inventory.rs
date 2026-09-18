@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Source-derived Nowledge query-inventory coverage over compatibility fixtures.
 //! Database execution and host-specific migration-gate assembly stay in the facade.
 
@@ -8,8 +22,8 @@ use crate::{
     CompatibilityQueryInventoryItem, CompatibilityRollbackEvidence, ExternalShadowReady,
     REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
 };
-use skein_core::{Result, SkeinError};
-use skein_evidence::{
+use hawdb_core::{HawDBError, Result};
+use hawdb_evidence::{
     inventory::{
         background_maintenance_evidence_health_from_bundle,
         replacement_readiness_family_evidence_health_from_bundle,
@@ -162,7 +176,7 @@ pub fn migration_gate_json_object(
     bundle: &mut serde_json::Value,
 ) -> Result<&mut serde_json::Map<String, serde_json::Value>> {
     bundle.as_object_mut().ok_or_else(|| {
-        SkeinError::Execution("migration gate bundle must be a JSON object".to_string())
+        HawDBError::Execution("migration gate bundle must be a JSON object".to_string())
     })
 }
 
@@ -237,7 +251,7 @@ fn insert_cutover_evidence_json(
         .get("migration_gate")
         .and_then(serde_json::Value::as_object)
         .ok_or_else(|| {
-            SkeinError::Execution("migration gate bundle missing migration_gate".to_string())
+            HawDBError::Execution("migration gate bundle missing migration_gate".to_string())
         })?;
     let migration_gate_ready = migration_gate
         .get("decision")
@@ -718,6 +732,6 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("skein-compat-nowledge-inventory-{name}-{nanos}"))
+        std::env::temp_dir().join(format!("hawdb-compat-nowledge-inventory-{name}-{nanos}"))
     }
 }

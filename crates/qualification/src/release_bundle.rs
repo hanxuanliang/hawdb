@@ -1,8 +1,22 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::ProductionMorselMatrixPolicy;
+use hawdb::{ProductionEvidenceBinding, ProductionQualificationIdentity};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use skein::{ProductionEvidenceBinding, ProductionQualificationIdentity};
 use std::collections::BTreeSet;
 
 #[path = "release_bundle/content_store.rs"]
@@ -25,9 +39,9 @@ mod runtime;
 mod vector;
 
 pub const PRODUCTION_RELEASE_QUALIFICATION_BUNDLE_PROTOCOL: &str =
-    "skein-production-release-qualification-bundle-v1";
+    "hawdb-production-release-qualification-bundle-v1";
 pub const PRODUCTION_RELEASE_CONTROL_EVIDENCE_PROTOCOL: &str =
-    "skein-production-release-control-evidence-v1";
+    "hawdb-production-release-control-evidence-v1";
 
 pub const REQUIRED_PRODUCTION_RELEASE_CONTROLS: [&str; 9] = [
     "workspace_fmt",

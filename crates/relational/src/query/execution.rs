@@ -1,12 +1,26 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{
     elapsed_nanos, execute_aggregate_select, execute_blocking_projection,
     execute_ordered_index_projection, execute_streaming_projection, format_relational_explain,
     plan_relational_field_plan, planned_operator_cardinality_profiles, prepared_access_descriptors,
-    AdmittedRelationalExecution, BindingId, Instant, PlannedJoin, PreparedRelationalExecutionMode,
-    PreparedRelationalSelect, QueryRows, RefCell, RelationalIndexRuntime,
-    RelationalPhysicalJoinExecution, RelationalPipelineState, RelationalQueryLimits,
-    RelationalQueryOutput, RelationalQueryStoreReader, RelationalRowExecutionEvidence,
-    RelationalSqlStageTimings, Result, SkeinError, Value,
+    AdmittedRelationalExecution, BindingId, HawDBError, Instant, PlannedJoin,
+    PreparedRelationalExecutionMode, PreparedRelationalSelect, QueryRows, RefCell,
+    RelationalIndexRuntime, RelationalPhysicalJoinExecution, RelationalPipelineState,
+    RelationalQueryLimits, RelationalQueryOutput, RelationalQueryStoreReader,
+    RelationalRowExecutionEvidence, RelationalSqlStageTimings, Result, Value,
 };
 
 pub(super) fn explain_select(
@@ -69,7 +83,7 @@ pub(super) fn execute_select<'state>(
         task_context,
     } = execution;
     let base_schema = state.table_schema(&select.from.name).ok_or_else(|| {
-        SkeinError::Semantic(format!("unknown relational table {}", select.from.name))
+        HawDBError::Semantic(format!("unknown relational table {}", select.from.name))
     })?;
     let base_qualifier = select
         .from_alias
@@ -85,7 +99,7 @@ pub(super) fn execute_select<'state>(
         .enumerate()
     {
         let join_schema = state.table_schema(&join.table.name).ok_or_else(|| {
-            SkeinError::Semantic(format!("unknown relational table {}", join.table.name))
+            HawDBError::Semantic(format!("unknown relational table {}", join.table.name))
         })?;
         let qualifier = join
             .alias
@@ -93,7 +107,7 @@ pub(super) fn execute_select<'state>(
             .unwrap_or_else(|| join.table.name.clone());
         planned_joins.push(PlannedJoin {
             binding: BindingId::new(u32::try_from(index.saturating_add(1)).map_err(|_| {
-                SkeinError::Execution(
+                HawDBError::Execution(
                     "relational planned join exceeds the binding-id range".to_string(),
                 )
             })?),
@@ -103,7 +117,7 @@ pub(super) fn execute_select<'state>(
             access: join_access.access.clone(),
         });
     }
-    let default_task = skein_core::RuntimeTaskContext::default();
+    let default_task = hawdb_core::RuntimeTaskContext::default();
     let row_task = task_context.unwrap_or(&default_task);
     let field_plan = plan_relational_field_plan(select, state)?;
     let row_runtime = row_read_mode.open_runtime(

@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Complete manifest validation under the writer's existing operation budget.
 
 use super::io::GenerationIo;
@@ -7,8 +21,8 @@ use crate::lexical_projection::admitted_manifest_generation;
 use crate::out_of_core::{
     SearchOutOfCoreManifestEnvelope, MAX_OUT_OF_CORE_MANIFEST_BYTES, OUT_OF_CORE_MANIFEST_FILE,
 };
-use crate::{Result, SkeinError};
-use skein_core::RuntimeTaskContext;
+use crate::{HawDBError, Result};
+use hawdb_core::RuntimeTaskContext;
 use std::fs;
 use std::path::Path;
 
@@ -29,11 +43,11 @@ pub(super) fn active(
     let _decode = memory.spool.reserve(capacity)?;
     let envelope: SearchOutOfCoreManifestEnvelope =
         serde_json::from_slice(&bytes.bytes).map_err(|error| {
-            SkeinError::Storage(format!("invalid search out-of-core manifest: {error}"))
+            HawDBError::Storage(format!("invalid search out-of-core manifest: {error}"))
         })?;
     checkpoint(task)?;
     if json::checksum_with_context(&envelope.body, Some(task))? != envelope.checksum {
-        return Err(SkeinError::Storage(
+        return Err(HawDBError::Storage(
             "search out-of-core manifest checksum mismatch".into(),
         ));
     }
@@ -51,7 +65,7 @@ pub(super) fn next(
     let active = match active(root, memory, task) {
         Ok(None) => return Ok(1),
         Ok(Some(generation)) => generation,
-        Err(error @ SkeinError::Execution(_)) => return Err(error),
+        Err(error @ HawDBError::Execution(_)) => return Err(error),
         Err(_) => {
             checkpoint(task)?;
             latest_lexical(root, max_lexical_manifest_bytes, memory, task)?
@@ -59,7 +73,7 @@ pub(super) fn next(
     };
     active
         .checked_add(1)
-        .ok_or_else(|| SkeinError::Storage("search out-of-core generation overflow".into()))
+        .ok_or_else(|| HawDBError::Storage("search out-of-core generation overflow".into()))
 }
 
 fn latest_lexical(
@@ -88,7 +102,7 @@ fn latest_lexical(
         let entry = entry?;
         let name = entry.file_name();
         if name.as_encoded_bytes().len() >= directory::ENTRY_NAME_BYTES {
-            return Err(SkeinError::Execution(
+            return Err(HawDBError::Execution(
                 "directory entry exceeds native admission".into(),
             ));
         }
@@ -97,7 +111,7 @@ fn latest_lexical(
         };
         let Some(generation) = name
             .strip_prefix("search_lexical.manifest.")
-            .and_then(|value| value.strip_suffix(".skein"))
+            .and_then(|value| value.strip_suffix(".hawdb"))
             .and_then(|value| value.parse::<u64>().ok())
         else {
             continue;

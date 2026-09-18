@@ -1,8 +1,22 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{
     system_sql, Database, QueryOutput, QueryStreamOptions, SharedState, SlowQueryLogExportOptions,
     SlowQueryLogRecordSummary, StatementExecutionContext,
 };
-use crate::error::{Result, SkeinError};
+use crate::error::{HawDBError, Result};
 use crate::executor;
 use crate::relational_sql::{
     compile_append_explain_sql, compile_append_select_sql, compile_append_statement_sql,
@@ -52,11 +66,11 @@ impl StatementRecordingTarget<'_> {
         query_text: &str,
         statement_kind: &str,
         started: std::time::Instant,
-        result: std::result::Result<&QueryOutput, &SkeinError>,
+        result: std::result::Result<&QueryOutput, &HawDBError>,
         context: StatementExecutionContext<'_>,
     ) {
         let elapsed_micros = started.elapsed().as_micros();
-        let query_identity = skein_query::QueryIdentity::new(query_language, query_text);
+        let query_identity = hawdb_query::QueryIdentity::new(query_language, query_text);
         let execution = match result {
             Ok(output) => system_sql::StatementExecution::completed(
                 query_language,
@@ -139,7 +153,7 @@ impl StatementRecorder {
         query_text: &str,
         statement_kind: &str,
         started: std::time::Instant,
-        result: std::result::Result<&QueryOutput, &SkeinError>,
+        result: std::result::Result<&QueryOutput, &HawDBError>,
         context: StatementExecutionContext<'_>,
     ) {
         StatementRecordingTarget {
@@ -175,7 +189,7 @@ impl Database {
         query_text: &str,
         statement_kind: &str,
         started: std::time::Instant,
-        result: std::result::Result<&QueryOutput, &SkeinError>,
+        result: std::result::Result<&QueryOutput, &HawDBError>,
         context: StatementExecutionContext<'_>,
     ) {
         StatementRecordingTarget {
@@ -287,11 +301,11 @@ impl Database {
         let statement_kind = sql_statement_kind(prepared.statement());
         let query_result = (|| {
             super::reject_locking_select_without_manager(prepared.statement(), false)?;
-            if skein_relational::system_schema::statement_writes_system_schema_registry(
+            if hawdb_relational::system_schema::statement_writes_system_schema_registry(
                 prepared.statement(),
             ) {
-                return Err(SkeinError::Semantic(
-                    "skein_schema_migrations is read-only outside system schema upgrade"
+                return Err(HawDBError::Semantic(
+                    "hawdb_schema_migrations is read-only outside system schema upgrade"
                         .to_string(),
                 ));
             }
@@ -400,7 +414,7 @@ impl Database {
                         .table_schema(&create.table.name)
                         .is_some()
                 {
-                    return Err(SkeinError::Semantic(format!(
+                    return Err(HawDBError::Semantic(format!(
                         "table {} already exists as a RowPage table",
                         create.table.name
                     )));
@@ -420,7 +434,7 @@ impl Database {
             if let crate::sql::SqlStatement::CreateTable(create) = prepared.statement()
                 && self.store.append_table_schema(&create.table.name).is_some()
             {
-                return Err(SkeinError::Semantic(format!(
+                return Err(HawDBError::Semantic(format!(
                     "table {} already exists as a strict append table",
                     create.table.name
                 )));
@@ -435,7 +449,7 @@ impl Database {
                 .commit_relational_transaction(&mut self.catalog, compiled.transaction)?;
             self.complete_required_relational_row_checkpoint("SQL commit")?;
             if summary.relational_mutation_outcomes.len() > 1 {
-                return Err(SkeinError::StorageIntegrity(
+                return Err(HawDBError::StorageIntegrity(
                     "one SQL statement produced multiple relational mutation outcomes".to_string(),
                 ));
             }

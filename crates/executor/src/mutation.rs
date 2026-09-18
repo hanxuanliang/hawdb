@@ -1,12 +1,26 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Storage-neutral translation from physical plans to graph mutation commands.
 //!
 //! Preflight uses the existing storage-neutral execution contracts; the embedding
 //! layer retains transaction admission, atomic commit, and recovery ownership.
 
-use skein_core::{Result, SkeinError};
-use skein_ddl::{object_state_to_core, property_type_to_core, table_kind_to_core};
-use skein_plan::{PhysicalPlan, RelationshipOnCreateValue, SetValue};
-use skein_storage::{
+use hawdb_core::{HawDBError, Result};
+use hawdb_ddl::{object_state_to_core, property_type_to_core, table_kind_to_core};
+use hawdb_plan::{PhysicalPlan, RelationshipOnCreateValue, SetValue};
+use hawdb_storage::{
     ConnectedNodesCreate, GraphMutation, MatchedRelationshipCopyMerge, MatchedRelationshipCreate,
     MatchedRelationshipMerge, MatchedRelationshipRetargetMerge,
     MatchedRelationshipSourceRetargetMerge, NodeSetAssignment, NodeSetValue,
@@ -299,7 +313,7 @@ pub fn mutation_command(plan: &PhysicalPlan) -> Result<Option<GraphMutation>> {
                     property: property.clone(),
                     value: value.clone(),
                 })),
-                SetValue::Coalesce { .. } => Err(SkeinError::Semantic(
+                SetValue::Coalesce { .. } => Err(HawDBError::Semantic(
                     "COALESCE node SET is not supported in transactional MATCH SET".to_string(),
                 )),
                 SetValue::AddInt { amount, .. } => Ok(Some(GraphMutation::SetNodePropertyAddInt {
@@ -535,11 +549,11 @@ pub fn mutation_command(plan: &PhysicalPlan) -> Result<Option<GraphMutation>> {
 pub fn is_mutation_plan(plan: &PhysicalPlan) -> Result<bool> {
     Ok(matches!(
         plan.class(),
-        skein_plan::PhysicalPlanClass::Schema | skein_plan::PhysicalPlanClass::Mutation
+        hawdb_plan::PhysicalPlanClass::Schema | hawdb_plan::PhysicalPlanClass::Mutation
     ))
 }
 
-pub fn node_set_assignment(assignment: &skein_plan::SetAssignment) -> NodeSetAssignment {
+pub fn node_set_assignment(assignment: &hawdb_plan::SetAssignment) -> NodeSetAssignment {
     NodeSetAssignment {
         property: assignment.property.clone(),
         value: node_set_value(&assignment.value),

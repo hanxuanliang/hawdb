@@ -1,4 +1,18 @@
-use crate::error::{Result, SkeinError};
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use crate::error::{HawDBError, Result};
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
@@ -11,13 +25,13 @@ pub(crate) fn read_bounded_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>> 
     let mut file = File::open(path)?;
     let length = file.metadata()?.len();
     if length > max_bytes {
-        return Err(SkeinError::Storage(format!(
+        return Err(HawDBError::Storage(format!(
             "search artifact {} requires {length} bytes, exceeding {max_bytes}",
             path.display()
         )));
     }
     let length = usize::try_from(length).map_err(|_| {
-        SkeinError::Storage(format!(
+        HawDBError::Storage(format!(
             "search artifact {} length does not fit in memory",
             path.display()
         ))
@@ -44,7 +58,7 @@ fn read_admitted_bytes(reader: &mut impl Read, length: usize, path: &Path) -> Re
             bytes
                 .try_reserve_exact(capacity - bytes.len())
                 .map_err(|error| {
-                    SkeinError::Storage(format!(
+                    HawDBError::Storage(format!(
                         "search artifact {} allocation failed: {error}",
                         path.display()
                     ))
@@ -58,7 +72,7 @@ fn read_admitted_bytes(reader: &mut impl Read, length: usize, path: &Path) -> Re
         match reader.read(&mut buffer[..1]) {
             Ok(0) => return Ok(bytes),
             Ok(_) => {
-                return Err(SkeinError::Storage(format!(
+                return Err(HawDBError::Storage(format!(
                     "search artifact {} grew beyond its admitted {length} bytes",
                     path.display()
                 )));

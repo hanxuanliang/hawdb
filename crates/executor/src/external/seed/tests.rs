@@ -1,8 +1,22 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use crate::external::tests::empty_report;
 use crate::VectorSeedExecutionRow;
-use skein_core::RuntimeCancellationToken;
-use skein_plan::{VectorCandidateSource, VectorExecutionResourceProfile, VectorPhysicalPlan};
+use hawdb_core::RuntimeCancellationToken;
+use hawdb_plan::{VectorCandidateSource, VectorExecutionResourceProfile, VectorPhysicalPlan};
 
 fn nz(bytes: usize) -> NonZeroUsize {
     NonZeroUsize::new(bytes).unwrap()
@@ -198,7 +212,7 @@ fn run(case: Case) -> Outcome {
                     .collect(),
             );
             if case.consumer_error {
-                Err(SkeinError::Execution("consumer failure".to_string()))
+                Err(HawDBError::Execution("consumer failure".to_string()))
             } else if case.consumer_stop {
                 Ok(BatchControl::Stop)
             } else {
@@ -312,10 +326,10 @@ fn embedding_conversion_preserves_bits_errors_and_validation_order() {
             ),
             Err(message) => {
                 let error = actual.unwrap_err();
-                assert!(matches!(error, SkeinError::Semantic(_)));
+                assert!(matches!(error, HawDBError::Semantic(_)));
                 assert_eq!(
                     error.to_string(),
-                    SkeinError::Semantic(format!("vector search parameter '$embedding' {message}"))
+                    HawDBError::Semantic(format!("vector search parameter '$embedding' {message}"))
                         .to_string()
                 );
             }
@@ -418,7 +432,7 @@ fn preflight_zero_limit_and_cancellation_keep_error_precedence() {
     error(
         &run(Case {
             cancel_after: true,
-            response: Err(SkeinError::Execution("host failure".into())),
+            response: Err(HawDBError::Execution("host failure".into())),
             ..Case::default()
         }),
         "host failure",

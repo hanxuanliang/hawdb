@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Typed, memory-bounded external ordering shared by executor front ends.
 
 use crate::blocking::spill_backed_report;
@@ -8,7 +22,7 @@ use crate::{
     BlockingOperatorMemoryReport, ExecutionMemoryConfig, QueryMemoryAccount, QueryMemoryClass,
     QueryMemoryLedger,
 };
-use skein_core::{Result, RuntimeTaskContext, SkeinError};
+use hawdb_core::{HawDBError, Result, RuntimeTaskContext};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::num::NonZeroUsize;
@@ -377,14 +391,14 @@ fn write_record<R: ExternalOrderRecord>(
     let record_len = row.record.encoded_len()?;
     let payload_len = EXTERNAL_ORDER_HEADER_BYTES
         .checked_add(record_len)
-        .ok_or_else(|| SkeinError::Execution("external order record size overflow".to_string()))?;
+        .ok_or_else(|| HawDBError::Execution("external order record size overflow".to_string()))?;
     let _staging_lease = spill_budget.reserve_staging(payload_len)?;
     let mut payload = Vec::with_capacity(payload_len);
     payload.push(EXTERNAL_ORDER_RECORD_VERSION);
     payload.extend_from_slice(&row.ordinal.to_le_bytes());
     row.record.encode(&mut payload)?;
     if payload.len() != payload_len {
-        return Err(SkeinError::Execution(format!(
+        return Err(HawDBError::Execution(format!(
             "external order codec declared {record_len} bytes but encoded {} bytes",
             payload.len().saturating_sub(EXTERNAL_ORDER_HEADER_BYTES)
         )));
@@ -427,8 +441,8 @@ fn read_record<R: ExternalOrderRecord>(
     Ok(Some(row))
 }
 
-fn invalid_record(reason: &str) -> SkeinError {
-    SkeinError::Execution(format!("external order spill record is invalid: {reason}"))
+fn invalid_record(reason: &str) -> HawDBError {
+    HawDBError::Execution(format!("external order spill record is invalid: {reason}"))
 }
 
 #[cfg(test)]
@@ -460,7 +474,7 @@ mod tests {
             output.extend_from_slice(&self.key.to_le_bytes());
             output.extend_from_slice(
                 &u32::try_from(self.payload.len())
-                    .map_err(|_| SkeinError::Execution("test payload is too large".to_string()))?
+                    .map_err(|_| HawDBError::Execution("test payload is too large".to_string()))?
                     .to_le_bytes(),
             );
             output.extend_from_slice(&self.payload);
@@ -469,7 +483,7 @@ mod tests {
 
         fn decode(input: &[u8]) -> Result<Self> {
             if input.len() < 12 {
-                return Err(SkeinError::Execution(
+                return Err(HawDBError::Execution(
                     "test external record is truncated".to_string(),
                 ));
             }
@@ -477,7 +491,7 @@ mod tests {
             let len =
                 u32::from_le_bytes(input[8..12].try_into().expect("checked length width")) as usize;
             if input.len() != 12usize.saturating_add(len) {
-                return Err(SkeinError::Execution(
+                return Err(HawDBError::Execution(
                     "test external record length mismatch".to_string(),
                 ));
             }
@@ -501,7 +515,7 @@ mod tests {
             max_total_spill_runs: NonZeroUsize::new(128).unwrap(),
             min_spill_free_bytes: NonZeroU64::new(1).unwrap(),
             spill_directory: std::env::temp_dir().join(format!(
-                "skein-external-order-{}-{name}-{nonce}",
+                "hawdb-external-order-{}-{name}-{nonce}",
                 std::process::id()
             )),
             ..ExecutionMemoryConfig::default()

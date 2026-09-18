@@ -1,9 +1,23 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Root facade wiring for storage-independent expression evaluation.
 
 use super::*;
-use skein_executor::store::GraphExecutionRead;
+use hawdb_executor::store::GraphExecutionRead;
 
-pub(super) use skein_executor::expression::{
+pub(super) use hawdb_executor::expression::{
     node_scan_filter_from_predicate, project_value, property_filter_from_predicate,
     relationship_filter_from_properties_and_predicate,
 };
@@ -19,9 +33,9 @@ pub(super) fn evaluate_predicate(
         catalog,
         store,
         binding,
-        &skein_executor::observer::NoopExecutionObserver,
-        skein_executor::store::AdjacencyReadMemory {
-            budget_bytes: skein_executor::memory::DEFAULT_BLOCKING_OPERATOR_MEMORY_BYTES,
+        &hawdb_executor::observer::NoopExecutionObserver,
+        hawdb_executor::store::AdjacencyReadMemory {
+            budget_bytes: hawdb_executor::memory::DEFAULT_BLOCKING_OPERATOR_MEMORY_BYTES,
             account: None,
         },
     )
@@ -32,10 +46,10 @@ pub(super) fn evaluate_predicate_observed(
     catalog: &Catalog,
     store: &dyn GraphExecutionRead,
     binding: &Binding,
-    observer: &dyn skein_executor::observer::ExecutionObserver,
-    adjacency_memory: skein_executor::store::AdjacencyReadMemory<'_>,
+    observer: &dyn hawdb_executor::observer::ExecutionObserver,
+    adjacency_memory: hawdb_executor::store::AdjacencyReadMemory<'_>,
 ) -> Result<bool> {
-    skein_executor::expression::evaluate_predicate_with_memory(
+    hawdb_executor::expression::evaluate_predicate_with_memory(
         predicate,
         catalog,
         store,

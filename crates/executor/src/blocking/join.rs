@@ -1,9 +1,23 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Bounded graph equi-join over owned bindings and the shared spill pool.
 
 use super::*;
 use crate::spill::{SpillReader, SpillRun, SpillWriter, SPILL_IO_BUFFER_BYTES};
 use crate::QueryMemoryLease;
-use skein_plan::HashJoinKey;
+use hawdb_plan::HashJoinKey;
 use std::hash::BuildHasher;
 
 const OPERATOR: &str = "HashJoinExec";
@@ -178,7 +192,7 @@ impl<'a> JoinState<'a> {
                     if join_key(&binding, key).map(|value| self.hash_state.hash_one(value))
                         != Some(hash)
                     {
-                        return Err(SkeinError::StorageIntegrity(
+                        return Err(HawDBError::StorageIntegrity(
                             "HashJoinExec spill key does not match its recorded hash".into(),
                         ));
                     }
@@ -293,7 +307,7 @@ impl<'a> JoinState<'a> {
         while let Some((hash, binding)) = self.read(&mut reader, &mut replay)? {
             if !self.can_insert(&binding) {
                 if self.table.is_empty() {
-                    return Err(SkeinError::Execution(
+                    return Err(HawDBError::Execution(
                         "HashJoinExec build row exceeds its admitted table budget".to_string(),
                     ));
                 }
@@ -380,7 +394,7 @@ fn execute_hash_join(
         right,
     } = plan
     else {
-        return Err(SkeinError::Execution(
+        return Err(HawDBError::Execution(
             "expected HashJoinExec plan".to_string(),
         ));
     };

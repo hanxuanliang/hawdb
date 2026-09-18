@@ -1,5 +1,19 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
-use skein_storage::{
+use hawdb_storage::{
     RelationalIndexRangeScan, RelationalIndexReadReport, RelationalIndexRecoveryReadReport,
     RelationalIndexScanDirection, RelationalValue,
 };
@@ -159,7 +173,7 @@ fn batch_prefixes_validate_width_deduplicate_and_reject_outside_keys() {
                 &[key(&[1]), key(&[1, 2])],
                 |_, _, _| panic!("invalid batch callback")
             ),
-            Err(SkeinError::Execution(_))
+            Err(HawDBError::Execution(_))
         ));
         assert_eq!(fixture.reader.limits.borrow().len(), before);
         let mut actual = Vec::new();
@@ -199,7 +213,7 @@ fn batch_prefixes_validate_width_deduplicate_and_reject_outside_keys() {
             &[key(&[9])],
             |_, _, _| panic!("outside key callback")
         ),
-        Err(SkeinError::StorageIntegrity(_))
+        Err(HawDBError::StorageIntegrity(_))
     ));
     assert!(runtime.evidence().is_empty());
     fixture.remove();
@@ -255,9 +269,9 @@ fn fallback_matrix_never_rescans_after_provisional_output() {
                     } else {
                         match outcome {
                             Outcome::Admission => {
-                                assert!(matches!(result, Err(SkeinError::Execution(_))))
+                                assert!(matches!(result, Err(HawDBError::Execution(_))))
                             }
-                            _ => assert!(matches!(result, Err(SkeinError::StorageIntegrity(_)))),
+                            _ => assert!(matches!(result, Err(HawDBError::StorageIntegrity(_)))),
                         }
                         assert_eq!(rows.len(), usize::from(emit));
                         assert!(runtime.evidence().is_empty());
@@ -288,11 +302,11 @@ fn callback_errors_precede_backend_results_on_every_probe() {
                 let mut calls = 0;
                 let error = visit(&runtime, &fixture.state, kind, |_, _| {
                     calls += 1;
-                    Err(SkeinError::Semantic("callback sentinel".into()))
+                    Err(HawDBError::Semantic("callback sentinel".into()))
                 })
                 .unwrap_err();
                 assert!(
-                    matches!(error, SkeinError::Semantic(message) if message == "callback sentinel")
+                    matches!(error, HawDBError::Semantic(message) if message == "callback sentinel")
                 );
                 assert_eq!(calls, 1);
                 assert!(runtime.evidence().is_empty());
@@ -302,7 +316,7 @@ fn callback_errors_precede_backend_results_on_every_probe() {
             let transaction = fixture.transaction();
             let runtime = Runtime::new(fixture.mode(mode, &transaction), Default::default());
             assert!(
-                matches!(visit(&runtime, &fixture.state, kind, |_, _| Err(SkeinError::Semantic("real callback".into()))), Err(SkeinError::Semantic(message)) if message == "real callback")
+                matches!(visit(&runtime, &fixture.state, kind, |_, _| Err(HawDBError::Semantic("real callback".into()))), Err(HawDBError::Semantic(message)) if message == "real callback")
             );
         }
     }
@@ -373,7 +387,7 @@ fn cumulative_admission_is_shared_across_indexes_and_allows_zero_file_budget() {
             &report,
             RelationalIndexProbeSelector::Prefix(&key(&[1]))
         ),
-        Err(SkeinError::Execution(_))
+        Err(HawDBError::Execution(_))
     ));
 }
 
@@ -405,7 +419,7 @@ fn exhausted_query_budget_falls_back_only_for_non_authoritative_modes() {
                     Ok(true)
                 });
                 if authoritative {
-                    assert!(matches!(result, Err(SkeinError::Execution(_))));
+                    assert!(matches!(result, Err(HawDBError::Execution(_))));
                     assert_eq!(calls, 0);
                 } else {
                     assert!(result.unwrap());
@@ -452,7 +466,7 @@ fn identity_fence_checks_every_field_after_the_first_success() {
                 &changed,
                 RelationalIndexProbeSelector::Prefix(&key(&[]))
             ),
-            Err(SkeinError::StorageIntegrity(_))
+            Err(HawDBError::StorageIntegrity(_))
         ));
         assert_eq!(runtime.evidence(), evidence);
     }
@@ -542,11 +556,11 @@ fn recovered_metrics_preserve_all_counters_and_overflow_errors() {
     recovered.base.pages_read = usize::MAX;
     assert!(matches!(
         IndexReadMetrics::from_report(&report),
-        Err(SkeinError::StorageIntegrity(_))
+        Err(HawDBError::StorageIntegrity(_))
     ));
     assert!(matches!(
         checked_add(usize::MAX, 1, "test"),
-        Err(SkeinError::StorageIntegrity(_))
+        Err(HawDBError::StorageIntegrity(_))
     ));
 }
 
@@ -845,7 +859,7 @@ fn assert_outcome(
         // Persistent key encoding rejects empty prefixes. Derived reads retain
         // their canonical fallback; authoritative reads must remain fail-closed.
         assert!(
-            matches!(result, Err(SkeinError::Execution(_))),
+            matches!(result, Err(HawDBError::Execution(_))),
             "seed/case/mode={context:?}"
         );
         assert!(rows.is_empty(), "seed/case/mode={context:?}");

@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! An experimental base-only HNSW candidate index over a fixed vector set.
 //!
 //! `InMemoryProjection`/`FileProjection` exhaustively scan eligible quantized
@@ -26,7 +40,7 @@
 
 use crate::error::{ProjectionError, Result};
 use crate::scan::ProjectionHit;
-use skein_core::RuntimeTaskContext;
+use hawdb_core::RuntimeTaskContext;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
 
@@ -522,7 +536,7 @@ impl SplitMix64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skein_core::{RuntimeCancellationToken, RuntimeTaskContext};
+    use hawdb_core::{RuntimeCancellationToken, RuntimeTaskContext};
 
     fn axis_vector(dimension: usize, axis: usize) -> Vec<f32> {
         let mut vector = vec![0.0; dimension];

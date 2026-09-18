@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 use std::cell::RefCell;
 
@@ -11,8 +25,8 @@ enum Failure {
     Cancelled,
 }
 
-fn failure(error: SkeinError) -> Failure {
-    let SkeinError::Execution(message) = error else {
+fn failure(error: HawDBError) -> Failure {
+    let HawDBError::Execution(message) = error else {
         panic!("unexpected error class: {error:?}");
     };
     if message.starts_with("read query returned more than") {
@@ -184,7 +198,7 @@ fn actual(input: &[Row], scenario: Scenario) -> Receipt {
             context.cancellation().cancel();
         }
         if rejected {
-            Err(SkeinError::Execution("consumer rejected row".to_string()))
+            Err(HawDBError::Execution("consumer rejected row".to_string()))
         } else {
             Ok(())
         }
@@ -351,7 +365,7 @@ fn deferred_interruption_drains_pending_rows_and_preserves_lease_until_drop_or_r
                 context.cancellation().cancel();
                 Ok(())
             } else {
-                Err(SkeinError::Execution("consumer rejected row".to_string()))
+                Err(HawDBError::Execution("consumer rejected row".to_string()))
             }
         };
         let mut output = QueryOutputAccumulator::new(

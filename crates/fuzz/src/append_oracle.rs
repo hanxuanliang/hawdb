@@ -1,15 +1,29 @@
-use serde_json::{json, Value as JsonValue};
-use skein::{
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use hawdb::{
     AppendGeneratedRow, AppendOrderMode, AppendTableSchema, AppendTransaction, AppendWrite,
     Database, RelationalColumnSchema, RelationalKey, RelationalRow, RelationalScalarType,
     RelationalValue,
 };
+use serde_json::{json, Value as JsonValue};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const APPEND_STATE_MACHINE_PROTOCOL: &str = "skein-append-state-machine-fuzz-v1";
+pub const APPEND_STATE_MACHINE_PROTOCOL: &str = "hawdb-append-state-machine-fuzz-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ModelRow {
@@ -470,7 +484,7 @@ fn verify_tail(
     Ok(())
 }
 
-fn decode_model_row(row: &skein::AppendTableRow) -> Result<ModelRow, String> {
+fn decode_model_row(row: &hawdb::AppendTableRow) -> Result<ModelRow, String> {
     match row.row.values() {
         [RelationalValue::Text(_), RelationalValue::BigInt(sequence), RelationalValue::Text(payload)] => {
             Ok(ModelRow {
@@ -539,7 +553,7 @@ fn unique_path(seed: u64) -> PathBuf {
         .unwrap_or_default()
         .as_nanos();
     std::env::temp_dir().join(format!(
-        "skein-append-state-machine-{}-{seed}-{timestamp}",
+        "hawdb-append-state-machine-{}-{seed}-{timestamp}",
         std::process::id()
     ))
 }

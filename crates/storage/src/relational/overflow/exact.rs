@@ -1,9 +1,23 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Bounded external sorting for exact relational overflow root closure.
 
 use super::publication::RelationalOverflowPublicationError;
 use super::RelationalOverflowRef;
 use crate::relational::RelationalScalarType;
-use skein_integrity::{Crc32cHasher, Sha256Digest};
+use hawdb_integrity::{Crc32cHasher, Sha256Digest};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fs::{self, File};
@@ -603,7 +617,7 @@ mod tests {
     fn unique_directory(name: &str) -> PathBuf {
         let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "skein-overflow-reference-{name}-{}-{sequence}",
+            "hawdb-overflow-reference-{name}-{}-{sequence}",
             std::process::id()
         ))
     }

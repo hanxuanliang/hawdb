@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Ordinary SQL aggregate state and HAVING compilation over borrowed row values.
 //!
 //! The facade retains grouping, sorting, row binding, and query lifecycle control.
@@ -7,13 +21,13 @@ use crate::predicate::predicate_truth_with;
 use crate::query_value::{
     bind_sql_value, expression_name, relational_to_value, value_to_relational,
 };
-use skein_core::{Result, SkeinError, Value};
-use skein_executor::kernel::{ensure_operator_item_fits, OperatorMemoryTracker};
-use skein_sql::{
+use hawdb_core::{HawDBError, Result, Value};
+use hawdb_executor::kernel::{ensure_operator_item_fits, OperatorMemoryTracker};
+use hawdb_sql::{
     Expr, ExprKind, SelectProjection, SelectStatement, SqlColumnRef, SqlComparisonOp,
     SqlExpression, SqlFunctionArgument, SqlPredicate, SqlValue,
 };
-use skein_storage::{
+use hawdb_storage::{
     RelationalScalarType, RelationalState, RelationalTableSchema, RelationalValue,
 };
 use std::collections::BTreeSet;
@@ -43,7 +57,7 @@ fn evaluate_row_expression<'a>(
         Expr {
             kind: ExprKind::Value(SqlValue::Parameter(position)),
             ..
-        } => Err(SkeinError::Semantic(format!(
+        } => Err(HawDBError::Semantic(format!(
             "aggregate row expression cannot bind parameter ${position}"
         ))),
         Expr {
@@ -61,7 +75,7 @@ fn evaluate_row_expression<'a>(
                 ..
             })] = arguments.as_slice()
             else {
-                return Err(SkeinError::Semantic(
+                return Err(HawDBError::Semantic(
                     "OCTET_LENGTH requires exactly one column".to_string(),
                 ));
             };
@@ -76,7 +90,7 @@ fn evaluate_row_expression<'a>(
                 RelationalValue::Overflow(reference) => Ok(RelationalValue::BigInt(
                     i64::try_from(reference.uncompressed_bytes).unwrap_or(i64::MAX),
                 )),
-                _ => Err(SkeinError::Semantic(
+                _ => Err(HawDBError::Semantic(
                     "OCTET_LENGTH requires TEXT or BYTEA input".to_string(),
                 )),
             }
@@ -84,10 +98,10 @@ fn evaluate_row_expression<'a>(
         Expr {
             kind: ExprKind::Function { name, .. },
             ..
-        } => Err(SkeinError::Semantic(format!(
+        } => Err(HawDBError::Semantic(format!(
             "unsupported aggregate row function {name}"
         ))),
-        _ => Err(SkeinError::Semantic(
+        _ => Err(HawDBError::Semantic(
             "unsupported scalar expression".to_owned(),
         )),
     }

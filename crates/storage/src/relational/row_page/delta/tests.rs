@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::super::demand::RelationalRowPageProjectedOverlayValue;
 use super::*;
 use crate::relational::{
@@ -89,7 +103,7 @@ fn immutable_runs_round_trip_across_bounded_flushes() {
     ));
     assert_eq!(rows[1].3, 3);
     let wrong_source = RelationalRecoverySourceIdentity {
-        record_sequence_sha256: skein_integrity::Sha256Digest::from_bytes([0x5a; 32]),
+        record_sequence_sha256: hawdb_integrity::Sha256Digest::from_bytes([0x5a; 32]),
         ..RelationalRecoverySourceIdentity::for_test(1, 3)
     };
     assert!(matches!(
@@ -915,7 +929,7 @@ fn key(id: i64) -> RelationalKey {
     RelationalKey(vec![RelationalValue::BigInt(id)])
 }
 
-fn schema_digest() -> skein_integrity::Sha256Digest {
+fn schema_digest() -> hawdb_integrity::Sha256Digest {
     crate::relational::row_page::test_row_page_schema_digest("documents", 2)
 }
 
@@ -946,7 +960,7 @@ fn flip_byte(path: &Path, offset: u64) {
 
 fn unique_test_dir(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
-        "skein-row-delta-{label}-{}-{}",
+        "hawdb-row-delta-{label}-{}-{}",
         std::process::id(),
         TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ))

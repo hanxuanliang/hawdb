@@ -1,10 +1,24 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Owned admission around the embedded projection writer's complete lifecycle.
 
 use super::SearchOutOfCoreGenerationBuildOptions;
 use crate::build_memory::{checked_add, checked_mul, BuildMemory};
 use crate::error::Result;
-use skein_executor::QueryMemoryLease;
-use skein_vector_projection::{ProjectionBuildAdmission, RaBitQBitWidth, SegmentDescriptor};
+use hawdb_executor::QueryMemoryLease;
+use hawdb_vector_projection::{ProjectionBuildAdmission, RaBitQBitWidth, SegmentDescriptor};
 use std::mem::size_of;
 use std::path::Path;
 

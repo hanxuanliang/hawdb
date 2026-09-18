@@ -1,7 +1,21 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
-use skein_core::Value;
-use skein_storage::relational_index_view::RelationalIndexReadView;
-use skein_storage::{
+use hawdb_core::Value;
+use hawdb_storage::relational_index_view::RelationalIndexReadView;
+use hawdb_storage::{
     RelationalIndexChangeCapture, RelationalIndexShadowConfig, RelationalIndexShadowReader,
     RelationalIndexShadowWriter, RelationalTransaction,
 };
@@ -32,8 +46,8 @@ pub(super) struct Fixture {
 impl Fixture {
     pub fn new() -> Self {
         let directory = std::env::temp_dir().join(format!(
-            "skein-index-runtime-{}",
-            skein_core::generate_uuidv7().unwrap()
+            "hawdb-index-runtime-{}",
+            hawdb_core::generate_uuidv7().unwrap()
         ));
         std::fs::create_dir(&directory).unwrap();
         let mut state = RelationalState::default();
@@ -79,7 +93,7 @@ impl Fixture {
     }
 
     pub fn recovered(&self) -> (Reader, RelationalState, Oracle) {
-        use skein_storage::{
+        use hawdb_storage::{
             RelationalIndexRecoveryBuilder, RelationalIndexRecoveryConfig,
             RelationalIndexRecoveryReader, RelationalRecoveryFence,
             RelationalRecoverySourceIdentity,

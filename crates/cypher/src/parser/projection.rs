@@ -1,4 +1,18 @@
-use skein_core::Result;
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use hawdb_core::Result;
 
 use super::super::ast::*;
 use super::Parser;
@@ -231,7 +245,7 @@ impl Parser<'_> {
         }
         if variable.eq_ignore_ascii_case("date_part") && self.consume_char('(') {
             let part = match self.parse_value()?.kind {
-                ValueExpressionKind::Literal(skein_core::Value::String(part)) => part,
+                ValueExpressionKind::Literal(hawdb_core::Value::String(part)) => part,
                 _ => return Err(self.error("date_part part requires a string literal")),
             };
             self.expect_char(',')?;
@@ -439,12 +453,12 @@ impl Parser<'_> {
             return Err(self.error("expected CASE floor expression '<'"));
         }
         let zero = self.parse_value()?;
-        if zero.kind != ValueExpressionKind::Literal(skein_core::Value::Int(0)) {
+        if zero.kind != ValueExpressionKind::Literal(hawdb_core::Value::Int(0)) {
             return Err(self.error("CASE floor expression only supports zero lower bound"));
         }
         self.expect_keyword("THEN")?;
         let then_zero = self.parse_value()?;
-        if then_zero.kind != ValueExpressionKind::Literal(skein_core::Value::Int(0)) {
+        if then_zero.kind != ValueExpressionKind::Literal(hawdb_core::Value::Int(0)) {
             return Err(self.error("CASE floor expression THEN must be zero"));
         }
         self.expect_keyword("ELSE")?;

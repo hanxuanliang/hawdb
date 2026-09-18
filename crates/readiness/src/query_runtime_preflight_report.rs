@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Stable result contract for query-runtime preflight execution.
 //!
 //! Hosts open databases and execute probes. This module owns the redacted result
@@ -5,10 +19,10 @@
 
 use crate::nowledge_mem_query_report::scan_pruning_report_json;
 use crate::query_runtime_preflight::NowledgeQueryRuntimePreflightProbe;
-use skein_core::SkeinError;
-use skein_evidence::inventory::REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES;
-use skein_route_ownership::graph::REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES;
-use skein_storage::ScanPruningReport;
+use hawdb_core::HawDBError;
+use hawdb_evidence::inventory::REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES;
+use hawdb_route_ownership::graph::REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES;
+use hawdb_storage::ScanPruningReport;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -342,15 +356,15 @@ fn query_runtime_probe_identity_blocker_codes(
 }
 
 #[doc(hidden)]
-pub const fn skein_error_class(error: &SkeinError) -> &'static str {
+pub const fn hawdb_error_class(error: &HawDBError) -> &'static str {
     match error {
-        SkeinError::Parse(_) => "parse",
-        SkeinError::Semantic(_) => "semantic",
-        SkeinError::Storage(_)
-        | SkeinError::StorageIntegrity(_)
-        | SkeinError::AppendSequenceExhausted { .. } => "storage",
-        SkeinError::Execution(_) => "execution",
-        SkeinError::CapabilityUnavailable { .. } => "capability_unavailable",
+        HawDBError::Parse(_) => "parse",
+        HawDBError::Semantic(_) => "semantic",
+        HawDBError::Storage(_)
+        | HawDBError::StorageIntegrity(_)
+        | HawDBError::AppendSequenceExhausted { .. } => "storage",
+        HawDBError::Execution(_) => "execution",
+        HawDBError::CapabilityUnavailable { .. } => "capability_unavailable",
     }
 }
 

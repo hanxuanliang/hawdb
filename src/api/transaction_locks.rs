@@ -1,6 +1,20 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Crate-private facade for storage-owned transaction lock metadata.
 
-pub(crate) use skein_storage::transaction_locks::{
+pub(crate) use hawdb_storage::transaction_locks::{
     GraphAdjacencyDirection, GraphAllocationKind, LockMode, LockRequest, LockTable, LockTarget,
     WaitForGraph, DEFAULT_LOCK_ESCALATION_ENTRIES_PER_TABLE,
 };
@@ -8,7 +22,7 @@ pub(crate) use skein_storage::transaction_locks::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skein_storage::transaction_locks as owner;
+    use hawdb_storage::transaction_locks as owner;
 
     #[test]
     fn facade_preserves_storage_lock_type_identity() {

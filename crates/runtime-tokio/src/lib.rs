@@ -1,5 +1,19 @@
-use skein_core::{RuntimeCancellationReason, RuntimeTaskContext};
-use skein_qos::{
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use hawdb_core::{RuntimeCancellationReason, RuntimeTaskContext};
+use hawdb_qos::{
     RuntimeAdmissionCode, RuntimeAdmissionError, RuntimeGovernor, RuntimeGovernorSnapshot,
     RuntimeWorkKind, RuntimeWorkRequest,
 };
@@ -169,12 +183,12 @@ impl Display for TokioRuntimeError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::NestedOwnedRuntime => formatter.write_str(
-                "an owned Skein Tokio runtime cannot be created inside an active Tokio runtime",
+                "an owned HawDB Tokio runtime cannot be created inside an active Tokio runtime",
             ),
             Self::BlockOnWithinRuntime => formatter.write_str(
-                "blocking on the Skein Tokio adapter is not allowed inside an active Tokio runtime",
+                "blocking on the HawDB Tokio adapter is not allowed inside an active Tokio runtime",
             ),
-            Self::Build(error) => write!(formatter, "failed to build Skein Tokio runtime: {error}"),
+            Self::Build(error) => write!(formatter, "failed to build HawDB Tokio runtime: {error}"),
         }
     }
 }
@@ -243,7 +257,7 @@ impl TokioRuntimeAdapter {
         }
         let mut builder = Builder::new_multi_thread();
         builder.enable_time();
-        builder.thread_name("skein-runtime");
+        builder.thread_name("hawdb-runtime");
         builder.thread_keep_alive(config.blocking_thread_keep_alive);
         if let Some(worker_threads) = config.async_worker_threads {
             builder.worker_threads(worker_threads.get());
@@ -383,7 +397,7 @@ impl TokioRuntimeAdapter {
         &self,
         request: RuntimeWorkRequest,
         context: &RuntimeTaskContext,
-    ) -> Result<skein_qos::RuntimePermit, TokioTaskError<E>> {
+    ) -> Result<hawdb_qos::RuntimePermit, TokioTaskError<E>> {
         self.acquire_with(move |_| request, context).await
     }
 
@@ -391,7 +405,7 @@ impl TokioRuntimeAdapter {
         &self,
         mut request_for_snapshot: R,
         context: &RuntimeTaskContext,
-    ) -> Result<skein_qos::RuntimePermit, TokioTaskError<E>>
+    ) -> Result<hawdb_qos::RuntimePermit, TokioTaskError<E>>
     where
         R: FnMut(RuntimeGovernorSnapshot) -> RuntimeWorkRequest + Send,
     {
@@ -430,7 +444,7 @@ impl TokioRuntimeAdapter {
 
     async fn wait_for_admission_event(
         &self,
-        waiter: &mut skein_qos::RuntimeAdmissionWaiter,
+        waiter: &mut hawdb_qos::RuntimeAdmissionWaiter,
         context: &RuntimeTaskContext,
     ) -> Result<(), RuntimeCancellationReason> {
         loop {
@@ -550,7 +564,7 @@ impl TokioRuntimeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skein_qos::{
+    use hawdb_qos::{
         IoConcurrencyBudget, RuntimeCancellationToken, RuntimeGovernorConfig,
         RuntimeMemorySnapshot, RuntimeResourceBudget, RuntimeResourceSnapshot,
         RuntimeTelemetryEvent, RuntimeTelemetryEventKind, RuntimeTelemetrySink,
@@ -1124,7 +1138,7 @@ mod tests {
             let TokioTaskError::Admission(error) = error else {
                 panic!("capacity shrink must return an admission error");
             };
-            assert_eq!(error.code, skein_qos::RuntimeAdmissionCode::MemorySaturated);
+            assert_eq!(error.code, hawdb_qos::RuntimeAdmissionCode::MemorySaturated);
             assert!(!error.is_retryable());
         });
     }

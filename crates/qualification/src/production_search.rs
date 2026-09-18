@@ -1,7 +1,20 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{latency_percentiles, LatencyPercentiles};
 use crate::production_graph::validate_production_identity_for_current_target;
-use sha2::{Digest, Sha256};
-use skein::{
+use hawdb::{
     CompressedVectorSearchMode, NowledgeMemSearchCandidateRequest, ProcessMemoryProfile,
     ProcessMemorySnapshot, ProductionEvidenceBinding, ProductionQualificationIdentity,
     SearchAccessControlContext, SearchIndex, SearchLexicalFeasibilityCoverage,
@@ -10,6 +23,7 @@ use skein::{
     SearchOutOfCoreOutput, SearchOutOfCoreReader, SearchProjectionDelta, SearchQueryOptions,
     SearchResultSet, SearchTopKScoreParity,
 };
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -19,7 +33,7 @@ use std::time::Instant;
 mod lifecycle;
 
 pub const PRODUCTION_SEARCH_OUT_OF_CORE_QUALIFICATION_PROTOCOL: &str =
-    "skein-production-search-out-of-core-qualification-v1";
+    "hawdb-production-search-out-of-core-qualification-v1";
 const MINIMUM_LIFECYCLE_REPLICA_COUNT: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -575,7 +589,7 @@ fn run_rabitq_serving_probe(
             .find(|retriever| retriever.name == "vector")
             .map(|retriever| {
                 (
-                    retriever.backend == "skein_rabitq_out_of_core_candidate_projection"
+                    retriever.backend == "hawdb_rabitq_out_of_core_candidate_projection"
                         && retriever.fallback_reason_codes.is_empty(),
                     retriever.candidate_score_source == "quantized_projection"
                         && retriever.final_score_source == "raw_vector"
@@ -600,8 +614,8 @@ fn run_rabitq_serving_probe(
 }
 
 fn same_search_document_identity(
-    left: &skein::SearchProjectionQualificationIdentity,
-    right: &skein::SearchProjectionQualificationIdentity,
+    left: &hawdb::SearchProjectionQualificationIdentity,
+    right: &hawdb::SearchProjectionQualificationIdentity,
 ) -> bool {
     left.source_graph_commit_epoch == right.source_graph_commit_epoch
         && left.document_count == right.document_count
@@ -969,7 +983,7 @@ fn throughput_per_second(runs: &[QueryRun]) -> u64 {
 
 fn result_digest(result: &SearchResultSet) -> String {
     let mut hasher = Sha256::new();
-    hash_field(&mut hasher, b"skein-production-search-result-v1");
+    hash_field(&mut hasher, b"hawdb-production-search-result-v1");
     hash_usize(&mut hasher, result.total_hits);
     hash_usize(&mut hasher, result.limit);
     hash_usize(&mut hasher, result.offset);
@@ -993,7 +1007,7 @@ fn result_digest(result: &SearchResultSet) -> String {
 
 fn request_digest(query_case: &ProductionSearchQueryCase) -> String {
     let mut hasher = Sha256::new();
-    hash_field(&mut hasher, b"skein-production-search-request-v1");
+    hash_field(&mut hasher, b"hawdb-production-search-request-v1");
     hash_field(&mut hasher, query_case.kind.as_str().as_bytes());
     hash_field(
         &mut hasher,
@@ -1168,7 +1182,7 @@ fn out_of_core_metrics_json(metrics: &SearchOutOfCoreMetrics) -> serde_json::Val
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skein::{
+    use hawdb::{
         SearchDocument, SearchEmbeddingManifest, SearchOutOfCoreGenerationWriter,
         SearchProjectionKind, SearchProjectionRow, PRODUCTION_QUALIFICATION_POLICY_VERSION,
     };
@@ -1441,7 +1455,7 @@ mod tests {
     fn test_root(name: &str) -> PathBuf {
         let sequence = TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "skein-production-search-qualification-{name}-{}-{sequence}",
+            "hawdb-production-search-qualification-{name}-{}-{sequence}",
             std::process::id()
         ))
     }

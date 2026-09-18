@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Serializable contracts for derived-artifact repair.
 //!
 //! Repair execution belongs to the embedded store, while these data contracts
@@ -9,11 +23,11 @@ use crate::{
     DEFAULT_MAX_GRAPH_MANIFEST_OPEN_BYTES, DEFAULT_MAX_WAL_REPLAY_BYTES,
     DEFAULT_MAX_WAL_REPLAY_ENTRIES,
 };
+use hawdb_core::{HawDBError, Result};
 use serde::{Deserialize, Serialize};
-use skein_core::{Result, SkeinError};
 use std::num::{NonZeroU64, NonZeroUsize};
 
-pub const DERIVED_ARTIFACT_REPAIR_PROTOCOL: &str = "skein-derived-artifact-repair-v1";
+pub const DERIVED_ARTIFACT_REPAIR_PROTOCOL: &str = "hawdb-derived-artifact-repair-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -128,7 +142,7 @@ pub fn validate_options(options: DerivedArtifactRebuildOptions) -> Result<()> {
         || options.max_wal_replay_bytes == 0
         || options.max_wal_replay_entries == 0
     {
-        return Err(SkeinError::Storage(
+        return Err(HawDBError::Storage(
             "derived artifact rebuild limits must all be non-zero".to_string(),
         ));
     }
@@ -143,7 +157,7 @@ pub fn validate_plan(plan: &DerivedArtifactRepairPlan) -> Result<()> {
         || plan.targets.is_empty()
         || plan.target_generation != plan.source_generation.saturating_add(1)
     {
-        return Err(SkeinError::Storage(
+        return Err(HawDBError::Storage(
             "derived artifact repair plan identity is invalid".to_string(),
         ));
     }
@@ -171,7 +185,7 @@ pub fn plan_identity(plan: &DerivedArtifactRepairPlan) -> String {
         plan.options,
     ))
     .expect("derived repair plan identity fields are serializable");
-    skein_integrity::integrity_digest(&encoded)
+    hawdb_integrity::integrity_digest(&encoded)
         .sha256
         .to_string()
 }
@@ -184,13 +198,13 @@ pub struct DerivedArtifactBuildConfig {
 
 pub fn build_config(options: DerivedArtifactRebuildOptions) -> Result<DerivedArtifactBuildConfig> {
     let memory = NonZeroU64::new(options.build_memory_bytes)
-        .ok_or_else(|| SkeinError::Storage("derived repair memory limit is zero".to_string()))?;
+        .ok_or_else(|| HawDBError::Storage("derived repair memory limit is zero".to_string()))?;
     let spill = NonZeroU64::new(options.max_temporary_bytes)
-        .ok_or_else(|| SkeinError::Storage("derived repair spill limit is zero".to_string()))?;
+        .ok_or_else(|| HawDBError::Storage("derived repair spill limit is zero".to_string()))?;
     let spill_runs = NonZeroUsize::new(options.max_spill_runs)
-        .ok_or_else(|| SkeinError::Storage("derived repair spill run limit is zero".to_string()))?;
+        .ok_or_else(|| HawDBError::Storage("derived repair spill run limit is zero".to_string()))?;
     let generated = NonZeroU64::new(options.max_generated_property_entries).ok_or_else(|| {
-        SkeinError::Storage("derived repair generated entry limit is zero".to_string())
+        HawDBError::Storage("derived repair generated entry limit is zero".to_string())
     })?;
     let adjacency = CanonicalAdjacencyConfig {
         memory_budget_bytes: memory,

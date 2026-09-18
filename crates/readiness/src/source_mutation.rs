@@ -1,3 +1,17 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Source mutation dual-write evidence contracts and readiness evaluation.
 //!
 //! This evaluates caller-supplied evidence; actual writes, ACK recording, replay,
@@ -6,7 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const NOWLEDGE_MEM_SOURCE_MUTATION_DUAL_WRITE_READINESS_PROTOCOL: &str =
-    "skein-nowledge-mem-source-mutation-dual-write-readiness-v1";
+    "hawdb-nowledge-mem-source-mutation-dual-write-readiness-v1";
 
 pub const NOWLEDGE_MEM_SOURCE_MUTATION_FAMILY_PATCH_DELETE: &str = "source_patch_delete";
 pub const NOWLEDGE_MEM_SOURCE_MUTATION_FAMILY_LIFECYCLE: &str = "source_lifecycle";
@@ -51,7 +65,7 @@ pub struct NowledgeMemSourceMutationDualWriteEvidence {
     pub family: String,
     pub payload_frozen: bool,
     pub legacy_ack_recorded: bool,
-    pub skein_ack_recorded: bool,
+    pub hawdb_ack_recorded: bool,
     pub independent_watermarks_recorded: bool,
     pub replay_idempotent: bool,
     pub search_projection_payload_frozen: bool,
@@ -65,7 +79,7 @@ impl NowledgeMemSourceMutationDualWriteEvidence {
             family,
             payload_frozen: true,
             legacy_ack_recorded: true,
-            skein_ack_recorded: true,
+            hawdb_ack_recorded: true,
             independent_watermarks_recorded: true,
             replay_idempotent: true,
         }
@@ -87,7 +101,7 @@ pub struct NowledgeMemSourceMutationDualWriteReadinessReport {
     pub duplicate_families: Vec<String>,
     pub payload_not_frozen_families: Vec<String>,
     pub legacy_ack_missing_families: Vec<String>,
-    pub skein_ack_missing_families: Vec<String>,
+    pub hawdb_ack_missing_families: Vec<String>,
     pub independent_watermarks_missing_families: Vec<String>,
     pub replay_not_idempotent_families: Vec<String>,
     pub search_projection_payload_not_frozen_families: Vec<String>,
@@ -110,7 +124,7 @@ impl NowledgeMemSourceMutationDualWriteReadinessReport {
             "duplicate_families": self.duplicate_families,
             "payload_not_frozen_families": self.payload_not_frozen_families,
             "legacy_ack_missing_families": self.legacy_ack_missing_families,
-            "skein_ack_missing_families": self.skein_ack_missing_families,
+            "hawdb_ack_missing_families": self.hawdb_ack_missing_families,
             "independent_watermarks_missing_families": self.independent_watermarks_missing_families,
             "replay_not_idempotent_families": self.replay_not_idempotent_families,
             "search_projection_payload_not_frozen_families": self.search_projection_payload_not_frozen_families,
@@ -175,8 +189,8 @@ pub fn nowledge_mem_source_mutation_dual_write_readiness(
         source_mutation_families_where(evidence, |item| !item.payload_frozen);
     let legacy_ack_missing_families =
         source_mutation_families_where(evidence, |item| !item.legacy_ack_recorded);
-    let skein_ack_missing_families =
-        source_mutation_families_where(evidence, |item| !item.skein_ack_recorded);
+    let hawdb_ack_missing_families =
+        source_mutation_families_where(evidence, |item| !item.hawdb_ack_recorded);
     let independent_watermarks_missing_families =
         source_mutation_families_where(evidence, |item| !item.independent_watermarks_recorded);
     let replay_not_idempotent_families =
@@ -190,7 +204,7 @@ pub fn nowledge_mem_source_mutation_dual_write_readiness(
         required_families.contains(item.family.as_str())
             && item.payload_frozen
             && item.legacy_ack_recorded
-            && item.skein_ack_recorded
+            && item.hawdb_ack_recorded
             && item.independent_watermarks_recorded
             && item.replay_idempotent
             && (!source_mutation_family_requires_projection(&item.family)
@@ -213,8 +227,8 @@ pub fn nowledge_mem_source_mutation_dual_write_readiness(
     if !legacy_ack_missing_families.is_empty() {
         blocker_codes.push("source_mutation_dual_write_legacy_ack_missing".to_string());
     }
-    if !skein_ack_missing_families.is_empty() {
-        blocker_codes.push("source_mutation_dual_write_skein_ack_missing".to_string());
+    if !hawdb_ack_missing_families.is_empty() {
+        blocker_codes.push("source_mutation_dual_write_hawdb_ack_missing".to_string());
     }
     if !independent_watermarks_missing_families.is_empty() {
         blocker_codes.push("source_mutation_dual_write_independent_watermarks_missing".to_string());
@@ -242,7 +256,7 @@ pub fn nowledge_mem_source_mutation_dual_write_readiness(
         duplicate_families,
         payload_not_frozen_families,
         legacy_ack_missing_families,
-        skein_ack_missing_families,
+        hawdb_ack_missing_families,
         independent_watermarks_missing_families,
         replay_not_idempotent_families,
         search_projection_payload_not_frozen_families,
@@ -289,7 +303,7 @@ fn source_mutation_dual_write_evidence_json(
         "family": evidence.family,
         "payload_frozen": evidence.payload_frozen,
         "legacy_ack_recorded": evidence.legacy_ack_recorded,
-        "skein_ack_recorded": evidence.skein_ack_recorded,
+        "hawdb_ack_recorded": evidence.hawdb_ack_recorded,
         "independent_watermarks_recorded": evidence.independent_watermarks_recorded,
         "replay_idempotent": evidence.replay_idempotent,
         "search_projection_payload_frozen": evidence.search_projection_payload_frozen,

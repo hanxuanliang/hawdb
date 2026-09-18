@@ -1,7 +1,20 @@
+// Copyright 2026 Nowledge
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::{latency_percentiles, LatencyPercentiles};
 use crate::production_graph::validate_production_identity_for_current_target;
-use serde::Serialize;
-use skein::{
+use hawdb::{
     ProcessMemoryProfile, ProcessMemorySnapshot, ProductionEvidenceBinding,
     ProductionQualificationIdentity, RuntimeCancellationToken, RuntimeTaskContext,
     SearchAccessControlContext, SearchFallbackReasonCode, SearchIndex, SearchOutOfCoreConfig,
@@ -11,6 +24,7 @@ use skein::{
     MAX_VECTOR_RECALL_VALIDATION_CANDIDATE_LIMIT, MAX_VECTOR_RECALL_VALIDATION_SAMPLES,
     MAX_VECTOR_RECALL_VALIDATION_TOP_K, MINIMUM_VECTOR_QUALIFICATION_DOCUMENT_COUNT,
 };
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -37,7 +51,7 @@ pub use query::{
 };
 
 pub const PRODUCTION_VECTOR_QUALIFICATION_PROTOCOL: &str =
-    "skein-production-vector-qualification-v1";
+    "hawdb-production-vector-qualification-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ProductionVectorCaseKind {
@@ -84,7 +98,7 @@ pub struct ProductionVectorLifecycleConfig {
     pub replica_paths: Vec<PathBuf>,
     /// This disposable copy is intentionally corrupted and cannot be reused.
     pub corruption_replica_path: PathBuf,
-    pub delta: skein::SearchProjectionDelta,
+    pub delta: hawdb::SearchProjectionDelta,
     pub verification_case: ProductionVectorQueryCase,
     pub expected_upsert_document_id: String,
     pub expected_deleted_document_id: String,
@@ -369,7 +383,7 @@ impl ProductionVectorQualificationReport {
                     || evidence.auto_metrics.max_admitted_workers == 0
                     || evidence.scalar_candidate_metrics.kernel != "scalar"
                     || evidence.serving_metrics.backend
-                        != "skein_rabitq_out_of_core_candidate_projection"
+                        != "hawdb_rabitq_out_of_core_candidate_projection"
                     || evidence.serving_metrics.candidate_score_source != "quantized_projection"
                     || evidence.serving_metrics.final_score_source != "raw_vector"
                     || evidence.serving_metrics.kernel.is_empty()
