@@ -762,6 +762,53 @@ impl hawdb_system_sql::SystemSqlStore for GraphStore {
     }
 }
 
+impl hawdb_storage::graph_engine::GraphMutationEngine for GraphStore {
+    fn plan_schema_maintenance(
+        &self,
+        catalog: &hawdb_core::Catalog,
+    ) -> Vec<hawdb_storage::SchemaMaintenancePlanItem> {
+        GraphStore::plan_schema_maintenance(self, catalog)
+    }
+
+    fn run_schema_maintenance(
+        &mut self,
+        catalog: &mut hawdb_core::Catalog,
+    ) -> hawdb_core::Result<Vec<hawdb_storage::SchemaMaintenanceAction>> {
+        GraphStore::run_schema_maintenance(self, catalog)
+    }
+
+    fn rebuild_projected_graph_artifacts(
+        &mut self,
+        catalog: &hawdb_core::Catalog,
+    ) -> hawdb_core::Result<()> {
+        GraphStore::rebuild_projected_graph_artifacts(self, catalog)
+    }
+
+    fn rebuild_bounded_property_index_projections(
+        &mut self,
+        catalog: &hawdb_core::Catalog,
+        max_estimated_operations: usize,
+    ) -> Vec<hawdb_storage::PropertyIndexProjectionRebuildAction> {
+        GraphStore::rebuild_bounded_property_index_projections(
+            self,
+            catalog,
+            max_estimated_operations,
+        )
+    }
+
+    fn scrub_storage(&mut self) -> hawdb_core::Result<hawdb_storage::StorageScrubReport> {
+        GraphStore::scrub_storage(self)
+    }
+
+    fn backup_to(
+        &mut self,
+        catalog: &hawdb_core::Catalog,
+        destination: impl AsRef<std::path::Path>,
+    ) -> hawdb_core::Result<hawdb_storage::StorageBackupReport> {
+        GraphStore::backup_to(self, catalog, destination)
+    }
+}
+
 pub use hawdb_storage::scan::GraphScanControl;
 
 /// Root-internal engine configuration that must not join the storage contract:
@@ -2744,6 +2791,84 @@ impl hawdb_storage::graph_engine::GraphReadEngine for GraphStore {
 
     fn storage_residency_report(&self) -> hawdb_storage::StorageResidencyReport {
         GraphStore::storage_residency_report(self)
+    }
+
+    fn adjacency_consistency_report(
+        &self,
+    ) -> hawdb_storage::consistency::AdjacencyConsistencyReport {
+        GraphStore::adjacency_consistency_report(self)
+    }
+
+    fn adjacency_consolidation_plan(
+        &self,
+    ) -> hawdb_storage::consistency::AdjacencyConsolidationPlan {
+        GraphStore::adjacency_consolidation_plan(self)
+    }
+
+    fn degree_statistics_consistency_report(
+        &self,
+    ) -> hawdb_storage::consistency::DegreeStatisticsConsistencyReport {
+        GraphStore::degree_statistics_consistency_report(self)
+    }
+
+    fn property_index_consistency_report(
+        &self,
+        catalog: &hawdb_core::Catalog,
+    ) -> hawdb_storage::consistency::PropertyIndexConsistencyReport {
+        GraphStore::property_index_consistency_report(self, catalog)
+    }
+
+    fn columnar_shadow_checkpoint_report(
+        &self,
+    ) -> Option<hawdb_storage::ColumnarShadowCheckpointReport> {
+        GraphStore::columnar_shadow_checkpoint_report(self)
+    }
+
+    fn columnar_shadow_recovery_status(&self) -> hawdb_storage::ColumnarShadowRecoveryStatus {
+        GraphStore::columnar_shadow_recovery_status(self)
+    }
+
+    fn projected_graph_statuses(&self) -> Vec<hawdb_storage::ProjectedGraphStatus> {
+        GraphStore::projected_graph_statuses(self)
+    }
+
+    fn storage_pressure_snapshot(
+        &self,
+        oldest_reader_commit_epoch: Option<u64>,
+    ) -> hawdb_storage::StoragePressureSnapshot {
+        GraphStore::storage_pressure_snapshot(self, oldest_reader_commit_epoch)
+    }
+
+    fn append_storage_residency_report(&self) -> hawdb_storage::AppendStorageResidencyReport {
+        GraphStore::append_storage_residency_report(self)
+    }
+
+    fn columnar_shadow_admission_bytes(&self) -> u64 {
+        GraphStore::columnar_shadow_admission_bytes(self)
+    }
+
+    fn relational_index_recovery_report(
+        &self,
+    ) -> Option<&hawdb_storage::RelationalIndexRecoveryReport> {
+        GraphStore::relational_index_recovery_report(self)
+    }
+
+    fn relational_index_shadow_checkpoint_report(
+        &self,
+    ) -> Option<&hawdb_storage::relational::RelationalIndexShadowCheckpointReport> {
+        GraphStore::relational_index_shadow_checkpoint_report(self)
+    }
+
+    fn relational_index_shadow_recovery_status(
+        &self,
+    ) -> &hawdb_storage::relational::RelationalIndexShadowRecoveryStatus {
+        GraphStore::relational_index_shadow_recovery_status(self)
+    }
+
+    fn search_projection_changefeed_status(
+        &self,
+    ) -> hawdb_storage::SearchProjectionChangefeedStatus {
+        GraphStore::search_projection_changefeed_status(self)
     }
 
     fn append_table_schema(&self, table: &str) -> Option<&hawdb_storage::AppendTableSchema> {

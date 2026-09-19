@@ -46,6 +46,46 @@ pub trait GraphReadEngine {
 
     fn storage_residency_report(&self) -> StorageResidencyReport;
 
+    fn adjacency_consistency_report(&self) -> crate::consistency::AdjacencyConsistencyReport;
+
+    fn adjacency_consolidation_plan(&self) -> crate::consistency::AdjacencyConsolidationPlan;
+
+    fn degree_statistics_consistency_report(
+        &self,
+    ) -> crate::consistency::DegreeStatisticsConsistencyReport;
+
+    fn property_index_consistency_report(
+        &self,
+        catalog: &Catalog,
+    ) -> crate::consistency::PropertyIndexConsistencyReport;
+
+    fn columnar_shadow_checkpoint_report(&self) -> Option<crate::ColumnarShadowCheckpointReport>;
+
+    fn columnar_shadow_recovery_status(&self) -> crate::ColumnarShadowRecoveryStatus;
+
+    fn projected_graph_statuses(&self) -> Vec<crate::ProjectedGraphStatus>;
+
+    fn storage_pressure_snapshot(
+        &self,
+        oldest_reader_commit_epoch: Option<u64>,
+    ) -> crate::StoragePressureSnapshot;
+
+    fn append_storage_residency_report(&self) -> crate::AppendStorageResidencyReport;
+
+    fn columnar_shadow_admission_bytes(&self) -> u64;
+
+    fn relational_index_recovery_report(&self) -> Option<&crate::RelationalIndexRecoveryReport>;
+
+    fn relational_index_shadow_checkpoint_report(
+        &self,
+    ) -> Option<&crate::relational::RelationalIndexShadowCheckpointReport>;
+
+    fn relational_index_shadow_recovery_status(
+        &self,
+    ) -> &crate::relational::RelationalIndexShadowRecoveryStatus;
+
+    fn search_projection_changefeed_status(&self) -> crate::SearchProjectionChangefeedStatus;
+
     fn append_table_schema(&self, table: &str) -> Option<&AppendTableSchema>;
 
     fn initial_import_source_fingerprint(&self) -> Option<&str>;
@@ -58,4 +98,35 @@ pub trait GraphReadEngine {
         max_rows: usize,
         max_payload_bytes: usize,
     ) -> Result<AppendSegmentReadOutput>;
+}
+
+/// Maintenance/commit surface the embedded facade drives itself.
+///
+/// This deliberately does not restate the execution write contract: statement
+/// execution goes through `hawdb_executor::store::GraphExecutionWrite`
+/// (`commit_mutation_with_limits` and friends). These are the storage-lifecycle
+/// operations the facade schedules directly.
+pub trait GraphMutationEngine {
+    fn plan_schema_maintenance(&self, catalog: &Catalog) -> Vec<crate::SchemaMaintenancePlanItem>;
+
+    fn run_schema_maintenance(
+        &mut self,
+        catalog: &mut Catalog,
+    ) -> Result<Vec<crate::SchemaMaintenanceAction>>;
+
+    fn rebuild_projected_graph_artifacts(&mut self, catalog: &Catalog) -> Result<()>;
+
+    fn rebuild_bounded_property_index_projections(
+        &mut self,
+        catalog: &Catalog,
+        max_estimated_operations: usize,
+    ) -> Vec<crate::PropertyIndexProjectionRebuildAction>;
+
+    fn scrub_storage(&mut self) -> Result<crate::StorageScrubReport>;
+
+    fn backup_to(
+        &mut self,
+        catalog: &Catalog,
+        destination: impl AsRef<std::path::Path>,
+    ) -> Result<crate::StorageBackupReport>;
 }
