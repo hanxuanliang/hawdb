@@ -19,14 +19,11 @@ use super::*;
 use hawdb_executor::mutation::execute_mutation_with_store;
 pub use hawdb_executor::mutation::project_staged_mutation_return_rows;
 pub use hawdb_executor::mutation::{is_mutation_plan, mutation_command};
-pub(super) use hawdb_executor::mutation::{
-    node_set_assignment, relationship_on_create_property_value,
-};
 
 pub fn execute_mutation_with_limits(
     plan: &PhysicalPlan,
     catalog: &mut Catalog,
-    store: &mut GraphStore,
+    store: &mut dyn hawdb_executor::store::GraphExecutionWrite,
     limits: MutationLimits,
     task_context: Option<&RuntimeTaskContext>,
 ) -> Result<Vec<Row>> {
