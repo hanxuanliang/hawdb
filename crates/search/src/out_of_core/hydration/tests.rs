@@ -58,6 +58,8 @@ fn hydration_retains_one_decoded_document_instead_of_the_segment() {
         reader
             .segment_for_document(&expected.id)
             .unwrap()
+            .unwrap()
+            .segment
             .document_count
             > 1
     );
@@ -73,6 +75,8 @@ fn hydration_retains_one_decoded_document_instead_of_the_segment() {
         output.metrics.peak_segment_document_bytes,
         search_document_bytes(&expected)
     );
+    assert_eq!(output.metrics.lexical_document_block_reads, 1);
+    assert!(output.metrics.lexical_document_bytes_read > 0);
     drop(reader);
     fs::remove_dir_all(root).unwrap();
 }
@@ -411,8 +415,15 @@ fn public_hydration_rejects_damaged_tail_without_writing_artifacts() {
     writer.push(document(1)).unwrap();
     writer.finish().unwrap();
     let reader = SearchOutOfCoreReader::open(&root).unwrap();
-    assert_eq!(reader.descriptor.segments.len(), 1);
-    let path = root.join(&reader.manifest.payload_file);
+    assert_eq!(reader.primary_segment().descriptor.segments.len(), 1);
+    let path = root.join(
+        &reader
+            .manifest
+            .segments
+            .first()
+            .expect("manifest has a segment")
+            .payload_file,
+    );
     let valid = fs::read(&path).unwrap();
     let mut damaged = valid.clone();
     *damaged.last_mut().unwrap() ^= 1;

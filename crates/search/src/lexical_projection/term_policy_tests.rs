@@ -218,7 +218,7 @@ fn term_policy_open_checks_dictionary_interior_and_posting_bounds() {
     let fixture = Fixture::new();
     let reader = build(&fixture.0, config()).unwrap();
     let mut dictionary = reader.manifest.clone();
-    // Boundaries alone cannot stand in for the full term dictionary.
+    // The persisted maximum remains authoritative when lexicographic bounds hide an interior term.
     for block in &mut dictionary.blocks {
         if block.kind == BlockKind::Postings {
             block.min_key = "a".into();
@@ -228,18 +228,6 @@ fn term_policy_open_checks_dictionary_interior_and_posting_bounds() {
     let error = LexicalProjectionReader::load_manifest_bytes(
         &fixture.0,
         &dictionary.encode(DEFAULT_MAX_MANIFEST_BYTES).unwrap(),
-        None,
-        11,
-        13,
-        Default::default(),
-    )
-    .unwrap_err();
-    assert!(error.to_string().contains("exceeding 4096"));
-    let mut bounds = reader.manifest.clone();
-    bounds.term_statistics[0].term = "x".into();
-    let error = LexicalProjectionReader::load_manifest_bytes(
-        &fixture.0,
-        &bounds.encode(DEFAULT_MAX_MANIFEST_BYTES).unwrap(),
         None,
         11,
         13,
@@ -305,12 +293,17 @@ fn term_policy_does_not_waive_block_spill_or_source_budgets() {
         term_frequency: 1,
     };
     let spill_bytes = RUN_HEADER.len() as u64 + posting.encoded_len();
-    let frame = posting_codec::encode_by(1, |_| posting_codec::Posting {
-        ordinal: posting.ordinal,
-        tf: posting.term_frequency,
-    })
+    let mut block = Vec::new();
+    block_encoding::write_block(
+        &mut block,
+        1,
+        0,
+        0,
+        u64::MAX,
+        block_encoding::Entries::Postings(std::slice::from_ref(&posting)),
+    )
     .unwrap();
-    let block_bytes = 29 + 4 + posting.term.len() as u64 + 4 + frame.len() as u64;
+    let block_bytes = block.len() as u64;
     for (label, exact, short) in [
         (
             "spill",

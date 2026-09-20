@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use super::lexical_projection::{
-    manifest_generation as lexical_manifest_generation, LexicalMiniDelta, LexicalProjectionConfig,
-    LexicalProjectionReader, DEFAULT_MAX_MANIFEST_BYTES, MANIFEST_FILE,
+    manifest_generation as lexical_manifest_generation, LexicalCorpusStatistics,
+    LexicalProjectionConfig, LexicalProjectionReader, DEFAULT_MAX_MANIFEST_BYTES, MANIFEST_FILE,
 };
 use super::{
     checksum_bytes, cosine_similarity, decode_embedding, decode_metadata,
@@ -56,12 +56,16 @@ mod generation_writer;
 #[cfg(test)]
 pub(crate) use generation_writer::analyzer_read_evidence;
 mod hydration;
+mod mutation_run;
 mod publish_lease;
 mod vector_serving;
 pub use generation_writer::{
-    GovernedSearchGenerationUpdate, GovernedSearchGenerationWriter, SearchGenerationAdmission,
+    GovernedSearchGenerationUpdate, GovernedSearchGenerationWriter,
+    ScheduledSearchOutOfCoreSegmentCompactionReport, SearchGenerationAdmission,
     SearchOutOfCoreGenerationBuildOptions, SearchOutOfCoreGenerationBuildReport,
     SearchOutOfCoreGenerationUpdate, SearchOutOfCoreGenerationWriter,
+    SearchOutOfCoreSegmentCompaction, SearchOutOfCoreSegmentCompactionPolicy,
+    SearchOutOfCoreSegmentCompactionReport, SearchOutOfCoreSegmentCompactionStopReason,
 };
 pub(super) use publish_lease::SearchProjectionPublishLease;
 #[cfg(feature = "vector-search")]
@@ -69,7 +73,7 @@ use vector_serving::vector_projection_error;
 use vector_serving::VectorScoreScan;
 
 const OUT_OF_CORE_MANIFEST_FILE: &str = "search_projection.out_of_core.manifest.hawdb";
-const OUT_OF_CORE_FORMAT: &str = "HAWDB_SEARCH_OUT_OF_CORE_V1";
+const OUT_OF_CORE_FORMAT: &str = "HAWDB_SEARCH_OUT_OF_CORE_V3";
 const OUT_OF_CORE_LAYOUT_FORMAT: &str = "HAWDB_SEARCH_OUT_OF_CORE_LAYOUT_V1";
 const MAX_OUT_OF_CORE_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_MARKER_BYTES: u64 = 64 * 1024;
@@ -81,6 +85,8 @@ pub struct SearchOutOfCoreConfig {
     pub max_compressed_segment_bytes: NonZeroU64,
     pub max_uncompressed_segment_bytes: NonZeroU64,
     pub max_descriptor_bytes: NonZeroU64,
+    /// Caller-selected bound for one decoded mutation-run artifact.
+    pub max_mutation_run_bytes: NonZeroU64,
     /// Caller-selected encoded lexical manifest limit, including private decoding.
     /// Prepared generation updates inherit this limit and require it to fit `isize`.
     pub max_lexical_manifest_bytes: NonZeroU64,
@@ -103,6 +109,7 @@ impl Default for SearchOutOfCoreConfig {
             max_compressed_segment_bytes: NonZeroU64::new(64 * 1024 * 1024).unwrap(),
             max_uncompressed_segment_bytes: NonZeroU64::new(256 * 1024 * 1024).unwrap(),
             max_descriptor_bytes: NonZeroU64::new(256 * 1024 * 1024).unwrap(),
+            max_mutation_run_bytes: NonZeroU64::new(64 * 1024 * 1024).unwrap(),
             max_lexical_manifest_bytes: NonZeroU64::new(DEFAULT_MAX_MANIFEST_BYTES).unwrap(),
             max_candidate_spill_bytes: NonZeroU64::new(4 * 1024 * 1024 * 1024).unwrap(),
             max_candidate_block_bytes: NonZeroU64::new(16 * 1024 * 1024).unwrap(),
@@ -123,6 +130,8 @@ impl Default for SearchOutOfCoreConfig {
 pub struct SearchOutOfCoreMetrics {
     pub segment_range_reads: u64,
     pub segment_bytes_read: u64,
+    pub lexical_document_block_reads: u64,
+    pub lexical_document_bytes_read: u64,
     pub metadata_segment_bytes_read: u64,
     pub vector_segment_bytes_read: u64,
     pub hydration_segment_bytes_read: u64,
@@ -138,6 +147,12 @@ pub struct SearchOutOfCoreMetrics {
     pub hydrated_bytes: u64,
 }
 
+struct SearchDocumentSegmentRoute<'a> {
+    artifact_index: usize,
+    segment: &'a SearchSegmentDescriptorEntry,
+    lexical_document_bytes_read: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchOutOfCoreOutput {
     pub result: SearchResultSet,
@@ -150,29 +165,88 @@ pub struct SearchOutOfCoreHydrationOutput {
     pub metrics: SearchOutOfCoreMetrics,
 }
 
+/// A current document together with the immutable content segment that owns it.
+///
+/// Mutation preparation uses this identity to rewrite the affected content
+/// segment instead of applying a generation-wide tombstone.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SearchOutOfCoreMutationTarget {
+    pub(crate) content_segment_id: u64,
+    pub(crate) document: SearchDocument,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SearchOutOfCoreMutationTargetOutput {
+    pub(crate) targets: BTreeMap<String, SearchOutOfCoreMutationTarget>,
+    pub(crate) metrics: SearchOutOfCoreMetrics,
+}
+
 #[derive(Debug)]
 pub struct SearchOutOfCoreReader {
     root: PathBuf,
     config: SearchOutOfCoreConfig,
     analyzer_lexicon: SearchAnalyzerLexicon,
     manifest: SearchOutOfCoreManifestBody,
+    segments: Vec<SearchOutOfCoreSegmentReader>,
+    // Mutation runs are admitted and validated at open. Serving consumes this
+    // closure only after the shared visibility path is installed.
+    _mutation_runs: Vec<mutation_run::SearchMutationRun>,
+    lexical_source_policy: SearchLexicalSourcePolicy,
+    lexical_term_policy: SearchLexicalTermPolicy,
+    runtime_capabilities: RuntimeCapabilities,
+}
+
+/// One immutable group of search artifacts selected by an out-of-core manifest.
+///
+/// The current manifest selects one group. Keeping the artifact closure separate
+/// from reader-wide identity and admission state is the boundary needed for
+/// incremental segment publication.
+#[derive(Debug)]
+pub(super) struct SearchOutOfCoreSegmentReader {
+    content_segment_id: u64,
     descriptor: SearchSegmentDescriptor,
     payload: Arc<File>,
     metadata_payload: Arc<File>,
     vector_payload: Arc<File>,
     layout: SearchOutOfCoreLayoutBody,
     lexical_projection: Arc<LexicalProjectionReader>,
-    lexical_source_policy: SearchLexicalSourcePolicy,
-    lexical_term_policy: SearchLexicalTermPolicy,
     #[cfg(feature = "vector-search")]
     rabitq_projection: Option<Arc<hawdb_vector_projection::FileProjection>>,
-    runtime_capabilities: RuntimeCapabilities,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct PublishedOutOfCoreProjection {
+    pub(super) generation: u64,
+    pub(super) bytes_written: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SearchOutOfCoreManifestBody<S = String> {
     format: S,
+    generation: u64,
+    segments: Vec<SearchOutOfCoreSegmentManifest<S>>,
+    #[serde(default)]
+    mutation_runs: Vec<SearchOutOfCoreMutationRunManifest<S>>,
+    document_count: usize,
+    documents_digest: u64,
+    source_graph_commit_epoch: Option<u64>,
+    import_source_graph_commit_epoch: Option<u64>,
+    embedding_model: Option<S>,
+    embedding_version: Option<S>,
+    embedding_dimension: Option<usize>,
+}
+
+/// One immutable artifact closure selected by an out-of-core manifest.
+///
+/// Segment-local identity stays with the files it validates. The active
+/// manifest owns the logical projection identity and will eventually select
+/// multiple entries as an incremental segment set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, bound(deserialize = "S: Deserialize<'de>"))]
+struct SearchOutOfCoreSegmentManifest<S = String> {
+    segment_id: u64,
+    level: u32,
     generation: u64,
     descriptor_file: S,
     descriptor_len: u64,
@@ -206,10 +280,22 @@ struct SearchOutOfCoreManifestBody<S = String> {
     document_count: usize,
     documents_digest: u64,
     source_graph_commit_epoch: Option<u64>,
-    import_source_graph_commit_epoch: Option<u64>,
-    embedding_model: Option<S>,
-    embedding_version: Option<S>,
-    embedding_dimension: Option<usize>,
+}
+
+/// One immutable mutation artifact selected by the active manifest.
+///
+/// The artifact carries the target-specific retractions that will later drive
+/// shared visibility and live corpus statistics. Its identity remains separate
+/// from content segments because a delete may publish no replacement content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, bound(deserialize = "S: Deserialize<'de>"))]
+struct SearchOutOfCoreMutationRunManifest<S = String> {
+    generation: u64,
+    file: S,
+    len: u64,
+    checksum: u64,
+    entry_count: usize,
+    analyzer_digest: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -325,9 +411,78 @@ impl SearchOutOfCoreManifestBody {
 
 impl<S: AsRef<str>> SearchOutOfCoreManifestBody<S> {
     fn validate_names(&self) -> Result<()> {
-        if self.format.as_ref() != OUT_OF_CORE_FORMAT || self.generation == 0 {
+        if self.format.as_ref() != OUT_OF_CORE_FORMAT
+            || self.generation == 0
+            || self.segments.is_empty()
+        {
             return Err(HawDBError::Storage(
-                "search out-of-core manifest header is invalid".to_string(),
+                "search out-of-core manifest header or segment set is invalid".to_string(),
+            ));
+        }
+        let mut ids = BTreeSet::new();
+        let mut content_document_count = 0usize;
+        for segment in &self.segments {
+            if !ids.insert(segment.segment_id) {
+                return Err(HawDBError::Storage(
+                    "search out-of-core manifest has duplicate segment ids".to_string(),
+                ));
+            }
+            content_document_count = content_document_count
+                .checked_add(segment.document_count)
+                .ok_or_else(|| {
+                    HawDBError::Storage(
+                        "search out-of-core manifest document count overflows".to_string(),
+                    )
+                })?;
+            segment.validate_names()?;
+        }
+        let mut mutation_generations = BTreeSet::new();
+        for run in &self.mutation_runs {
+            if run.generation > self.generation || !mutation_generations.insert(run.generation) {
+                return Err(HawDBError::Storage(
+                    "search out-of-core manifest has an invalid mutation-run generation"
+                        .to_string(),
+                ));
+            }
+            run.validate_names()?;
+        }
+        if self.document_count > content_document_count
+            || (self.mutation_runs.is_empty() && content_document_count != self.document_count)
+        {
+            return Err(HawDBError::Storage(
+                "search out-of-core manifest document count does not match its artifact closure"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl<S: AsRef<str>> SearchOutOfCoreMutationRunManifest<S> {
+    fn validate_names(&self) -> Result<()> {
+        if self.generation == 0 || self.len == 0 || self.entry_count == 0 {
+            return Err(HawDBError::Storage(
+                "search out-of-core mutation-run manifest metadata is invalid".to_string(),
+            ));
+        }
+        let name = self.file.as_ref();
+        if Path::new(name).file_name().and_then(|value| value.to_str()) != Some(name)
+            || name != mutation_run::artifact_file(self.generation)
+        {
+            return Err(HawDBError::Storage(
+                "search out-of-core manifest contains an invalid mutation-run artifact name"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl<S: AsRef<str>> SearchOutOfCoreSegmentManifest<S> {
+    fn validate_names(&self) -> Result<()> {
+        if self.generation == 0 {
+            return Err(HawDBError::Storage(
+                "search out-of-core segment generation is invalid".to_string(),
             ));
         }
         for name in [
@@ -446,7 +601,7 @@ impl SearchOutOfCoreLayoutBody {
 
     fn validate(
         &self,
-        manifest: &SearchOutOfCoreManifestBody,
+        manifest: &SearchOutOfCoreSegmentManifest,
         descriptor: &SearchSegmentDescriptor,
         max_compressed_segment_bytes: u64,
     ) -> Result<()> {
@@ -506,6 +661,158 @@ impl SearchOutOfCoreLayoutBody {
             ));
         }
         Ok(())
+    }
+}
+
+impl SearchOutOfCoreSegmentReader {
+    fn open(
+        root: &Path,
+        config: &SearchOutOfCoreConfig,
+        analyzer_lexicon: &SearchAnalyzerLexicon,
+        lexical_source_policy: SearchLexicalSourcePolicy,
+        lexical_term_policy: SearchLexicalTermPolicy,
+        active_manifest: &SearchOutOfCoreManifestBody,
+        manifest: &SearchOutOfCoreSegmentManifest,
+    ) -> Result<Self> {
+        #[cfg(not(feature = "vector-search"))]
+        let _ = active_manifest;
+        let descriptor_bytes = read_bound_artifact(
+            &root.join(&manifest.descriptor_file),
+            manifest.descriptor_len,
+            manifest.descriptor_checksum,
+            config.max_descriptor_bytes.get(),
+            "search segment descriptor",
+        )?;
+        let descriptor_text = std::str::from_utf8(&descriptor_bytes).map_err(|error| {
+            HawDBError::Storage(format!("search segment descriptor is not UTF-8: {error}"))
+        })?;
+        let descriptor = decode_search_segment_descriptor_text(descriptor_text)?;
+        if descriptor.document_count != manifest.document_count {
+            return Err(HawDBError::Storage(format!(
+                "search out-of-core manifest expects {} documents, descriptor has {}",
+                manifest.document_count, descriptor.document_count
+            )));
+        }
+        for segment in &descriptor.segments {
+            let range = segment.payload_range.ok_or_else(|| {
+                HawDBError::Storage(format!(
+                    "search segment {} has no physical payload range",
+                    segment.segment_id
+                ))
+            })?;
+            if range.length > config.max_compressed_segment_bytes.get() {
+                return Err(HawDBError::Storage(format!(
+                    "search segment {} requires {} compressed bytes, exceeding {}",
+                    segment.segment_id, range.length, config.max_compressed_segment_bytes
+                )));
+            }
+            if range.offset.saturating_add(range.length) > manifest.payload_len {
+                return Err(HawDBError::Storage(format!(
+                    "search segment {} exceeds the published payload length",
+                    segment.segment_id
+                )));
+            }
+        }
+
+        let payload_path = root.join(&manifest.payload_file);
+        let payload = File::open(&payload_path)?;
+        if payload.metadata()?.len() != manifest.payload_len {
+            return Err(HawDBError::Storage(
+                "search out-of-core payload length mismatch".to_string(),
+            ));
+        }
+
+        let layout_bytes = read_bound_artifact(
+            &root.join(&manifest.layout_file),
+            manifest.layout_len,
+            manifest.layout_checksum,
+            config.max_descriptor_bytes.get(),
+            "search out-of-core layout",
+        )?;
+        let layout = SearchOutOfCoreLayoutBody::decode(&layout_bytes)?;
+        layout.validate(
+            manifest,
+            &descriptor,
+            config.max_compressed_segment_bytes.get(),
+        )?;
+        if manifest.rabitq_vector_document_count
+            != manifest.rabitq_artifact_file.as_ref().map(|_| {
+                layout
+                    .segments
+                    .iter()
+                    .map(|segment| segment.vectors.entry_count)
+                    .sum()
+            })
+        {
+            return Err(HawDBError::Storage(
+                "search out-of-core RaBitQ vector count does not match the sidecar layout"
+                    .to_string(),
+            ));
+        }
+
+        let metadata_payload = open_exact_length_artifact(
+            &root.join(&manifest.metadata_payload_file),
+            manifest.metadata_payload_len,
+            "search out-of-core metadata payload",
+        )?;
+        let vector_payload = open_exact_length_artifact(
+            &root.join(&manifest.vector_payload_file),
+            manifest.vector_payload_len,
+            "search out-of-core vector payload",
+        )?;
+
+        let lexical_manifest_path = root.join(&manifest.lexical_manifest_file);
+        let lexical_manifest_bytes = read_bound_artifact(
+            &lexical_manifest_path,
+            manifest.lexical_manifest_len,
+            manifest.lexical_manifest_checksum,
+            config.max_lexical_manifest_bytes.get(),
+            "search lexical manifest",
+        )?;
+        let lexical_config = LexicalProjectionConfig {
+            max_manifest_bytes: config.max_lexical_manifest_bytes,
+            max_term_bytes: lexical_term_policy.max_term_bytes(),
+            max_document_source_bytes: lexical_source_policy.max_document_source_bytes(),
+            max_query_score_entries: config.max_score_entries,
+            ..LexicalProjectionConfig::default()
+        };
+        let lexical_projection = LexicalProjectionReader::load_manifest_bytes(
+            root,
+            &lexical_manifest_bytes,
+            manifest.source_graph_commit_epoch,
+            lexical_analyzer_digest(analyzer_lexicon),
+            manifest.documents_digest,
+            lexical_config,
+        )?
+        .ok_or_else(|| {
+            HawDBError::Storage(
+                "published search lexical projection does not match the out-of-core manifest"
+                    .to_string(),
+            )
+        })?;
+        drop(lexical_manifest_bytes);
+
+        #[cfg(feature = "vector-search")]
+        let rabitq_projection = open_rabitq_projection(
+            root,
+            active_manifest,
+            manifest,
+            config.max_vector_search_working_bytes.get(),
+        )?;
+        #[cfg(not(feature = "vector-search"))]
+        verify_rabitq_artifact(root, manifest)?;
+
+        Ok(Self {
+            content_segment_id: manifest.segment_id,
+            descriptor,
+            payload: Arc::new(payload),
+            metadata_payload: Arc::new(metadata_payload),
+            vector_payload: Arc::new(vector_payload),
+            layout,
+            lexical_projection,
+            #[cfg(feature = "vector-search")]
+            rabitq_projection,
+        })
     }
 }
 
@@ -570,7 +877,7 @@ impl SearchOutOfCoreReader {
         )
     }
 
-    /// Opens a generation under host-selected lexical source and term limits.
+    /// Opens a generation with explicit host-selected lexical policies.
     ///
     /// Source admission governs subsequent writes only; it is never read from
     /// the artifact, so an artifact cannot widen host input policy.
@@ -585,149 +892,54 @@ impl SearchOutOfCoreReader {
         let manifest_path = root.join(OUT_OF_CORE_MANIFEST_FILE);
         let manifest_bytes = read_bounded_file(&manifest_path, MAX_OUT_OF_CORE_MANIFEST_BYTES)?;
         let manifest = SearchOutOfCoreManifestBody::decode(&manifest_bytes)?;
-
-        let descriptor_bytes = read_bound_artifact(
-            &root.join(&manifest.descriptor_file),
-            manifest.descriptor_len,
-            manifest.descriptor_checksum,
-            config.max_descriptor_bytes.get(),
-            "search segment descriptor",
-        )?;
-        let descriptor_text = std::str::from_utf8(&descriptor_bytes).map_err(|error| {
-            HawDBError::Storage(format!("search segment descriptor is not UTF-8: {error}"))
-        })?;
-        let descriptor = decode_search_segment_descriptor_text(descriptor_text)?;
-        if descriptor.document_count != manifest.document_count {
-            return Err(HawDBError::Storage(format!(
-                "search out-of-core manifest expects {} documents, descriptor has {}",
-                manifest.document_count, descriptor.document_count
-            )));
-        }
-        for segment in &descriptor.segments {
-            let range = segment.payload_range.ok_or_else(|| {
-                HawDBError::Storage(format!(
-                    "search segment {} has no physical payload range",
-                    segment.segment_id
-                ))
-            })?;
-            if range.length > config.max_compressed_segment_bytes.get() {
-                return Err(HawDBError::Storage(format!(
-                    "search segment {} requires {} compressed bytes, exceeding {}",
-                    segment.segment_id, range.length, config.max_compressed_segment_bytes
-                )));
-            }
-            if range.offset.saturating_add(range.length) > manifest.payload_len {
-                return Err(HawDBError::Storage(format!(
-                    "search segment {} exceeds the published payload length",
-                    segment.segment_id
-                )));
-            }
-        }
-
-        let payload_path = root.join(&manifest.payload_file);
-        let payload = File::open(&payload_path)?;
-        if payload.metadata()?.len() != manifest.payload_len {
-            return Err(HawDBError::Storage(
-                "search out-of-core payload length mismatch".to_string(),
-            ));
-        }
-
-        let layout_bytes = read_bound_artifact(
-            &root.join(&manifest.layout_file),
-            manifest.layout_len,
-            manifest.layout_checksum,
-            config.max_descriptor_bytes.get(),
-            "search out-of-core layout",
-        )?;
-        let layout = SearchOutOfCoreLayoutBody::decode(&layout_bytes)?;
-        layout.validate(
-            &manifest,
-            &descriptor,
-            config.max_compressed_segment_bytes.get(),
-        )?;
-        if manifest.rabitq_vector_document_count
-            != manifest.rabitq_artifact_file.as_ref().map(|_| {
-                layout
-                    .segments
-                    .iter()
-                    .map(|segment| segment.vectors.entry_count)
-                    .sum()
+        let segments = manifest
+            .segments
+            .iter()
+            .map(|segment| {
+                SearchOutOfCoreSegmentReader::open(
+                    &root,
+                    &config,
+                    &analyzer_lexicon,
+                    lexical_source_policy,
+                    lexical_term_policy,
+                    &manifest,
+                    segment,
+                )
             })
-        {
-            return Err(HawDBError::Storage(
-                "search out-of-core RaBitQ vector count does not match the sidecar layout"
-                    .to_string(),
-            ));
-        }
-
-        let metadata_payload = open_exact_length_artifact(
-            &root.join(&manifest.metadata_payload_file),
-            manifest.metadata_payload_len,
-            "search out-of-core metadata payload",
-        )?;
-        let vector_payload = open_exact_length_artifact(
-            &root.join(&manifest.vector_payload_file),
-            manifest.vector_payload_len,
-            "search out-of-core vector payload",
-        )?;
-
-        let lexical_manifest_path = root.join(&manifest.lexical_manifest_file);
-        let lexical_manifest_bytes = read_bound_artifact(
-            &lexical_manifest_path,
-            manifest.lexical_manifest_len,
-            manifest.lexical_manifest_checksum,
-            config.max_lexical_manifest_bytes.get(),
-            "search lexical manifest",
-        )?;
-        let lexical_config = LexicalProjectionConfig {
-            max_manifest_bytes: config.max_lexical_manifest_bytes,
-            max_term_bytes: lexical_term_policy.max_term_bytes(),
-            max_document_source_bytes: lexical_source_policy.max_document_source_bytes(),
-            max_query_score_entries: config.max_score_entries,
-            ..LexicalProjectionConfig::default()
-        };
-        let lexical_projection = LexicalProjectionReader::load_manifest_bytes(
-            &root,
-            &lexical_manifest_bytes,
-            manifest.source_graph_commit_epoch,
-            lexical_analyzer_digest(&analyzer_lexicon),
-            manifest.documents_digest,
-            lexical_config,
-        )?
-        .ok_or_else(|| {
-            HawDBError::Storage(
-                "published search lexical projection does not match the out-of-core manifest"
-                    .to_string(),
-            )
-        })?;
-        drop(lexical_manifest_bytes);
-
-        #[cfg(feature = "vector-search")]
-        let rabitq_projection = open_rabitq_projection(
-            &root,
-            &manifest,
-            config.max_vector_search_working_bytes.get(),
-        )?;
-        #[cfg(not(feature = "vector-search"))]
-        verify_rabitq_artifact(&root, &manifest)?;
+            .collect::<Result<Vec<_>>>()?;
+        let mutation_runs = manifest
+            .mutation_runs
+            .iter()
+            .map(|run| {
+                mutation_run::SearchMutationRun::open(
+                    &root,
+                    run,
+                    config.max_mutation_run_bytes.get(),
+                    lexical_analyzer_digest(&analyzer_lexicon),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        mutation_run::validate_closure(&manifest, &mutation_runs)?;
 
         Ok(Self {
             root,
             config,
             analyzer_lexicon,
             manifest,
-            descriptor,
-            payload: Arc::new(payload),
-            metadata_payload: Arc::new(metadata_payload),
-            vector_payload: Arc::new(vector_payload),
-            layout,
-            lexical_projection,
+            segments,
+            _mutation_runs: mutation_runs,
             lexical_source_policy,
             lexical_term_policy,
-            #[cfg(feature = "vector-search")]
-            rabitq_projection,
             runtime_capabilities: crate::compiled_runtime_capabilities(),
         })
+    }
+
+    pub(super) fn primary_segment(&self) -> &SearchOutOfCoreSegmentReader {
+        // Logical-manifest metadata remains shared. Any data-plane operation
+        // must iterate the complete artifact set instead of using this helper.
+        self.segments
+            .first()
+            .expect("validated search manifest has at least one segment")
     }
 
     pub fn lexical_term_policy(&self) -> SearchLexicalTermPolicy {
@@ -744,13 +956,16 @@ impl SearchOutOfCoreReader {
     /// leaves the previous policy intact. Exclusive access prevents changes
     /// during a query; already prepared updates keep their own snapshot.
     pub fn set_lexical_term_policy(&mut self, policy: SearchLexicalTermPolicy) -> Result<()> {
-        self.lexical_projection
-            .validate_term_limit(policy.max_term_bytes())?;
+        for artifact in &self.segments {
+            artifact
+                .lexical_projection
+                .validate_term_limit(policy.max_term_bytes())?;
+        }
         self.lexical_term_policy = policy;
         Ok(())
     }
 
-    /// Changes source admission for subsequent prepared updates.
+    /// Changes source admission for later generation updates.
     ///
     /// This does not affect reading an already published generation because
     /// source admission is a host-owned write policy.
@@ -763,14 +978,16 @@ impl SearchOutOfCoreReader {
     }
 
     pub fn projection_payload_bytes(&self) -> u64 {
-        self.manifest
-            .descriptor_len
-            .saturating_add(self.manifest.payload_len)
-            .saturating_add(self.manifest.metadata_payload_len)
-            .saturating_add(self.manifest.vector_payload_len)
-            .saturating_add(self.manifest.layout_len)
-            .saturating_add(self.manifest.lexical_manifest_len)
-            .saturating_add(self.manifest.rabitq_artifact_len.unwrap_or_default())
+        self.manifest.segments.iter().fold(0u64, |total, segment| {
+            total
+                .saturating_add(segment.descriptor_len)
+                .saturating_add(segment.payload_len)
+                .saturating_add(segment.metadata_payload_len)
+                .saturating_add(segment.vector_payload_len)
+                .saturating_add(segment.layout_len)
+                .saturating_add(segment.lexical_manifest_len)
+                .saturating_add(segment.rabitq_artifact_len.unwrap_or_default())
+        })
     }
 
     #[doc(hidden)]
@@ -782,8 +999,46 @@ impl SearchOutOfCoreReader {
         self.manifest.generation
     }
 
+    #[cfg(all(test, feature = "full-text-search"))]
+    pub(crate) fn artifact_count(&self) -> usize {
+        self.manifest.segments.len()
+    }
+
     pub fn source_graph_commit_epoch(&self) -> Option<u64> {
         self.manifest.source_graph_commit_epoch
+    }
+
+    pub(super) fn can_append_after(&self, first_document_id: &str) -> Result<bool> {
+        let mut previous_last_document_id = None;
+        for artifact in &self.segments {
+            let descriptor_first = artifact.descriptor.segments.first();
+            let descriptor_last = artifact.descriptor.segments.last();
+            let lexical_bounds = artifact.lexical_projection.document_id_bounds();
+            match (descriptor_first, descriptor_last, lexical_bounds) {
+                (None, None, None) => continue,
+                (Some(first), Some(last), Some((lexical_first, lexical_last)))
+                    if first.first_document_id == lexical_first
+                        && last.last_document_id == lexical_last => {}
+                _ => {
+                    return Err(HawDBError::Storage(
+                        "search generation update requires descriptor and lexical document ranges to agree"
+                            .to_string(),
+                    ));
+                }
+            }
+            for segment in &artifact.descriptor.segments {
+                if previous_last_document_id
+                    .is_some_and(|previous| previous >= segment.first_document_id.as_str())
+                {
+                    return Err(HawDBError::Storage(
+                        "search generation update requires manifest artifacts with globally ordered, non-overlapping document ranges"
+                            .to_string(),
+                    ));
+                }
+                previous_last_document_id = Some(segment.last_document_id.as_str());
+            }
+        }
+        Ok(previous_last_document_id.is_none_or(|previous| previous < first_document_id))
     }
 
     pub fn import_source_graph_commit_epoch(&self) -> Option<u64> {
@@ -826,7 +1081,7 @@ impl SearchOutOfCoreReader {
     ) -> Option<super::VectorProjectionQualificationIdentity> {
         #[cfg(feature = "vector-search")]
         {
-            let projection = self.rabitq_projection.as_ref()?;
+            let projection = self.primary_segment().rabitq_projection.as_ref()?;
             let manifest = projection.manifest();
             Some(super::VectorProjectionQualificationIdentity {
                 projection_generation: manifest.identity.generation,
@@ -856,7 +1111,7 @@ impl SearchOutOfCoreReader {
     ) -> Option<super::VectorProjectionResourceEvidence> {
         #[cfg(feature = "vector-search")]
         {
-            let projection = self.rabitq_projection.as_ref()?;
+            let projection = self.primary_segment().rabitq_projection.as_ref()?;
             let manifest = projection.manifest();
             let raw_vector_bytes = (manifest.document_count as u64)
                 .saturating_mul(manifest.dimension as u64)
@@ -1040,8 +1295,13 @@ impl SearchOutOfCoreReader {
                 "search hydration document ids must be unique".to_string(),
             ));
         }
-        let mut metrics = SearchOutOfCoreMetrics::default();
-        let mut hydrated = self.load_documents(&requested, &mut metrics)?;
+        let targets = self.resolve_mutation_targets(&requested)?;
+        let mut metrics = targets.metrics;
+        let mut hydrated = targets
+            .targets
+            .into_iter()
+            .map(|(id, target)| (id, target.document))
+            .collect::<BTreeMap<_, _>>();
         let documents = document_ids
             .iter()
             .map(|id| {
@@ -1056,15 +1316,51 @@ impl SearchOutOfCoreReader {
         Ok(SearchOutOfCoreHydrationOutput { documents, metrics })
     }
 
+    /// Resolves the current content segment for each requested document.
+    ///
+    /// The input is a `BTreeSet` so mutation preparation receives a unique,
+    /// deterministic document-id order. Resolution performs the same bounded
+    /// physical hydration as serving, while retaining the manifest segment
+    /// identity required for a segment-local replacement or delete.
+    pub(crate) fn resolve_mutation_targets(
+        &self,
+        document_ids: &BTreeSet<String>,
+    ) -> Result<SearchOutOfCoreMutationTargetOutput> {
+        let mut metrics = SearchOutOfCoreMetrics::default();
+        let targets = self.load_mutation_targets(document_ids, &mut metrics)?;
+        metrics.hydrated_documents = targets.len();
+        Ok(SearchOutOfCoreMutationTargetOutput { targets, metrics })
+    }
+
+    /// Resolves the content segment that currently owns one document.
+    ///
+    /// This reads the lexical document-id index but does not hydrate the
+    /// document payload. A caller that rebuilds the selected segment therefore
+    /// pays for the segment stream exactly once.
+    pub(crate) fn resolve_mutation_segment(&self, document_id: &str) -> Result<Option<u64>> {
+        let Some(route) = self.segment_for_document(document_id)? else {
+            return Ok(None);
+        };
+        let artifact = self.segments.get(route.artifact_index).ok_or_else(|| {
+            HawDBError::Storage(format!(
+                "search mutation target references unknown layer {}",
+                route.artifact_index
+            ))
+        })?;
+        Ok(Some(artifact.content_segment_id))
+    }
+
     #[cfg(test)]
     fn visit_documents_in_order(
         &self,
         consumer: &mut dyn FnMut(SearchDocument) -> Result<()>,
     ) -> Result<SearchOutOfCoreMetrics> {
         let mut metrics = SearchOutOfCoreMetrics::default();
-        for segment in &self.descriptor.segments {
-            for document in self.read_hydration_segment(segment, &mut metrics)? {
-                consumer(document)?;
+        for artifact in &self.segments {
+            for segment in &artifact.descriptor.segments {
+                for document in self.read_hydration_segment(artifact, segment, &mut metrics)? {
+                    consumer(document)?;
+                }
             }
         }
         Ok(metrics)
@@ -1137,7 +1433,7 @@ impl SearchOutOfCoreReader {
         let policy_epoch = access_control
             .map(|access_control| access_control.policy_epoch)
             .or(options.policy_epoch);
-        let query_terms = self.lexical_projection.tokenize_query(
+        let query_terms = self.primary_segment().lexical_projection.tokenize_query(
             query_text,
             &self.analyzer_lexicon,
             self.lexical_term_policy.max_term_bytes(),
@@ -1209,28 +1505,51 @@ impl SearchOutOfCoreReader {
             SearchMode::Hybrid => options.rank_window,
             SearchMode::Vector => Some(0),
         };
-        let lexical_report = if text_available && mode != SearchMode::Vector {
-            Some(self.lexical_projection.score_with_term_limit(
-                &query_terms,
-                &LexicalMiniDelta::default(),
-                self.lexical_term_policy.max_term_bytes(),
-                retained_text_limit,
-                |id| candidate_set.contains(id, &mut metrics),
-            )?)
-        } else {
-            None
-        };
         let (text_scores, text_matching_count, lexical_postings_visited, lexical_bytes_read) =
-            lexical_report
-                .map(|report| {
-                    (
-                        report.scores,
-                        report.matching_document_count,
-                        report.postings_visited,
-                        report.bytes_read,
-                    )
-                })
-                .unwrap_or_default();
+            if text_available && mode != SearchMode::Vector {
+                let lexical_statistics = LexicalCorpusStatistics::aggregate(
+                    self.segments
+                        .iter()
+                        .map(|segment| segment.lexical_projection.as_ref()),
+                    &query_terms,
+                    self.lexical_term_policy.max_term_bytes(),
+                )?;
+                let mut scores = BTreeMap::new();
+                let mut matching_document_count = 0usize;
+                let mut postings_visited = 0u64;
+                let mut bytes_read = lexical_statistics.bytes_read();
+                for segment in &self.segments {
+                    let report = segment.lexical_projection.score_with_global_statistics(
+                        &query_terms,
+                        self.lexical_term_policy.max_term_bytes(),
+                        retained_text_limit,
+                        &lexical_statistics,
+                        |id| candidate_set.contains(id, &mut metrics),
+                    )?;
+                    matching_document_count = matching_document_count
+                        .checked_add(report.matching_document_count)
+                        .ok_or_else(|| {
+                            HawDBError::Storage("search text match count overflow".to_string())
+                        })?;
+                    postings_visited = postings_visited.saturating_add(report.postings_visited);
+                    bytes_read = bytes_read.saturating_add(report.bytes_read);
+                    for (id, score) in report.scores {
+                        if scores.insert(id.clone(), score).is_some() {
+                            return Err(HawDBError::Storage(format!(
+                                "search out-of-core segment set has duplicate document {id}"
+                            )));
+                        }
+                    }
+                }
+                (
+                    scores,
+                    matching_document_count,
+                    postings_visited,
+                    bytes_read,
+                )
+            } else {
+                Default::default()
+            };
 
         let retained_vector_limit = match mode {
             SearchMode::Vector => Some(page_score_limit),
@@ -1629,39 +1948,76 @@ impl SearchOutOfCoreReader {
         document_ids: &BTreeSet<String>,
         metrics: &mut SearchOutOfCoreMetrics,
     ) -> Result<BTreeMap<String, SearchDocument>> {
+        Ok(self
+            .load_document_targets(document_ids, metrics, "hydration")?
+            .into_iter()
+            .map(|(id, target)| (id, target.document))
+            .collect())
+    }
+
+    fn load_mutation_targets(
+        &self,
+        document_ids: &BTreeSet<String>,
+        metrics: &mut SearchOutOfCoreMetrics,
+    ) -> Result<BTreeMap<String, SearchOutOfCoreMutationTarget>> {
+        self.load_document_targets(document_ids, metrics, "mutation target resolution")
+    }
+
+    fn load_document_targets(
+        &self,
+        document_ids: &BTreeSet<String>,
+        metrics: &mut SearchOutOfCoreMetrics,
+        operation: &str,
+    ) -> Result<BTreeMap<String, SearchOutOfCoreMutationTarget>> {
         if document_ids.len() > self.config.max_hydrated_documents.get() {
             return Err(HawDBError::Storage(format!(
-                "search hydration requires {} documents, exceeding {}",
+                "search {operation} requires {} documents, exceeding {}",
                 document_ids.len(),
                 self.config.max_hydrated_documents
             )));
         }
-        let mut segment_documents = BTreeMap::<u64, BTreeSet<String>>::new();
+        let mut segment_documents = BTreeMap::<(usize, u64), BTreeSet<String>>::new();
         for id in document_ids {
-            let segment = self.segment_for_document(id).ok_or_else(|| {
+            let route = self.segment_for_document(id)?.ok_or_else(|| {
                 HawDBError::Storage(format!(
                     "search document {id} is outside the published document ranges"
                 ))
             })?;
+            if route.lexical_document_bytes_read > 0 {
+                metrics.lexical_document_block_reads =
+                    metrics.lexical_document_block_reads.saturating_add(1);
+                metrics.lexical_document_bytes_read = metrics
+                    .lexical_document_bytes_read
+                    .saturating_add(route.lexical_document_bytes_read);
+            }
             segment_documents
-                .entry(segment.segment_id)
+                .entry((route.artifact_index, route.segment.segment_id))
                 .or_default()
                 .insert(id.clone());
         }
-        let mut hydrated = BTreeMap::<String, SearchDocument>::new();
+        let mut targets = BTreeMap::<String, SearchOutOfCoreMutationTarget>::new();
         let mut hydrated_bytes = 0u64;
-        for (segment_id, ids) in segment_documents {
+        for ((layer, segment_id), ids) in segment_documents {
+            let artifact = self.segments.get(layer).ok_or_else(|| {
+                HawDBError::Storage(format!(
+                    "search {operation} references unknown layer {layer}"
+                ))
+            })?;
             let segment = self
+                .segments
+                .get(layer)
+                .expect("layer was checked above")
                 .descriptor
                 .segments
                 .get(segment_id as usize)
                 .filter(|segment| segment.segment_id == segment_id)
                 .ok_or_else(|| {
                     HawDBError::Storage(format!(
-                        "search hydration references unknown segment {segment_id}"
+                        "search {operation} references unknown segment {segment_id}"
                     ))
                 })?;
             for document in self.read_selected_hydration_segment(
+                artifact,
                 segment,
                 &ids,
                 self.config.max_hydrated_bytes.get() - hydrated_bytes,
@@ -1670,32 +2026,47 @@ impl SearchOutOfCoreReader {
                 hydrated_bytes = hydrated_bytes
                     .checked_add(search_document_bytes(&document))
                     .ok_or_else(|| {
-                        HawDBError::Storage("search hydration byte count overflow".to_string())
+                        HawDBError::Storage(format!("search {operation} byte count overflow"))
                     })?;
                 if hydrated_bytes > self.config.max_hydrated_bytes.get() {
                     return Err(HawDBError::Storage(format!(
-                        "search hydration requires {hydrated_bytes} bytes, exceeding {}",
+                        "search {operation} requires {hydrated_bytes} bytes, exceeding {}",
                         self.config.max_hydrated_bytes
                     )));
                 }
-                hydrated.insert(document.id.clone(), document);
+                let id = document.id.clone();
+                if targets
+                    .insert(
+                        id.clone(),
+                        SearchOutOfCoreMutationTarget {
+                            content_segment_id: artifact.content_segment_id,
+                            document,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(HawDBError::Storage(format!(
+                        "search {operation} found duplicate document {id}"
+                    )));
+                }
             }
         }
-        if hydrated.len() != document_ids.len() {
+        if targets.len() != document_ids.len() {
             return Err(HawDBError::Storage(format!(
-                "search hydration found {} of {} requested documents",
-                hydrated.len(),
+                "search {operation} found {} of {} requested documents",
+                targets.len(),
                 document_ids.len()
             )));
         }
         metrics.hydrated_bytes = hydrated_bytes;
-        Ok(hydrated)
+        Ok(targets)
     }
 
-    fn segment_for_document(&self, id: &str) -> Option<&SearchSegmentDescriptorEntry> {
-        self.descriptor
-            .segments
-            .binary_search_by(|segment| {
+    fn segment_for_document(&self, id: &str) -> Result<Option<SearchDocumentSegmentRoute<'_>>> {
+        let mut route = None;
+        let mut lexical_document_bytes_read = 0u64;
+        for (artifact_index, artifact) in self.segments.iter().enumerate() {
+            let Ok(index) = artifact.descriptor.segments.binary_search_by(|segment| {
                 if segment.last_document_id.as_str() < id {
                     CmpOrdering::Less
                 } else if segment.first_document_id.as_str() > id {
@@ -1703,9 +2074,33 @@ impl SearchOutOfCoreReader {
                 } else {
                     CmpOrdering::Equal
                 }
-            })
-            .ok()
-            .and_then(|index| self.descriptor.segments.get(index))
+            }) else {
+                continue;
+            };
+            let segment = artifact
+                .descriptor
+                .segments
+                .get(index)
+                .expect("binary search returned an existing descriptor segment");
+            let probe = artifact.lexical_projection.probe_document_id(id)?;
+            lexical_document_bytes_read =
+                lexical_document_bytes_read.saturating_add(probe.bytes_read);
+            if !probe.present {
+                continue;
+            }
+            if route.replace((artifact_index, segment)).is_some() {
+                return Err(HawDBError::Storage(format!(
+                    "search out-of-core segment set has duplicate document {id}"
+                )));
+            }
+        }
+        Ok(
+            route.map(|(artifact_index, segment)| SearchDocumentSegmentRoute {
+                artifact_index,
+                segment,
+                lexical_document_bytes_read,
+            }),
+        )
     }
 
     fn require_search_capabilities(&self, mode: SearchMode) -> Result<()> {
@@ -1728,6 +2123,7 @@ impl SearchOutOfCoreReader {
     #[cfg(test)]
     fn read_hydration_segment(
         &self,
+        artifact: &SearchOutOfCoreSegmentReader,
         segment: &SearchSegmentDescriptorEntry,
         metrics: &mut SearchOutOfCoreMetrics,
     ) -> Result<Vec<SearchDocument>> {
@@ -1738,7 +2134,7 @@ impl SearchOutOfCoreReader {
             ))
         })?;
         let payload = read_out_of_core_payload_range(
-            &self.payload,
+            &artifact.payload,
             SearchOutOfCoreRange {
                 offset: range.offset,
                 length: range.length,
@@ -1765,12 +2161,13 @@ impl SearchOutOfCoreReader {
 
     fn read_metadata_segment(
         &self,
+        artifact: &SearchOutOfCoreSegmentReader,
         segment: &SearchSegmentDescriptorEntry,
         metrics: &mut SearchOutOfCoreMetrics,
     ) -> Result<Vec<SearchMetadataDocument>> {
-        let range = self.layout_range(segment.segment_id)?.metadata;
+        let range = Self::artifact_layout_range(artifact, segment.segment_id)?.metadata;
         let payload = read_out_of_core_payload_range(
-            &self.metadata_payload,
+            &artifact.metadata_payload,
             range,
             segment.segment_id,
             "metadata",
@@ -1786,7 +2183,7 @@ impl SearchOutOfCoreReader {
         metrics.peak_metadata_segment_bytes =
             metrics.peak_metadata_segment_bytes.max(text.len() as u64);
         let documents = decode_metadata_segment(&text, segment, range.entry_count)?;
-        let layout = self.layout_range(segment.segment_id)?;
+        let layout = Self::artifact_layout_range(artifact, segment.segment_id)?;
         let ordinals = documents
             .iter()
             .filter_map(|document| document.vector_ordinal)
@@ -1806,12 +2203,14 @@ impl SearchOutOfCoreReader {
 
     fn read_vector_segment(
         &self,
+        artifact: &SearchOutOfCoreSegmentReader,
         segment: &SearchSegmentDescriptorEntry,
         metrics: &mut SearchOutOfCoreMetrics,
     ) -> Result<Vec<SearchVectorDocument>> {
-        let range = self.layout_range(segment.segment_id)?.vectors;
+        let layout = Self::artifact_layout_range(artifact, segment.segment_id)?;
+        let range = layout.vectors;
         let payload = read_out_of_core_payload_range(
-            &self.vector_payload,
+            &artifact.vector_payload,
             range,
             segment.segment_id,
             "vector",
@@ -1830,13 +2229,17 @@ impl SearchOutOfCoreReader {
             &text,
             segment,
             range.entry_count,
-            self.layout_range(segment.segment_id)?.vector_ordinal_base,
+            layout.vector_ordinal_base,
             self.manifest.embedding_dimension,
         )
     }
 
-    fn layout_range(&self, segment_id: u64) -> Result<&SearchOutOfCoreSegmentLayout> {
-        self.layout
+    fn artifact_layout_range(
+        artifact: &SearchOutOfCoreSegmentReader,
+        segment_id: u64,
+    ) -> Result<&SearchOutOfCoreSegmentLayout> {
+        artifact
+            .layout
             .segments
             .get(segment_id as usize)
             .filter(|layout| layout.segment_id == segment_id)
@@ -1853,14 +2256,18 @@ impl SearchOutOfCoreReader {
         report: &mut SearchPredicatePushdownReport,
         metrics: &mut SearchOutOfCoreMetrics,
     ) -> Result<CandidateSet> {
-        report.segment_count = self.descriptor.segments.len();
-        report.segment_pruning_candidate_document_count = self.descriptor.document_count;
+        report.segment_count = self
+            .segments
+            .iter()
+            .map(|segment| segment.descriptor.segments.len())
+            .sum();
+        report.segment_pruning_candidate_document_count = self.manifest.document_count;
         report.persisted_segment_descriptor_used = true;
         let mut field_pruning = SearchFieldPruningAccumulator::new(predicates);
 
         if predicates.is_empty() {
             report.field_summaries = field_pruning.into_reports();
-            return Ok(CandidateSet::All(self.descriptor.document_count));
+            return Ok(CandidateSet::All(self.manifest.document_count));
         }
 
         fs::create_dir_all(&self.config.spill_directory)?;
@@ -1874,76 +2281,85 @@ impl SearchOutOfCoreReader {
         file.write_all(CANDIDATE_FILE_HEADER)?;
         let mut offset = CANDIDATE_FILE_HEADER.len() as u64;
         let mut cardinality = 0usize;
-        let mut blocks = Vec::with_capacity(self.descriptor.segments.len());
+        let mut blocks = Vec::with_capacity(
+            self.segments
+                .iter()
+                .map(|artifact| artifact.descriptor.segments.len())
+                .sum(),
+        );
 
-        for segment in &self.descriptor.segments {
-            field_pruning.observe_persisted_segment(segment, predicates);
-            if !segment.may_match_predicates(predicates) {
-                report.pruned_segment_count = report.pruned_segment_count.saturating_add(1);
-                report.segment_pruned_document_count = report
-                    .segment_pruned_document_count
-                    .saturating_add(segment.document_count);
-                blocks.push(CandidateBlock::empty(segment));
-                continue;
-            }
-            report.scanned_segment_count = report.scanned_segment_count.saturating_add(1);
-            report.segment_scanned_document_count = report
-                .segment_scanned_document_count
-                .saturating_add(segment.document_count);
-            let documents = self.read_metadata_segment(segment, metrics)?;
-            let mut encoded = Vec::new();
-            let mut block_cardinality = 0usize;
-            for document in documents {
-                let candidate = SearchDocument {
-                    id: document.id,
-                    title: String::new(),
-                    content: String::new(),
-                    embedding: None,
-                    metadata: document.metadata,
-                };
-                if !search_document_matches_predicates(&candidate, predicates) {
+        for (layer, artifact) in self.segments.iter().enumerate() {
+            for segment in &artifact.descriptor.segments {
+                field_pruning.observe_persisted_segment(segment, predicates);
+                if !segment.may_match_predicates(predicates) {
+                    report.pruned_segment_count = report.pruned_segment_count.saturating_add(1);
+                    report.segment_pruned_document_count = report
+                        .segment_pruned_document_count
+                        .saturating_add(segment.document_count);
+                    blocks.push(CandidateBlock::empty(layer, segment));
                     continue;
                 }
-                let id_len = u32::try_from(candidate.id.len()).map_err(|_| {
-                    HawDBError::Storage(format!(
-                        "search candidate id {} exceeds the supported length",
-                        candidate.id
-                    ))
-                })?;
-                encoded.extend_from_slice(&id_len.to_le_bytes());
-                encoded.extend_from_slice(candidate.id.as_bytes());
-                encoded
-                    .extend_from_slice(&document.vector_ordinal.unwrap_or(u64::MAX).to_le_bytes());
-                block_cardinality = block_cardinality.saturating_add(1);
+                report.scanned_segment_count = report.scanned_segment_count.saturating_add(1);
+                report.segment_scanned_document_count = report
+                    .segment_scanned_document_count
+                    .saturating_add(segment.document_count);
+                let documents = self.read_metadata_segment(artifact, segment, metrics)?;
+                let mut encoded = Vec::new();
+                let mut block_cardinality = 0usize;
+                for document in documents {
+                    let candidate = SearchDocument {
+                        id: document.id,
+                        title: String::new(),
+                        content: String::new(),
+                        embedding: None,
+                        metadata: document.metadata,
+                    };
+                    if !search_document_matches_predicates(&candidate, predicates) {
+                        continue;
+                    }
+                    let id_len = u32::try_from(candidate.id.len()).map_err(|_| {
+                        HawDBError::Storage(format!(
+                            "search candidate id {} exceeds the supported length",
+                            candidate.id
+                        ))
+                    })?;
+                    encoded.extend_from_slice(&id_len.to_le_bytes());
+                    encoded.extend_from_slice(candidate.id.as_bytes());
+                    encoded.extend_from_slice(
+                        &document.vector_ordinal.unwrap_or(u64::MAX).to_le_bytes(),
+                    );
+                    block_cardinality = block_cardinality.saturating_add(1);
+                }
+                if encoded.len() as u64 > self.config.max_candidate_block_bytes.get() {
+                    return Err(HawDBError::Storage(format!(
+                        "search candidate block for layer {layer} segment {} requires {} bytes, exceeding {}",
+                        segment.segment_id,
+                        encoded.len(),
+                        self.config.max_candidate_block_bytes
+                    )));
+                }
+                let next_spill_bytes = offset
+                    .saturating_add(encoded.len() as u64)
+                    .saturating_sub(CANDIDATE_FILE_HEADER.len() as u64);
+                if next_spill_bytes > self.config.max_candidate_spill_bytes.get() {
+                    return Err(HawDBError::Storage(format!(
+                        "search candidate spill requires {next_spill_bytes} bytes, exceeding {}",
+                        self.config.max_candidate_spill_bytes
+                    )));
+                }
+                file.write_all(&encoded)?;
+                blocks.push(CandidateBlock {
+                    layer,
+                    segment_id: segment.segment_id,
+                    first_document_id: segment.first_document_id.clone(),
+                    last_document_id: segment.last_document_id.clone(),
+                    offset,
+                    length: encoded.len() as u64,
+                    cardinality: block_cardinality,
+                });
+                offset = offset.saturating_add(encoded.len() as u64);
+                cardinality = cardinality.saturating_add(block_cardinality);
             }
-            if encoded.len() as u64 > self.config.max_candidate_block_bytes.get() {
-                return Err(HawDBError::Storage(format!(
-                    "search candidate block for segment {} requires {} bytes, exceeding {}",
-                    segment.segment_id,
-                    encoded.len(),
-                    self.config.max_candidate_block_bytes
-                )));
-            }
-            let next_spill_bytes = offset
-                .saturating_add(encoded.len() as u64)
-                .saturating_sub(CANDIDATE_FILE_HEADER.len() as u64);
-            if next_spill_bytes > self.config.max_candidate_spill_bytes.get() {
-                return Err(HawDBError::Storage(format!(
-                    "search candidate spill requires {next_spill_bytes} bytes, exceeding {}",
-                    self.config.max_candidate_spill_bytes
-                )));
-            }
-            file.write_all(&encoded)?;
-            blocks.push(CandidateBlock {
-                segment_id: segment.segment_id,
-                first_document_id: segment.first_document_id.clone(),
-                last_document_id: segment.last_document_id.clone(),
-                offset,
-                length: encoded.len() as u64,
-                cardinality: block_cardinality,
-            });
-            offset = offset.saturating_add(encoded.len() as u64);
-            cardinality = cardinality.saturating_add(block_cardinality);
         }
         file.sync_all()?;
         metrics.candidate_spill_bytes = offset.saturating_sub(CANDIDATE_FILE_HEADER.len() as u64);
@@ -1963,7 +2379,7 @@ impl SearchOutOfCoreReader {
     }
 }
 
-fn verify_rabitq_artifact(root: &Path, manifest: &SearchOutOfCoreManifestBody) -> Result<()> {
+fn verify_rabitq_artifact(root: &Path, manifest: &SearchOutOfCoreSegmentManifest) -> Result<()> {
     let Some(file_name) = manifest.rabitq_artifact_file.as_deref() else {
         return Ok(());
     };
@@ -1985,7 +2401,8 @@ fn verify_rabitq_artifact(root: &Path, manifest: &SearchOutOfCoreManifestBody) -
 #[cfg(feature = "vector-search")]
 fn open_rabitq_projection(
     root: &Path,
-    manifest: &SearchOutOfCoreManifestBody,
+    active_manifest: &SearchOutOfCoreManifestBody,
+    manifest: &SearchOutOfCoreSegmentManifest,
     max_working_bytes: usize,
 ) -> Result<Option<Arc<hawdb_vector_projection::FileProjection>>> {
     verify_rabitq_artifact(root, manifest)?;
@@ -2002,18 +2419,18 @@ fn open_rabitq_projection(
     }
     let projection = hawdb_vector_projection::FileProjection::open(root.join(file_name))
         .map_err(vector_projection_error)?;
-    let projection_manifest = projection.manifest();
+    let artifact_manifest = projection.manifest();
     let expected_identity = hawdb_vector_projection::ProjectionIdentity {
         generation: manifest.generation,
         source_epoch: manifest.source_graph_commit_epoch,
-        embedding_model: manifest.embedding_model.clone(),
-        embedding_version: manifest.embedding_version.clone(),
+        embedding_model: active_manifest.embedding_model.clone(),
+        embedding_version: active_manifest.embedding_version.clone(),
     };
-    if projection_manifest.identity != expected_identity
-        || Some(projection_manifest.dimension) != manifest.embedding_dimension
-        || Some(projection_manifest.document_count) != manifest.rabitq_vector_document_count
-        || Some(projection_manifest.source_digest) != manifest.rabitq_source_digest
-        || Some(projection_manifest.payload_checksum) != manifest.rabitq_payload_checksum
+    if artifact_manifest.identity != expected_identity
+        || Some(artifact_manifest.dimension) != active_manifest.embedding_dimension
+        || Some(artifact_manifest.document_count) != manifest.rabitq_vector_document_count
+        || Some(artifact_manifest.source_digest) != manifest.rabitq_source_digest
+        || Some(artifact_manifest.payload_checksum) != manifest.rabitq_payload_checksum
     {
         return Err(HawDBError::Storage(
             "search out-of-core RaBitQ identity does not match its generation".to_string(),
@@ -2045,10 +2462,17 @@ fn file_len_checksum_streaming(path: &Path) -> Result<(u64, u64)> {
     Ok((actual_len, hasher.finish()))
 }
 
-pub(super) fn published_generation(
+pub(super) struct PublishedArtifactGenerations {
+    pub(super) active_generation: u64,
+    pub(super) lexical_generations: BTreeSet<u64>,
+    pub(super) out_of_core_generations: BTreeSet<u64>,
+    pub(super) rabitq_generations: BTreeSet<u64>,
+}
+
+pub(super) fn published_artifact_generations(
     root: &Path,
     analyzer_lexicon: &SearchAnalyzerLexicon,
-) -> Result<Option<u64>> {
+) -> Result<Option<PublishedArtifactGenerations>> {
     let manifest_path = root.join(OUT_OF_CORE_MANIFEST_FILE);
     if !manifest_path.exists() {
         return Ok(None);
@@ -2058,10 +2482,35 @@ pub(super) fn published_generation(
         SearchOutOfCoreConfig::default(),
         analyzer_lexicon.clone(),
     )?;
-    Ok(Some(reader.generation()))
+    let mut lexical_generations = BTreeSet::new();
+    let mut out_of_core_generations = BTreeSet::new();
+    let mut rabitq_generations = BTreeSet::new();
+    for artifact in &reader.manifest.segments {
+        lexical_generations.insert(artifact.generation);
+        out_of_core_generations.insert(artifact.generation);
+        if artifact.rabitq_artifact_file.is_some() {
+            rabitq_generations.insert(artifact.generation);
+        }
+    }
+    out_of_core_generations.extend(
+        reader
+            .manifest
+            .mutation_runs
+            .iter()
+            .map(|run| run.generation),
+    );
+    Ok(Some(PublishedArtifactGenerations {
+        active_generation: reader.generation(),
+        lexical_generations,
+        out_of_core_generations,
+        rabitq_generations,
+    }))
 }
 
-pub(super) fn publish_out_of_core_projection(index: &SearchIndex, root: &Path) -> Result<u64> {
+pub(super) fn publish_out_of_core_projection(
+    index: &SearchIndex,
+    root: &Path,
+) -> Result<PublishedOutOfCoreProjection> {
     let descriptor = read_search_segment_descriptor(root)?.ok_or_else(|| {
         HawDBError::Storage("search segment descriptor is missing after checkpoint".to_string())
     })?;
@@ -2077,18 +2526,18 @@ pub(super) fn publish_out_of_core_projection(index: &SearchIndex, root: &Path) -
     let vector_payload_file = format!("search_projection_vector_payloads.{generation}.hawdb");
     let layout_file = format!("search_projection_out_of_core_layout.{generation}.hawdb");
     let lexical_manifest_file = format!("search_lexical.manifest.{generation}.hawdb");
-    publish_generation_link(
+    let mut bytes_written = publish_generation_link(
         &root.join(SEARCH_SEGMENT_DESCRIPTOR_FILE),
         &root.join(&descriptor_file),
     )?;
-    publish_generation_link(
+    bytes_written = bytes_written.saturating_add(publish_generation_link(
         &root.join(SEARCH_SEGMENT_PAYLOAD_FILE),
         &root.join(&payload_file),
-    )?;
-    publish_generation_link(
+    )?);
+    bytes_written = bytes_written.saturating_add(publish_generation_link(
         &root.join(MANIFEST_FILE),
         &root.join(&lexical_manifest_file),
-    )?;
+    )?);
 
     let (layout, metadata_payload_len, vector_payload_len) = write_out_of_core_sidecars(
         index,
@@ -2098,7 +2547,13 @@ pub(super) fn publish_out_of_core_projection(index: &SearchIndex, root: &Path) -
         &root.join(&vector_payload_file),
     )?;
     let layout_bytes = layout.encode()?;
-    write_generation_artifact(&root.join(&layout_file), &layout_bytes)?;
+    bytes_written = bytes_written.saturating_add(write_generation_artifact(
+        &root.join(&layout_file),
+        &layout_bytes,
+    )?);
+    bytes_written = bytes_written
+        .saturating_add(metadata_payload_len)
+        .saturating_add(vector_payload_len);
 
     let descriptor_bytes = fs::read(root.join(&descriptor_file))?;
     let lexical_manifest_bytes = fs::read(root.join(&lexical_manifest_file))?;
@@ -2106,31 +2561,40 @@ pub(super) fn publish_out_of_core_projection(index: &SearchIndex, root: &Path) -
     let manifest = SearchOutOfCoreManifestBody {
         format: OUT_OF_CORE_FORMAT.to_string(),
         generation,
-        descriptor_file,
-        descriptor_len: descriptor_bytes.len() as u64,
-        descriptor_checksum: checksum_bytes(&descriptor_bytes),
-        payload_file,
-        payload_len: fs::metadata(root.join(format!(
-            "search_projection_segment_payloads.{generation}.hawdb"
-        )))?
-        .len(),
-        metadata_payload_file,
-        metadata_payload_len,
-        vector_payload_file,
-        vector_payload_len,
-        layout_file,
-        layout_len: layout_bytes.len() as u64,
-        layout_checksum: checksum_bytes(&layout_bytes),
-        lexical_manifest_file,
-        lexical_manifest_len: lexical_manifest_bytes.len() as u64,
-        lexical_manifest_checksum: checksum_bytes(&lexical_manifest_bytes),
-        rabitq_artifact_file: None,
-        rabitq_artifact_len: None,
-        rabitq_artifact_checksum: None,
-        rabitq_source_digest: None,
-        rabitq_vector_document_count: None,
-        rabitq_payload_checksum: None,
-        rabitq_peak_build_working_bytes: None,
+        segments: vec![SearchOutOfCoreSegmentManifest {
+            segment_id: 0,
+            level: 0,
+            generation,
+            descriptor_file,
+            descriptor_len: descriptor_bytes.len() as u64,
+            descriptor_checksum: checksum_bytes(&descriptor_bytes),
+            payload_file,
+            payload_len: fs::metadata(root.join(format!(
+                "search_projection_segment_payloads.{generation}.hawdb"
+            )))?
+            .len(),
+            metadata_payload_file,
+            metadata_payload_len,
+            vector_payload_file,
+            vector_payload_len,
+            layout_file,
+            layout_len: layout_bytes.len() as u64,
+            layout_checksum: checksum_bytes(&layout_bytes),
+            lexical_manifest_file,
+            lexical_manifest_len: lexical_manifest_bytes.len() as u64,
+            lexical_manifest_checksum: checksum_bytes(&lexical_manifest_bytes),
+            rabitq_artifact_file: None,
+            rabitq_artifact_len: None,
+            rabitq_artifact_checksum: None,
+            rabitq_source_digest: None,
+            rabitq_vector_document_count: None,
+            rabitq_payload_checksum: None,
+            rabitq_peak_build_working_bytes: None,
+            document_count: index.documents.len(),
+            documents_digest: lexical_documents_digest(&index.documents),
+            source_graph_commit_epoch: index.source_graph_commit_epoch,
+        }],
+        mutation_runs: Vec::new(),
         document_count: index.documents.len(),
         documents_digest: lexical_documents_digest(&index.documents),
         source_graph_commit_epoch: index.source_graph_commit_epoch,
@@ -2143,13 +2607,17 @@ pub(super) fn publish_out_of_core_projection(index: &SearchIndex, root: &Path) -
     };
     let manifest_path = root.join(OUT_OF_CORE_MANIFEST_FILE);
     let tmp_path = manifest_path.with_extension(format!("tmp.{generation}"));
+    let manifest_bytes = manifest.encode()?;
     {
         let mut file = File::create(&tmp_path)?;
-        file.write_all(&manifest.encode()?)?;
+        file.write_all(&manifest_bytes)?;
         file.sync_all()?;
     }
     durable_replace_file(&tmp_path, &manifest_path)?;
-    Ok(generation)
+    Ok(PublishedOutOfCoreProjection {
+        generation,
+        bytes_written: bytes_written.saturating_add(manifest_bytes.len() as u64),
+    })
 }
 
 fn write_out_of_core_sidecars(
@@ -2328,21 +2796,22 @@ impl CandidateSet {
         }
     }
 
-    fn segment_cardinality(&self, segment_id: u64) -> usize {
+    fn segment_cardinality(&self, layer: usize, segment_id: u64) -> usize {
         match self {
             Self::All(_) => usize::MAX,
             Self::Spilled(set) => set
                 .blocks
-                .get(segment_id as usize)
-                .filter(|block| block.segment_id == segment_id)
+                .iter()
+                .find(|block| block.layer == layer && block.segment_id == segment_id)
                 .map(|block| block.cardinality)
                 .unwrap_or(0),
         }
     }
 
     #[cfg(feature = "vector-search")]
-    fn vector_ordinals(
+    fn vector_ordinals_for_layer(
         &self,
+        layer: usize,
         max_bytes: u64,
         task_context: Option<&crate::RuntimeTaskContext>,
         metrics: &mut SearchOutOfCoreMetrics,
@@ -2350,7 +2819,7 @@ impl CandidateSet {
         match self {
             Self::All(_) => Ok(None),
             Self::Spilled(set) => set
-                .vector_ordinals(max_bytes, task_context, metrics)
+                .vector_ordinals_for_layer(layer, max_bytes, task_context, metrics)
                 .map(Some),
         }
     }
@@ -2462,6 +2931,7 @@ impl BoundedScoreCollector {
 
 #[derive(Debug)]
 struct CandidateBlock {
+    layer: usize,
     segment_id: u64,
     first_document_id: String,
     last_document_id: String,
@@ -2471,8 +2941,9 @@ struct CandidateBlock {
 }
 
 impl CandidateBlock {
-    fn empty(segment: &SearchSegmentDescriptorEntry) -> Self {
+    fn empty(layer: usize, segment: &SearchSegmentDescriptorEntry) -> Self {
         Self {
+            layer,
             segment_id: segment.segment_id,
             first_document_id: segment.first_document_id.clone(),
             last_document_id: segment.last_document_id.clone(),
@@ -2489,6 +2960,7 @@ impl CandidateBlock {
 
 #[derive(Debug)]
 struct CandidateCache {
+    layer: usize,
     segment_id: u64,
     entries: Vec<CandidateEntry>,
 }
@@ -2510,74 +2982,54 @@ struct SpilledCandidateSet {
 
 impl SpilledCandidateSet {
     fn contains(&self, id: &str, metrics: &mut SearchOutOfCoreMetrics) -> Result<bool> {
-        let block = self
-            .blocks
-            .binary_search_by(|block| {
-                if id < block.first_document_id.as_str() {
-                    std::cmp::Ordering::Greater
-                } else if id > block.last_document_id.as_str() {
-                    std::cmp::Ordering::Less
-                } else {
-                    std::cmp::Ordering::Equal
-                }
-            })
-            .ok()
-            .and_then(|index| self.blocks.get(index));
-        let Some(block) = block.filter(|block| block.contains_range(id)) else {
-            return Ok(false);
-        };
-        if block.cardinality == 0 {
-            return Ok(false);
-        }
         let mut cache = self
             .cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if cache
-            .as_ref()
-            .is_none_or(|cached| cached.segment_id != block.segment_id)
+        for block in self
+            .blocks
+            .iter()
+            .filter(|block| block.cardinality > 0 && block.contains_range(id))
         {
-            if block.length > self.max_block_bytes {
-                return Err(HawDBError::Storage(format!(
-                    "search candidate block {} exceeds its read budget",
-                    block.segment_id
-                )));
+            if cache.as_ref().is_none_or(|cached| {
+                cached.layer != block.layer || cached.segment_id != block.segment_id
+            }) {
+                let bytes = self.read_block_bytes(block, metrics)?;
+                *cache = Some(CandidateCache {
+                    layer: block.layer,
+                    segment_id: block.segment_id,
+                    entries: decode_candidate_entries(&bytes, block.cardinality)?,
+                });
             }
-            let length = usize::try_from(block.length).map_err(|_| {
-                HawDBError::Storage("search candidate block length exceeds usize".to_string())
-            })?;
-            let mut bytes = vec![0u8; length];
-            read_search_range(
-                self.file.as_ref().ok_or_else(|| {
-                    HawDBError::Storage("search candidate spill file is closed".to_string())
-                })?,
-                block.offset,
-                &mut bytes,
-            )?;
-            metrics.candidate_block_reads = metrics.candidate_block_reads.saturating_add(1);
-            metrics.candidate_bytes_read =
-                metrics.candidate_bytes_read.saturating_add(block.length);
-            *cache = Some(CandidateCache {
-                segment_id: block.segment_id,
-                entries: decode_candidate_entries(&bytes, block.cardinality)?,
-            });
+            if cache.as_ref().is_some_and(|cached| {
+                cached
+                    .entries
+                    .binary_search_by(|value| value.id.as_str().cmp(id))
+                    .is_ok()
+            }) {
+                return Ok(true);
+            }
         }
-        Ok(cache.as_ref().is_some_and(|cached| {
-            cached
-                .entries
-                .binary_search_by(|value| value.id.as_str().cmp(id))
-                .is_ok()
-        }))
+        Ok(false)
     }
 
     #[cfg(feature = "vector-search")]
-    fn vector_ordinals(
+    fn vector_ordinals_for_layer(
         &self,
+        layer: usize,
         max_bytes: u64,
         task_context: Option<&crate::RuntimeTaskContext>,
         metrics: &mut SearchOutOfCoreMetrics,
     ) -> Result<Vec<u64>> {
-        let ordinal_capacity_bytes = (self.cardinality as u64)
+        let cardinality = self
+            .blocks
+            .iter()
+            .filter(|block| block.layer == layer)
+            .try_fold(0usize, |total, block| total.checked_add(block.cardinality))
+            .ok_or_else(|| {
+                HawDBError::Storage("search vector candidate count overflow".to_string())
+            })?;
+        let ordinal_capacity_bytes = (cardinality as u64)
             .checked_mul(std::mem::size_of::<u64>() as u64)
             .ok_or_else(|| {
                 HawDBError::Storage("search vector allowlist size overflow".to_string())
@@ -2585,6 +3037,7 @@ impl SpilledCandidateSet {
         let max_block_bytes = self
             .blocks
             .iter()
+            .filter(|block| block.layer == layer)
             .map(|block| block.length)
             .max()
             .unwrap_or_default();
@@ -2598,8 +3051,8 @@ impl SpilledCandidateSet {
                 "search vector candidate allowlist and block require {required_working_bytes} bytes, exceeding {max_bytes}"
             )));
         }
-        let mut ordinals = Vec::with_capacity(self.cardinality);
-        for block in &self.blocks {
+        let mut ordinals = Vec::with_capacity(cardinality);
+        for block in self.blocks.iter().filter(|block| block.layer == layer) {
             if let Some(task_context) = task_context {
                 task_context.checkpoint().map_err(|reason| {
                     HawDBError::Execution(format!("search vector task {reason}"))
@@ -2619,7 +3072,6 @@ impl SpilledCandidateSet {
         Ok(ordinals)
     }
 
-    #[cfg(feature = "vector-search")]
     fn read_block_bytes(
         &self,
         block: &CandidateBlock,
@@ -3075,22 +3527,23 @@ fn latest_recoverable_lexical_generation(root: &Path, max_manifest_bytes: u64) -
     Ok(latest)
 }
 
-fn publish_generation_link(source: &Path, target: &Path) -> Result<()> {
+fn publish_generation_link(source: &Path, target: &Path) -> Result<u64> {
     let tmp = temporary_artifact_path(target);
     let mut guard = CandidateFileGuard::new(tmp.clone());
-    match fs::hard_link(source, &tmp) {
-        Ok(()) => {}
+    let bytes_written = match fs::hard_link(source, &tmp) {
+        Ok(()) => 0,
         Err(_) => {
-            fs::copy(source, &tmp)?;
+            let copied = fs::copy(source, &tmp)?;
             File::open(&tmp)?.sync_all()?;
+            copied
         }
-    }
+    };
     durable_replace_file(&tmp, target)?;
     guard.disarm();
-    Ok(())
+    Ok(bytes_written)
 }
 
-fn write_generation_artifact(target: &Path, bytes: &[u8]) -> Result<()> {
+fn write_generation_artifact(target: &Path, bytes: &[u8]) -> Result<u64> {
     let tmp = temporary_artifact_path(target);
     let mut guard = CandidateFileGuard::new(tmp.clone());
     {
@@ -3100,7 +3553,7 @@ fn write_generation_artifact(target: &Path, bytes: &[u8]) -> Result<()> {
     }
     durable_replace_file(&tmp, target)?;
     guard.disarm();
-    Ok(())
+    Ok(bytes.len() as u64)
 }
 
 fn temporary_artifact_path(target: &Path) -> PathBuf {
@@ -3424,7 +3877,7 @@ mod tests {
             .unwrap_err();
         assert!(memory_error
             .to_string()
-            .contains("admitted 0 score entries"));
+            .contains("uniqueness check exceeds the admitted working memory"));
 
         let cancellation = crate::RuntimeCancellationToken::new();
         let task_context = crate::RuntimeTaskContext::without_deadline(cancellation.clone());
@@ -3543,7 +3996,14 @@ mod tests {
         index.upsert(document(0, "team")).unwrap();
         index.checkpoint().unwrap();
         let reader = SearchOutOfCoreReader::open(&path).unwrap();
-        let payload_path = path.join(&reader.manifest.payload_file);
+        let payload_path = path.join(
+            &reader
+                .manifest
+                .segments
+                .first()
+                .expect("manifest has a segment")
+                .payload_file,
+        );
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -3574,6 +4034,519 @@ mod tests {
     }
 
     #[test]
+    fn out_of_core_reader_rejects_duplicate_manifest_segment_ids() {
+        let path = test_dir("multiple-manifest-segments");
+        let mut index = SearchIndex::open(&path).unwrap();
+        index.upsert(document(0, "team")).unwrap();
+        index.checkpoint().unwrap();
+
+        let manifest_path = path.join(OUT_OF_CORE_MANIFEST_FILE);
+        let envelope: SearchOutOfCoreManifestEnvelope =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        let mut body = envelope.body;
+        let duplicate = body.segments[0].clone();
+        body.segments.push(duplicate);
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        let bytes = serde_json::to_vec(&SearchOutOfCoreManifestEnvelope {
+            body,
+            checksum: checksum_bytes(&body_bytes),
+        })
+        .unwrap();
+        fs::write(&manifest_path, bytes).unwrap();
+
+        let error = SearchOutOfCoreReader::open(&path).unwrap_err();
+        assert!(error.to_string().contains("duplicate segment ids"));
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "full-text-search")]
+    fn out_of_core_reader_and_generation_update_reject_duplicate_manifest_documents() {
+        let path = test_dir("duplicate-segment-documents");
+        let mut index = SearchIndex::open(&path).unwrap();
+        index.upsert(document(0, "team")).unwrap();
+        index.checkpoint().unwrap();
+
+        let manifest_path = path.join(OUT_OF_CORE_MANIFEST_FILE);
+        let envelope: SearchOutOfCoreManifestEnvelope =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        let mut body = envelope.body;
+        let mut duplicate = body.segments[0].clone();
+        duplicate.segment_id = 1;
+        body.segments.push(duplicate);
+        body.document_count = 2;
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        let bytes = serde_json::to_vec(&SearchOutOfCoreManifestEnvelope {
+            body,
+            checksum: checksum_bytes(&body_bytes),
+        })
+        .unwrap();
+        fs::write(&manifest_path, &bytes).unwrap();
+
+        let reader = SearchOutOfCoreReader::open(&path).unwrap();
+        let error = reader
+            .search_with_options("graph", None, SearchMode::Text, options(1, None))
+            .unwrap_err();
+        assert!(error.to_string().contains("duplicate document"));
+        let error = reader
+            .hydrate_documents(&[document(0, "team").id])
+            .unwrap_err();
+        assert!(error.to_string().contains("duplicate document"));
+        #[cfg(feature = "vector-search")]
+        {
+            let error = reader
+                .search_with_options("", Some(&[1.0, 16.0]), SearchMode::Vector, options(1, None))
+                .unwrap_err();
+            assert!(error.to_string().contains("duplicate document"));
+        }
+        let error = SearchOutOfCoreGenerationWriter::prepare_delta(
+            &reader,
+            crate::SearchProjectionDelta::default(),
+            Default::default(),
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("globally ordered, non-overlapping document ranges"));
+        assert_eq!(fs::read(&manifest_path).unwrap(), bytes);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[cfg(feature = "full-text-search")]
+    fn publish_two_artifact_manifest(
+        path: &Path,
+        initial_document: SearchDocument,
+        next_document: SearchDocument,
+    ) {
+        publish_two_artifact_manifest_with_options(
+            path,
+            initial_document,
+            Default::default(),
+            next_document,
+            Default::default(),
+        );
+    }
+
+    #[cfg(feature = "full-text-search")]
+    fn publish_two_artifact_manifest_with_options(
+        path: &Path,
+        initial_document: SearchDocument,
+        initial_options: SearchOutOfCoreGenerationBuildOptions,
+        next_document: SearchDocument,
+        next_options: SearchOutOfCoreGenerationBuildOptions,
+    ) {
+        let mut initial = SearchOutOfCoreGenerationWriter::create(path, initial_options).unwrap();
+        initial.push(initial_document).unwrap();
+        initial.finish().unwrap();
+
+        let manifest_path = path.join(OUT_OF_CORE_MANIFEST_FILE);
+        let initial_manifest: SearchOutOfCoreManifestEnvelope =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        let initial_segment = initial_manifest
+            .body
+            .segments
+            .into_iter()
+            .next()
+            .expect("initial manifest has one segment");
+
+        let mut next = SearchOutOfCoreGenerationWriter::create(path, next_options).unwrap();
+        next.push(next_document).unwrap();
+        next.finish().unwrap();
+
+        let next_manifest: SearchOutOfCoreManifestEnvelope =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        let mut body = next_manifest.body;
+        let mut next_segment = body.segments.pop().expect("next manifest has one segment");
+        next_segment.segment_id = 1;
+        body.segments = vec![initial_segment, next_segment];
+        body.document_count = 2;
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&SearchOutOfCoreManifestEnvelope {
+                body,
+                checksum: checksum_bytes(&body_bytes),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn install_delete_mutation_run(
+        path: &Path,
+        document: &SearchDocument,
+        target_segment_id: u64,
+        run_generation: u64,
+    ) {
+        let manifest_path = path.join(OUT_OF_CORE_MANIFEST_FILE);
+        let envelope: SearchOutOfCoreManifestEnvelope =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        let mut manifest = envelope.body;
+        manifest.generation = run_generation;
+        let analyzer_digest = lexical_analyzer_digest(&SearchAnalyzerLexicon::default());
+        let document_digest =
+            lexical_documents_digest(&BTreeMap::from([(document.id.clone(), document.clone())]));
+        let run_body = mutation_run::SearchMutationRunBody::new(
+            manifest.generation,
+            analyzer_digest,
+            vec![mutation_run::SearchMutationRunEntry {
+                document_id: document.id.clone(),
+                target_segment_id,
+                operation: mutation_run::SearchMutationOperation::Delete,
+                retraction: mutation_run::SearchMutationRetraction {
+                    documents_digest: document_digest,
+                    lexical_document_len: 5,
+                    unique_terms: vec!["graph".to_string(), "memory".to_string()],
+                },
+            }],
+        )
+        .unwrap();
+        let run_bytes = run_body.encode().unwrap();
+        let run_file = mutation_run::artifact_file(manifest.generation);
+        fs::write(path.join(&run_file), &run_bytes).unwrap();
+        manifest.mutation_runs = vec![SearchOutOfCoreMutationRunManifest {
+            generation: manifest.generation,
+            file: run_file,
+            len: run_bytes.len() as u64,
+            checksum: checksum_bytes(&run_bytes),
+            entry_count: 1,
+            analyzer_digest,
+        }];
+        manifest.document_count = manifest.document_count.checked_sub(1).unwrap();
+        manifest.documents_digest = crate::lexical_projection::DocumentsDigest::replace(
+            manifest.documents_digest,
+            document_digest,
+            0,
+        );
+        let body_bytes = serde_json::to_vec(&manifest).unwrap();
+        fs::write(
+            manifest_path,
+            serde_json::to_vec(&SearchOutOfCoreManifestEnvelope {
+                body: manifest,
+                checksum: checksum_bytes(&body_bytes),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn out_of_core_reader_validates_mutation_run_artifact_closure() {
+        let path = test_dir("mutation-run-artifact-closure");
+        let document = document(0, "team");
+        let mut index = SearchIndex::open(&path).unwrap();
+        index.upsert(document.clone()).unwrap();
+        index.checkpoint().unwrap();
+        install_delete_mutation_run(&path, &document, 0, 2);
+
+        // This cut validates publication state only. Shared serving visibility
+        // is installed with the mutation writer in the next delivery.
+        let manifest: SearchOutOfCoreManifestEnvelope =
+            serde_json::from_slice(&fs::read(path.join(OUT_OF_CORE_MANIFEST_FILE)).unwrap())
+                .unwrap();
+        let limited = SearchOutOfCoreReader::open_with_config(
+            &path,
+            SearchOutOfCoreConfig {
+                max_mutation_run_bytes: NonZeroU64::new(manifest.body.mutation_runs[0].len - 1)
+                    .unwrap(),
+                ..SearchOutOfCoreConfig::default()
+            },
+        )
+        .unwrap_err();
+        assert!(limited
+            .to_string()
+            .contains("mutation-run artifact exceeds the configured read budget"));
+        assert_eq!(
+            SearchOutOfCoreReader::open(&path).unwrap().document_count(),
+            0
+        );
+        let generations = published_artifact_generations(&path, &SearchAnalyzerLexicon::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(generations.active_generation, 2);
+        assert_eq!(generations.lexical_generations, BTreeSet::from([1]));
+        assert_eq!(generations.out_of_core_generations, BTreeSet::from([1, 2]));
+
+        fs::write(
+            path.join(&manifest.body.mutation_runs[0].file),
+            b"corrupt mutation run",
+        )
+        .unwrap();
+        let error = SearchOutOfCoreReader::open(&path).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("mutation-run artifact length or checksum mismatch"));
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn out_of_core_reader_rejects_mutation_runs_targeting_inactive_segments() {
+        let path = test_dir("mutation-run-inactive-target");
+        let document = document(0, "team");
+        let mut index = SearchIndex::open(&path).unwrap();
+        index.upsert(document.clone()).unwrap();
+        index.checkpoint().unwrap();
+        install_delete_mutation_run(&path, &document, 99, 2);
+
+        let error = SearchOutOfCoreReader::open(&path).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("targets a segment outside the active manifest"));
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "full-text-search")]
+    fn published_artifact_generations_track_every_manifest_artifact() {
+        let path = test_dir("published-artifact-generations");
+        publish_two_artifact_manifest(&path, document(0, "team"), document(1, "team"));
+
+        let generations = published_artifact_generations(&path, &SearchAnalyzerLexicon::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(generations.active_generation, 2);
+        assert_eq!(generations.lexical_generations, BTreeSet::from([1, 2]));
+        assert_eq!(generations.out_of_core_generations, BTreeSet::from([1, 2]));
+        #[cfg(feature = "vector-search")]
+        assert_eq!(generations.rabitq_generations, BTreeSet::from([1, 2]));
+        #[cfg(not(feature = "vector-search"))]
+        assert!(generations.rabitq_generations.is_empty());
+
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "full-text-search")]
+    fn out_of_core_generation_update_retains_every_ordered_manifest_artifact() {
+        let path = test_dir("multi-segment-generation-update");
+        publish_two_artifact_manifest(&path, document(0, "team"), document(1, "team"));
+        let reader = SearchOutOfCoreReader::open(&path).unwrap();
+        let appended = crate::SearchProjectionRow {
+            kind: crate::SearchProjectionKind::Memory,
+            external_id: "002".to_string(),
+            title: "added graph document".to_string(),
+            body: "storage memory document 2".to_string(),
+            embedding: Some(vec![3.0, 14.0]),
+            source_id: None,
+            metadata: BTreeMap::from([("space_id".to_string(), "team".to_string())]),
+        };
+        let expected_appended = appended.clone().into_document();
+        let update = SearchOutOfCoreGenerationWriter::prepare_delta(
+            &reader,
+            crate::SearchProjectionDelta {
+                upserts: vec![appended],
+                ..Default::default()
+            },
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(update.delta_report().before_document_count, 2);
+        assert_eq!(update.delta_report().action, "incremental_segment_append");
+        assert_eq!(update.source_read_metrics().hydrated_documents, 0);
+        assert_eq!(update.source_read_metrics().segment_range_reads, 0);
+        let (_, build, _) = update.finish().unwrap();
+        assert_eq!(build.document_count, 3);
+
+        let reader = SearchOutOfCoreReader::open(&path).unwrap();
+        assert_eq!(reader.manifest.segments.len(), 3);
+        assert_eq!(
+            reader
+                .hydrate_documents(&[
+                    "memory:000".to_string(),
+                    "memory:001".to_string(),
+                    "memory:002".to_string(),
+                ])
+                .unwrap()
+                .documents,
+            vec![document(0, "team"), document(1, "team"), expected_appended],
+        );
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "full-text-search")]
+    fn out_of_core_multi_segment_metadata_filter_reads_each_artifact() {
+        let path = test_dir("multi-segment-metadata-filter");
+        publish_two_artifact_manifest(&path, document(0, "team"), document(1, "team"));
+
+        let reader = SearchOutOfCoreReader::open(&path).unwrap();
+        let mut filtered = options(10, None);
+        filtered
+            .metadata_filters
+            .insert("space_id".to_string(), "team".to_string());
+        let output = reader
+            .search_with_options("graph", None, SearchMode::Text, filtered)
+            .unwrap();
+        assert_eq!(output.result.filtered_document_count, 2);
+        assert_eq!(output.result.total_hits, 2);
+        assert_eq!(
+            output
+                .result
+                .hits
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["memory:000", "memory:001"]),
+        );
+        assert_eq!(
+            output
+                .result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .segment_count,
+            2
+        );
+        assert_eq!(output.metrics.candidate_block_reads, 2);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    #[cfg(all(feature = "full-text-search", feature = "vector-search"))]
+    fn out_of_core_multi_segment_vector_and_hybrid_query_all_artifacts() {
+        let path = test_dir("multi-segment-vector");
+        publish_two_artifact_manifest(&path, document(0, "team"), document(1, "team"));
+        let reader = SearchOutOfCoreReader::open(&path).unwrap();
+        let query_embedding = [1.0, 16.0];
+        let mut filtered = options(10, None);
+        filtered
+            .metadata_filters
+            .insert("space_id".to_string(), "team".to_string());
+
+        let vector = reader
+            .search_with_options(
+                "",
+                Some(&query_embedding),
+                SearchMode::Vector,
+                filtered.clone(),
+            )
+            .unwrap();
+        assert_eq!(vector.result.filtered_document_count, 2);
+        assert_eq!(vector.result.total_hits, 2);
+        assert_eq!(
+            vector
+                .result
+                .hits
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["memory:000", "memory:001"]),
+        );
+        assert_eq!(vector.metrics.candidate_block_reads, 2);
+        assert!(vector.metrics.vector_segment_bytes_read > 0);
+
+        let limited = reader
+            .search_with_options("", Some(&[16.0, 1.0]), SearchMode::Vector, options(1, None))
+            .unwrap();
+        assert_eq!(limited.result.total_hits, 2);
+        assert_eq!(limited.result.hits.len(), 1);
+        assert_eq!(limited.result.hits[0].id, "memory:001");
+
+        let hybrid = reader
+            .search_with_options(
+                "graph",
+                Some(&query_embedding),
+                SearchMode::Hybrid,
+                filtered.clone(),
+            )
+            .unwrap();
+        assert_eq!(hybrid.result.filtered_document_count, 2);
+        assert_eq!(hybrid.result.total_hits, 2);
+        assert!(hybrid.metrics.vector_segment_bytes_read > 0);
+
+        let preferred = reader
+            .search_with_options_compressed_vector_projection_mode(
+                "",
+                Some(&query_embedding),
+                SearchMode::Vector,
+                filtered.clone(),
+                CompressedVectorSearchMode::Preferred,
+            )
+            .unwrap();
+        assert_eq!(preferred.result.total_hits, 2);
+        assert_eq!(
+            preferred.result.retrievers[0].backend,
+            "hawdb_rabitq_out_of_core_candidate_projection"
+        );
+        assert!(!preferred
+            .result
+            .fallback_reason_codes
+            .contains(&SearchFallbackReasonCode::CompressedVectorProjectionUnavailable));
+        assert_eq!(preferred.metrics.candidate_block_reads, 2);
+        assert!(preferred.metrics.rabitq_payload_bytes_read > 0);
+        let required = reader
+            .search_with_options_compressed_vector_projection_mode(
+                "",
+                Some(&query_embedding),
+                SearchMode::Vector,
+                filtered,
+                CompressedVectorSearchMode::Required,
+            )
+            .unwrap();
+        assert_eq!(required.result.total_hits, 2);
+        assert_eq!(
+            required
+                .result
+                .hits
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["memory:000", "memory:001"]),
+        );
+        assert_eq!(required.metrics.candidate_block_reads, 2);
+        assert!(required.metrics.rabitq_payload_bytes_read > 0);
+
+        let mut limited_config = SearchOutOfCoreConfig::default();
+        limited_config.max_vector_candidates = std::num::NonZeroUsize::new(1).unwrap();
+        let limited_reader =
+            SearchOutOfCoreReader::open_with_config(&path, limited_config).unwrap();
+        let limited = limited_reader
+            .search_with_options_compressed_vector_projection_mode(
+                "",
+                Some(&[16.0, 1.0]),
+                SearchMode::Vector,
+                options(1, None),
+                CompressedVectorSearchMode::Required,
+            )
+            .unwrap();
+        assert_eq!(limited.result.total_hits, 1);
+        assert_eq!(limited.result.hits.len(), 1);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    #[cfg(all(feature = "full-text-search", feature = "vector-search"))]
+    fn out_of_core_multi_segment_rabitq_rejects_mixed_quantization() {
+        let path = test_dir("multi-segment-rabitq-mixed-quantization");
+        publish_two_artifact_manifest_with_options(
+            &path,
+            document(0, "team"),
+            SearchOutOfCoreGenerationBuildOptions {
+                rabitq_transform_seed: 1,
+                ..Default::default()
+            },
+            document(1, "team"),
+            SearchOutOfCoreGenerationBuildOptions {
+                rabitq_transform_seed: 2,
+                ..Default::default()
+            },
+        );
+        let reader = SearchOutOfCoreReader::open(&path).unwrap();
+        let error = reader
+            .search_with_options_compressed_vector_projection_mode(
+                "",
+                Some(&[1.0, 16.0]),
+                SearchMode::Vector,
+                options(1, None),
+                CompressedVectorSearchMode::Required,
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("matching bit widths and transform seeds"));
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
     #[cfg(all(feature = "full-text-search", feature = "vector-search"))]
     fn out_of_core_sidecar_corruption_fails_closed_in_the_consuming_stage() {
         let metadata_path = test_dir("metadata-corruption");
@@ -3581,7 +4554,16 @@ mod tests {
         metadata_index.upsert(document(0, "team")).unwrap();
         metadata_index.checkpoint().unwrap();
         let metadata_reader = SearchOutOfCoreReader::open(&metadata_path).unwrap();
-        corrupt_first_byte(&metadata_path.join(&metadata_reader.manifest.metadata_payload_file));
+        corrupt_first_byte(
+            &metadata_path.join(
+                &metadata_reader
+                    .manifest
+                    .segments
+                    .first()
+                    .expect("manifest has a segment")
+                    .metadata_payload_file,
+            ),
+        );
         let mut filtered = options(0, None);
         filtered
             .metadata_filters
@@ -3599,7 +4581,16 @@ mod tests {
         vector_index.upsert(document(0, "team")).unwrap();
         vector_index.checkpoint().unwrap();
         let vector_reader = SearchOutOfCoreReader::open(&vector_path).unwrap();
-        corrupt_first_byte(&vector_path.join(&vector_reader.manifest.vector_payload_file));
+        corrupt_first_byte(
+            &vector_path.join(
+                &vector_reader
+                    .manifest
+                    .segments
+                    .first()
+                    .expect("manifest has a segment")
+                    .vector_payload_file,
+            ),
+        );
         let error = vector_reader
             .search_with_options("", Some(&[1.0, 0.5]), SearchMode::Vector, options(0, None))
             .unwrap_err();

@@ -197,11 +197,14 @@ pub use lexical_readiness::{
 pub use lexical_source_policy::SearchLexicalSourcePolicy;
 pub use lexical_term_policy::SearchLexicalTermPolicy;
 pub use out_of_core::{
-    GovernedSearchGenerationUpdate, GovernedSearchGenerationWriter, SearchGenerationAdmission,
+    GovernedSearchGenerationUpdate, GovernedSearchGenerationWriter,
+    ScheduledSearchOutOfCoreSegmentCompactionReport, SearchGenerationAdmission,
     SearchOutOfCoreConfig, SearchOutOfCoreGenerationBuildOptions,
     SearchOutOfCoreGenerationBuildReport, SearchOutOfCoreGenerationUpdate,
     SearchOutOfCoreGenerationWriter, SearchOutOfCoreHydrationOutput, SearchOutOfCoreMetrics,
-    SearchOutOfCoreOutput, SearchOutOfCoreReader,
+    SearchOutOfCoreOutput, SearchOutOfCoreReader, SearchOutOfCoreSegmentCompaction,
+    SearchOutOfCoreSegmentCompactionPolicy, SearchOutOfCoreSegmentCompactionReport,
+    SearchOutOfCoreSegmentCompactionStopReason,
 };
 // These are internal ownership seams. Hosts continue to use the embedded facade.
 #[doc(hidden)]
@@ -2404,9 +2407,9 @@ impl SearchIndex {
         let Some(path) = &self.path else {
             return self.projection_cleanup_report();
         };
-        let (out_of_core_generation, out_of_core_discovery_failed) =
-            match out_of_core::published_generation(path, &self.analyzer_lexicon) {
-                Ok(generation) => (generation, false),
+        let (published, out_of_core_discovery_failed) =
+            match out_of_core::published_artifact_generations(path, &self.analyzer_lexicon) {
+                Ok(generations) => (generations, false),
                 Err(_) => (None, true),
             };
         let generations = SearchProjectionGenerations {
@@ -2416,7 +2419,7 @@ impl SearchIndex {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .as_ref()
                 .map(|projection| projection.generation()),
-            out_of_core: out_of_core_generation,
+            out_of_core: published.as_ref().map(|value| value.active_generation),
             #[cfg(feature = "vector-search")]
             rabitq: self
                 .rabitq_projection()
@@ -2428,6 +2431,15 @@ impl SearchIndex {
                 .values()
                 .all(|document| document.embedding.is_none()),
             out_of_core_discovery_failed,
+            retained_lexical: published
+                .as_ref()
+                .map_or_else(Default::default, |value| value.lexical_generations.clone()),
+            retained_out_of_core: published.as_ref().map_or_else(Default::default, |value| {
+                value.out_of_core_generations.clone()
+            }),
+            retained_rabitq: published
+                .as_ref()
+                .map_or_else(Default::default, |value| value.rabitq_generations.clone()),
         };
         self.cleanup_state
             .lock()
@@ -2465,11 +2477,17 @@ impl SearchIndex {
                 self.consumer_binding.as_ref(),
                 self.documents.values(),
             )?;
-            self.write_segment_artifacts(path)?;
-            self.write_lexical_projection(path)?;
-            let projection_generation = out_of_core::publish_out_of_core_projection(self, path)?;
+            let segment_bytes_written = self.write_segment_artifacts(path)?;
+            let lexical_bytes_written = self.write_lexical_projection(path)?;
+            let publication = out_of_core::publish_out_of_core_projection(self, path)?;
             #[cfg(feature = "vector-search")]
-            self.write_rabitq_projection(path)?;
+            let rabitq_bytes_written = self.write_rabitq_projection(path)?;
+            #[cfg(not(feature = "vector-search"))]
+            let rabitq_bytes_written = 0;
+            let projection_bytes_written = segment_bytes_written
+                .saturating_add(lexical_bytes_written)
+                .saturating_add(publication.bytes_written)
+                .saturating_add(rabitq_bytes_written);
             *self
                 .durable_source_graph_commit_epoch
                 .lock()
@@ -2489,14 +2507,16 @@ impl SearchIndex {
                         sha256: snapshot.encoded_sha256.to_string(),
                     });
             }
-            Ok(snapshot.finish(projection_generation))
+            Ok(snapshot.finish(publication.generation, projection_bytes_written))
         })();
         if let Some(telemetry) = &self.telemetry {
             let (byte_count, generation) = result
                 .as_ref()
                 .map(|report| {
                     (
-                        report.snapshot_compressed_bytes,
+                        report
+                            .snapshot_compressed_bytes
+                            .saturating_add(report.projection_bytes_written),
                         Some(report.projection_generation),
                     )
                 })
@@ -2514,7 +2534,7 @@ impl SearchIndex {
         result
     }
 
-    fn write_lexical_projection(&self, path: &Path) -> Result<()> {
+    fn write_lexical_projection(&self, path: &Path) -> Result<u64> {
         let generation =
             out_of_core::next_generation(path, self.lexical_config.max_manifest_bytes.get())?;
         let projection = LexicalProjectionWriter::new(self.lexical_config).write(
@@ -2526,19 +2546,22 @@ impl SearchIndex {
             self.documents.values(),
             &self.analyzer_lexicon,
         )?;
+        let bytes_written = projection
+            .artifact_len()
+            .saturating_add(fs::metadata(path.join(lexical_projection::MANIFEST_FILE))?.len());
         self.replace_lexical_projection(Some(projection));
-        Ok(())
+        Ok(bytes_written)
     }
 
     #[cfg(feature = "vector-search")]
-    fn write_rabitq_projection(&self, path: &Path) -> Result<()> {
+    fn write_rabitq_projection(&self, path: &Path) -> Result<u64> {
         if self
             .documents
             .values()
             .all(|document| document.embedding.is_none())
         {
             self.invalidate_rabitq_projection();
-            return Ok(());
+            return Ok(0);
         }
         let loaded_generation = self
             .rabitq_projection()
@@ -2561,11 +2584,12 @@ impl SearchIndex {
                     .to_string(),
             )
         })?;
+        let bytes_written = fs::metadata(&artifact_path)?.len();
         *self
             .rabitq_projection
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(projection));
-        Ok(())
+        Ok(bytes_written)
     }
 
     /// Searches resident documents, returning unavailable-capability and execution errors.
@@ -3966,10 +3990,13 @@ impl SearchIndex {
         Ok(())
     }
 
-    fn write_segment_artifacts(&self, path: &Path) -> Result<()> {
+    fn write_segment_artifacts(&self, path: &Path) -> Result<u64> {
         let mut descriptor = SearchSegmentDescriptor::build(&self.documents);
         write_search_segment_payloads(path, &self.documents, &mut descriptor)?;
-        write_search_segment_descriptor(path, &descriptor)
+        let descriptor_bytes =
+            write_search_segment_descriptor_bounded(path, &descriptor, u64::MAX)?;
+        let payload_bytes = fs::metadata(path.join(SEARCH_SEGMENT_PAYLOAD_FILE))?.len();
+        Ok(descriptor_bytes.saturating_add(payload_bytes))
     }
 
     fn marker_path(&self, name: &str) -> Option<PathBuf> {
@@ -10458,6 +10485,7 @@ mod tests {
             assert!(report.snapshot_compressed_bytes > 0);
             assert!(report.snapshot_peak_record_bytes > 0);
             assert!(report.projection_generation > 0);
+            assert!(report.projection_bytes_written > 0);
         }
         {
             let index = SearchIndex::open(&path).unwrap();
@@ -10498,7 +10526,8 @@ mod tests {
                 index.projection_freshness().source_graph_commit_epoch,
                 Some(store.commit_epoch())
             );
-            index.checkpoint().unwrap();
+            let report = index.checkpoint_with_report().unwrap();
+            assert!(report.projection_bytes_written > 0);
         }
         {
             let index = SearchIndex::open(&path).unwrap();
@@ -10532,6 +10561,17 @@ mod tests {
         let snapshot = read_search_snapshot_text(&path.join(SEARCH_SNAPSHOT_FILE)).unwrap();
         assert!(snapshot.contains("source_graph_commit_epoch\t1\n"));
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn in_memory_checkpoint_reports_no_projection_writes() {
+        let index = SearchIndex::in_memory();
+
+        let report = index.checkpoint_with_report().unwrap();
+
+        assert_eq!(report.projection_generation, 0);
+        assert_eq!(report.projection_bytes_written, 0);
+        assert!(!report.snapshot_streamed);
     }
 
     #[test]
@@ -14425,6 +14465,166 @@ mod tests {
         let error = SearchIndex::open(&path).unwrap_err();
         assert!(error.to_string().contains("artifact checksum mismatch"));
         fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "full-text-search")]
+    fn multi_segment_bm25_scores_match_a_single_segment_baseline() {
+        let baseline_path = unique_test_dir("single_segment_bm25_baseline");
+        let segmented_path = unique_test_dir("multi_segment_bm25_differential");
+        let documents = [
+            SearchProjectionRow {
+                kind: SearchProjectionKind::Memory,
+                external_id: "a-graph-storage".to_string(),
+                title: "Graph Graph storage engine".to_string(),
+                body: "durable graph storage".to_string(),
+                embedding: None,
+                source_id: None,
+                metadata: BTreeMap::from([("space_id".to_string(), "team".to_string())]),
+            },
+            SearchProjectionRow {
+                kind: SearchProjectionKind::Memory,
+                external_id: "b-graph-query".to_string(),
+                title: "Graph query planner".to_string(),
+                body: "query graph graph optimization".to_string(),
+                embedding: None,
+                source_id: None,
+                metadata: BTreeMap::from([("space_id".to_string(), "team".to_string())]),
+            },
+            SearchProjectionRow {
+                kind: SearchProjectionKind::Memory,
+                external_id: "c-storage-reader".to_string(),
+                title: "Storage reader".to_string(),
+                body: "bounded storage cache".to_string(),
+                embedding: None,
+                source_id: None,
+                metadata: BTreeMap::from([("space_id".to_string(), "team".to_string())]),
+            },
+            SearchProjectionRow {
+                kind: SearchProjectionKind::Memory,
+                external_id: "d-private-graph".to_string(),
+                title: "Graph Graph private".to_string(),
+                body: "private graph material".to_string(),
+                embedding: None,
+                source_id: None,
+                metadata: BTreeMap::from([("space_id".to_string(), "private".to_string())]),
+            },
+        ];
+        let replacement = SearchProjectionRow {
+            kind: SearchProjectionKind::Memory,
+            external_id: "b-graph-query".to_string(),
+            title: "Graph storage planner".to_string(),
+            body: "durable graph storage update".to_string(),
+            embedding: None,
+            source_id: None,
+            metadata: BTreeMap::from([("space_id".to_string(), "team".to_string())]),
+        };
+        let deleted_id = documents[3].clone().into_document().id;
+        let options = SearchQueryOptions {
+            limit: 10,
+            offset: 0,
+            rank_window: Some(10),
+            fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: BTreeMap::new(),
+            policy_epoch: None,
+        };
+        let mut baseline_writer =
+            SearchOutOfCoreGenerationWriter::create(&baseline_path, Default::default()).unwrap();
+        for document in [
+            documents[0].clone(),
+            replacement.clone(),
+            documents[2].clone(),
+        ] {
+            baseline_writer.push(document.into_document()).unwrap();
+        }
+        baseline_writer.finish().unwrap();
+
+        let mut initial_writer =
+            SearchOutOfCoreGenerationWriter::create(&segmented_path, Default::default()).unwrap();
+        initial_writer
+            .push(documents[0].clone().into_document())
+            .unwrap();
+        initial_writer.finish().unwrap();
+        for document in documents.iter().skip(1).cloned() {
+            let reader = SearchOutOfCoreReader::open(&segmented_path).unwrap();
+            let update = SearchOutOfCoreGenerationWriter::prepare_delta(
+                &reader,
+                SearchProjectionDelta {
+                    upserts: vec![document],
+                    ..Default::default()
+                },
+                Default::default(),
+            )
+            .unwrap();
+            update.finish().unwrap();
+        }
+        let reader = SearchOutOfCoreReader::open(&segmented_path).unwrap();
+        assert_eq!(reader.artifact_count(), documents.len());
+        let update = SearchOutOfCoreGenerationWriter::prepare_delta(
+            &reader,
+            SearchProjectionDelta {
+                upserts: vec![replacement],
+                ..Default::default()
+            },
+            Default::default(),
+        )
+        .unwrap();
+        update.finish().unwrap();
+
+        let reader = SearchOutOfCoreReader::open(&segmented_path).unwrap();
+        let update = SearchOutOfCoreGenerationWriter::prepare_delta(
+            &reader,
+            SearchProjectionDelta {
+                deletes: vec![deleted_id],
+                ..Default::default()
+            },
+            Default::default(),
+        )
+        .unwrap();
+        update.finish().unwrap();
+
+        let baseline = SearchOutOfCoreReader::open(&baseline_path).unwrap();
+        let segmented = SearchOutOfCoreReader::open(&segmented_path).unwrap();
+        assert_eq!(segmented.document_count(), 3);
+
+        let filtered_options = SearchQueryOptions {
+            metadata_filters: BTreeMap::from([("space_id".to_string(), "team".to_string())]),
+            ..options.clone()
+        };
+        for (query, options) in [
+            ("graph", options.clone()),
+            ("graph storage", filtered_options),
+            ("absent", options),
+        ] {
+            let expected = baseline
+                .search_with_options(query, None, SearchMode::Text, options.clone())
+                .unwrap()
+                .result;
+            let actual = segmented
+                .search_with_options(query, None, SearchMode::Text, options)
+                .unwrap()
+                .result;
+            assert_eq!(actual.total_hits, expected.total_hits, "query: {query}");
+            assert_eq!(actual.truncated, expected.truncated, "query: {query}");
+            assert_eq!(
+                actual
+                    .hits
+                    .iter()
+                    .map(|hit| (&hit.id, hit.score, hit.text_rank))
+                    .collect::<Vec<_>>(),
+                expected
+                    .hits
+                    .iter()
+                    .map(|hit| (&hit.id, hit.score, hit.text_rank))
+                    .collect::<Vec<_>>(),
+                "query: {query}"
+            );
+        }
+
+        drop(segmented);
+        drop(baseline);
+        fs::remove_dir_all(segmented_path).unwrap();
+        fs::remove_dir_all(baseline_path).unwrap();
     }
 
     #[test]

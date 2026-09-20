@@ -13,21 +13,50 @@
 // limitations under the License.
 
 use super::super::{
-    SearchOutOfCoreLayoutBody, SearchOutOfCoreManifestBody, OUT_OF_CORE_FORMAT,
-    OUT_OF_CORE_MANIFEST_FILE,
+    SearchOutOfCoreLayoutBody, SearchOutOfCoreManifestBody, SearchOutOfCoreSegmentManifest,
+    MAX_OUT_OF_CORE_MANIFEST_BYTES, OUT_OF_CORE_FORMAT, OUT_OF_CORE_MANIFEST_FILE,
 };
 use super::{
     artifact_name::Name, RaBitQGenerationArtifact, STAGE_METADATA_FILE, STAGE_VECTOR_FILE,
 };
+use crate::bounded_file::read_bounded_file;
 use crate::build_control::json;
 use crate::build_memory::BuildMemory;
 use crate::error::{HawDBError, Result};
-use crate::lexical_projection::MANIFEST_FILE as LEXICAL_MANIFEST_FILE;
+use crate::lexical_projection::{DocumentsDigest, MANIFEST_FILE as LEXICAL_MANIFEST_FILE};
 use crate::{SearchEmbeddingManifest, SEARCH_SEGMENT_DESCRIPTOR_FILE, SEARCH_SEGMENT_PAYLOAD_FILE};
 use hawdb_core::RuntimeTaskContext;
 use std::path::Path;
 
 use super::io::GenerationIo;
+
+#[derive(Debug)]
+pub(super) enum ActiveManifestUpdate {
+    Append {
+        expected_generation: u64,
+    },
+    Replace {
+        expected_generation: u64,
+        segment_id: u64,
+        expected_document_count: usize,
+        expected_documents_digest: u64,
+    },
+    ReplaceRange {
+        expected_generation: u64,
+        first_segment_id: u64,
+        last_segment_id: u64,
+        segment_count: usize,
+        expected_document_count: usize,
+        expected_documents_digest: u64,
+    },
+    Compact {
+        expected_generation: u64,
+        first_segment_id: u64,
+        last_segment_id: u64,
+        segment_count: usize,
+        target_level: u32,
+    },
+}
 
 pub(super) struct PublishGenerationInput<'a> {
     pub(super) root: &'a Path,
@@ -35,6 +64,7 @@ pub(super) struct PublishGenerationInput<'a> {
     pub(super) generation: u64,
     pub(super) document_count: usize,
     pub(super) documents_digest: u64,
+    pub(super) active_manifest_update: Option<&'a ActiveManifestUpdate>,
     pub(super) source_graph_commit_epoch: Option<u64>,
     pub(super) import_source_graph_commit_epoch: Option<u64>,
     pub(super) embedding_manifest: Option<&'a SearchEmbeddingManifest>,
@@ -51,6 +81,8 @@ pub(super) struct PublishGenerationInput<'a> {
 pub(super) struct PublishedGeneration {
     pub(super) manifest_bytes: u64,
     pub(super) generation_bytes: u64,
+    pub(super) document_count: usize,
+    pub(super) documents_digest: u64,
 }
 
 pub(super) fn publish_generation(
@@ -122,25 +154,328 @@ pub(super) fn publish_generation(
         Some(task),
         "search out-of-core layout",
     )?;
-    let manifest = SearchOutOfCoreManifestBody {
-        format: OUT_OF_CORE_FORMAT,
+    let (mut segments, document_count, documents_digest, segment_id, level, compact_range) =
+        match input.active_manifest_update {
+            Some(ActiveManifestUpdate::Append {
+                expected_generation,
+            }) => {
+                let active_bytes = read_bounded_file(
+                    &input.root.join(OUT_OF_CORE_MANIFEST_FILE),
+                    MAX_OUT_OF_CORE_MANIFEST_BYTES,
+                )?;
+                let active = SearchOutOfCoreManifestBody::decode(&active_bytes)?;
+                if active.generation != *expected_generation {
+                    return Err(HawDBError::Storage(format!(
+                        "search generation update base changed before manifest composition: expected {expected_generation}, got {}",
+                        active.generation
+                    )));
+                }
+                let document_count = active
+                    .document_count
+                    .checked_add(input.document_count)
+                    .ok_or_else(|| HawDBError::Storage("search document count overflow".into()))?;
+                let segment_id = active
+                    .segments
+                    .iter()
+                    .map(|segment| segment.segment_id)
+                    .max()
+                    .unwrap_or_default()
+                    .checked_add(1)
+                    .ok_or_else(|| HawDBError::Storage("search segment id overflow".into()))?;
+                (
+                    active.segments,
+                    document_count,
+                    DocumentsDigest::combine(active.documents_digest, input.documents_digest),
+                    segment_id,
+                    0,
+                    None,
+                )
+            }
+            Some(ActiveManifestUpdate::Replace {
+                expected_generation,
+                segment_id,
+                expected_document_count,
+                expected_documents_digest,
+            }) => {
+                let active_bytes = read_bounded_file(
+                    &input.root.join(OUT_OF_CORE_MANIFEST_FILE),
+                    MAX_OUT_OF_CORE_MANIFEST_BYTES,
+                )?;
+                let active = SearchOutOfCoreManifestBody::decode(&active_bytes)?;
+                if active.generation != *expected_generation {
+                    return Err(HawDBError::Storage(format!(
+                        "search generation update base changed before manifest composition: expected {expected_generation}, got {}",
+                        active.generation
+                    )));
+                }
+                let index = active
+                    .segments
+                    .iter()
+                    .position(|segment| segment.segment_id == *segment_id)
+                    .ok_or_else(|| {
+                        HawDBError::Storage(
+                            "search generation update target segment is no longer active".into(),
+                        )
+                    })?;
+                let previous = &active.segments[index];
+                if previous.document_count != *expected_document_count
+                    || previous.documents_digest != *expected_documents_digest
+                {
+                    return Err(HawDBError::Storage(
+                        "search generation update target segment changed before manifest composition"
+                            .into(),
+                    ));
+                }
+                let document_count = active
+                    .document_count
+                    .checked_sub(previous.document_count)
+                    .and_then(|count| count.checked_add(input.document_count))
+                    .ok_or_else(|| {
+                        HawDBError::Storage(
+                            "search generation update document count overflows".into(),
+                        )
+                    })?;
+                let documents_digest = DocumentsDigest::replace(
+                    active.documents_digest,
+                    previous.documents_digest,
+                    input.documents_digest,
+                );
+                let level = previous.level;
+                (
+                    active.segments,
+                    document_count,
+                    documents_digest,
+                    *segment_id,
+                    level,
+                    Some((index, index + 1)),
+                )
+            }
+            Some(ActiveManifestUpdate::Compact {
+                expected_generation,
+                first_segment_id,
+                last_segment_id,
+                segment_count,
+                target_level,
+            }) => {
+                if *segment_count < 2 {
+                    return Err(HawDBError::Storage(
+                        "search segment compaction requires at least two source segments".into(),
+                    ));
+                }
+                let active_bytes = read_bounded_file(
+                    &input.root.join(OUT_OF_CORE_MANIFEST_FILE),
+                    MAX_OUT_OF_CORE_MANIFEST_BYTES,
+                )?;
+                let active = SearchOutOfCoreManifestBody::decode(&active_bytes)?;
+                if active.generation != *expected_generation {
+                    return Err(HawDBError::Storage(format!(
+                        "search segment compaction base changed before manifest composition: expected {expected_generation}, got {}",
+                        active.generation
+                    )));
+                }
+                let start = active
+                    .segments
+                    .iter()
+                    .position(|segment| segment.segment_id == *first_segment_id)
+                    .ok_or_else(|| {
+                        HawDBError::Storage(
+                            "search segment compaction first source segment is no longer active"
+                                .into(),
+                        )
+                    })?;
+                let end = start.checked_add(*segment_count).ok_or_else(|| {
+                    HawDBError::Storage("search segment compaction range overflows".into())
+                })?;
+                if end > active.segments.len()
+                    || active.segments[end - 1].segment_id != *last_segment_id
+                {
+                    return Err(HawDBError::Storage(
+                        "search segment compaction selection is no longer active and contiguous"
+                            .into(),
+                    ));
+                }
+                let selected = &active.segments[start..end];
+                let source_level = selected[0].level;
+                if (*target_level != source_level
+                    && *target_level != source_level.saturating_add(1))
+                    || selected.iter().any(|segment| segment.level != source_level)
+                {
+                    return Err(HawDBError::Storage(
+                        "search segment compaction source levels do not match its target".into(),
+                    ));
+                }
+                let selected_document_count =
+                    selected.iter().try_fold(0usize, |total, segment| {
+                        total.checked_add(segment.document_count).ok_or_else(|| {
+                            HawDBError::Storage(
+                                "search segment compaction document count overflows".into(),
+                            )
+                        })
+                    })?;
+                let selected_documents_digest = selected.iter().fold(0u64, |digest, segment| {
+                    DocumentsDigest::combine(digest, segment.documents_digest)
+                });
+                if selected_document_count != input.document_count
+                    || selected_documents_digest != input.documents_digest
+                {
+                    return Err(HawDBError::Storage(
+                        "search segment compaction staged documents do not match the active selection"
+                            .into(),
+                    ));
+                }
+                let segment_id = active
+                    .segments
+                    .iter()
+                    .map(|segment| segment.segment_id)
+                    .max()
+                    .unwrap_or_default()
+                    .checked_add(1)
+                    .ok_or_else(|| HawDBError::Storage("search segment id overflow".into()))?;
+                (
+                    active.segments,
+                    active.document_count,
+                    active.documents_digest,
+                    segment_id,
+                    *target_level,
+                    Some((start, end)),
+                )
+            }
+            Some(ActiveManifestUpdate::ReplaceRange {
+                expected_generation,
+                first_segment_id,
+                last_segment_id,
+                segment_count,
+                expected_document_count,
+                expected_documents_digest,
+            }) => {
+                if *segment_count < 2 {
+                    return Err(HawDBError::Storage(
+                        "search segment range replacement requires at least two source segments"
+                            .into(),
+                    ));
+                }
+                let active_bytes = read_bounded_file(
+                    &input.root.join(OUT_OF_CORE_MANIFEST_FILE),
+                    MAX_OUT_OF_CORE_MANIFEST_BYTES,
+                )?;
+                let active = SearchOutOfCoreManifestBody::decode(&active_bytes)?;
+                if active.generation != *expected_generation {
+                    return Err(HawDBError::Storage(format!(
+                        "search segment range replacement base changed before manifest composition: expected {expected_generation}, got {}",
+                        active.generation
+                    )));
+                }
+                let start = active
+                    .segments
+                    .iter()
+                    .position(|segment| segment.segment_id == *first_segment_id)
+                    .ok_or_else(|| {
+                        HawDBError::Storage(
+                            "search segment range replacement first source segment is no longer active"
+                                .into(),
+                        )
+                    })?;
+                let end = start.checked_add(*segment_count).ok_or_else(|| {
+                    HawDBError::Storage("search segment range replacement range overflows".into())
+                })?;
+                if end > active.segments.len()
+                    || active.segments[end - 1].segment_id != *last_segment_id
+                {
+                    return Err(HawDBError::Storage(
+                        "search segment range replacement selection is no longer active and contiguous"
+                            .into(),
+                    ));
+                }
+                let selected = &active.segments[start..end];
+                let source_level = selected[0].level;
+                if selected.iter().any(|segment| segment.level != source_level) {
+                    return Err(HawDBError::Storage(
+                        "search segment range replacement source levels do not match".into(),
+                    ));
+                }
+                let selected_document_count =
+                    selected.iter().try_fold(0usize, |total, segment| {
+                        total.checked_add(segment.document_count).ok_or_else(|| {
+                            HawDBError::Storage(
+                                "search segment range replacement document count overflows".into(),
+                            )
+                        })
+                    })?;
+                let selected_documents_digest = selected.iter().fold(0u64, |digest, segment| {
+                    DocumentsDigest::combine(digest, segment.documents_digest)
+                });
+                if selected_document_count != *expected_document_count
+                    || selected_documents_digest != *expected_documents_digest
+                {
+                    return Err(HawDBError::Storage(
+                        "search segment range replacement source documents changed before manifest composition"
+                            .into(),
+                    ));
+                }
+                let document_count = active
+                    .document_count
+                    .checked_sub(selected_document_count)
+                    .and_then(|count| count.checked_add(input.document_count))
+                    .ok_or_else(|| {
+                        HawDBError::Storage(
+                            "search segment range replacement document count overflows".into(),
+                        )
+                    })?;
+                let documents_digest = selected
+                    .iter()
+                    .fold(active.documents_digest, |digest, segment| {
+                        DocumentsDigest::replace(digest, segment.documents_digest, 0)
+                    });
+                let documents_digest =
+                    DocumentsDigest::combine(documents_digest, input.documents_digest);
+                let segment_id = active
+                    .segments
+                    .iter()
+                    .map(|segment| segment.segment_id)
+                    .max()
+                    .unwrap_or_default()
+                    .checked_add(1)
+                    .ok_or_else(|| HawDBError::Storage("search segment id overflow".into()))?;
+                (
+                    active.segments,
+                    document_count,
+                    documents_digest,
+                    segment_id,
+                    source_level,
+                    Some((start, end)),
+                )
+            }
+            None => (
+                Vec::new(),
+                input.document_count,
+                input.documents_digest,
+                0,
+                0,
+                None,
+            ),
+        };
+    let new_segment = SearchOutOfCoreSegmentManifest {
+        segment_id,
+        level,
         generation,
-        descriptor_file: descriptor_file.as_str(),
+        descriptor_file: descriptor_file.as_str().to_string(),
         descriptor_len,
         descriptor_checksum,
-        payload_file: payload_file.as_str(),
+        payload_file: payload_file.as_str().to_string(),
         payload_len,
-        metadata_payload_file: metadata_payload_file.as_str(),
+        metadata_payload_file: metadata_payload_file.as_str().to_string(),
         metadata_payload_len,
-        vector_payload_file: vector_payload_file.as_str(),
+        vector_payload_file: vector_payload_file.as_str().to_string(),
         vector_payload_len,
-        layout_file: layout_file.as_str(),
+        layout_file: layout_file.as_str().to_string(),
         layout_len: layout.len() as u64,
         layout_checksum: layout.checksum(),
-        lexical_manifest_file: lexical_manifest_file.as_str(),
+        lexical_manifest_file: lexical_manifest_file.as_str().to_string(),
         lexical_manifest_len,
         lexical_manifest_checksum,
-        rabitq_artifact_file: input.rabitq.map(|artifact| artifact.file_name.as_str()),
+        rabitq_artifact_file: input
+            .rabitq
+            .map(|artifact| artifact.file_name.as_str().to_string()),
         rabitq_artifact_len: input.rabitq.map(|artifact| artifact.artifact_bytes),
         rabitq_artifact_checksum: input.rabitq.map(|artifact| artifact.artifact_checksum),
         rabitq_source_digest: input.rabitq.map(|artifact| artifact.source_digest),
@@ -152,13 +487,27 @@ pub(super) fn publish_generation(
         document_count: input.document_count,
         documents_digest: input.documents_digest,
         source_graph_commit_epoch: input.source_graph_commit_epoch,
+    };
+    if let Some((start, end)) = compact_range {
+        segments.splice(start..end, std::iter::once(new_segment));
+    } else {
+        segments.push(new_segment);
+    }
+    let manifest = SearchOutOfCoreManifestBody {
+        format: OUT_OF_CORE_FORMAT.to_string(),
+        generation,
+        segments,
+        mutation_runs: Vec::new(),
+        document_count,
+        documents_digest,
+        source_graph_commit_epoch: input.source_graph_commit_epoch,
         import_source_graph_commit_epoch: input.import_source_graph_commit_epoch,
         embedding_model: input
             .embedding_manifest
-            .map(|manifest| manifest.model.as_str()),
+            .map(|manifest| manifest.model.clone()),
         embedding_version: input
             .embedding_manifest
-            .and_then(|manifest| manifest.version.as_deref()),
+            .and_then(|manifest| manifest.version.clone()),
         embedding_dimension: input
             .embedding_manifest
             .map(|manifest| manifest.dimension)
@@ -284,6 +633,8 @@ pub(super) fn publish_generation(
     Ok(PublishedGeneration {
         manifest_bytes: manifest_bytes.bytes.len() as u64,
         generation_bytes,
+        document_count,
+        documents_digest,
     })
 }
 

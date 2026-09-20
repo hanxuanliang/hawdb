@@ -24,8 +24,8 @@ use crate::generation_cleanup::{
 #[cfg(test)]
 use crate::lexical_projection::artifact_file as lexical_artifact_file;
 use crate::lexical_projection::{
-    analyzer_digest as lexical_analyzer_digest, LexicalProjectionConfig, LexicalProjectionWriter,
-    DEFAULT_MAX_MANIFEST_BYTES, MANIFEST_FILE as LEXICAL_MANIFEST_FILE,
+    analyzer_digest as lexical_analyzer_digest, DocumentsDigest, LexicalProjectionConfig,
+    LexicalProjectionWriter, DEFAULT_MAX_MANIFEST_BYTES, MANIFEST_FILE as LEXICAL_MANIFEST_FILE,
 };
 use crate::{
     SearchAnalyzerLexicon, SearchDocument, SearchEmbeddingManifest, SearchLexicalSourcePolicy,
@@ -35,10 +35,9 @@ use crate::{
 use artifacts::SegmentArtifactBuilder;
 use hawdb_core::RuntimeTaskContext;
 use hawdb_executor::QueryMemoryLease;
-use hawdb_integrity::Crc32cHasher;
 #[cfg(test)]
 use publication::file_len_checksum;
-use publication::{publish_generation, PublishGenerationInput};
+use publication::{publish_generation, ActiveManifestUpdate, PublishGenerationInput};
 use rabitq::RaBitQArtifactBuilder;
 use serde::Serialize;
 #[cfg(test)]
@@ -54,6 +53,7 @@ use std::path::PathBuf;
 
 mod artifact_name;
 mod artifacts;
+mod compaction;
 mod context_memory;
 mod delta;
 mod discovery;
@@ -67,6 +67,11 @@ mod spool;
 #[cfg(test)]
 mod tests;
 
+pub use compaction::{
+    ScheduledSearchOutOfCoreSegmentCompactionReport, SearchOutOfCoreSegmentCompaction,
+    SearchOutOfCoreSegmentCompactionPolicy, SearchOutOfCoreSegmentCompactionReport,
+    SearchOutOfCoreSegmentCompactionStopReason,
+};
 pub use delta::SearchOutOfCoreGenerationUpdate;
 pub use governed::{
     GovernedSearchGenerationUpdate, GovernedSearchGenerationWriter, SearchGenerationAdmission,
@@ -199,10 +204,11 @@ pub struct SearchOutOfCoreGenerationWriter {
     spool_bytes: u64,
     peak_record_bytes: u64,
     embedding_dimension: Option<usize>,
-    documents_digest: Crc32cHasher,
+    documents_digest: DocumentsDigest,
     metadata_fields: BTreeSet<String>,
     metadata_field_bytes: u64,
     expected_active_generation: Option<u64>,
+    active_manifest_update: Option<ActiveManifestUpdate>,
     poisoned: bool,
     needs_chinese_analyzer: bool,
     task_context: RuntimeTaskContext,
@@ -226,6 +232,7 @@ impl std::fmt::Debug for SearchOutOfCoreGenerationWriter {
                 "expected_active_generation",
                 &self.expected_active_generation,
             )
+            .field("active_manifest_update", &self.active_manifest_update)
             .field("poisoned", &self.poisoned)
             .finish_non_exhaustive()
     }
@@ -361,10 +368,11 @@ impl SearchOutOfCoreGenerationWriter {
             spool_bytes: SPOOL_HEADER.len() as u64,
             peak_record_bytes: 0,
             embedding_dimension,
-            documents_digest: Crc32cHasher::new(),
+            documents_digest: DocumentsDigest::default(),
             metadata_fields,
             metadata_field_bytes,
             expected_active_generation: None,
+            active_manifest_update: None,
             poisoned: false,
             needs_chinese_analyzer: false,
             task_context,
@@ -452,7 +460,8 @@ impl SearchOutOfCoreGenerationWriter {
     /// Prepares an update governed by the task until finish or drop.
     ///
     /// Uses the same operation contract as [`Self::create_with_context`],
-    /// including input conversion, ordered base hydration and retained reports.
+    /// including input conversion, strict append publication or ordered base
+    /// hydration, and retained reports.
     /// The reader's term policy, manifest budget and generation identity are
     /// captured during preparation. Later reader changes do not affect the
     /// update, and a newer active generation makes its publication fail.
@@ -464,6 +473,105 @@ impl SearchOutOfCoreGenerationWriter {
         task: RuntimeTaskContext,
     ) -> Result<SearchOutOfCoreGenerationUpdate> {
         SearchOutOfCoreGenerationUpdate::prepare(reader, delta, options, task)
+    }
+
+    /// Compacts one bounded run of adjacent immutable segments at the same level.
+    ///
+    /// The policy selects at most its configured input-byte budget. The staged
+    /// replacement is published only if the reader generation remains active;
+    /// cancellation or a stale generation leaves the active manifest unchanged.
+    pub fn compact_segments(
+        reader: &super::SearchOutOfCoreReader,
+        policy: SearchOutOfCoreSegmentCompactionPolicy,
+        options: SearchOutOfCoreGenerationBuildOptions,
+    ) -> Result<Option<SearchOutOfCoreSegmentCompactionReport>> {
+        Self::compact_segments_with_context(reader, policy, options, RuntimeTaskContext::default())
+    }
+
+    /// Returns the QoS work plan for the next bounded segment compaction.
+    ///
+    /// The plan performs only manifest selection; it does not read or stage
+    /// source artifacts. If the manifest has no eligible same-level run within
+    /// the policy budget, this returns `None`.
+    pub fn segment_compaction_work_plan(
+        reader: &super::SearchOutOfCoreReader,
+        policy: SearchOutOfCoreSegmentCompactionPolicy,
+        hint: hawdb_qos::BackgroundWorkHint,
+    ) -> Result<Option<hawdb_qos::BackgroundWorkPlan>> {
+        compaction::segment_background_work_plan(reader, policy, hint)
+    }
+
+    /// Compacts segments under the caller's cancellation and resource context.
+    pub fn compact_segments_with_context(
+        reader: &super::SearchOutOfCoreReader,
+        policy: SearchOutOfCoreSegmentCompactionPolicy,
+        options: SearchOutOfCoreGenerationBuildOptions,
+        task: RuntimeTaskContext,
+    ) -> Result<Option<SearchOutOfCoreSegmentCompactionReport>> {
+        compaction::compact(reader, policy, options, task)
+    }
+
+    /// Schedules one bounded segment compaction through a host-owned QoS scheduler.
+    ///
+    /// This method does not create a task or thread. The caller owns execution and
+    /// may use the context-taking form to provide cancellation and resource limits.
+    pub fn compact_scheduled_background_segments(
+        reader: &super::SearchOutOfCoreReader,
+        scheduler: &hawdb_qos::LocalQosScheduler,
+        policy: SearchOutOfCoreSegmentCompactionPolicy,
+        hint: hawdb_qos::BackgroundWorkHint,
+        options: SearchOutOfCoreGenerationBuildOptions,
+    ) -> Result<ScheduledSearchOutOfCoreSegmentCompactionReport> {
+        Self::compact_scheduled_background_segments_with_context(
+            reader,
+            scheduler,
+            policy,
+            hint,
+            options,
+            RuntimeTaskContext::default(),
+        )
+    }
+
+    /// Schedules one bounded segment compaction with caller-owned cancellation and resources.
+    ///
+    /// The scheduler permit is released for every execution result. A defer or
+    /// rejection is returned as a structured stop reason without staging artifacts.
+    pub fn compact_scheduled_background_segments_with_context(
+        reader: &super::SearchOutOfCoreReader,
+        scheduler: &hawdb_qos::LocalQosScheduler,
+        policy: SearchOutOfCoreSegmentCompactionPolicy,
+        hint: hawdb_qos::BackgroundWorkHint,
+        options: SearchOutOfCoreGenerationBuildOptions,
+        task: RuntimeTaskContext,
+    ) -> Result<ScheduledSearchOutOfCoreSegmentCompactionReport> {
+        compaction::scheduled(reader, scheduler, policy, hint, options, task)
+    }
+
+    /// Stages one bounded segment compaction without publishing it.
+    ///
+    /// Call this after the host admits the work plan. Dropping the staged value
+    /// removes its unpublished artifacts.
+    pub fn prepare_segment_compaction(
+        reader: &super::SearchOutOfCoreReader,
+        policy: SearchOutOfCoreSegmentCompactionPolicy,
+        options: SearchOutOfCoreGenerationBuildOptions,
+    ) -> Result<Option<SearchOutOfCoreSegmentCompaction>> {
+        Self::prepare_segment_compaction_with_context(
+            reader,
+            policy,
+            options,
+            RuntimeTaskContext::default(),
+        )
+    }
+
+    /// Stages one bounded segment compaction under the caller's task context.
+    pub fn prepare_segment_compaction_with_context(
+        reader: &super::SearchOutOfCoreReader,
+        policy: SearchOutOfCoreSegmentCompactionPolicy,
+        options: SearchOutOfCoreGenerationBuildOptions,
+        task: RuntimeTaskContext,
+    ) -> Result<Option<SearchOutOfCoreSegmentCompaction>> {
+        compaction::prepare(reader, policy, options, task)
     }
 
     pub fn finish(self) -> Result<SearchOutOfCoreGenerationBuildReport> {
@@ -550,6 +658,7 @@ impl SearchOutOfCoreGenerationWriter {
                 generation,
                 document_count: self.document_count,
                 documents_digest: self.documents_digest.finish(),
+                active_manifest_update: self.active_manifest_update.as_ref(),
                 source_graph_commit_epoch: self.options.source_graph_commit_epoch,
                 import_source_graph_commit_epoch: self.options.import_source_graph_commit_epoch,
                 embedding_manifest: self.options.embedding_manifest.as_ref(),
@@ -571,15 +680,41 @@ impl SearchOutOfCoreGenerationWriter {
             crate::generation_cleanup::once::evidence::Point::AfterCommit,
             &self.memory,
         );
-        let cleanup = cleanup.run(
-            &self.root,
+        let cleanup_generations = if self.active_manifest_update.is_some() {
+            match super::published_artifact_generations(&self.root, &self.options.analyzer_lexicon)
+            {
+                Ok(Some(retained)) => SearchProjectionGenerations {
+                    lexical: Some(lexical_generation),
+                    out_of_core: Some(retained.active_generation),
+                    rabitq: retained.rabitq_generations.last().copied(),
+                    rabitq_remove_all: retained.rabitq_generations.is_empty(),
+                    retained_lexical: retained.lexical_generations,
+                    retained_out_of_core: retained.out_of_core_generations,
+                    retained_rabitq: retained.rabitq_generations,
+                    out_of_core_discovery_failed: false,
+                },
+                Ok(None) | Err(_) => SearchProjectionGenerations {
+                    lexical: Some(lexical_generation),
+                    out_of_core: Some(generation),
+                    rabitq: rabitq.as_ref().map(|_| generation),
+                    rabitq_remove_all: false,
+                    out_of_core_discovery_failed: true,
+                    ..Default::default()
+                },
+            }
+        } else {
             SearchProjectionGenerations {
                 lexical: Some(lexical_generation),
                 out_of_core: Some(generation),
                 rabitq: rabitq.as_ref().map(|_| generation),
                 rabitq_remove_all: rabitq.is_none(),
                 out_of_core_discovery_failed: false,
-            },
+                ..Default::default()
+            }
+        };
+        let cleanup = cleanup.run(
+            &self.root,
+            cleanup_generations,
             self.options.cleanup_options,
             &self.task_context,
         );
@@ -587,9 +722,9 @@ impl SearchOutOfCoreGenerationWriter {
         Ok(SearchOutOfCoreGenerationBuildReport {
             generation,
             lexical_generation,
-            document_count: self.document_count,
+            document_count: published.document_count,
             vector_document_count: self.vector_document_count,
-            documents_digest: self.documents_digest.finish(),
+            documents_digest: published.documents_digest,
             logical_document_bytes: self.logical_document_bytes,
             spool_bytes: self.spool_bytes,
             peak_record_bytes: self.peak_record_bytes,

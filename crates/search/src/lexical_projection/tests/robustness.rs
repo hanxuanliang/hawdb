@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::*;
+use crate::encode_search_document_line;
 
 mod admission;
 
@@ -64,6 +65,67 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+#[test]
+fn documents_digest_is_order_independent_and_reversible() {
+    let first_document = document("a", "graph", "storage");
+    let second_document = document("b", "graph", "memory");
+    let documents = BTreeMap::from([
+        (first_document.id.clone(), first_document.clone()),
+        (second_document.id.clone(), second_document.clone()),
+    ]);
+    let first = encode_search_document_line(&first_document);
+    let second = encode_search_document_line(&second_document);
+
+    let mut forward = DocumentsDigest::default();
+    forward.add_bytes(first.as_bytes());
+    forward.add_bytes(second.as_bytes());
+
+    let mut reverse = DocumentsDigest::default();
+    reverse.add_bytes(second.as_bytes());
+    reverse.add_bytes(first.as_bytes());
+    assert_eq!(forward, reverse);
+    assert_eq!(forward.finish(), documents_digest(&documents));
+
+    reverse.remove_record(checksum(second.as_bytes()), second.len() as u64);
+    let mut only_first = DocumentsDigest::default();
+    only_first.add_bytes(first.as_bytes());
+    assert_eq!(reverse, only_first);
+}
+
+#[test]
+fn document_membership_reads_a_validated_mapping_block() {
+    let fixture = Fixture::new("document-membership");
+    let a = fixture.reader.probe_document_id("a").unwrap();
+    let b = fixture.reader.probe_document_id("b").unwrap();
+    let absent = fixture.reader.probe_document_id("aa").unwrap();
+    let out_of_range = fixture.reader.probe_document_id("c").unwrap();
+    assert!(a.present);
+    assert!(b.present);
+    assert!(!absent.present);
+    assert!(!out_of_range.present);
+
+    let block = fixture
+        .reader
+        .manifest
+        .blocks
+        .iter()
+        .find(|block| block.kind == BlockKind::Documents)
+        .unwrap();
+    let path = fixture.root.join(&fixture.reader.manifest.artifact_file);
+    let mut artifact = fs::OpenOptions::new().write(true).open(&path).unwrap();
+    artifact.seek(SeekFrom::Start(block.offset)).unwrap();
+    artifact.write_all(&[0]).unwrap();
+    artifact.sync_all().unwrap();
+
+    assert_eq!(a.bytes_read, block.length);
+    assert_eq!(b.bytes_read, block.length);
+    assert_eq!(absent.bytes_read, block.length);
+    assert_eq!(out_of_range.bytes_read, 0);
+
+    let error = fixture.reader.probe_document_id("a").unwrap_err();
+    assert!(error.to_string().contains("checksum mismatch"));
 }
 
 fn assert_delta_snapshot(
@@ -120,6 +182,78 @@ fn assert_delta_snapshot(
         )
         .sum::<u64>();
     assert_eq!(delta.resident_bytes, expected_bytes);
+}
+
+#[test]
+fn global_statistics_preserve_scores_across_disjoint_projection_layers() {
+    let root = projection_root("global-statistics");
+    let left_root = root.join("left");
+    let right_root = root.join("right");
+    let merged_root = root.join("merged");
+    fs::create_dir_all(&left_root).unwrap();
+    fs::create_dir_all(&right_root).unwrap();
+    fs::create_dir_all(&merged_root).unwrap();
+
+    let analyzer = SearchAnalyzerLexicon::default();
+    let left_documents = [
+        document("a", "graph graph", "storage"),
+        document("b", "graph", "memory"),
+    ];
+    let right_documents = [
+        document("c", "graph", "graph graph graph"),
+        document("d", "database", "storage"),
+    ];
+    let reader = |root: &Path, documents: &[SearchDocument]| {
+        LexicalProjectionWriter::new(LexicalProjectionConfig::default())
+            .write(root, 1, Some(7), 11, 13, documents.iter(), &analyzer)
+            .unwrap()
+    };
+    let left = reader(&left_root, &left_documents);
+    let right = reader(&right_root, &right_documents);
+    let merged = reader(
+        &merged_root,
+        &left_documents
+            .iter()
+            .chain(&right_documents)
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
+    let terms = BTreeSet::from(["graph".to_string()]);
+    let statistics = LexicalCorpusStatistics::aggregate(
+        [left.as_ref(), right.as_ref()],
+        &terms,
+        crate::SearchLexicalTermPolicy::default().max_term_bytes(),
+    )
+    .unwrap();
+
+    let mut layered_scores = left
+        .score_with_global_statistics(
+            &terms,
+            crate::SearchLexicalTermPolicy::default().max_term_bytes(),
+            None,
+            &statistics,
+            |_| Ok(true),
+        )
+        .unwrap()
+        .scores;
+    layered_scores.extend(
+        right
+            .score_with_global_statistics(
+                &terms,
+                crate::SearchLexicalTermPolicy::default().max_term_bytes(),
+                None,
+                &statistics,
+                |_| Ok(true),
+            )
+            .unwrap()
+            .scores,
+    );
+    let merged_scores = merged
+        .score(&terms, &LexicalMiniDelta::default(), None, |_| Ok(true))
+        .unwrap()
+        .scores;
+    assert_eq!(layered_scores, merged_scores);
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -285,7 +419,7 @@ fn manifest_tampering_is_rejected_even_with_recomputed_envelope_checksum() {
             0 => body.artifact_file = "../search_lexical.1.hawdb".to_string(),
             1 => body.blocks[0].offset += 1,
             2 => body.document_count += 1,
-            3 => body.term_statistics[0].document_frequency += 1,
+            3 => body.blocks[0].entry_count += 1,
             4 => body.blocks[0].length = 0,
             _ => body.format = "unrecognized".to_string(),
         }
