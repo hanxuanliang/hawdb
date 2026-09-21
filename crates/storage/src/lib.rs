@@ -12,6 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Let the embedded graph kernel keep addressing this crate as `hawdb_storage`
+// after moving in: its sources predate the move and are kept verbatim.
+extern crate self as hawdb_storage;
+
+pub use hawdb_core::error::{HawDBError, Result};
+pub use hawdb_core::value::Value;
+pub use relational_index_view::{
+    RelationalIndexReadViewBackendReport, RelationalIndexReadViewReport,
+};
+pub use hawdb_storage::relational::RelationalRowPageCompactionConfig;
+
 pub mod adjacency;
 pub mod append_table;
 #[doc(hidden)]
@@ -48,16 +59,36 @@ pub mod graph_index;
 pub mod graph_index_metrics;
 #[doc(hidden)]
 pub mod graph_overlay;
-pub mod ids;
+pub use hawdb_core::ids;
 pub mod index_page;
 #[doc(hidden)]
 pub mod io;
 pub mod mutation;
-mod ownership;
+#[doc(hidden)]
+pub mod ownership;
 #[doc(hidden)]
 pub mod predicate;
 pub mod pressure;
 pub mod projection;
+
+// Compatibility shims so the graph kernel can move into this crate without
+// edit churn: the kernel addresses these items through `crate::error`,
+// `crate::schema`, `crate::value`, `crate::telemetry` and `crate::analytics`,
+// which were root-level re-exports before the move.
+#[doc(hidden)]
+pub mod error {
+    pub use hawdb_core::error::*;
+}
+
+#[doc(hidden)]
+pub mod value {
+    pub use hawdb_core::value::*;
+}
+
+#[doc(hidden)]
+pub mod analytics {
+    pub use hawdb_analytics::*;
+}
 pub mod projection_generation;
 pub mod property_projection;
 pub mod property_spill;
@@ -79,6 +110,7 @@ pub mod stable_identity;
 pub mod statistics;
 #[doc(hidden)]
 pub mod statistics_refresh;
+pub mod store;
 pub mod telemetry;
 #[doc(hidden)]
 pub mod text;
@@ -207,7 +239,7 @@ pub use graph_descriptor_tree::{
 pub use graph_index_metrics::{
     GraphIndexReadMetrics, GraphIndexReadMetricsSnapshot, PersistentGraphIndexClass,
 };
-pub use ids::{NodeId, NodeRecord, ProjectedNodeRecord, RelId, RelRecord};
+pub use hawdb_core::ids::{NodeId, NodeRecord, ProjectedNodeRecord, RelId, RelRecord};
 pub use index_page::{
     ImmutableIndexPage, ImmutableIndexPageBody, ImmutableIndexPageError, ImmutableIndexPageLimits,
     IndexIdentity, IndexInteriorEntry, IndexInteriorPage, IndexLeafEntry, IndexLeafPage,

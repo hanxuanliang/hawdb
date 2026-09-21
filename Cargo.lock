@@ -381,7 +381,6 @@ name = "hawdb-analytics"
 version = "0.1.0"
 dependencies = [
  "hawdb-core",
- "hawdb-storage",
 ]
 
 [[package]]
@@ -720,8 +719,12 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "fs2",
+ "hawdb-analytics",
  "hawdb-core",
  "hawdb-integrity",
+ "hawdb-plan",
+ "hawdb-qos",
+ "hawdb-telemetry",
  "rayon",
  "roaring",
  "serde",

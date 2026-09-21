@@ -24,16 +24,16 @@ use hawdb_executor::result_delivery::QueryOutputAccumulator;
 ///
 /// The resources are borrowed for the duration of the call. The executor does
 /// not retain them or create a process-global execution context.
-pub struct ExecutionResources<'a> {
+pub struct ExecutionResources<'a, S: ExecutionStore> {
     catalog: &'a mut Catalog,
-    store: &'a mut GraphStore,
+    store: &'a mut S,
     external: &'a mut dyn ExternalReadOperator,
 }
 
-impl<'a> ExecutionResources<'a> {
+impl<'a, S: ExecutionStore> ExecutionResources<'a, S> {
     pub fn new(
         catalog: &'a mut Catalog,
-        store: &'a mut GraphStore,
+        store: &'a mut S,
         external: &'a mut dyn ExternalReadOperator,
     ) -> Self {
         Self {
@@ -68,9 +68,9 @@ fn record_process_memory(
     report.major_page_faults = process_memory.major_page_faults;
 }
 
-pub(super) fn execute_profiled_rows(
+pub(super) fn execute_profiled_rows<S: ExecutionStore>(
     request: ExecutionRequest<'_>,
-    resources: ExecutionResources<'_>,
+    resources: ExecutionResources<'_, S>,
 ) -> Result<ProfiledQueryRows> {
     let mut rows = QueryRowsBuilder::new();
     let streamed = execute_profiled_consumer(
@@ -85,9 +85,9 @@ pub(super) fn execute_profiled_rows(
     })
 }
 
-pub(super) fn execute_profiled_consumer(
+pub(super) fn execute_profiled_consumer<S: ExecutionStore>(
     request: ExecutionRequest<'_>,
-    resources: ExecutionResources<'_>,
+    resources: ExecutionResources<'_, S>,
     output_memory: ConsumerMemoryMode,
     consumer: &mut dyn FnMut(Row) -> Result<()>,
 ) -> Result<ProfiledQueryStream> {

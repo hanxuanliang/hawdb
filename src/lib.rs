@@ -37,7 +37,11 @@ mod relational_sql;
 pub mod replacement_summary;
 pub mod search;
 pub use hawdb_route_ownership as search_route_ownership;
-pub mod store;
+pub use hawdb_storage::store;
+
+#[cfg(test)]
+mod store_facade_tests;
+
 pub mod telemetry;
 pub mod workload_fixtures;
 

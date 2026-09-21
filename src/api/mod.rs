@@ -448,22 +448,25 @@ fn relational_plan_template_cache_from_database_config(
     ))
 }
 
-fn relational_index_read_mode<'a>(
+fn relational_index_read_mode<
+    'a,
+    R: hawdb_relational::index_runtime::RelationalIndexStoreReader,
+>(
     config: &DatabaseConfig,
-    store: &'a GraphStore,
-) -> crate::relational_sql::RelationalIndexReadMode<'a> {
+    store: &'a R,
+) -> hawdb_relational::index_runtime::RelationalIndexReadMode<'a, R> {
     match config.relational_index_mode {
         hawdb_storage::RelationalIndexMode::Materialized => {
-            crate::relational_sql::RelationalIndexReadMode::Materialized
+            hawdb_relational::index_runtime::RelationalIndexReadMode::Materialized
         }
         hawdb_storage::RelationalIndexMode::Shadow => {
-            crate::relational_sql::RelationalIndexReadMode::Shadow(store)
+            hawdb_relational::index_runtime::RelationalIndexReadMode::Shadow(store)
         }
         hawdb_storage::RelationalIndexMode::DemandPaged => {
-            crate::relational_sql::RelationalIndexReadMode::DemandPaged(store)
+            hawdb_relational::index_runtime::RelationalIndexReadMode::DemandPaged(store)
         }
         hawdb_storage::RelationalIndexMode::Authoritative => {
-            crate::relational_sql::RelationalIndexReadMode::Authoritative(store)
+            hawdb_relational::index_runtime::RelationalIndexReadMode::Authoritative(store)
         }
     }
 }
@@ -737,9 +740,9 @@ pub struct DatabaseSession<'a> {
 }
 
 #[derive(Debug)]
-pub struct DatabaseReadTransaction {
+pub struct DatabaseReadTransaction<S: crate::executor::ExecutionStore = GraphStore> {
     catalog: Catalog,
-    store: GraphStore,
+    store: S,
     published_read_view: PublishedReadView,
     optimizer: CascadesOptimizer,
     plan_cache: SharedState<PlanCache>,
@@ -4319,16 +4322,16 @@ fn effective_database_config(mut config: DatabaseConfig) -> DatabaseConfig {
     config
 }
 
-struct KnowledgeRetrievalGraphContext<'a> {
+struct KnowledgeRetrievalGraphContext<'a, S = GraphStore> {
     catalog: &'a Catalog,
-    store: &'a GraphStore,
+    store: &'a S,
     compressed_vector_search_mode: CompressedVectorSearchMode,
     adaptive_vector_backend_policy: hawdb_optimizer::AdaptiveVectorBackendPolicy,
     query_memory_budget: NonZeroUsize,
     result_payload_budget: usize,
 }
 
-impl KnowledgeRetrievalGraphContext<'_> {
+impl<S: crate::executor::ExecutionStore> KnowledgeRetrievalGraphContext<'_, S> {
     fn retrieve_knowledge(
         &self,
         search_index: &SearchIndex,
@@ -4387,7 +4390,8 @@ impl KnowledgeRetrievalGraphContext<'_> {
         projection_freshness: SearchProjectionFreshness,
         request: &KnowledgeRetrievalRequest,
     ) -> Result<KnowledgeRetrievalOutput> {
-        let graph_commit_epoch = self.store.commit_epoch();
+        let graph_commit_epoch =
+            <S as hawdb_storage::graph_engine::GraphReadEngine>::commit_epoch(&self.store);
         let mut pipeline =
             hawdb_search::knowledge_retrieval_pipeline::KnowledgeRetrievalPipelineBudget::new(
                 self.query_memory_budget,
@@ -4458,9 +4462,10 @@ impl KnowledgeRetrievalGraphContext<'_> {
                 &graph_seed_search.seeds,
                 &graph_context_search.paths,
             )?;
-        let required_projection_commit_epoch = self
-            .store
-            .search_projection_changefeed_status()
+        let required_projection_commit_epoch =
+            <S as hawdb_storage::graph_engine::GraphReadEngine>::search_projection_changefeed_status(
+                &self.store,
+            )
             .required_projection_commit_epoch();
         let retrievers = knowledge_retriever_reports(
             &search,
@@ -4979,7 +4984,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
         let mut candidate_count = 0usize;
         let mut scored = Vec::new();
         let mut scan_error = None;
-        self.store.visit_nodes_owned(None, |node| {
+        crate::store::InternalGraphEngine::visit_nodes_owned(self.store, None, |node| {
             let matches = match try_knowledge_graph_seed_matches_filters(
                 self.catalog,
                 self.store,
@@ -6050,7 +6055,7 @@ fn knowledge_graph_seed_matches_filters(
 
 fn try_knowledge_graph_seed_matches_filters(
     catalog: &Catalog,
-    store: &GraphStore,
+    store: &impl crate::executor::ExecutionStore,
     node: &NodeRecord,
     metadata_filters: &BTreeMap<String, String>,
 ) -> Result<bool> {
@@ -6060,7 +6065,7 @@ fn try_knowledge_graph_seed_matches_filters(
 
 fn knowledge_graph_seed_matches_predicates(
     catalog: &Catalog,
-    store: &GraphStore,
+    store: &impl crate::executor::ExecutionStore,
     node: &NodeRecord,
     predicates: &SearchPredicateSet,
 ) -> Result<bool> {
@@ -6077,7 +6082,7 @@ fn knowledge_graph_seed_matches_predicates(
 
 fn knowledge_graph_seed_matches_predicate(
     catalog: &Catalog,
-    store: &GraphStore,
+    store: &impl crate::executor::ExecutionStore,
     node: &NodeRecord,
     predicate: &SearchPredicate,
 ) -> Result<bool> {
@@ -6193,7 +6198,7 @@ fn parse_metadata_filter_number(value: &str) -> Option<f64> {
 
 fn knowledge_graph_seed_filter_values(
     catalog: &Catalog,
-    store: &GraphStore,
+    store: &impl crate::executor::ExecutionStore,
     node: &NodeRecord,
     key: &str,
 ) -> Result<Vec<String>> {
@@ -6220,7 +6225,7 @@ fn knowledge_graph_seed_filter_values(
 
 fn knowledge_graph_seed_business_labels(
     catalog: &Catalog,
-    store: &GraphStore,
+    store: &impl crate::executor::ExecutionStore,
     node: &NodeRecord,
 ) -> Result<Vec<String>> {
     let Some(has_label_type_id) = catalog.rel_type_id("HAS_LABEL") else {
@@ -6232,7 +6237,8 @@ fn knowledge_graph_seed_business_labels(
     let mut labels = BTreeSet::new();
     let mut scan_error = None;
     for direction in [AdjacencyDirection::Outgoing, AdjacencyDirection::Incoming] {
-        store.visit_adjacent_relationships_owned(
+        crate::store::InternalGraphEngine::visit_adjacent_relationships_owned(
+            store,
             node.id,
             Some(has_label_type_id),
             direction,
@@ -18396,16 +18402,16 @@ struct KnowledgeExpansionEdge {
     relationship: RelRecord,
 }
 
-struct DenseAdjacencyDiagnosticContext<'a> {
+struct DenseAdjacencyDiagnosticContext<'a, S = GraphStore> {
     catalog: &'a Catalog,
-    store: &'a GraphStore,
+    store: &'a S,
     operation: &'a str,
     relationship_type: Option<crate::schema::RelTypeId>,
     requested_direction: KnowledgeNeighborDirection,
 }
 
 fn knowledge_expansion_edges_for_node(
-    store: &GraphStore,
+    store: &impl crate::executor::ExecutionStore,
     node_id: NodeId,
     relationship_type: Option<crate::schema::RelTypeId>,
     requested_direction: KnowledgeNeighborDirection,
@@ -18415,7 +18421,8 @@ fn knowledge_expansion_edges_for_node(
     let mut seen_relationships = BTreeSet::new();
     for adjacency_direction in adjacency_directions_for_request(requested_direction) {
         let mut direction_edges = BTreeMap::new();
-        store.visit_adjacent_relationships_owned(
+        crate::store::InternalGraphEngine::visit_adjacent_relationships_owned(
+            store,
             node_id,
             relationship_type,
             adjacency_direction,
@@ -18450,8 +18457,8 @@ fn knowledge_expansion_edges_for_node(
     Ok(edges)
 }
 
-fn record_dense_adjacency_diagnostics(
-    context: DenseAdjacencyDiagnosticContext<'_>,
+fn record_dense_adjacency_diagnostics<S: crate::executor::ExecutionStore>(
+    context: DenseAdjacencyDiagnosticContext<'_, S>,
     node_id: NodeId,
     reported_dense_groups: &mut BTreeSet<String>,
     fanout_reasons: &mut Vec<KnowledgeFanoutReasonDetail>,
@@ -18523,7 +18530,7 @@ fn adjacency_direction_name(adjacency_direction: AdjacencyDirection) -> &'static
 
 fn try_seed_node_by_label_and_external_id(
     catalog: &Catalog,
-    store: &GraphStore,
+    store: &impl crate::executor::ExecutionStore,
     label: &str,
     external_id: &str,
 ) -> Result<Option<NodeRecord>> {
@@ -18535,13 +18542,19 @@ fn try_seed_node_by_label_and_external_id(
     if let Ok(value) = external_id.parse::<i64>() {
         values.push(Value::Int(value));
     }
-    store.visit_nodes_by_property_owned(label_id, "id", &values, |node| {
-        if projected_node_external_id(&node) != external_id {
-            return crate::store::GraphScanControl::Continue;
-        }
-        found = Some(node);
-        crate::store::GraphScanControl::Stop
-    })?;
+    crate::store::InternalGraphEngine::visit_nodes_by_property_owned(
+        store,
+        label_id,
+        "id",
+        &values,
+        |node| {
+            if projected_node_external_id(&node) != external_id {
+                return crate::store::GraphScanControl::Continue;
+            }
+            found = Some(node);
+            crate::store::GraphScanControl::Stop
+        },
+    )?;
     if found.is_some() {
         return Ok(found);
     }
@@ -20587,7 +20600,7 @@ struct DatabaseReadSqlOptions<'a> {
     join_planning: RelationalJoinPlanningDirective,
 }
 
-impl DatabaseReadTransaction {
+impl<S: crate::executor::ExecutionStore> DatabaseReadTransaction<S> {
     pub fn commit_epoch(&self) -> u64 {
         self.published_read_view.visible_commit_epoch()
     }
@@ -20632,7 +20645,7 @@ impl DatabaseReadTransaction {
         parameters: &BTreeMap<String, Value>,
         task_context: &hawdb_core::RuntimeTaskContext,
     ) -> Result<QueryOutput> {
-        let (cypher_text, prepared) = prepared.into_execution(&self.catalog, &self.store);
+        let (cypher_text, prepared) = prepared.into_execution(&self.catalog);
         Ok(self
             .query_with_params_bounded_profile_prepared_internal(
                 &cypher_text,
@@ -20651,7 +20664,7 @@ impl DatabaseReadTransaction {
         parameters: &BTreeMap<String, Value>,
     ) -> Result<BoundedReadQueryOutput> {
         let task_context = self.task_context.clone();
-        let (cypher_text, prepared) = prepared.into_execution(&self.catalog, &self.store);
+        let (cypher_text, prepared) = prepared.into_execution(&self.catalog);
         self.query_with_params_bounded_profile_prepared_internal(
             &cypher_text,
             prepared,
@@ -20819,7 +20832,7 @@ impl DatabaseReadTransaction {
         task_context: &hawdb_core::RuntimeTaskContext,
         mut consumer: impl FnMut(Row) -> Result<()>,
     ) -> Result<QueryStreamReport> {
-        let (cypher_text, prepared) = prepared.into_execution(&self.catalog, &self.store);
+        let (cypher_text, prepared) = prepared.into_execution(&self.catalog);
         self.query_with_params_streaming_prepared_external_internal(
             &cypher_text,
             prepared,
@@ -21100,7 +21113,12 @@ impl DatabaseReadTransaction {
             execution_profile: empty_read_execution_profile(),
         })
     }
+}
 
+impl<S> DatabaseReadTransaction<S>
+where
+    S: crate::executor::ExecutionStore + hawdb_system_sql::SystemSqlStore,
+{
     pub fn query_sql(&self, sql_text: &str) -> Result<QueryOutput> {
         self.query_sql_bounded(sql_text, self.config.max_read_result_rows)
     }
@@ -21447,19 +21465,19 @@ impl DatabaseReadTransaction {
     ) -> Result<ProfiledRelationalSqlQueryOutput> {
         let row_read_mode = match &self.projection_relational {
             Some(projection) => {
-                crate::relational_sql::RelationalRowReadMode::ProjectionGeneration {
+                hawdb_relational::row_runtime::RelationalRowReadMode::<S>::ProjectionGeneration {
                     store: &self.store,
                     reader: &projection.reader,
                     tables: projection.binding.tables(),
                 }
             }
-            None => crate::relational_sql::RelationalRowReadMode::Store(&self.store),
+            None => hawdb_relational::row_runtime::RelationalRowReadMode::<S>::Store(&self.store),
         };
         let query_result = crate::relational_sql::execute_prepared_relational_query_with_resources(
             prepared,
             parameters,
             self.store.relational_state(),
-            crate::relational_sql::RelationalQueryReadModes::new(
+            hawdb_relational::query::RelationalQueryReadModes::<S>::new(
                 relational_index_read_mode(&self.config, &self.store),
                 row_read_mode,
             ),
@@ -21476,7 +21494,9 @@ impl DatabaseReadTransaction {
         query_runtime::query_runtime_checkpoint(Some(task_context))?;
         Ok(profiled_relational_sql_output(output))
     }
+}
 
+impl<S: crate::executor::ExecutionStore> DatabaseReadTransaction<S> {
     pub fn explain_query(&self, cypher_text: &str) -> Result<ExplainOutput> {
         self.explain_query_with_params(cypher_text, &BTreeMap::new())
     }
@@ -21595,7 +21615,12 @@ impl DatabaseReadTransaction {
             },
         )
     }
+}
 
+impl<S> DatabaseReadTransaction<S>
+where
+    S: crate::executor::ExecutionStore + hawdb_analytics::ProjectionSource,
+{
     pub fn project_graph(&self, rel_type: Option<&str>) -> ProjectedGraph {
         match rel_type {
             Some(name) => self
@@ -21606,7 +21631,9 @@ impl DatabaseReadTransaction {
             None => ProjectedGraph::from_store(&self.store, None),
         }
     }
+}
 
+impl<S: crate::executor::ExecutionStore> DatabaseReadTransaction<S> {
     pub fn export_canonical_graph_snapshot(&self) -> CanonicalGraphSnapshotExport {
         export_canonical_graph_snapshot_for(&self.catalog, &self.store)
     }
@@ -21614,7 +21641,12 @@ impl DatabaseReadTransaction {
     pub fn try_export_canonical_graph_snapshot(&self) -> Result<CanonicalGraphSnapshotExport> {
         canonical_snapshot::try_export_canonical_graph_snapshot_for(&self.catalog, &self.store)
     }
+}
 
+impl<S> DatabaseReadTransaction<S>
+where
+    S: crate::executor::ExecutionStore + hawdb_search::SearchProjectionSource,
+{
     pub fn rebuild_search_projection(
         &self,
         search_index: &mut SearchIndex,
@@ -21630,7 +21662,9 @@ impl DatabaseReadTransaction {
     ) -> Result<MetadataRepairSummary> {
         search_index.repair_metadata_from_graph(&self.catalog, &self.store, options)
     }
+}
 
+impl<S: crate::executor::ExecutionStore> DatabaseReadTransaction<S> {
     /// Retrieves from resident search payloads, propagating search and graph/pipeline errors.
     pub fn retrieve_knowledge(
         &self,
@@ -21672,7 +21706,7 @@ impl DatabaseReadTransaction {
 
     #[cfg(test)]
     pub(crate) fn statistics(&self) -> GraphStatistics {
-        self.store.statistics(&self.catalog)
+        <S as hawdb_storage::graph_engine::GraphReadEngine>::statistics(&self.store, &self.catalog)
     }
 
     #[cfg(test)]

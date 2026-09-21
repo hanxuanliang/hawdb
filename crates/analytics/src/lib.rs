@@ -12,36 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use hawdb_core::ids::{NodeId, NodeRecord, RelRecord};
 use hawdb_core::{HawDBError, LabelId, RelTypeId, Result, RuntimeTaskContext};
-use hawdb_storage::{NodeId, NodeRecord, RelRecord};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::{Display, Formatter};
-use std::num::NonZeroUsize;
 
 const ALGORITHM_CHECKPOINT_INTERVAL: usize = 1024;
 const LOUVAIN_NODE_STATE_BYTES: usize = 384;
 const BTREE_ENTRY_ESTIMATED_BYTES: usize = 64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProjectionScanControl {
-    Continue,
-    Stop,
-}
-
-/// Storage-neutral source consumed while building an immutable analytics
-/// projection. Implementations retain ownership of scan and recovery details.
-pub trait ProjectionSource {
-    fn visit_projection_nodes(
-        &self,
-        visitor: &mut dyn FnMut(NodeRecord) -> ProjectionScanControl,
-    ) -> std::result::Result<ProjectionScanControl, String>;
-
-    fn visit_projection_relationships(
-        &self,
-        visitor: &mut dyn FnMut(RelRecord) -> ProjectionScanControl,
-    ) -> std::result::Result<ProjectionScanControl, String>;
-}
+pub use hawdb_core::projection::{ProjectionScanControl, ProjectionSource};
 
 /// Internal execution seam used by the embedded executor to attach
 /// cancellation without moving runtime orchestration into this crate.
@@ -59,118 +39,11 @@ pub trait ProjectedGraphExecution {
     ) -> Result<Vec<HierarchicalCommunityAssignment>>;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProjectionLayout {
-    Outgoing,
-    Incoming,
-    Bidirectional,
-    Undirected,
-}
-
-impl ProjectionLayout {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Outgoing => "outgoing",
-            Self::Incoming => "incoming",
-            Self::Bidirectional => "bidirectional",
-            Self::Undirected => "undirected",
-        }
-    }
-
-    fn stores_outgoing(self) -> bool {
-        matches!(
-            self,
-            Self::Outgoing | Self::Bidirectional | Self::Undirected
-        )
-    }
-
-    fn stores_incoming(self) -> bool {
-        matches!(self, Self::Incoming | Self::Bidirectional)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProjectionMemoryBudget {
-    max_bytes: Option<NonZeroUsize>,
-}
-
-impl ProjectionMemoryBudget {
-    pub const fn unlimited() -> Self {
-        Self { max_bytes: None }
-    }
-
-    pub const fn new(max_bytes: NonZeroUsize) -> Self {
-        Self {
-            max_bytes: Some(max_bytes),
-        }
-    }
-
-    pub fn max_bytes(self) -> Option<usize> {
-        self.max_bytes.map(NonZeroUsize::get)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProjectionMemoryEstimate {
-    pub layout: ProjectionLayout,
-    pub node_count: usize,
-    pub relationship_count: usize,
-    pub projected_edge_count: usize,
-    pub estimated_bytes: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GraphAlgorithmMemoryEstimate {
-    pub projection_bytes: usize,
-    pub algorithm_peak_bytes: usize,
-    pub result_bytes: usize,
-    pub total_peak_bytes: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectionMemoryAdmissionError {
-    pub estimate: ProjectionMemoryEstimate,
-    pub budget_bytes: usize,
-    pub storage_error: Option<String>,
-}
-
-impl Display for ProjectionMemoryAdmissionError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-        if let Some(error) = &self.storage_error {
-            return write!(
-                formatter,
-                "analytics projection storage scan failed: {error}"
-            );
-        }
-        write!(
-            formatter,
-            "analytics projection layout '{}' requires an estimated {} bytes for {} nodes and {} relationships, exceeding the {} byte budget",
-            self.estimate.layout.as_str(),
-            self.estimate.estimated_bytes,
-            self.estimate.node_count,
-            self.estimate.relationship_count,
-            self.budget_bytes,
-        )
-    }
-}
-
-impl std::error::Error for ProjectionMemoryAdmissionError {}
-
-impl ProjectionMemoryAdmissionError {
-    fn storage(error: impl Display) -> Self {
-        Self {
-            estimate: ProjectionMemoryEstimate {
-                layout: ProjectionLayout::Bidirectional,
-                node_count: 0,
-                relationship_count: 0,
-                projected_edge_count: 0,
-                estimated_bytes: 0,
-            },
-            budget_bytes: 0,
-            storage_error: Some(error.to_string()),
-        }
-    }
-}
+pub use hawdb_core::projection::{
+    CommunityAssignment, GraphAlgorithmMemoryEstimate, HierarchicalCommunityAssignment,
+    LouvainOptions, PageRankOptions, PageRankScore, ProjectionLayout,
+    ProjectionMemoryAdmissionError, ProjectionMemoryBudget, ProjectionMemoryEstimate,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectedGraph {
@@ -182,37 +55,6 @@ pub struct ProjectedGraph {
     layout: ProjectionLayout,
     edge_count: usize,
     memory_estimate: ProjectionMemoryEstimate,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PageRankOptions {
-    pub iterations: usize,
-    pub damping: f64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PageRankScore {
-    pub node: NodeId,
-    pub score: f64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LouvainOptions {
-    pub max_iterations: usize,
-    pub max_levels: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CommunityAssignment {
-    pub node: NodeId,
-    pub community: NodeId,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HierarchicalCommunityAssignment {
-    pub level: usize,
-    pub node: NodeId,
-    pub community: NodeId,
 }
 
 enum UndirectedNeighborIndexes<'a> {
@@ -227,24 +69,6 @@ impl Iterator for UndirectedNeighborIndexes<'_> {
         match self {
             Self::Projected(iter) => iter.next(),
             Self::Materialized(iter) => iter.next(),
-        }
-    }
-}
-
-impl Default for PageRankOptions {
-    fn default() -> Self {
-        Self {
-            iterations: 20,
-            damping: 0.85,
-        }
-    }
-}
-
-impl Default for LouvainOptions {
-    fn default() -> Self {
-        Self {
-            max_iterations: 20,
-            max_levels: 1,
         }
     }
 }
@@ -1361,7 +1185,7 @@ mod tests {
         ProjectionSource,
     };
     use hawdb_core::{Catalog, Value};
-    use hawdb_storage::{NodeId, NodeRecord, RelId, RelRecord};
+    use hawdb_core::ids::{NodeId, NodeRecord, RelId, RelRecord};
     use std::collections::{BTreeMap, BTreeSet};
     use std::num::NonZeroUsize;
 

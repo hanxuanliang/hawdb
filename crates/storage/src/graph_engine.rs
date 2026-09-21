@@ -98,6 +98,10 @@ pub trait GraphReadEngine {
         max_rows: usize,
         max_payload_bytes: usize,
     ) -> Result<AppendSegmentReadOutput>;
+
+    fn node_records_owned(&self) -> crate::graph_overlay::GraphNodeIterator;
+
+    fn relationship_records_owned(&self) -> crate::graph_overlay::GraphRelationshipIterator;
 }
 
 /// Maintenance/commit surface the embedded facade drives itself.
@@ -129,4 +133,10 @@ pub trait GraphMutationEngine {
         catalog: &Catalog,
         destination: impl AsRef<std::path::Path>,
     ) -> Result<crate::StorageBackupReport>;
+
+    fn register_projected_graph(
+        &mut self,
+        name: &str,
+        definition: crate::ProjectedGraphDefinition,
+    ) -> Result<()>;
 }
