@@ -2101,3 +2101,74 @@ fn plan_fingerprint_excludes_bound_values_but_instance_fingerprint_retains_them(
         second.physical_plan.instance_fingerprint()
     );
 }
+
+/// Wiring check: the configured commit lag must reach the inline query path,
+/// not just `ensure_statistics` unit calls. With lag=4, up to four commits
+/// of staleness are tolerated; the window is exceeded once lag reaches 5.
+#[test]
+fn configured_commit_lag_defers_statistics_refresh_on_query_path() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        optimizer_statistics_inline_commit_lag: Some(4),
+        ..DatabaseConfig::default()
+    });
+    // Warm the statistics cache through the public path.
+    db.explain_query("MATCH (m:Memory) RETURN m.id AS id")
+        .unwrap();
+
+    // Five commits leave lag == 4, still inside the tolerated window; each
+    // write's own planning sees a pre-commit epoch, so none recompute.
+    for id in 0..5 {
+        db.query(&format!("CREATE (:Memory {{id: {id}}})"))
+            .unwrap();
+    }
+    let within_boundary = db
+        .explain_query("MATCH (m:Memory) RETURN m.id AS id, m.title AS title")
+        .unwrap();
+    assert!(
+        within_boundary
+            .trace
+            .decisions
+            .iter()
+            .any(|decision| decision.contains("optimizer statistics cache hit")),
+        "{:?}",
+        within_boundary.trace.decisions
+    );
+
+    // One more commit pushes lag to 5 > 4: the next fresh plan recomputes.
+    db.query("CREATE (:Memory {id: 5})").unwrap();
+    let boundary = db
+        .explain_query("MATCH (m:Memory) RETURN m.title AS title, m.id AS id")
+        .unwrap();
+    assert!(
+        boundary
+            .trace
+            .decisions
+            .iter()
+            .any(|decision| decision.contains("optimizer statistics cache refresh")),
+        "{:?}",
+        boundary.trace.decisions
+    );
+
+    // Two more commits sit below the new refresh point: the next fresh plan
+    // hits the cached statistics.
+    for id in 6..8 {
+        db.query(&format!("CREATE (:Memory {{id: {id}}})"))
+            .unwrap();
+    }
+    let within = db
+        .explain_query("MATCH (m:Memory) RETURN m.title AS title")
+        .unwrap();
+    assert!(
+        within
+            .trace
+            .decisions
+            .iter()
+            .any(|decision| decision.contains("optimizer statistics cache hit")),
+        "{:?}",
+        within.trace.decisions
+    );
+
+    // Stale statistics only affect plan choice: results stay correct.
+    let output = db.query("MATCH (m:Memory) RETURN m.id AS id").unwrap();
+    assert_eq!(output.rows.len(), 8);
+}
