@@ -139,13 +139,13 @@ fn check_case(values: Vec<Vec<u64>>, final_count: usize, exit: Exit) {
         .iter()
         .map(|values| write_run(values, &mut budget).unwrap())
         .collect();
-    let seeded_runs = budget.run_count;
+    let seeded_runs = budget.run_count();
     let (expected, expected_pairs) = reference(values, final_count);
     if let Exit::RunBudget(allowed) = exit {
         budget.max_runs = seeded_runs + allowed;
     }
     if matches!(exit, Exit::ByteBudget) {
-        budget.max_bytes = budget.used_bytes;
+        budget.max_bytes = budget.used_bytes();
     }
     let token = RuntimeCancellationToken::new();
     let context = RuntimeTaskContext::without_deadline(token.clone());
@@ -166,7 +166,7 @@ fn check_case(values: Vec<Vec<u64>>, final_count: usize, exit: Exit) {
                     writer.write(
                         value,
                         &Binding::scalar("value", Value::Int(value as i64)),
-                        &mut budget,
+                        &budget,
                     )?;
                     match exit {
                         Exit::Error(at) if index == at => {
@@ -199,7 +199,7 @@ fn check_case(values: Vec<Vec<u64>>, final_count: usize, exit: Exit) {
                 expected
             );
             assert_eq!(observed, expected_pairs);
-            assert_eq!(budget.run_count, seeded_runs + observed.len());
+            assert_eq!(budget.run_count(), seeded_runs + observed.len());
             assert_eq!(
                 fixture.memory.spill_pool_snapshot().unwrap().active_runs,
                 runs.len()
@@ -226,7 +226,7 @@ fn check_case(values: Vec<Vec<u64>>, final_count: usize, exit: Exit) {
                     "injected merge failure"
                 }
                 Exit::RunBudget(allowed) => {
-                    assert_eq!(budget.run_count, seeded_runs + allowed);
+                    assert_eq!(budget.run_count(), seeded_runs + allowed);
                     assert_eq!(observed.len(), allowed + 1);
                     "max_spill_runs"
                 }

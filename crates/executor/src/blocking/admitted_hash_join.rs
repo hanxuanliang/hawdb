@@ -321,8 +321,8 @@ impl<'a> AdmittedHashJoin<'a> {
             repartitions: self.work.repartitions,
             max_spill_bytes: self.spill.max_bytes,
             max_spill_runs: self.spill.max_runs,
-            spilled_bytes: self.spill.used_bytes,
-            spill_run_count: self.spill.run_count,
+            spilled_bytes: self.spill.used_bytes(),
+            spill_run_count: self.spill.run_count(),
             spilled_rows: self.work.spilled_rows,
         }
     }
@@ -655,7 +655,7 @@ impl JoinWriter {
         state: &mut AdmittedHashJoin<'_>,
     ) -> Result<()> {
         runtime_checkpoint(state.task_context)?;
-        self.writer.write(hash, binding, &mut state.spill)?;
+        self.writer.write(hash, binding, &state.spill)?;
         self.run.hash_or |= hash;
         self.run.hash_and &= hash;
         self.run.rows = self.run.rows.saturating_add(1);
