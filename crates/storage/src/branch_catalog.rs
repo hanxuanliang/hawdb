@@ -6,7 +6,12 @@
 //! checksummed so a future publisher can reject an incomplete or ambiguous
 //! catalog before changing any durable selector.
 
+use crate::branch_head::{
+    create_child_branch_head_from_parent, BranchHead, BranchHeadError, ChildBranchHeadRequest,
+    ChildBranchSourceExpectation,
+};
 use crate::durability;
+use crate::ownership::{DatabaseDirectoryLease, DatabaseDirectoryLeaseError};
 use hawdb_core::Uuid;
 use hawdb_integrity::crc32c;
 use std::collections::BTreeSet;
@@ -644,6 +649,252 @@ pub fn write_catalog(path: &Path, catalog: &Catalog) -> io::Result<()> {
     result
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreateReservation {
+    pub id: BranchId,
+    pub metadata_revision: u64,
+}
+
+#[derive(Debug)]
+pub enum CatalogFileTransitionError {
+    Io(io::Error),
+    Transition(CatalogTransitionError),
+}
+
+impl Display for CatalogFileTransitionError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => Display::fmt(error, formatter),
+            Self::Transition(error) => Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl std::error::Error for CatalogFileTransitionError {}
+
+/// Reserves a child branch in the durable catalog before child files are made.
+/// The returned metadata revision binds the later completion transition.
+pub fn reserve_create_file(
+    path: &Path,
+    request: CreateRequest,
+) -> Result<CreateReservation, CatalogFileTransitionError> {
+    let mut catalog = read_catalog(path).map_err(CatalogFileTransitionError::Io)?;
+    let id = catalog
+        .reserve_create(request)
+        .map_err(CatalogFileTransitionError::Transition)?;
+    let metadata_revision = catalog
+        .branches
+        .iter()
+        .find(|branch| branch.id == id)
+        .map(|branch| branch.metadata_revision)
+        .ok_or(CatalogFileTransitionError::Transition(
+            CatalogTransitionError::MissingBranch,
+        ))?;
+    write_catalog(path, &catalog).map_err(CatalogFileTransitionError::Io)?;
+    Ok(CreateReservation {
+        id,
+        metadata_revision,
+    })
+}
+
+/// Marks a previously reserved child ready after its head and WAL are durable.
+pub fn complete_create_file(
+    path: &Path,
+    reservation: CreateReservation,
+) -> Result<(), CatalogFileTransitionError> {
+    let mut catalog = read_catalog(path).map_err(CatalogFileTransitionError::Io)?;
+    catalog
+        .complete_create(reservation.id, reservation.metadata_revision)
+        .map_err(CatalogFileTransitionError::Transition)?;
+    write_catalog(path, &catalog).map_err(CatalogFileTransitionError::Io)
+}
+
+/// Aborts a reserved child create after a known pre-publication failure.
+pub fn abort_create_file(
+    path: &Path,
+    reservation: CreateReservation,
+) -> Result<(), CatalogFileTransitionError> {
+    let mut catalog = read_catalog(path).map_err(CatalogFileTransitionError::Io)?;
+    catalog
+        .abort_create(reservation.id, reservation.metadata_revision)
+        .map_err(CatalogFileTransitionError::Transition)?;
+    write_catalog(path, &catalog).map_err(CatalogFileTransitionError::Io)
+}
+
+#[derive(Debug)]
+pub enum BranchCreateError {
+    Catalog(CatalogFileTransitionError),
+    Head(BranchHeadError),
+    Lease(DatabaseDirectoryLeaseError),
+    InconsistentRequest(&'static str),
+}
+
+impl Display for BranchCreateError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Catalog(error) => Display::fmt(error, formatter),
+            Self::Head(error) => Display::fmt(error, formatter),
+            Self::Lease(error) => Display::fmt(error, formatter),
+            Self::InconsistentRequest(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for BranchCreateError {}
+
+/// Reserves the catalog record, creates the isolated child head/WAL, and
+/// completes the record only after both files are durable. Known child-file
+/// failures abort the reservation; an uncertain catalog completion leaves the
+/// `Creating` record for deterministic recovery on the next open.
+pub fn create_branch_from_parent(
+    catalog_path: &Path,
+    parent_head_path: &Path,
+    child_head_request: ChildBranchHeadRequest,
+    expected_parent: ChildBranchSourceExpectation,
+    max_active_wal_bytes: u64,
+    request: CreateRequest,
+) -> Result<BranchCreateResult, BranchCreateError> {
+    if request.id.as_uuid().as_bytes() != &child_head_request.branch_id {
+        return Err(BranchCreateError::InconsistentRequest(
+            "catalog and child head branch IDs differ",
+        ));
+    }
+    if request.base_root_digest != *child_head_request.sealed_root.sha256.as_bytes() {
+        return Err(BranchCreateError::InconsistentRequest(
+            "catalog and child head sealed-root digests differ",
+        ));
+    }
+    if request.parent_id.as_uuid().as_bytes() != &expected_parent.branch_id {
+        return Err(BranchCreateError::InconsistentRequest(
+            "catalog parent and selected parent head differ",
+        ));
+    }
+    let reservation =
+        reserve_create_file(catalog_path, request).map_err(BranchCreateError::Catalog)?;
+    let child_head_path = child_head_request.head_path.clone();
+    let child_directory = child_head_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if let Err(error) = fs::create_dir_all(child_directory) {
+        let _ = abort_create_file(catalog_path, reservation);
+        return Err(BranchCreateError::Head(BranchHeadError::Io {
+            operation: "create child branch directory",
+            source: error,
+        }));
+    }
+    let lease = match DatabaseDirectoryLease::acquire(child_directory) {
+        Ok(lease) => lease,
+        Err(error) => {
+            let _ = abort_create_file(catalog_path, reservation);
+            return Err(BranchCreateError::Lease(error));
+        }
+    };
+    match create_child_branch_head_from_parent(
+        parent_head_path,
+        &child_head_path,
+        child_head_request,
+        expected_parent,
+        max_active_wal_bytes,
+    ) {
+        Ok(head) => {
+            complete_create_file(catalog_path, reservation).map_err(BranchCreateError::Catalog)?;
+            Ok(BranchCreateResult { head, lease })
+        }
+        Err(error) => {
+            let _ = abort_create_file(catalog_path, reservation);
+            Err(BranchCreateError::Head(error))
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct BranchCreateResult {
+    pub head: BranchHead,
+    pub lease: DatabaseDirectoryLease,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateRecoveryOutcome {
+    Completed,
+    Aborted,
+}
+
+/// Recovers a pending child creation after process interruption.  A complete
+/// and valid child head/WAL pair is promoted to `Ready`; a known absent pair
+/// is aborted.  Any other filesystem or integrity error leaves `Creating`
+/// untouched so a later open can retry conservatively.
+pub fn recover_create_file(
+    catalog_path: &Path,
+    branch_id: BranchId,
+    child_head_path: &Path,
+    child_wal_path: &Path,
+    max_active_wal_bytes: u64,
+) -> Result<CreateRecoveryOutcome, BranchCreateError> {
+    let catalog = read_catalog(catalog_path)
+        .map_err(|error| BranchCreateError::Catalog(CatalogFileTransitionError::Io(error)))?;
+    let branch = catalog
+        .branches
+        .iter()
+        .find(|branch| branch.id == branch_id)
+        .ok_or(BranchCreateError::Catalog(
+            CatalogFileTransitionError::Transition(CatalogTransitionError::MissingBranch),
+        ))?;
+    if branch.state != BranchState::Creating || branch.create_outcome != CreateOutcome::Pending {
+        return Err(BranchCreateError::Catalog(
+            CatalogFileTransitionError::Transition(CatalogTransitionError::InvalidState(
+                "recovery requires a pending child create",
+            )),
+        ));
+    }
+    let reservation = CreateReservation {
+        id: branch_id,
+        metadata_revision: branch.metadata_revision,
+    };
+    let head = match crate::branch_head::read_branch_head(child_head_path) {
+        Ok(head) => head,
+        Err(BranchHeadError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+            abort_create_file(catalog_path, reservation).map_err(BranchCreateError::Catalog)?;
+            return Ok(CreateRecoveryOutcome::Aborted);
+        }
+        Err(error) => return Err(BranchCreateError::Head(error)),
+    };
+    if head.project_id != *catalog.project_id.as_uuid().as_bytes()
+        || head.branch_id != *branch_id.as_uuid().as_bytes()
+        || branch.base_root_digest != Some(*head.sealed_root.sha256.as_bytes())
+        || branch.source_commit_epoch != head.logical_commit_epoch
+    {
+        return Err(BranchCreateError::InconsistentRequest(
+            "pending child metadata does not match its head",
+        ));
+    }
+    match fs::metadata(child_wal_path) {
+        Ok(_) => {}
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            abort_create_file(catalog_path, reservation).map_err(BranchCreateError::Catalog)?;
+            return Ok(CreateRecoveryOutcome::Aborted);
+        }
+        Err(source) => {
+            return Err(BranchCreateError::Head(BranchHeadError::Io {
+                operation: "read pending child WAL metadata",
+                source,
+            }));
+        }
+    }
+    let wal = crate::branch_head::active_wal_identity_from_file(
+        child_wal_path,
+        head.active_wal.generation,
+        head.active_wal.replay_start_lsn,
+        max_active_wal_bytes,
+    )
+    .map_err(BranchCreateError::Head)?;
+    if wal != head.active_wal {
+        return Err(BranchCreateError::Head(BranchHeadError::InvalidWalIdentity));
+    }
+    complete_create_file(catalog_path, reservation).map_err(BranchCreateError::Catalog)?;
+    Ok(CreateRecoveryOutcome::Completed)
+}
+
 /// Stable project metadata lock.  It is separate from branch writer leases so
 /// independent branch handles can write their own WALs while catalog updates
 /// remain serialized.
@@ -1147,6 +1398,251 @@ mod tests {
         assert_eq!(read_catalog(&path).unwrap().revision, catalog.revision);
         assert!(path.is_file());
         assert!(directory.join(METADATA_LOCK_FILE).is_file());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn file_create_reservation_and_completion_are_restart_visible() {
+        let (directory, path) = temporary_catalog_path();
+        write_catalog(&path, &catalog()).unwrap();
+        let reservation = reserve_create_file(&path, create_request()).unwrap();
+        let pending = read_catalog(&path).unwrap();
+        assert_eq!(pending.revision, 12);
+        assert_eq!(pending.branches.len(), 3);
+        assert_eq!(
+            pending
+                .branches
+                .iter()
+                .find(|branch| branch.id == reservation.id)
+                .unwrap()
+                .state,
+            BranchState::Creating
+        );
+        complete_create_file(&path, reservation).unwrap();
+        let ready = read_catalog(&path).unwrap();
+        assert_eq!(
+            ready
+                .branches
+                .iter()
+                .find(|branch| branch.id == reservation.id)
+                .unwrap()
+                .state,
+            BranchState::Ready
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn interrupted_create_without_child_files_is_aborted_on_recovery() {
+        let (directory, path) = temporary_catalog_path();
+        write_catalog(&path, &catalog()).unwrap();
+        let reservation = reserve_create_file(&path, create_request()).unwrap();
+        let outcome = recover_create_file(
+            &path,
+            reservation.id,
+            &directory.join("missing.head"),
+            &directory.join("missing.wal"),
+            1024,
+        )
+        .unwrap();
+        assert_eq!(outcome, CreateRecoveryOutcome::Aborted);
+        let recovered = read_catalog(&path).unwrap();
+        let branch = recovered
+            .branches
+            .iter()
+            .find(|branch| branch.id == reservation.id)
+            .unwrap();
+        assert_eq!(branch.state, BranchState::Deleted);
+        assert_eq!(branch.create_outcome, CreateOutcome::Aborted);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recovery_completes_a_pending_create_when_files_are_already_durable() {
+        let (directory, catalog_path) = temporary_catalog_path();
+        write_catalog(&catalog_path, &catalog()).unwrap();
+        let parent_head_path = directory.join("parent.head");
+        let child_directory = directory.join("child");
+        let child_head_path = child_directory.join("child.head");
+        let child_wal_path = child_directory.join("child.wal");
+        fs::create_dir_all(&child_directory).unwrap();
+        let root = crate::immutable_object::ObjectReference::for_bytes(
+            crate::immutable_object::ObjectKind::SealedRoot,
+            1,
+            b"parent-root",
+        );
+        let parent = BranchHead {
+            project_id: *catalog().project_id.as_uuid().as_bytes(),
+            branch_id: *id(1).as_uuid().as_bytes(),
+            physical_generation: 4,
+            sealed_root: root,
+            logical_commit_epoch: 7,
+            active_wal: crate::branch_head::ActiveWalIdentity {
+                generation: 5,
+                replay_start_lsn: 20,
+                byte_length: 1,
+                sha256: hawdb_integrity::sha256(b"x"),
+            },
+        };
+        fs::write(&parent_head_path, parent.encode().unwrap()).unwrap();
+        let mut request = create_request();
+        request.base_root_digest = *root.sha256.as_bytes();
+        let reservation = reserve_create_file(&catalog_path, request.clone()).unwrap();
+        let child_request = ChildBranchHeadRequest {
+            project_id: parent.project_id,
+            branch_id: *request.id.as_uuid().as_bytes(),
+            sealed_root: root,
+            logical_commit_epoch: 7,
+            active_wal_generation: 1,
+            replay_start_lsn: 42,
+            head_path: child_head_path.clone(),
+            wal_path: child_wal_path.clone(),
+        };
+        create_child_branch_head_from_parent(
+            &parent_head_path,
+            &child_head_path,
+            child_request,
+            ChildBranchSourceExpectation {
+                branch_id: parent.branch_id,
+                physical_generation: 4,
+                logical_commit_epoch: 7,
+                sealed_root: root,
+            },
+            1024,
+        )
+        .unwrap();
+        assert_eq!(
+            recover_create_file(
+                &catalog_path,
+                reservation.id,
+                &child_head_path,
+                &child_wal_path,
+                1024,
+            )
+            .unwrap(),
+            CreateRecoveryOutcome::Completed
+        );
+        assert_eq!(
+            read_catalog(&catalog_path)
+                .unwrap()
+                .branches
+                .iter()
+                .find(|branch| branch.id == reservation.id)
+                .unwrap()
+                .state,
+            BranchState::Ready
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recovery_keeps_creating_for_corrupt_child_head() {
+        let (directory, path) = temporary_catalog_path();
+        write_catalog(&path, &catalog()).unwrap();
+        let reservation = reserve_create_file(&path, create_request()).unwrap();
+        let head_path = directory.join("corrupt.head");
+        let wal_path = directory.join("corrupt.wal");
+        fs::write(&head_path, b"corrupt").unwrap();
+        let error =
+            recover_create_file(&path, reservation.id, &head_path, &wal_path, 1024).unwrap_err();
+        assert!(matches!(error, BranchCreateError::Head(_)));
+        assert_eq!(
+            read_catalog(&path)
+                .unwrap()
+                .branches
+                .iter()
+                .find(|branch| branch.id == reservation.id)
+                .unwrap()
+                .state,
+            BranchState::Creating
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn create_branch_from_parent_completes_catalog_after_child_files() {
+        let (directory, catalog_path) = temporary_catalog_path();
+        write_catalog(&catalog_path, &catalog()).unwrap();
+        let parent_head_path = directory.join("parent.head");
+        let child_directory = directory.join("child");
+        let child_head_path = child_directory.join("child.head");
+        let child_wal_path = child_directory.join("child.wal");
+        let root = crate::immutable_object::ObjectReference::for_bytes(
+            crate::immutable_object::ObjectKind::SealedRoot,
+            1,
+            b"parent-root",
+        );
+        let parent = BranchHead {
+            project_id: *catalog().project_id.as_uuid().as_bytes(),
+            branch_id: *id(1).as_uuid().as_bytes(),
+            physical_generation: 4,
+            sealed_root: root,
+            logical_commit_epoch: 7,
+            active_wal: crate::branch_head::ActiveWalIdentity {
+                generation: 5,
+                replay_start_lsn: 20,
+                byte_length: 1,
+                sha256: hawdb_integrity::sha256(b"x"),
+            },
+        };
+        fs::write(&parent_head_path, parent.encode().unwrap()).unwrap();
+        let mut request = create_request();
+        request.base_root_digest = *root.sha256.as_bytes();
+        let child_id = request.id;
+        let child = create_branch_from_parent(
+            &catalog_path,
+            &parent_head_path,
+            ChildBranchHeadRequest {
+                project_id: parent.project_id,
+                branch_id: *request.id.as_uuid().as_bytes(),
+                sealed_root: root,
+                logical_commit_epoch: 7,
+                active_wal_generation: 1,
+                replay_start_lsn: 42,
+                head_path: child_head_path.clone(),
+                wal_path: child_wal_path.clone(),
+            },
+            ChildBranchSourceExpectation {
+                branch_id: parent.branch_id,
+                physical_generation: 4,
+                logical_commit_epoch: 7,
+                sealed_root: root,
+            },
+            1024,
+            request,
+        )
+        .unwrap();
+        assert_eq!(child.head.sealed_root, root);
+        assert_eq!(
+            read_catalog(&catalog_path)
+                .unwrap()
+                .branches
+                .last()
+                .unwrap()
+                .state,
+            BranchState::Ready
+        );
+        assert!(child_head_path.is_file());
+        assert!(child_wal_path.is_file());
+        assert!(matches!(
+            DatabaseDirectoryLease::acquire(&child_directory),
+            Err(DatabaseDirectoryLeaseError::AlreadyOpen)
+        ));
+        drop(child);
+        let reopened = crate::branch_head::read_branch_head(&child_head_path).unwrap();
+        assert_eq!(reopened.sealed_root, root);
+        assert_eq!(
+            read_catalog(&catalog_path)
+                .unwrap()
+                .branches
+                .iter()
+                .find(|branch| branch.id == child_id)
+                .unwrap()
+                .state,
+            BranchState::Ready
+        );
+        let reopened_lease = DatabaseDirectoryLease::acquire(&child_directory).unwrap();
+        drop(reopened_lease);
         fs::remove_dir_all(directory).unwrap();
     }
 
