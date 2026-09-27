@@ -29,11 +29,15 @@ pub mod background;
 pub mod backup;
 #[doc(hidden)]
 pub mod branch_catalog;
+#[doc(hidden)]
+pub mod branch_head;
 pub mod cache;
 pub mod canonical;
 pub mod canonical_adjacency;
 #[doc(hidden)]
 pub mod checkpoint;
+#[doc(hidden)]
+pub mod checkpoint_closure;
 pub mod column_group;
 pub mod config;
 #[doc(hidden)]
@@ -59,6 +63,8 @@ pub mod graph_index_metrics;
 pub mod graph_overlay;
 pub use hawdb_core::ids;
 pub use hawdb_core::ids::{NodeId, NodeRecord, ProjectedNodeRecord, RelId, RelRecord};
+#[doc(hidden)]
+pub mod immutable_object;
 pub mod index_page;
 #[doc(hidden)]
 pub mod io;
@@ -69,6 +75,10 @@ pub mod ownership;
 pub mod predicate;
 pub mod pressure;
 pub mod projection;
+#[doc(hidden)]
+pub mod sealed_root;
+#[doc(hidden)]
+pub mod sealed_wal;
 
 // Compatibility shims so the graph kernel can move into this crate without
 // edit churn: the kernel addresses these items through `crate::error`,

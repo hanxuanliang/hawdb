@@ -179,6 +179,187 @@ directory publication before a selector can refer to it. Existing
 to overwrite an immutable object. Uncertain sync/replace results poison the
 affected publication handle until reopen; the caller receives no success.
 
+### Immutable object publication kernel
+
+`crates/storage/src/immutable_object.rs` implements the first #779 publication
+boundary. Its reference is `(kind, format_version, byte_length, sha256)`. The
+SHA-256 input is the fixed domain tag, the one-byte kind, the little-endian
+format version and byte length, followed by the exact payload bytes. Therefore
+two different object families or format versions cannot silently share an
+identity, and a reference computed from a payload is deterministic.
+
+The publication argument is an induction over the operation's checked stages:
+
+1. Before staging, the reference validator establishes the identity and size
+   invariant for the caller's bytes.
+2. A private staging file is created with `create_new`, written completely, and
+   synchronized. A bounded read-back recomputes its length, full bytes, and
+   domain-separated digest, so the installed candidate satisfies the same
+   invariant before it can become visible.
+3. Installation uses an exclusive hard link into the kind directory. If the
+   destination already exists, the publisher reads and compares the complete
+   bytes and reference; it never replaces that path. Consequently, every
+   successful destination names exactly one validated immutable payload, even
+   when two publishers race.
+4. The object and staging directory entries are synchronized before success is
+   reported. An error after exclusive installation is publication-uncertain and
+   poisons that in-memory publisher; reopening creates a fresh publisher which
+   revalidates the existing object. Thus an uncertain result cannot be retried
+   through a possibly stale handle or acknowledged as a durable selector.
+
+This is a source-linked deductive proof of the publication kernel's identity,
+exclusive-installation, and fail-closed boundaries. It does not prove the
+future sealed-root closure, WAL interval ordering, filesystem crash model, or
+the branch selector protocol; those remain obligations of the later #779
+stages.
+
+### Sealed-root reference codec
+
+`crates/storage/src/sealed_root.rs` provides the bounded v1 metadata codec for
+the next #779 stage. A root contains a nonempty canonical checkpoint-reference
+list, a checkpoint and commit epoch, a replay-start LSN, and zero or more
+sealed-WAL references. Each WAL interval is half-open, strictly nonempty, and
+must begin exactly where the previous interval ended. Checkpoint and WAL
+references are restricted to their object kinds and nonzero format versions.
+
+The codec proof follows the reader offset by induction. Every fixed-width read
+checks the remaining slice before advancing, so each decoded field belongs to
+the checksum-covered prefix. The declared counts are checked against bounded
+limits before vector allocation. Checkpoint references must be strictly
+increasing under their complete typed identity, while the WAL invariant carries
+the expected next LSN from one record to the next; therefore duplicates,
+overlaps, and gaps cannot enter a validated root. Exact-end checking rejects
+unparsed bytes, and the CRC32C footer rejects mutations before validation. The
+encoder emits the same field order and validated lists, so equivalent roots
+have one byte representation and their sealed-root object identity is
+deterministic.
+
+This proves codec boundaries and interval admission only. The references are
+not yet populated from every live checkpoint artifact family, and the codec
+does not itself seal a WAL, publish a root, or prove crash recovery; those
+remain integration obligations of #779.
+
+### Explicit checkpoint-closure publication
+
+`crates/storage/src/checkpoint_closure.rs` defines the boundary between a
+validated durable manifest and immutable object publication. The caller gives
+one input for every manifest-bound artifact; the publisher never scans the
+directory and never derives a dependency from a filename. For each input it
+first proves path and typed-reference uniqueness, reads the complete file,
+recomputes the domain-separated object identity, and only then invokes the
+exclusive immutable publisher. Therefore induction over the input list gives:
+
+1. every returned reference denotes exactly the bytes named by one explicit
+   manifest binding;
+2. a missing file, wrong kind, digest/length mismatch, duplicate path, or
+   duplicate reference aborts before that binding is acknowledged; and
+3. the returned references are a deterministic sorted set suitable for the
+   sealed-root encoder, while already-published earlier objects remain safe to
+   share and are never replaced.
+
+This proof covers the no-inference and per-artifact identity boundary. It does
+not claim that the caller has enumerated every artifact family; the manifest
+reader and the eventual active-writer/head handoff must provide that complete
+list before a root or selector can be published. `build_sealed_root` then
+copies only that returned canonical reference set and delegates epoch and WAL
+interval validation to the sealed-root codec. Thus root construction cannot
+silently add an unpublished checkpoint dependency or bypass interval checks.
+
+`DurableManifest::manifest_artifact_inputs` is the first manifest-side
+population boundary. It derives the known checkpoint, manifest, adjacency,
+relational, and append manifest paths from validated generation bindings and
+their recorded lengths/raw content digests; it verifies those bytes first and
+only then derives the domain-separated immutable identity, so the two digest
+domains cannot be confused. It never enumerates directory entries. Each
+family reader must append its physical pages and descriptor descendants from
+the decoded manifest before calling the closure publisher. This split keeps
+the proof compositional: manifest bindings prove names and expected identity,
+family readers prove their internal transitive ranges, and the publisher
+proves byte-for-byte immutable installation.
+
+`CheckpointClosurePlan` makes the family-reader obligation executable. Before
+publication each canonical, adjacency, property, relational, and append family
+must either contribute its validated descendants or be explicitly marked
+empty. The plan rejects duplicate family decisions and rejects publication
+with any undecided family, so a caller cannot accidentally turn a partial
+manifest walk into a branch root.
+
+### Sealed WAL validation boundary
+
+`crates/storage/src/sealed_wal.rs` validates one stable binary WAL generation
+and hands its exact bytes to the immutable-object publisher. The caller must
+hold the source publication barrier; this helper intentionally does not close
+the active writer or switch a branch head.
+
+Its proof is a prefix induction over cursor events. The WAL reader first proves
+the generation header and replay-start LSN. For each `Entry`, the next expected
+LSN is the previous LSN plus one, so the induction preserves a contiguous
+half-open interval. A corrupt record or torn tail exits before publication,
+while `Eof` is accepted only after the complete valid prefix. The file is then
+read with the original bounded length and rejected if its length changes during
+the read. Only those bytes are passed to the content-addressed publisher, which
+rechecks their identity before installation. Thus a successful publication
+corresponds to exactly the validated WAL interval; no partial suffix can be
+selected. Rotation, new-WAL creation, head switching, and crash recovery remain
+separate protocol obligations.
+
+`prepare_wal_rotation` extends that boundary without acknowledging a head
+switch. It first obtains the validated sealed-WAL result, derives the
+successor start LSN from the validated end LSN, creates the successor with
+`create_new`, writes its exact binary header, synchronizes the file, and then
+synchronizes its parent directory. The old WAL is retained byte-for-byte. By
+the sequence of durable prerequisites, a caller can expose the successor only
+after its complete header is durable; a failure before selector publication
+leaves the old head and old WAL authoritative, while a failed candidate is
+removed where its outcome is known. The remaining uncertain directory-sync
+case is returned as an error and must be handled by the caller's publication
+poison/reopen protocol.
+
+If that parent-directory synchronization fails after the successor file has
+been written, `prepare_wal_rotation` removes the known candidate before
+returning. The retry invariant is therefore preserved: a subsequent attempt
+can use the same successor path and `create_new` remains exclusive, while the
+old WAL and head stay authoritative throughout.
+
+### Branch-head selector codec and CAS
+
+`crates/storage/src/branch_head.rs` defines the v1 branch-head selector. It
+binds nonzero project and branch identities, a strictly positive physical
+generation, a sealed-root object reference, the logical commit epoch, and the
+active WAL generation/start LSN/length/digest. The selector has a fixed field
+order and CRC32C footer; unknown, truncated, checksum-invalid, trailing, or
+incomplete values fail closed before a handle can use them.
+
+The codec proof follows the bounded reader offset exactly as for the root
+codec: every field advances only after a checked slice, and the final exact-end
+check excludes hidden state. Validation establishes the identity and reference
+invariants before encoding or publication. Head publication then reads the
+current selector, requires matching project/branch identities and the caller's
+exact physical generation, and accepts only a strictly newer generation. The
+candidate is fully written and synchronized before `durable_replace_file`
+changes visibility, so a failed pre-replacement operation leaves the old bytes
+selected. A successful replacement selects one complete old or new selector;
+the later crash-recovery integration must still prove how an uncertain
+filesystem result is poisoned and reopened.
+
+`active_wal_identity_from_file` supplies the active-WAL binding used by that
+selector. It reads the complete bounded successor file and hashes those exact
+bytes; the path and metadata length are never sufficient evidence. Thus, if a
+rotation preparation has made the successor header durable, the recorded
+length and digest identify the same byte image that recovery will open. A
+length-limit failure occurs before an identity is returned, preserving the
+old head as the only acknowledged selector.
+
+`publish_prepared_wal_rotation` is the final handoff operation. It first
+re-reads the current head and checks the caller's generation and branch
+identity, then reads and hashes the already-prepared successor, constructs the
+next physical generation, and invokes the generation-checked atomic selector
+replacement. By this ordering, a missing or oversized successor leaves the
+old selector untouched; once replacement succeeds, the selector's active WAL
+identity is exactly the successor byte image prepared by the preceding
+rotation step. The sealed root is an explicit precondition, so this helper
+cannot acknowledge a head that has not already named an immutable root.
+
 ### Catalog codec invariants
 
 The first storage implementation slice uses a fixed v1 header, little-endian
