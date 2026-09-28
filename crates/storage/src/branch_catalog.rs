@@ -71,6 +71,11 @@ impl BranchName {
         Self("main".to_string())
     }
 
+    /// Returns the canonical engine-generated agent name for a branch UUID.
+    pub fn generated_agent(id: BranchId) -> Self {
+        Self(format!("agent/{}", id.as_uuid()))
+    }
+
     pub fn new(value: impl Into<String>) -> Result<Self, CatalogError> {
         let value = value.into();
         validate_name(&value)?;
@@ -703,6 +708,7 @@ fn write_catalog_locked(path: &Path, catalog: &Catalog) -> io::Result<()> {
 pub struct CreateReservation {
     pub id: BranchId,
     pub metadata_revision: u64,
+    pub replayed: bool,
 }
 
 #[derive(Debug)]
@@ -737,6 +743,10 @@ pub fn reserve_create_file(
     let _metadata_lock =
         CatalogMetadataLease::acquire_blocking(parent).map_err(CatalogFileTransitionError::Io)?;
     let mut catalog = read_catalog(path).map_err(CatalogFileTransitionError::Io)?;
+    let replayed = catalog
+        .branches
+        .iter()
+        .any(|branch| branch.create_request_key == request.request_key);
     let id = catalog
         .reserve_create(request)
         .map_err(CatalogFileTransitionError::Transition)?;
@@ -752,6 +762,7 @@ pub fn reserve_create_file(
     Ok(CreateReservation {
         id,
         metadata_revision,
+        replayed,
     })
 }
 
@@ -850,6 +861,66 @@ pub fn create_branch_from_parent(
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
+    if reservation.replayed {
+        if reservation.id.as_uuid().as_bytes() != &child_head_request.branch_id {
+            return Err(BranchCreateError::InconsistentRequest(
+                "replayed branch identity does not match the requested child paths",
+            ));
+        }
+        let lease =
+            DatabaseDirectoryLease::acquire(child_directory).map_err(BranchCreateError::Lease)?;
+        let catalog = read_catalog(catalog_path)
+            .map_err(|error| BranchCreateError::Catalog(CatalogFileTransitionError::Io(error)))?;
+        let branch = catalog
+            .branches
+            .iter()
+            .find(|branch| branch.id == reservation.id)
+            .ok_or(BranchCreateError::InconsistentRequest(
+                "replayed branch is missing",
+            ))?;
+        match (branch.state, branch.create_outcome) {
+            (BranchState::Creating, CreateOutcome::Pending) => {
+                if recover_create_file(
+                    catalog_path,
+                    reservation.id,
+                    &child_head_path,
+                    &child_head_request.wal_path,
+                    max_active_wal_bytes,
+                )? == CreateRecoveryOutcome::Aborted
+                {
+                    return Err(BranchCreateError::InconsistentRequest(
+                        "replayed branch creation was aborted",
+                    ));
+                }
+            }
+            (BranchState::Ready, CreateOutcome::Succeeded) => {}
+            _ => {
+                return Err(BranchCreateError::InconsistentRequest(
+                    "replayed branch is not ready",
+                ))
+            }
+        }
+        let head = crate::branch_head::read_branch_head(&child_head_path)
+            .map_err(BranchCreateError::Head)?;
+        if head.project_id != *catalog.project_id.as_uuid().as_bytes()
+            || head.branch_id != *reservation.id.as_uuid().as_bytes()
+        {
+            return Err(BranchCreateError::InconsistentRequest(
+                "replayed branch head identity mismatch",
+            ));
+        }
+        let wal = crate::branch_head::active_wal_identity_from_file(
+            &child_head_request.wal_path,
+            head.active_wal.generation,
+            head.active_wal.replay_start_lsn,
+            max_active_wal_bytes,
+        )
+        .map_err(BranchCreateError::Head)?;
+        if wal != head.active_wal {
+            return Err(BranchCreateError::Head(BranchHeadError::InvalidWalIdentity));
+        }
+        return Ok(BranchCreateResult { head, lease });
+    }
     if let Err(error) = fs::create_dir_all(child_directory) {
         let _ = abort_create_file(catalog_path, reservation);
         return Err(BranchCreateError::Head(BranchHeadError::Io {
@@ -1030,6 +1101,7 @@ pub fn recover_create_file(
     let reservation = CreateReservation {
         id: branch_id,
         metadata_revision: branch.metadata_revision,
+        replayed: false,
     };
     let head = match crate::branch_head::read_branch_head(child_head_path) {
         Ok(head) => head,
@@ -1838,6 +1910,7 @@ mod tests {
         let mut request = create_request();
         request.base_root_digest = *root.sha256.as_bytes();
         let child_id = request.id;
+        let retry_request = request.clone();
         let child = create_branch_from_parent(
             &catalog_path,
             &parent_head_path,
@@ -1877,7 +1950,33 @@ mod tests {
             DatabaseDirectoryLease::acquire(&child_directory),
             Err(DatabaseDirectoryLeaseError::AlreadyOpen)
         ));
+        let first_head = child.head;
         drop(child);
+        let retried = create_branch_from_parent(
+            &catalog_path,
+            &parent_head_path,
+            ChildBranchHeadRequest {
+                project_id: parent.project_id,
+                branch_id: *retry_request.id.as_uuid().as_bytes(),
+                sealed_root: root,
+                logical_commit_epoch: 7,
+                active_wal_generation: 1,
+                replay_start_lsn: 42,
+                head_path: child_head_path.clone(),
+                wal_path: child_wal_path.clone(),
+            },
+            ChildBranchSourceExpectation {
+                branch_id: parent.branch_id,
+                physical_generation: 4,
+                logical_commit_epoch: 7,
+                sealed_root: root,
+            },
+            1024,
+            retry_request,
+        )
+        .unwrap();
+        assert_eq!(retried.head, first_head);
+        drop(retried);
         let reopened = crate::branch_head::read_branch_head(&child_head_path).unwrap();
         assert_eq!(reopened.sealed_root, root);
         assert_eq!(
