@@ -79,6 +79,33 @@ impl CheckpointClosurePlan {
         Ok(())
     }
 
+    /// Adds a family's physical artifacts while coalescing files with the
+    /// same immutable content identity. Multiple physical generations may
+    /// legitimately share one content-addressed object.
+    pub fn add_family_artifacts_deduplicating(
+        &mut self,
+        family: CheckpointArtifactFamily,
+        inputs: impl IntoIterator<Item = CheckpointArtifactInput>,
+    ) -> Result<(), CheckpointClosureError> {
+        self.complete_family(family)?;
+        let existing = self
+            .inputs
+            .iter()
+            .map(|input| input.reference)
+            .collect::<BTreeSet<_>>();
+        let mut references = existing;
+        self.inputs.extend(
+            inputs
+                .into_iter()
+                .filter(|input| references.insert(input.reference)),
+        );
+        Ok(())
+    }
+
+    pub fn inputs(&self) -> &[CheckpointArtifactInput] {
+        &self.inputs
+    }
+
     pub fn mark_family_empty(
         &mut self,
         family: CheckpointArtifactFamily,
@@ -233,7 +260,10 @@ pub fn publish_checkpoint_closure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     struct TempDir(PathBuf);
     impl TempDir {
@@ -242,7 +272,11 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let path = std::env::temp_dir().join(format!("hawdb-closure-{suffix}"));
+            let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "hawdb-closure-{}-{suffix}-{sequence}",
+                std::process::id()
+            ));
             fs::create_dir_all(&path).unwrap();
             Self(path)
         }
@@ -331,5 +365,43 @@ mod tests {
         let mut store = ImmutableObjectStore::open(dir.path().join("objects")).unwrap();
         let error = plan.publish(&mut store).unwrap_err();
         assert!(matches!(error, CheckpointClosureError::Incomplete { .. }));
+    }
+
+    #[test]
+    fn deduplicating_family_coalesces_identical_physical_artifacts() {
+        let dir = TempDir::new();
+        let checkpoint = dir.path().join("checkpoint");
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        fs::write(&checkpoint, b"checkpoint").unwrap();
+        fs::write(&first, b"same-bytes").unwrap();
+        fs::write(&second, b"same-bytes").unwrap();
+        let mut plan = CheckpointClosurePlan::new(vec![input(
+            checkpoint,
+            ObjectKind::Checkpoint,
+            b"checkpoint",
+        )]);
+        plan.add_family_artifacts_deduplicating(
+            CheckpointArtifactFamily::Canonical,
+            vec![
+                input(first, ObjectKind::CheckpointArtifact, b"same-bytes"),
+                input(second, ObjectKind::CheckpointArtifact, b"same-bytes"),
+            ],
+        )
+        .unwrap();
+        for family in [
+            CheckpointArtifactFamily::Adjacency,
+            CheckpointArtifactFamily::PropertySpill,
+            CheckpointArtifactFamily::PropertyProjection,
+            CheckpointArtifactFamily::RelationalRow,
+            CheckpointArtifactFamily::RelationalOverflow,
+            CheckpointArtifactFamily::RelationalIndex,
+            CheckpointArtifactFamily::Append,
+        ] {
+            plan.mark_family_empty(family).unwrap();
+        }
+        let mut store = ImmutableObjectStore::open(dir.path().join("objects")).unwrap();
+        let closure = plan.publish(&mut store).unwrap();
+        assert_eq!(closure.references.len(), 2);
     }
 }
