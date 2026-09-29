@@ -26,13 +26,13 @@ require qualification; this document does not claim they pass.
   lost after power failure. Successful checkpoint/seal synchronizes its covered
   committed prefix. There is no fixed time bound on the unsynchronized window.
   Loss may omit whole transactions, never recover partial schema/data changes.
-- The effective policy comes from the branch opener's explicit `durability`
+- The effective policy comes from the project opener's explicit `durability`
   argument, not `DatabaseConfig` or persisted branch metadata. It applies to that
-  handle's transactions and is fixed for its lifetime. The default opener passes
-  `SyncOnEveryWrite`; reopening without an override and opening a newly created
-  child use that default, regardless of a previous or parent handle's policy.
-  The proposed API below exposes the effective mode. WAL disabling is outside
-  this decision.
+  execution context's transactions and is fixed for its lifetime. Default opening
+  uses `SyncOnEveryWrite`. `USE BRANCH` preserves that context's explicit policy;
+  it never inherits the target branch's previous writer policy. Reopening without
+  an override resets to the synchronous default. WAL disabling is outside this
+  decision.
 - A response lost after durable publication may leave a committed operation.
   Branch creation retries MUST recover the same idempotent outcome and identity.
   An interrupted transaction MUST recover atomically, never as partial schema
@@ -172,58 +172,122 @@ contract; explicit branch deletion does not expire its request receipt.
 
 ## Writable branch API and schema isolation
 
-The proposed `Database::open_branch(project_path, BranchSelector)` returns a
-`Database` permanently bound to the resolved branch UUID. It owns the internal
-OS open lock and reuses ordinary SQL/Cypher, transaction, and checkpoint APIs.
-No public lease renewal API, branch-switching SQL, or per-DDL branch wrapper is
-required. Read-only opening is explicit; a read-only recovery handle alone does
-not meet the writable-branch contract. Project metadata inspection must not
-require opening `main` as a writer merely to access another branch.
+Branch creation, inspection, selection/opening, and deletion are SQL operations
+executed by the embedded query runtime. A dedicated public `open_branch()` method
+is not required. Rust opens the project and configures its execution context;
+SQL selects the branch. The proposed initial selection statement is:
 
-The proposed signatures follow the existing single-database opener pattern.
-These are design signatures, not APIs already implemented:
-
-```rust
-impl Database {
-    pub fn open_branch(
-        project_path: impl AsRef<Path>,
-        selector: BranchSelector,
-    ) -> Result<Self>;
-
-    pub fn open_branch_with_durability_and_config(
-        project_path: impl AsRef<Path>,
-        selector: BranchSelector,
-        durability: DurabilityPolicy,
-        config: DatabaseConfig,
-    ) -> Result<Self>;
-
-    pub fn durability_policy(&self) -> DurabilityPolicy;
-}
+```sql
+USE BRANCH dev;
+USE BRANCH NAME $1;
+USE BRANCH ID $1;
+SHOW CURRENT BRANCH;
 ```
 
-`open_branch(path, selector)` delegates to the configuration-aware opener with
-`DurabilityPolicy::SyncOnEveryWrite` and `DatabaseConfig::default()`. The explicit
-`durability` argument is the sole policy source; `DatabaseConfig` supplies the
-existing read-only, recovery, and resource settings and does not override it.
-There is no policy lookup from the catalog, environment, or parent handle.
-`durability_policy()` returns the selected effective policy. Setting
-`config.read_only = true` rejects writes regardless of the selected policy.
+The first form accepts a validated branch-name identifier (double-quoted when
+needed); the `NAME` and `ID` forms accept a string literal or bound parameter.
+Names remain case-sensitive under the branch-name contract, with no UUID-looking
+name heuristic. UUID values are parsed and validated as UUIDs. Parameters are
+bound as values by the parser/runtime, never interpolated into SQL text.
+`SHOW CURRENT BRANCH` returns one bounded row containing branch UUID, name, and
+effective durability policy; a metadata-only context returns null UUID/name.
 
-For example, a host explicitly accepts relaxed transaction durability with:
+The proposed usage reuses existing Rust query entrypoints; branch SQL itself is
+not yet implemented:
 
 ```rust
-let branch = Database::open_branch_with_durability_and_config(
+let mut db = Database::open(project_path)?; // default: SyncOnEveryWrite
+// Proposed SQL, resolved inside this project:
+db.query_sql("USE BRANCH dev")?;
+db.query_sql("ALTER TABLE documents ADD COLUMN kind TEXT")?;
+db.query_sql("SHOW CURRENT BRANCH")?;
+```
+
+An explicit relaxed context uses the existing configuration-bearing opener:
+
+```rust
+let mut db = Database::open_with_durability_and_config(
     project_path,
-    BranchSelector::Name("dev".into()),
     DurabilityPolicy::SyncOnCheckpoint,
     DatabaseConfig::default(),
 )?;
-assert_eq!(branch.durability_policy(), DurabilityPolicy::SyncOnCheckpoint);
+db.query_sql("USE BRANCH dev")?; // retains the explicitly selected policy
 ```
 
-Branch metadata publication still uses synchronous durability in this example.
-API qualification must verify the default path, explicit relaxed path, read-only
-rejection, effective-policy reporting, and default reset on reopen/child opening.
+`DatabaseConfig` supplies read-only, recovery, and resource settings; the
+separate `DurabilityPolicy` argument is the sole policy source. No environment,
+parent-branch policy, catalog preference, or SQL switch can weaken the default.
+Read-only contexts may select branches but cannot mutate data or branch metadata.
+Branch metadata publication stays synchronously durable even in relaxed mode.
+
+### Selection, locks, and transactions
+
+Selection belongs to a mutable execution context, never a global project setting.
+For direct `Database::query_sql`, that context is the exclusively borrowed
+`Database`. `DatabaseSession` borrows the same context; a successful selection
+remains on that database after the session ends. Independent contexts retain
+their own branch selections. Reopening defaults to `main`, not the last selection.
+Project metadata access must not require obtaining the `main` writer lock:
+validate the project/catalog on open, and defer branch lock acquisition and data
+recovery until `USE BRANCH` or the first data statement against default `main`.
+After default/selected branch admission fails, never silently route to another
+branch. Metadata operations remain possible without an admitted data branch.
+
+`USE BRANCH` performs real open admission: resolve and pin the target identity,
+try its open lock, validate/recover its state, revalidate its catalog identity,
+and only then replace the context's active branch. Do not wait indefinitely for
+a target lock while retaining the source lock: return a typed busy error. A
+failed switch keeps the original context usable; it must not replace the source
+catalog/store before target admission completes. Release the old context's open
+lock only after switching, retaining any independently owned reader/job pins.
+Selecting the already admitted UUID is a no-op after lifecycle revalidation.
+
+Reject selection during an explicit transaction, including read-only transactions;
+never implicitly commit, roll back, or move writes. Existing independent read
+snapshots remain pinned to their original branch. Prepared plans and cached state
+must be invalidated or bound to the branch identity/schema version; a statement
+prepared before switching cannot silently write into the new branch. Background
+jobs retain their original branch identity and ownership until completion.
+
+`ConcurrentDatabase` currently shares one runtime through `Arc`. P0 selection
+happens before converting a mutable database into that shared concurrent runtime;
+`USE BRANCH` on the shared runtime or its transactions returns a typed unsupported
+context error. It must never retarget all clones. Future independently selectable
+concurrent sessions require their own selection state; adding them is separate
+from enabling SQL selection on the mutable embedded context.
+
+### SQL lifecycle surface and implementation boundary
+
+Use `CREATE BRANCH`, `SHOW BRANCHES`, `SHOW BRANCH`, and `DROP BRANCH` for lifecycle
+operations. Creation does not implicitly select its result; `USE BRANCH` never
+creates a missing branch. Creation must expose expected source revision and an
+idempotency key as bound values; deletion must expose expected UUID/revision so
+name reuse cannot redirect a delayed request. Listing requires explicit bounded
+pagination and payload accounting. These grammar details and result schemas must
+be finalized with parser tests before implementation qualification; they must not
+be hidden solely in route-specific Rust methods. Create/drop/use are rejected
+inside user transactions and never implicitly commit them. Dropping the selected
+branch is rejected until the caller switches away; other contexts follow the
+explicit deletion/admission protocol below.
+
+Add explicit SQL AST variants and dispatch lifecycle/selection before the normal
+implicit data-transaction wrapper. Use one storage lifecycle kernel for locking,
+sealing, publication, and recovery. Existing typed helpers may support that kernel
+or compatibility callers, but SQL must exercise the same semantics and error
+classes. Do not implement branch commands by host-side string matching, shelling
+out, or copying a database directory. No new crate is required for this surface.
+
+[Dolt's branch SQL](https://www.dolthub.com/docs/sql-reference/version-control/branches/)
+provides a precedent for session-scoped `USE` and `DOLT_CHECKOUT`; its
+[checkout implementation](https://github.com/dolthub/dolt/blob/main/go/libraries/doltcore/sqle/dprocedures/dolt_checkout.go)
+calls session `SwitchWorkingSet`. HawDB adopts session-scoped selection, not
+Dolt's multi-branch transaction or implicit-commit behavior.
+
+Acceptance must cover parameterized name/UUID selection, missing/busy/corrupt
+targets leaving the source intact, selection in active transactions, cross-context
+isolation, shared-runtime rejection, stale prepared statements, reader/job pins,
+read-only selection, default synchronous policy, explicit relaxed selection, and
+reopen defaulting to `main` with synchronous durability.
 
 Opening validates the selected branch's complete immutable closure and replays
 its sealed WAL plus private active WAL exactly once. It MUST NOT derive schema,
@@ -305,12 +369,15 @@ must distinguish maintenance failure from a definitely aborted transaction.
 The lifecycle facade currently creates nested branch metadata from sealed heads;
 this is not yet the complete writable workflow above. Required work includes:
 
-- branch-selected writable `Database` opening and private active-WAL replay;
+- SQL branch selection/lifecycle AST and dispatch, deferred branch admission,
+  context-local writable opening, and private active-WAL replay;
 - sealing current committed state when a modified child becomes a fork source;
 - branch-local DDL/checkpoint publication, snapshot and plan invalidation;
 - removing legacy expiry fields/transitions from the implementation and model;
 - exposing the effective durability mode and auditing platform persistence
   barriers in both modes, including metadata publication and uncertain completion;
+- shared project FD accounting, lazy file residency, and bounded descriptor
+  admission across branch switching and maintenance;
 - branch-aware locking, global GC, and the acceptance scenarios above.
 
 There is no production compatibility obligation for earlier development-only
@@ -654,6 +721,83 @@ implementation may skip sweeping whenever an unrelated branch is leased; it
 MUST NOT guess that an uninspectable owner has no pins. Lock hold time and
 retained debt are observable maintenance results.
 
+## File descriptor budgets and branch residency
+
+Persisted branch count MUST NOT determine the number of resident file descriptors
+(FDs). Creating or listing branches uses bounded temporary descriptors and closes
+them after the operation. An unopened branch retains its durable catalog/head
+and reachable objects without a permanently open per-branch lock, WAL, or data
+file. Open-lock loss or FD-cache eviction never authorizes branch deletion.
+
+Admitted branches retain their required open locks and private active WALs.
+Data files are opened lazily. Within one process/project runtime, immutable
+objects should share cached read handles keyed by their complete object identity
+and canonical project identity; a child must not open a separate persistent
+handle merely because it references the same object as its parent. Shared reads
+must use positional I/O or equivalent synchronization, not a shared mutable file
+offset. Mutable WALs and branch ownership locks are not immutable-cache entries.
+
+A typed Rust resource configuration MUST supply a finite FD budget, with a safe
+finite default, for all engine-owned descriptors in that runtime. Include
+non-evictable branch locks and WALs, immutable-file cache entries, and temporary
+open/recovery/checkpoint/seal/GC descriptors. The file cache uses the remaining
+budget; limiting cache size alone is insufficient. Independently opened contexts
+for the same project in the process must share the accounting domain rather than
+multiply its budget. A budget configuration conflict must fail explicitly.
+Other projects, host files, and other processes consume resources outside this
+domain; do not claim the engine budget prevents every OS descriptor-limit error.
+
+Reserve descriptor capacity before opening files, including transient operations.
+Every failure/cancellation path releases its reservations and temporary handles.
+Idle cached handles may be evicted under pressure; active I/O handles and open
+locks cannot be evicted. When eviction cannot provide capacity, fail with a typed
+resource-limit error and requested/available counts. OS descriptor exhaustion
+must also produce a typed resource error without leaking handles or publishing
+partial branch state. Do not introduce an unbounded wait or an unlimited fallback.
+
+`USE BRANCH` must reserve enough capacity for target admission while preserving
+the source branch. If the target cannot open within budget, release its temporary
+resources and leave the original selection intact. After a successful switch,
+release source ownership when no source reader, job, or other owner needs it.
+An idle branch runtime must not retain non-evictable locks/WALs indefinitely.
+Unsynchronized relaxed-mode writes remain subject to their documented durability
+policy; closing descriptors is not a substitute for a completed sync barrier.
+
+A reader snapshot or durable branch root pins object reachability, not necessarily
+an open descriptor for every object. Evicting a cached FD leaves its logical pin
+in place; reopening the immutable file must validate its identity. Active I/O
+retains its handle until completion. GC must honor both durable roots and reader,
+job, and publication pins regardless of whether the object currently has an FD.
+
+Recovery, branch listing, and GC process heads and object metadata in bounded
+batches, closing temporary handles promptly. They must not open one descriptor
+per catalog entry or descendant at once. Checkpoint and background-maintenance
+concurrency also participates in the same admission budget.
+
+Expose typed metrics for admitted branch runtimes, engine-owned open/reserved FDs,
+non-evictable and cached handles, high-water usage, cache hits/misses/evictions,
+and descriptor-budget/OS-limit rejections. These are engine-domain counts, not
+claims about the total process FD count. Monitoring must not open every branch.
+
+Qualification must use deterministic small budgets and platform FD measurements
+where available to prove:
+
+- Creating/listing many unopened branches does not retain a descriptor per branch;
+  repeated listing, multi-level forks, reopen, and failed creation leak no FDs.
+- Parent/child/sibling reads reuse cached immutable handles, and eviction/reopen
+  preserves identity and data isolation without sharing mutable file offsets.
+- Active locks/WALs count against admission; oversubscription and target-switch
+  failure leave the source usable and descriptor/reservation counts bounded.
+- Repeated switches release unneeded source resources; a surviving snapshot/job
+  keeps its original data reachable even when idle data-file FDs are evicted.
+- Concurrent maintenance, GC, and admission stay within budget, including
+  temporary descriptors. Inject OS-limit and I/O errors after each acquisition
+  and verify no leaks, partial publication, or deletion of referenced objects.
+
+These are implementation and resource-verification requirements; existing open
+helpers and caches are not claimed to satisfy them merely because branches share
+immutable storage.
+
 ## Sealing and create protocol
 
 Sealing holds the source branch's commit/publication barrier, checks the
@@ -741,7 +885,7 @@ request a new branch.
 | Unknown UUID or name | `UnknownBranch`; never infer a path. |
 | Source token or mutation revision mismatch | `StaleRevision`, no rebasing or implicit retry against newer state. |
 | Open `Creating` | `RecoveryPending`; no partial handle. |
-| Open `Ready` | Acquire/revalidate the open lock, recover the selected state, and return a writable `Database` (or explicitly requested read-only handle). |
+| `USE BRANCH` on `Ready` | Acquire/revalidate the open lock, recover the selected state, and bind the current context, preserving its configured read-only and durability settings. |
 | Open an independently leased UUID | `AlreadyOpen`; other branch UUIDs remain independently openable. |
 | Open `Deleting` / `Deleted` | `Deleting` / `Deleted` by retained UUID; removed names may be unknown. |
 | Delete `Ready` | Publish `Deleting`, reject new opens and new work on its existing handle. |
@@ -752,8 +896,8 @@ request a new branch.
 `describe` and bounded/paginated `list` expose UUID/name, lineage, revision,
 state and owner without mutable paths. Their catalog revision makes
 pagination changes explicit. Owner metadata is descriptive; hosts remain
-responsible for authorization. Limits and all lifecycle errors belong to typed
-Rust library APIs; JSON/CLI wrappers may later derive from those APIs.
+responsible for authorization. Lifecycle statements return bounded query results and typed library errors.
+JSON/CLI wrappers may later derive from the embedded query runtime.
 
 There is no time-based admission or automatic expiry in P0. An explicit delete
 permits already-admitted commits/checkpoints to finish or abort atomically and
@@ -795,6 +939,28 @@ After mark, sweep revalidates candidates under the reachability barrier;
 objects protected since mark are retained. Deletions and directory cleanup
 are restart-idempotent, and failure reports retained/reclaimed counts and bytes
 without changing a successful logical-delete receipt into a false failure.
+
+### Unreferenced DDL artifacts after relaxed commits
+
+In `SyncOnCheckpoint`, table/index artifacts may reach disk before their WAL
+transaction becomes durable. Power loss can then recover a catalog that never
+committed those artifacts. Such files are candidates for reclamation, not proof
+of a committed schema change. Startup first recovers and validates catalog,
+heads, and WAL; it must not infer tables or indexes from directory contents.
+
+A subsequent bounded maintenance sweep may reclaim only inventoried candidates
+proven unreachable from every surviving branch, reader/job pin, and pending
+publication. Revalidate under the reachability barrier before unlinking. A file
+unreferenced by the current branch alone is not an orphan: another branch or
+pending create may own it. Unreadable metadata, incomplete recovery, or unknown
+ownership retains the file and reports retry-required evidence. Eager startup
+GC is not required for successful opening; automatic repair/truncation of shared
+WAL remains prohibited. Interrupting cleanup must be restart-idempotent.
+
+Fault injection must cover an unsynchronized DDL transaction with artifacts
+already persisted, a shared artifact still used by a sibling, a pending create
+using the same root, and a crash during cleanup. Recovery must preserve durable
+commits and schema/data atomicity; reclamation must never remove a live dependency.
 
 ### Conservative immutable-object sweep implementation
 
@@ -840,6 +1006,33 @@ and global GC (#778). Each PR targets `main` directly. Before P0 is available:
   open/delete races, corrupt closure discovery and publication during GC;
 - cover every canonical artifact family, minimal/default facade profiles,
   focused Cargo/Bazel tests and the repository's required local fuzz command.
+
+### Follow-up delivery slices
+
+Each slice targets `main` directly after its prerequisite lands; none is a
+stacked PR against an unmerged feature branch. Keep the tracker open until the
+runtime and qualification obligations are complete:
+
+1. **Model revision (#776):** remove expiry transitions; add multi-level forks,
+   selection/open-lock loss, and atomic schema/data state. Model synchronous and
+   relaxed acknowledgment separately. Rerun invariants, negative controls, and
+   witnesses; replace historical evidence only with actual results.
+2. **Catalog lifecycle (#777, #775):** remove `expires_at` and `Expired` from
+   requests, codecs, admission, and recovery. Update the greenfield format and
+   tests without compatibility migrations for earlier development databases.
+3. **SQL selection and writable recovery (#780, #775):** add AST/dispatch and
+   context-local `USE BRANCH`, deferred admission, source-preserving switch
+   failure, shared project FD budgets, and complete private active-WAL replay. Finalize administrative SQL
+   grammar/result budgets and ensure SQL uses the storage lifecycle kernel.
+4. **DDL and durable fork publication (#779, #780):** isolate schema, migration
+   records, caches, and checkpoint artifacts; fork from the exact committed
+   state of modified children. Qualify both durability modes and metadata sync.
+5. **Reclamation and power-loss qualification (#778, #774):** implement bounded
+   orphan cleanup after validated recovery, preserve descendants and pending
+   publications, and inject lost writes, torn writes, reordering, and interrupted
+   sweep. Verify bounded temporary descriptors and orphan-cleanup FD accounting.
+   Register focused regression and local fuzz coverage. Runtime slices
+   need their own failure tests; this final slice does not defer their safety.
 
 No issue is complete merely because a model passes; the corresponding runtime
 acceptance criteria require source-level and executable implementation evidence.
