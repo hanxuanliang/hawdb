@@ -175,7 +175,26 @@ contract; explicit branch deletion does not expire its request receipt.
 Branch creation, inspection, selection/opening, and deletion are SQL operations
 executed by the embedded query runtime. A dedicated public `open_branch()` method
 is not required. Rust opens the project and configures its execution context;
-SQL selects the branch. The proposed initial selection statement is:
+SQL selects the branch. The implemented inspection surface is:
+
+```sql
+SHOW BRANCHES LIMIT 100;
+SHOW BRANCHES LIMIT $1 OFFSET $2;
+SHOW BRANCH NAME $1;
+SHOW BRANCH ID $1;
+```
+
+`SHOW BRANCHES` requires an explicit unsigned `LIMIT` literal or positional
+parameter, and accepts an optional unsigned `OFFSET` in either clause order; the
+configured query row budget rejects an oversized emitted result rather than
+truncating it. Results are accounted against the configured payload budget. Each catalog row contains
+`branch_id`, `name`, `parent_id`, `source_commit_epoch`, `state`, and `owner`.
+`SHOW BRANCH NAME` and `SHOW BRANCH ID` accept only a string literal or a bound
+string parameter. The `ID` form validates UUID syntax after binding, while the
+`NAME` form never applies a UUID-looking-name heuristic. Catalog inspection is
+metadata-only and does not admit or retain a data-branch runtime.
+
+Selection will use:
 
 ```sql
 USE BRANCH dev;
@@ -189,11 +208,12 @@ needed); the `NAME` and `ID` forms accept a string literal or bound parameter.
 Names remain case-sensitive under the branch-name contract, with no UUID-looking
 name heuristic. UUID values are parsed and validated as UUIDs. Parameters are
 bound as values by the parser/runtime, never interpolated into SQL text.
-`SHOW CURRENT BRANCH` returns one bounded row containing branch UUID, name, and
-effective durability policy; a metadata-only context returns null UUID/name.
+`SHOW CURRENT BRANCH` is reserved for the same future selection surface. It is
+not parsed or executed until `USE BRANCH` has durable session state to report.
 
-The proposed usage reuses existing Rust query entrypoints; branch SQL itself is
-not yet implemented:
+The same Rust query entrypoints execute inspection SQL. `USE BRANCH` is not yet
+implemented; the following remains the target use after its admission protocol
+lands:
 
 ```rust
 let mut db = Database::open(project_path)?; // default: SyncOnEveryWrite

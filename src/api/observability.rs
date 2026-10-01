@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use super::{
-    system_sql, Database, QueryOutput, QueryStreamOptions, SharedState, SlowQueryLogExportOptions,
-    SlowQueryLogRecordSummary, StatementExecutionContext,
+    system_sql, BranchInfo, Database, QueryOutput, QueryStreamOptions, SharedState,
+    SlowQueryLogExportOptions, SlowQueryLogRecordSummary, StatementExecutionContext,
 };
 use crate::error::{HawDBError, Result};
 use crate::executor;
@@ -22,9 +22,14 @@ use crate::relational_sql::{
     compile_append_explain_sql, compile_append_select_sql, compile_append_statement_sql,
     compile_relational_statement_sql_with_result, format_append_explain, project_append_rows,
 };
-use crate::sql::SqlStatement;
+use crate::sql::{
+    BranchSqlSelector, BranchSqlStatement, BranchSqlValue, ShowBranchesStatement, SqlBound,
+    SqlStatement,
+};
 use crate::telemetry::{QueryTelemetry, TelemetrySink};
 use crate::value::Value;
+use hawdb_storage::branch_catalog as storage;
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
@@ -39,6 +44,7 @@ pub(super) fn sql_statement_kind(statement: &SqlStatement) -> &'static str {
         SqlStatement::CreateIndex(_) => "create_index",
         SqlStatement::AlterTableAddColumn(_) => "alter_table_add_column",
         SqlStatement::Explain(_) => "explain",
+        SqlStatement::Branch(_) => "branch",
     }
 }
 
@@ -300,6 +306,16 @@ impl Database {
     ) -> Result<QueryOutput> {
         let statement_kind = sql_statement_kind(prepared.statement());
         let query_result = (|| {
+            if let SqlStatement::Branch(statement) = prepared.statement() {
+                let catalog_path = self.branch_catalog_path().ok();
+                return execute_branch_sql_at_path(
+                    catalog_path.as_deref(),
+                    statement,
+                    parameters,
+                    max_rows,
+                    max_payload_bytes,
+                );
+            }
             super::reject_locking_select_without_manager(prepared.statement(), false)?;
             if hawdb_relational::system_schema::statement_writes_system_schema_registry(
                 prepared.statement(),
@@ -522,4 +538,173 @@ impl Database {
         file.write_all(jsonl.as_bytes())?;
         Ok(())
     }
+}
+
+/// Executes the read-only branch catalog SQL surface against the durable
+/// catalog selected when the caller acquired its database read view. Branch
+/// selection is intentionally absent until `USE BRANCH` has a durable session
+/// state, so every currently supported branch statement is metadata-only.
+pub(super) fn execute_branch_sql_at_path(
+    catalog_path: Option<&Path>,
+    statement: &BranchSqlStatement,
+    parameters: &[Value],
+    max_rows: Option<usize>,
+    max_payload_bytes: Option<usize>,
+) -> Result<QueryOutput> {
+    let branches = read_branch_catalog(catalog_path)?;
+    let rows = match statement {
+        BranchSqlStatement::ShowBranches(statement) => {
+            show_branches_sql_rows(branches, statement, parameters)?
+        }
+        BranchSqlStatement::ShowBranch(statement) => {
+            let selector = branch_selector_from_sql(&statement.selector, parameters)?;
+            let branch = branches
+                .into_iter()
+                .find(|branch| branch_matches_selector(branch, &selector))
+                .ok_or_else(|| HawDBError::Semantic("branch does not exist".to_string()))?;
+            vec![branch_info_row(&branch)?]
+        }
+    };
+    enforce_branch_result_budget(rows.len(), max_rows)?;
+    let output = QueryOutput::from_rows(rows);
+    enforce_branch_payload_budget(&output, max_payload_bytes)?;
+    Ok(output)
+}
+
+fn read_branch_catalog(catalog_path: Option<&Path>) -> Result<Vec<BranchInfo>> {
+    let catalog_path = catalog_path.ok_or_else(|| {
+        HawDBError::Execution("branch lifecycle requires a durable database".to_string())
+    })?;
+    if !catalog_path.exists() {
+        return Ok(Vec::new());
+    }
+    let catalog = storage::read_catalog(catalog_path)
+        .map_err(|error| HawDBError::Storage(format!("branch catalog I/O failed: {error}")))?;
+    Ok(catalog
+        .branches
+        .iter()
+        .map(super::branch_lifecycle::branch_info)
+        .collect())
+}
+
+fn show_branches_sql_rows(
+    branches: Vec<BranchInfo>,
+    statement: &ShowBranchesStatement,
+    parameters: &[Value],
+) -> Result<Vec<crate::executor::Row>> {
+    let limit = branch_bound(&statement.limit, parameters)?;
+    let offset = statement
+        .offset
+        .as_ref()
+        .map(|offset| branch_bound(offset, parameters))
+        .transpose()?
+        .unwrap_or(0);
+    branches
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|branch| branch_info_row(&branch))
+        .collect()
+}
+
+fn branch_matches_selector(branch: &BranchInfo, selector: &super::BranchSelector) -> bool {
+    match selector {
+        super::BranchSelector::Id(id) => branch.id == *id,
+        super::BranchSelector::Name(name) => branch.name == *name,
+    }
+}
+
+fn branch_selector_from_sql(
+    selector: &BranchSqlSelector,
+    parameters: &[Value],
+) -> Result<super::BranchSelector> {
+    match selector {
+        BranchSqlSelector::Name(value) => Ok(super::BranchSelector::Name(branch_selector_value(
+            value, parameters,
+        )?)),
+        BranchSqlSelector::Id(value) => {
+            let raw = branch_selector_value(value, parameters)?;
+            let id = raw.parse().map_err(|_| {
+                HawDBError::Semantic("SHOW BRANCH ID requires a valid UUID string".to_string())
+            })?;
+            Ok(super::BranchSelector::Id(id))
+        }
+    }
+}
+
+fn branch_selector_value(value: &BranchSqlValue, parameters: &[Value]) -> Result<String> {
+    match value {
+        BranchSqlValue::Literal(value) => Ok(value.clone()),
+        BranchSqlValue::Parameter(position) => match parameters.get(position.saturating_sub(1)) {
+            Some(Value::String(value)) => Ok(value.clone()),
+            Some(_) => Err(HawDBError::Semantic(format!(
+                "branch SQL parameter ${position} must be a string"
+            ))),
+            None => Err(HawDBError::Semantic(format!(
+                "missing branch SQL parameter ${position}"
+            ))),
+        },
+    }
+}
+
+fn branch_bound(bound: &SqlBound, parameters: &[Value]) -> Result<usize> {
+    let value = hawdb_relational::query_value::bind_bound(Some(*bound), parameters, "branch SQL")?
+        .ok_or_else(|| {
+            HawDBError::Semantic("branch SQL bound was unexpectedly absent".to_string())
+        })?;
+    usize::try_from(value)
+        .map_err(|_| HawDBError::Semantic("branch SQL bound exceeds platform capacity".to_string()))
+}
+
+fn enforce_branch_result_budget(requested: usize, max_rows: Option<usize>) -> Result<()> {
+    if max_rows.is_some_and(|maximum| requested > maximum) {
+        return Err(HawDBError::Execution(
+            "branch SQL page exceeds the configured result row budget".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn enforce_branch_payload_budget(
+    output: &QueryOutput,
+    max_payload_bytes: Option<usize>,
+) -> Result<()> {
+    if max_payload_bytes.is_some_and(|maximum| output.payload_bytes() > maximum) {
+        return Err(HawDBError::Execution(
+            "branch SQL result exceeds the configured payload budget".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn branch_info_row(branch: &super::BranchInfo) -> Result<crate::executor::Row> {
+    let source_commit_epoch = i64::try_from(branch.source_commit_epoch).map_err(|_| {
+        HawDBError::StorageIntegrity(
+            "branch source commit epoch cannot be represented as PostgreSQL BIGINT".to_string(),
+        )
+    })?;
+    Ok(BTreeMap::from([
+        ("branch_id".to_string(), Value::Uuid(branch.id)),
+        ("name".to_string(), Value::String(branch.name.clone())),
+        (
+            "parent_id".to_string(),
+            branch.parent_id.map(Value::Uuid).unwrap_or(Value::Null),
+        ),
+        (
+            "source_commit_epoch".to_string(),
+            Value::Int(source_commit_epoch),
+        ),
+        (
+            "state".to_string(),
+            Value::String(format!("{:?}", branch.state).to_lowercase()),
+        ),
+        (
+            "owner".to_string(),
+            branch
+                .owner
+                .clone()
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        ),
+    ]))
 }
