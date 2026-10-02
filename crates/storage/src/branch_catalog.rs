@@ -632,6 +632,86 @@ pub fn write_catalog(path: &Path, catalog: &Catalog) -> io::Result<()> {
     write_catalog_locked(path, catalog)
 }
 
+/// Creates the root catalog once, or reopens the same root identity, while
+/// holding the metadata lease across the existence check and publication.
+///
+/// A caller must not infer that a missing catalog is still missing after a
+/// separate read: another initializer can publish it in that interval. This
+/// helper returns the one validated `main` record observed under the lease.
+pub fn initialize_catalog_file(
+    path: &Path,
+    project_id: BranchId,
+    main_id: BranchId,
+) -> Result<BranchRecord, CatalogFileTransitionError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| {
+            CatalogFileTransitionError::Io(invalid_data("branch catalog destination has no parent"))
+        })?;
+    fs::create_dir_all(parent).map_err(CatalogFileTransitionError::Io)?;
+    let _metadata_lock =
+        CatalogMetadataLease::acquire_blocking(parent).map_err(CatalogFileTransitionError::Io)?;
+    match read_catalog(path) {
+        Ok(catalog) => main_record(&catalog, project_id, main_id),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let catalog = Catalog::bootstrap(project_id, main_id)
+                .map_err(|error| CatalogFileTransitionError::Io(invalid_data(error.to_string())))?;
+            let main = catalog.branches[0].clone();
+            write_catalog_locked(path, &catalog).map_err(CatalogFileTransitionError::Io)?;
+            Ok(main)
+        }
+        Err(error) => Err(CatalogFileTransitionError::Io(error)),
+    }
+}
+
+/// Binds the root catalog record to the exact immutable root selected by its
+/// initial branch head. The catalog read, validation, and publication occur
+/// under one metadata lease, so a concurrent lifecycle transition cannot be
+/// overwritten by a stale in-memory catalog image.
+pub fn bind_main_head_file(
+    path: &Path,
+    project_id: BranchId,
+    main_id: BranchId,
+    sealed_root_digest: [u8; DIGEST_BYTES],
+    source_commit_epoch: u64,
+) -> Result<BranchRecord, CatalogFileTransitionError> {
+    mutate_catalog_file(path, |catalog| {
+        let index = main_record_index(catalog, project_id, main_id)?;
+        let branch = &catalog.branches[index];
+        if let Some(digest) = branch.base_root_digest {
+            if digest != sealed_root_digest || branch.source_commit_epoch != source_commit_epoch {
+                return Err(CatalogTransitionError::Conflict(
+                    "main catalog binding does not match its sealed head",
+                ));
+            }
+            return Ok(CatalogMutation {
+                value: branch.clone(),
+                changed: false,
+            });
+        }
+        if branch.state != BranchState::Ready {
+            return Err(CatalogTransitionError::InvalidState(
+                "main branch is not ready for head binding",
+            ));
+        }
+        let next_catalog_revision = catalog.next_revision()?;
+        let next_metadata_revision = catalog.next_metadata_revision(index)?;
+        let branch = &mut catalog.branches[index];
+        branch.base_root_digest = Some(sealed_root_digest);
+        branch.source_commit_epoch = source_commit_epoch;
+        branch.metadata_revision = next_metadata_revision;
+        catalog.revision = next_catalog_revision;
+        catalog
+            .validate()
+            .map_err(CatalogTransitionError::Validation)?;
+        Ok(CatalogMutation {
+            value: catalog.branches[index].clone(),
+            changed: true,
+        })
+    })
+}
+
 /// Publishes a catalog while the caller owns the project metadata lease.
 /// Keeping the lock acquisition outside the read/modify/write sequence lets
 /// catalog transitions serialize their read and publication as one operation.
@@ -675,6 +755,33 @@ pub struct CreateReservation {
     pub replayed: bool,
 }
 
+/// Exact identity and revision required to start a durable delete transition.
+///
+/// A name is intentionally absent. Name resolution belongs to the caller's
+/// admission protocol; the storage transition only acts on the resolved,
+/// immutable branch identity so a delayed request cannot affect a later name
+/// incarnation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeleteRequest {
+    pub id: BranchId,
+    pub expected_metadata_revision: u64,
+}
+
+/// Durable evidence that a branch has stopped accepting new admission while
+/// its deletion is completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeleteReservation {
+    pub id: BranchId,
+    pub metadata_revision: u64,
+}
+
+/// Result of beginning or resuming a deletion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeleteBeginOutcome {
+    Deleting(DeleteReservation),
+    Deleted(BranchRecord),
+}
+
 #[derive(Debug)]
 pub enum CatalogFileTransitionError {
     Io(io::Error),
@@ -692,12 +799,19 @@ impl Display for CatalogFileTransitionError {
 
 impl std::error::Error for CatalogFileTransitionError {}
 
-/// Reserves a child branch in the durable catalog before child files are made.
-/// The returned metadata revision binds the later completion transition.
-pub fn reserve_create_file(
+struct CatalogMutation<T> {
+    value: T,
+    changed: bool,
+}
+
+/// Runs one catalog read/modify/validate/publish cycle while owning the stable
+/// project metadata lease. A transition that discovers an already-published
+/// idempotent outcome can return `changed = false` and avoid replacing the
+/// catalog bytes again.
+fn mutate_catalog_file<T>(
     path: &Path,
-    request: CreateRequest,
-) -> Result<CreateReservation, CatalogFileTransitionError> {
+    transition: impl FnOnce(&mut Catalog) -> Result<CatalogMutation<T>, CatalogTransitionError>,
+) -> Result<T, CatalogFileTransitionError> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -707,26 +821,73 @@ pub fn reserve_create_file(
     let _metadata_lock =
         CatalogMetadataLease::acquire_blocking(parent).map_err(CatalogFileTransitionError::Io)?;
     let mut catalog = read_catalog(path).map_err(CatalogFileTransitionError::Io)?;
-    let replayed = catalog
-        .branches
-        .iter()
-        .any(|branch| branch.create_request_key == request.request_key);
-    let id = catalog
-        .reserve_create(request)
+    let mutation = transition(&mut catalog).map_err(CatalogFileTransitionError::Transition)?;
+    if mutation.changed {
+        write_catalog_locked(path, &catalog).map_err(CatalogFileTransitionError::Io)?;
+    }
+    Ok(mutation.value)
+}
+
+fn main_record(
+    catalog: &Catalog,
+    project_id: BranchId,
+    main_id: BranchId,
+) -> Result<BranchRecord, CatalogFileTransitionError> {
+    let index = main_record_index(catalog, project_id, main_id)
         .map_err(CatalogFileTransitionError::Transition)?;
-    let metadata_revision = catalog
+    Ok(catalog.branches[index].clone())
+}
+
+fn main_record_index(
+    catalog: &Catalog,
+    project_id: BranchId,
+    main_id: BranchId,
+) -> Result<usize, CatalogTransitionError> {
+    if catalog.project_id != project_id {
+        return Err(CatalogTransitionError::Conflict(
+            "catalog project identity does not match root initialization",
+        ));
+    }
+    let index = catalog
         .branches
         .iter()
-        .find(|branch| branch.id == id)
-        .map(|branch| branch.metadata_revision)
-        .ok_or(CatalogFileTransitionError::Transition(
-            CatalogTransitionError::MissingBranch,
-        ))?;
-    write_catalog_locked(path, &catalog).map_err(CatalogFileTransitionError::Io)?;
-    Ok(CreateReservation {
-        id,
-        metadata_revision,
-        replayed,
+        .position(|branch| branch.id == main_id)
+        .ok_or(CatalogTransitionError::MissingBranch)?;
+    if catalog.branches[index].name.as_str() != "main" {
+        return Err(CatalogTransitionError::Conflict(
+            "root branch identity does not name main",
+        ));
+    }
+    Ok(index)
+}
+
+/// Reserves a child branch in the durable catalog before child files are made.
+/// The returned metadata revision binds the later completion transition.
+pub fn reserve_create_file(
+    path: &Path,
+    request: CreateRequest,
+) -> Result<CreateReservation, CatalogFileTransitionError> {
+    mutate_catalog_file(path, move |catalog| {
+        let replayed = catalog
+            .branches
+            .iter()
+            .any(|branch| branch.create_request_key == request.request_key);
+        let revision = catalog.revision;
+        let id = catalog.reserve_create(request)?;
+        let metadata_revision = catalog
+            .branches
+            .iter()
+            .find(|branch| branch.id == id)
+            .map(|branch| branch.metadata_revision)
+            .ok_or(CatalogTransitionError::MissingBranch)?;
+        Ok(CatalogMutation {
+            value: CreateReservation {
+                id,
+                metadata_revision,
+                replayed,
+            },
+            changed: catalog.revision != revision,
+        })
     })
 }
 
@@ -735,19 +896,13 @@ pub fn complete_create_file(
     path: &Path,
     reservation: CreateReservation,
 ) -> Result<(), CatalogFileTransitionError> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .ok_or_else(|| {
-            CatalogFileTransitionError::Io(invalid_data("branch catalog destination has no parent"))
-        })?;
-    let _metadata_lock =
-        CatalogMetadataLease::acquire_blocking(parent).map_err(CatalogFileTransitionError::Io)?;
-    let mut catalog = read_catalog(path).map_err(CatalogFileTransitionError::Io)?;
-    catalog
-        .complete_create(reservation.id, reservation.metadata_revision)
-        .map_err(CatalogFileTransitionError::Transition)?;
-    write_catalog_locked(path, &catalog).map_err(CatalogFileTransitionError::Io)
+    mutate_catalog_file(path, |catalog| {
+        catalog.complete_create(reservation.id, reservation.metadata_revision)?;
+        Ok(CatalogMutation {
+            value: (),
+            changed: true,
+        })
+    })
 }
 
 /// Aborts a reserved child create after a known pre-publication failure.
@@ -755,19 +910,110 @@ pub fn abort_create_file(
     path: &Path,
     reservation: CreateReservation,
 ) -> Result<(), CatalogFileTransitionError> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .ok_or_else(|| {
-            CatalogFileTransitionError::Io(invalid_data("branch catalog destination has no parent"))
-        })?;
-    let _metadata_lock =
-        CatalogMetadataLease::acquire_blocking(parent).map_err(CatalogFileTransitionError::Io)?;
-    let mut catalog = read_catalog(path).map_err(CatalogFileTransitionError::Io)?;
-    catalog
-        .abort_create(reservation.id, reservation.metadata_revision)
-        .map_err(CatalogFileTransitionError::Transition)?;
-    write_catalog_locked(path, &catalog).map_err(CatalogFileTransitionError::Io)
+    mutate_catalog_file(path, |catalog| {
+        catalog.abort_create(reservation.id, reservation.metadata_revision)?;
+        Ok(CatalogMutation {
+            value: (),
+            changed: true,
+        })
+    })
+}
+
+/// Publishes `Ready -> Deleting` under one metadata lease, or resumes an
+/// interrupted deletion of the same durable branch identity. The reservation
+/// is intentionally published before physical cleanup so new branch admission
+/// can reject the target after a crash or lost response.
+///
+/// Revision CAS applies to the first `Ready -> Deleting` transition. For an
+/// already-`Deleting` or `Deleted` UUID, return its current outcome without
+/// another mutation: a lost response leaves the caller's original revision
+/// stale. The immutable UUID, rather than a reusable name, binds that replay.
+pub fn begin_delete_file(
+    path: &Path,
+    request: DeleteRequest,
+) -> Result<DeleteBeginOutcome, CatalogFileTransitionError> {
+    mutate_catalog_file(path, |catalog| {
+        let branch = catalog
+            .branches
+            .iter()
+            .find(|branch| branch.id == request.id)
+            .cloned()
+            .ok_or(CatalogTransitionError::MissingBranch)?;
+        match branch.state {
+            BranchState::Ready => {
+                catalog.begin_delete(request.id, request.expected_metadata_revision)?;
+                let metadata_revision = catalog
+                    .branches
+                    .iter()
+                    .find(|branch| branch.id == request.id)
+                    .map(|branch| branch.metadata_revision)
+                    .ok_or(CatalogTransitionError::MissingBranch)?;
+                Ok(CatalogMutation {
+                    value: DeleteBeginOutcome::Deleting(DeleteReservation {
+                        id: request.id,
+                        metadata_revision,
+                    }),
+                    changed: true,
+                })
+            }
+            BranchState::Deleting => Ok(CatalogMutation {
+                value: DeleteBeginOutcome::Deleting(DeleteReservation {
+                    id: branch.id,
+                    metadata_revision: branch.metadata_revision,
+                }),
+                changed: false,
+            }),
+            BranchState::Deleted => Ok(CatalogMutation {
+                value: DeleteBeginOutcome::Deleted(branch),
+                changed: false,
+            }),
+            BranchState::Creating => Err(CatalogTransitionError::InvalidState(
+                "branch creation is not complete",
+            )),
+        }
+    })
+}
+
+/// Publishes `Deleting -> Deleted` under one metadata lease. Retrying after a
+/// completed publication returns the same durable tombstone without creating a
+/// new branch identity.
+/// The reservation revision is checked while changing `Deleting` to `Deleted`;
+/// after publication, the same UUID's tombstone is an idempotent read even
+/// though completing that transition advanced its revision.
+pub fn finish_delete_file(
+    path: &Path,
+    reservation: DeleteReservation,
+) -> Result<BranchRecord, CatalogFileTransitionError> {
+    mutate_catalog_file(path, |catalog| {
+        let branch = catalog
+            .branches
+            .iter()
+            .find(|branch| branch.id == reservation.id)
+            .cloned()
+            .ok_or(CatalogTransitionError::MissingBranch)?;
+        match branch.state {
+            BranchState::Deleting => {
+                catalog.finish_delete(reservation.id, reservation.metadata_revision)?;
+                let branch = catalog
+                    .branches
+                    .iter()
+                    .find(|branch| branch.id == reservation.id)
+                    .cloned()
+                    .ok_or(CatalogTransitionError::MissingBranch)?;
+                Ok(CatalogMutation {
+                    value: branch,
+                    changed: true,
+                })
+            }
+            BranchState::Deleted => Ok(CatalogMutation {
+                value: branch,
+                changed: false,
+            }),
+            _ => Err(CatalogTransitionError::InvalidState(
+                "delete finalization requires a deleting branch",
+            )),
+        }
+    })
 }
 
 #[derive(Debug)]
@@ -1632,6 +1878,190 @@ mod tests {
     }
 
     #[test]
+    fn delete_transition_is_published_resumable_and_idempotent() {
+        let (directory, path) = temporary_catalog_path();
+        write_catalog(&path, &catalog()).unwrap();
+        let request = DeleteRequest {
+            id: id(1),
+            expected_metadata_revision: 3,
+        };
+
+        let reservation = match begin_delete_file(&path, request).unwrap() {
+            DeleteBeginOutcome::Deleting(reservation) => reservation,
+            DeleteBeginOutcome::Deleted(_) => panic!("ready branch must begin deletion"),
+        };
+        assert_eq!(reservation.metadata_revision, 4);
+        let deleting = read_catalog(&path).unwrap();
+        let branch = deleting
+            .branches
+            .iter()
+            .find(|branch| branch.id == request.id)
+            .unwrap();
+        assert_eq!(branch.state, BranchState::Deleting);
+        assert_eq!(branch.metadata_revision, reservation.metadata_revision);
+
+        assert_eq!(
+            begin_delete_file(&path, request).unwrap(),
+            DeleteBeginOutcome::Deleting(reservation)
+        );
+        let deleted = finish_delete_file(&path, reservation).unwrap();
+        assert_eq!(deleted.state, BranchState::Deleted);
+        assert_eq!(deleted.metadata_revision, 5);
+        assert_eq!(finish_delete_file(&path, reservation).unwrap(), deleted);
+        assert_eq!(
+            begin_delete_file(&path, request).unwrap(),
+            DeleteBeginOutcome::Deleted(deleted)
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn delete_revision_cas_applies_before_transition_and_replays_keep_uuid_identity() {
+        let (directory, path) = temporary_catalog_path();
+        let mut initial = catalog();
+        initial
+            .rename(id(1), 3, BranchName::new("reusable").unwrap())
+            .unwrap();
+        write_catalog(&path, &initial).unwrap();
+        let before = fs::read(&path).unwrap();
+        let request = DeleteRequest {
+            id: id(1),
+            expected_metadata_revision: 3,
+        };
+        assert!(matches!(
+            begin_delete_file(&path, request),
+            Err(CatalogFileTransitionError::Transition(
+                CatalogTransitionError::StaleRevision {
+                    expected: 3,
+                    actual: 4,
+                }
+            ))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let reservation = match begin_delete_file(
+            &path,
+            DeleteRequest {
+                expected_metadata_revision: 4,
+                ..request
+            },
+        )
+        .unwrap()
+        {
+            DeleteBeginOutcome::Deleting(reservation) => reservation,
+            DeleteBeginOutcome::Deleted(_) => panic!("ready branch must begin deletion"),
+        };
+        assert!(matches!(
+            finish_delete_file(
+                &path,
+                DeleteReservation {
+                    metadata_revision: 4,
+                    ..reservation
+                }
+            ),
+            Err(CatalogFileTransitionError::Transition(
+                CatalogTransitionError::StaleRevision {
+                    expected: 4,
+                    actual: 5,
+                }
+            ))
+        ));
+        let deleted = finish_delete_file(&path, reservation).unwrap();
+        let mut reused = read_catalog(&path).unwrap();
+        reused.branches.push(record(9, "reusable"));
+        write_catalog(&path, &reused).unwrap();
+        let before_replay = fs::read(&path).unwrap();
+        assert_eq!(
+            begin_delete_file(&path, request).unwrap(),
+            DeleteBeginOutcome::Deleted(deleted.clone())
+        );
+        assert_eq!(finish_delete_file(&path, reservation).unwrap(), deleted);
+        assert_eq!(fs::read(&path).unwrap(), before_replay);
+        assert_eq!(
+            read_catalog(&path)
+                .unwrap()
+                .branches
+                .iter()
+                .find(|branch| branch.id == id(9))
+                .unwrap()
+                .state,
+            BranchState::Ready
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn concurrent_create_and_delete_keep_both_catalog_transitions() {
+        let (directory, path) = temporary_catalog_path();
+        write_catalog(&path, &catalog()).unwrap();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(3));
+
+        let delete_path = path.clone();
+        let delete_start = std::sync::Arc::clone(&start);
+        let delete = std::thread::spawn(move || {
+            delete_start.wait();
+            begin_delete_file(
+                &delete_path,
+                DeleteRequest {
+                    id: id(1),
+                    expected_metadata_revision: 3,
+                },
+            )
+        });
+
+        let create_path = path.clone();
+        let create_start = std::sync::Arc::clone(&start);
+        let create = std::thread::spawn(move || {
+            create_start.wait();
+            reserve_create_file(
+                &create_path,
+                CreateRequest {
+                    id: id(3),
+                    name: BranchName::new("third").unwrap(),
+                    parent_id: id(2),
+                    source_commit_epoch: 7,
+                    base_root_digest: [3; DIGEST_BYTES],
+                    owner: None,
+                    request_key: "concurrent-create".to_string(),
+                    request_fingerprint: [3; DIGEST_BYTES],
+                },
+            )
+        });
+
+        start.wait();
+        let reservation = match delete.join().unwrap().unwrap() {
+            DeleteBeginOutcome::Deleting(reservation) => reservation,
+            DeleteBeginOutcome::Deleted(_) => panic!("branch must begin deletion once"),
+        };
+        let created = create.join().unwrap().unwrap();
+        let published = read_catalog(&path).unwrap();
+        assert_eq!(published.revision, 13);
+        assert_eq!(
+            published
+                .branches
+                .iter()
+                .find(|branch| branch.id == id(1))
+                .unwrap()
+                .state,
+            BranchState::Deleting
+        );
+        assert_eq!(
+            published
+                .branches
+                .iter()
+                .find(|branch| branch.id == created.id)
+                .unwrap()
+                .state,
+            BranchState::Creating
+        );
+
+        let deleted = finish_delete_file(&path, reservation).unwrap();
+        assert_eq!(deleted.state, BranchState::Deleted);
+        assert_eq!(read_catalog(&path).unwrap().revision, 14);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn concurrent_create_reservations_serialize_the_read_modify_publish_cycle() {
         let (directory, path) = temporary_catalog_path();
         write_catalog(&path, &catalog()).unwrap();
@@ -1941,6 +2371,40 @@ mod tests {
         drop(first);
         CatalogMetadataLease::acquire(&directory).unwrap();
         assert!(directory.join(METADATA_LOCK_FILE).is_file());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn root_initialization_and_head_binding_share_one_catalog_transition() {
+        let (directory, path) = temporary_catalog_path();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let first_path = path.clone();
+        let first_start = std::sync::Arc::clone(&start);
+        let first = std::thread::spawn(move || {
+            first_start.wait();
+            initialize_catalog_file(&first_path, id(90), id(91)).unwrap()
+        });
+        start.wait();
+        let second = initialize_catalog_file(&path, id(90), id(91)).unwrap();
+        let first = first.join().unwrap();
+        assert_eq!(first, second);
+        assert_eq!(read_catalog(&path).unwrap().branches, vec![first.clone()]);
+
+        let bound = bind_main_head_file(&path, id(90), id(91), [7; DIGEST_BYTES], 12).unwrap();
+        assert_eq!(bound.base_root_digest, Some([7; DIGEST_BYTES]));
+        assert_eq!(bound.source_commit_epoch, 12);
+        assert_eq!(bound.metadata_revision, first.metadata_revision + 1);
+        assert_eq!(read_catalog(&path).unwrap().revision, 2);
+        assert_eq!(
+            bind_main_head_file(&path, id(90), id(91), [7; DIGEST_BYTES], 12).unwrap(),
+            bound
+        );
+        assert!(matches!(
+            bind_main_head_file(&path, id(90), id(91), [8; DIGEST_BYTES], 12),
+            Err(CatalogFileTransitionError::Transition(
+                CatalogTransitionError::Conflict(_)
+            ))
+        ));
         fs::remove_dir_all(directory).unwrap();
     }
 

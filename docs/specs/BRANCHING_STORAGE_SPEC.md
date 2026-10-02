@@ -929,6 +929,30 @@ recovery; its sealed and private WAL replay does not consult the parent
 directory. Branch-local DDL/DML and checkpoint head publication remain database
 integration obligations.
 
+`begin_delete_file` and `finish_delete_file` make the catalog half of deletion
+equally explicit. Each takes the metadata lease before reading the current
+catalog and keeps it through validation and candidate replacement.
+`DeleteRequest` carries the resolved immutable UUID and the observed metadata
+revision, never a name, so a delayed request cannot target a later name
+incarnation. The first transition durably publishes `Deleting`; a retry returns
+that same reservation, and finalization publishes the same UUID's `Deleted`
+tombstone. Revision CAS applies when changing `Ready -> Deleting` or
+`Deleting -> Deleted`. Reading an existing reservation or completed tombstone
+for the same UUID intentionally accepts the older request revision, since a
+lost response can leave the original revision stale after successful
+publication. Replays never mutate a newer `Ready` revision or resolve a reused
+name to a different UUID.
+
+The facade first proves that no current branch writer owns the
+target lease, then releases its temporary admission probe before finalization.
+If an already-`Deleting` branch still has a lease owner, a retry returns its
+current pending state without changing the catalog. `Deleted` confirms
+finalization; a retry after lease release can finish the same UUID's deletion.
+Direct head admission revalidates the catalog after acquiring the target lease
+and recovering the branch, so a `Deleting` record cannot expose a runtime.
+Database session integration remains tracked by #780, and #778 remains
+responsible for physical cleanup and reachability checks.
+
 If the parent advances or is subsequently deleted, the child's base digest and
 parent UUID remain unchanged. Lineage does not retain the parent's directory;
 the child's own root references retain the required immutable objects.

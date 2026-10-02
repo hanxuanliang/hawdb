@@ -40,14 +40,24 @@ the source context. One branch may have only one writer, while separately leased
 branches can be open at the same time. A foreign lease pins the exact root it
 admitted, rather than following a later current-head change.
 
+The Rust catalog subprotocol now has direct counterparts to `BeginDelete` and
+`FinalizeDelete`: `begin_delete_file` persists the `Deleting` state while
+holding the metadata lease, and `finish_delete_file` persists the tombstone
+only from that state. `Database::delete_branch` uses a temporary branch-lock
+admission probe before `BeginDelete` and releases it before finalization.
+
 `GraphStore::admit_branch_from_head` is source-level evidence for the
 admission portion of this model. It validates a ready UUID/revision, acquires
 the target lease without holding catalog metadata serialization, recovers from
 the target's immutable root and private WAL, validates the sealed successor
 prefix before replaying its append-only suffix, then revalidates the same
-catalog identity before exposing the runtime. This linkage does not establish a full
-Rust-to-TLA refinement, nor does it implement SQL `USE BRANCH`, DDL/DML head
-publication, or physical reclamation.
+catalog identity before exposing the runtime. The target lease stays held
+through failed-admission cleanup or for the admitted runtime's lifetime.
+
+These are source-level links to the catalog and admission state machines,
+not a full Rust-to-TLA refinement. SQL `USE BRANCH` and DDL/DML head publication
+remain separate implementation work, and #778 still owns physical cleanup
+and pin-aware reclamation.
 
 `s.candidate` is an unpublished root and `s.armed` records a candidate whose
 complete closure is already durable. `StageCandidateClosure` models an
