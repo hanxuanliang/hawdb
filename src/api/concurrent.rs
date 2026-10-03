@@ -398,6 +398,14 @@ impl ConcurrentDatabase {
         let database = self.inner.commits.lock()?;
         let started = Instant::now();
         let prepared = database.relational_plan_template_cache.prepare(sql_text)?;
+        if let SqlStatement::Branch(crate::sql::BranchSqlStatement::UseBranch(_)) =
+            prepared.statement()
+        {
+            return Err(HawDBError::BranchCommandUnsupported {
+                command: "USE BRANCH",
+                context: "shared concurrent runtime",
+            });
+        }
         if !sql_statement_uses_snapshot(prepared.statement()) {
             drop(database);
             return self.with_autocommit_exclusive(move |database| {
@@ -885,7 +893,7 @@ fn sql_statement_uses_snapshot(statement: &SqlStatement) -> bool {
         // The current branch AST is inspection-only. It executes through a
         // `DatabaseReadTransaction`, so autocommit catalog reads do not take
         // the write sequencer's exclusive database lock.
-        SqlStatement::Branch(_) => true,
+        SqlStatement::Branch(statement) => !statement.changes_context_or_catalog(),
     }
 }
 
@@ -1089,9 +1097,11 @@ fn sql_lock_requests(
         | SqlStatement::AlterTableAddColumn(_) => {
             Ok(vec![LockRequest::database(LockMode::Exclusive)])
         }
-        // Keep explicit transactions coordinated with future branch lifecycle
-        // mutations. Do not add mutating branch variants to this read-only
-        // arm; they require an explicit exclusive-lock case and protocol.
+        SqlStatement::Branch(statement) if statement.changes_context_or_catalog() => {
+            Ok(vec![LockRequest::database(LockMode::Exclusive)])
+        }
+        // Only catalog inspection can participate with a shared lock. The
+        // executor separately rejects lifecycle changes in explicit transactions.
         SqlStatement::Branch(_) => Ok(vec![LockRequest::database(LockMode::Shared)]),
     }
 }
@@ -1809,6 +1819,36 @@ mod tests {
         .expect("derive append explain analyze locks");
 
         assert_eq!(requests, vec![LockRequest::database(LockMode::Shared)]);
+    }
+
+    #[test]
+    fn branch_lifecycle_lock_requests_are_exclusive_while_inspection_is_shared() {
+        let cache = crate::relational_sql::RelationalPlanTemplateCache::new(Some(8));
+        for (sql, mode) in [
+            ("SHOW CURRENT BRANCH", LockMode::Shared),
+            ("SHOW BRANCH NAME 'main'", LockMode::Shared),
+            ("SHOW BRANCHES LIMIT 10", LockMode::Shared),
+            ("USE BRANCH main", LockMode::Exclusive),
+            (
+                "CREATE BRANCH child FROM main AT REVISION 1 REQUEST KEY 'key'",
+                LockMode::Exclusive,
+            ),
+            (
+                "DROP BRANCH ID '00000000-0000-0000-0000-000000000001' AT REVISION 1",
+                LockMode::Exclusive,
+            ),
+        ] {
+            let prepared = cache.prepare(sql).unwrap();
+            let requests = sql_lock_requests(
+                sql,
+                &prepared,
+                &[],
+                &RelationalState::default(),
+                &hawdb_storage::append_table::AppendState::default(),
+            )
+            .unwrap();
+            assert_eq!(requests, vec![LockRequest::database(mode)], "{sql}");
+        }
     }
 
     fn append_column(name: &str, scalar_type: RelationalScalarType) -> RelationalColumnSchema {
