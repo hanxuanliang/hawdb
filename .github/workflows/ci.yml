@@ -107,6 +107,12 @@ jobs:
       - name: Test RaBitQ projection
         run: cargo test -p hawdb-vector-projection
 
+      - name: Test admitted RaBitQ artifact IO
+        shell: bash
+        run: |
+          cargo test --locked -p hawdb-vector-projection --features storage-io
+          bash scripts/cargo-test-required.sh --locked -p hawdb-vector-projection --features storage-io --lib artifact::descriptor_tests::
+
       - name: Test RaBitQ search projection
         shell: bash
         run: |

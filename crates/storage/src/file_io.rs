@@ -128,6 +128,19 @@ impl File {
         }
     }
 
+    /// Map an immutable artifact through its admitted native handle.
+    /// The mapping retains the OS mapping, not the file descriptor permit.
+    ///
+    /// # Safety
+    /// The underlying file must not be mutated or truncated while the mapping
+    /// exists, including by another process.
+    #[cfg(feature = "artifact-mmap")]
+    pub unsafe fn map_read_only(&self) -> io::Result<memmap2::Mmap> {
+        // SAFETY: the caller guarantees the immutable artifact lifetime. The
+        // native handle and its permit stay together throughout map creation.
+        self.with_native(|file| unsafe { memmap2::Mmap::map(file) })
+    }
+
     pub fn metadata(&self) -> io::Result<Metadata> {
         self.with_native(std::fs::File::metadata)
     }
@@ -774,9 +787,28 @@ impl DirEntry {
     }
 }
 
+/// Maximum children retained while removing one admitted directory batch.
+#[doc(hidden)]
+pub const DIRECTORY_REMOVAL_BATCH_ENTRIES: usize = 64;
+
 /// Close each directory batch before descending: depth and breadth never retain
 /// one native directory descriptor per node in the deletion tree.
 pub fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
+    remove_dir_all_with_batch_size(path, DIRECTORY_REMOVAL_BATCH_ENTRIES)
+}
+
+/// Internal callers can bound retained path memory with a smaller batch.
+#[doc(hidden)]
+pub fn remove_dir_all_with_batch_size(
+    path: impl AsRef<Path>,
+    batch_entries: usize,
+) -> io::Result<()> {
+    if batch_entries == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "directory removal batch must be nonzero",
+        ));
+    }
     let path = path.as_ref();
     let root = symlink_metadata(path)?;
     if root.file_type().is_symlink() {
@@ -797,7 +829,7 @@ pub fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
         let children = {
             let entries = read_dir(&directory)?;
             entries
-                .take(64)
+                .take(batch_entries)
                 .map(|entry| {
                     let entry = entry?;
                     Ok((entry.path(), entry.file_type()?))
