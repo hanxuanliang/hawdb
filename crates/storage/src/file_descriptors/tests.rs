@@ -288,13 +288,15 @@ fn immutable_handle_pressure_evicts_the_least_recently_used_idle_file() {
             .unwrap()
     });
     for binding in &bindings[..2] {
-        drop(
-            fixture
-                .project
-                .immutable_handles
-                .get(binding, &context)
-                .unwrap(),
-        );
+        let (file, validation_bytes) = fixture
+            .project
+            .immutable_handles
+            .get_admitted(binding, &context, |_| {
+                panic!("warm handles must not repeat validation admission")
+            })
+            .unwrap();
+        assert_eq!(validation_bytes, 0);
+        drop(file);
     }
     let observers = handles.each_ref().map(Arc::downgrade);
     drop(handles);
@@ -306,6 +308,40 @@ fn immutable_handle_pressure_evicts_the_least_recently_used_idle_file() {
     assert_eq!(fixture.project.metrics().cache_evictions, 1);
     assert_eq!(fixture.project.metrics().open, 3);
     drop(pressure);
+
+    let evicted = &bindings[2];
+    let mut admission_calls = 0;
+    let error = fixture
+        .project
+        .immutable_handles
+        .get_admitted(evicted, &context, |bytes| {
+            admission_calls += 1;
+            assert_eq!(bytes, evicted.reference.byte_length);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "validation budget refused",
+            ))
+        })
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(admission_calls, 1);
+    assert_eq!(fixture.project.metrics().cached_handles, 2);
+    assert_eq!(fixture.project.metrics().open, 2);
+
+    let (file, validation_bytes) = fixture
+        .project
+        .immutable_handles
+        .get_admitted(evicted, &context, |bytes| {
+            admission_calls += 1;
+            assert_eq!(bytes, evicted.reference.byte_length);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(admission_calls, 2);
+    assert_eq!(validation_bytes, evicted.reference.byte_length);
+    assert_eq!(fixture.project.metrics().cached_handles, 3);
+    assert!(fixture.project.metrics().high_water <= 3);
+    drop(file);
 }
 
 #[test]
