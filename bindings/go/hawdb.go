@@ -28,7 +28,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"unsafe"
 )
@@ -61,6 +64,9 @@ func (e *Error) Error() string {
 type OpenOptions struct {
 	// ReadOnly opens an existing database without permitting writes.
 	ReadOnly bool
+	// Memory opens an in-process database with no durable storage;
+	// the path is ignored and no data survives Close.
+	Memory bool
 }
 
 // Result is one materialized statement result: Columns in declaration
@@ -106,7 +112,10 @@ func OpenReadOnly(path string) (*DB, error) {
 func (lib *Library) Open(path string, opts ...*OpenOptions) (*DB, error) {
 	var optionsJSON string
 	if len(opts) > 0 && opts[0] != nil {
-		data, err := json.Marshal(map[string]any{"read_only": opts[0].ReadOnly})
+		data, err := json.Marshal(map[string]any{
+			"read_only": opts[0].ReadOnly,
+			"memory":    opts[0].Memory,
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -214,6 +223,10 @@ func prepareValue(value any) any {
 		return map[string]any{"$binary": base64.StdEncoding.EncodeToString(v)}
 	case UUID:
 		return map[string]any{"$uuid": string(v)}
+	case float32:
+		return floatParam(float64(v))
+	case float64:
+		return floatParam(v)
 	case []any:
 		out := make([]any, len(v))
 		for i, item := range v {
@@ -229,6 +242,22 @@ func prepareValue(value any) any {
 	default:
 		return value
 	}
+}
+
+// floatParam renders a float so its JSON text always carries a decimal
+// point or exponent. encoding/json would marshal float64(14000) as
+// "14000", which the engine decodes as an integer, silently changing the
+// parameter's type. Non-finite values stay untouched so Marshal keeps
+// surfacing its usual error.
+func floatParam(v float64) any {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return v
+	}
+	text := strconv.FormatFloat(v, 'g', -1, 64)
+	if !strings.ContainsAny(text, ".eE") {
+		text += ".0"
+	}
+	return json.Number(text)
 }
 
 // normalizeValue turns json.Number into int64 or float64, decodes the

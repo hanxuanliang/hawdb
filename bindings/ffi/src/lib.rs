@@ -297,7 +297,9 @@ fn output_to_json(output: &QueryOutput) -> serde_json::Value {
 ///
 /// `path` is `path_len` UTF-8 bytes and must not be NULL. `options_json`
 /// may be NULL or a JSON object; currently supported keys:
-/// `{"read_only": bool}`.
+/// `{"read_only": bool, "memory": bool}`. With `"memory": true` the
+/// database lives in process memory only; `path` must still be a valid
+/// string but is not used for storage.
 ///
 /// Returns a handle to pass to the other functions, or NULL on failure
 /// with `err_out` filled. Close the handle with [`hawdb_close`].
@@ -359,6 +361,17 @@ unsafe fn hawdb_open_inner(
                 .as_bool()
                 .ok_or_else(|| FfiError::invalid("hawdb: \"read_only\" must be a bool"))?;
             options.config.read_only = read_only;
+        }
+        if let Some(memory) = object.get("memory") {
+            let memory = memory
+                .as_bool()
+                .ok_or_else(|| FfiError::invalid("hawdb: \"memory\" must be a bool"))?;
+            if memory {
+                let database = HawDBEmbedded::open_in_memory_with_config(options.config);
+                return Ok(Box::into_raw(Box::new(HawdbDatabase {
+                    inner: Mutex::new(database),
+                })));
+            }
         }
     }
     let database =

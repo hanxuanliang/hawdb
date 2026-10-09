@@ -48,7 +48,9 @@ typedef struct HawdbBuffer {
  *
  * `path` is `path_len` UTF-8 bytes and must not be NULL. `options_json`
  * may be NULL or a JSON object; currently supported keys:
- * `{"read_only": bool}`.
+ * `{"read_only": bool, "memory": bool}`. With `"memory": true` the
+ * database lives in process memory only; `path` must still be a valid
+ * string but is not used for storage.
  *
  * Returns a handle to pass to the other functions, or NULL on failure
  * with `err_out` filled. Close the handle with [`hawdb_close`].

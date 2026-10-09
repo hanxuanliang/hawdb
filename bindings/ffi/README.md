@@ -77,7 +77,23 @@ parameters; any other object shape stays a `Map`.
 
 ## Options
 
-`hawdb_open` takes `options_json`: `{"read_only": bool}` (default false).
+`hawdb_open` takes `options_json`: `{"read_only": bool, "memory": bool}`
+(both default false). With `"memory": true` the database is in-process
+only and `path` is not used for storage.
+
+## Boundary benchmark
+
+`benches/boundary.rs` is a `harness = false` baseline for
+host-boundary cost (issue #976): it runs the same five cases
+(`fill`, `fill_bulk`, `select`, `point`, `wide`) through an
+`engine` layer (`HawDBEmbedded` direct, the lower bound) and an `ffi`
+layer (`hawdb_query`/`hawdb_query_sql`, engine plus JSON serialization).
+Run with `cargo bench --bench boundary` or the release binary; sizes,
+backends and cases come from `HAWDB_BENCH_SIZES`,
+`HAWDB_BENCH_BACKENDS` and `HAWDB_BENCH_CASES`. The Go-side mirror is
+`bindings/go/boundary_bench_test.go` (`HAWDB_BENCH=1 go test -run
+TestBoundaryBench`); both emit `bench,...` rows with a shared value
+checksum so cross-language parity is verifiable.
 
 ## Consumers
 

@@ -603,6 +603,7 @@ dependencies = [
  "base64",
  "cbindgen",
  "hawdb",
+ "libc",
  "serde_json",
 ]
 

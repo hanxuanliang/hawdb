@@ -27,12 +27,25 @@ license = "Apache-2.0"
 [workspace]
 
 [lib]
-crate-type = ["cdylib", "staticlib"]
+# "rlib" lets the workspace-local benches and tests link this crate;
+# cdylib/staticlib remain the only shipped artifacts.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[[bench]]
+name = "boundary"
+harness = false
 
 [dependencies]
 hawdb = { path = "../.." }
 base64 = "0.22"
-serde_json = "1"
+# float_roundtrip: the default parser can misround by 1 ulp (e.g.
+# "445.85714285714283" parses 0x1 below), which silently corrupts float
+# parameters crossing the boundary. Exact round-trip is worth the parse
+# cost at this scale.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[dev-dependencies]
+libc = "0.2"
 
 [build-dependencies]
 cbindgen = "0.29"
