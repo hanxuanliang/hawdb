@@ -195,18 +195,11 @@ func (db *DB) query(sql bool, text string, params any) (*Result, error) {
 		}
 		return nil, errors.New("hawdb: query failed")
 	}
-	var result Result
-	decoder := json.NewDecoder(bytes.NewReader(db.lib.takeBytes(&resultBuf)))
-	decoder.UseNumber()
-	if err := decoder.Decode(&result); err != nil {
+	result, err := decodeResult(db.lib.takeBytes(&resultBuf))
+	if err != nil {
 		return nil, fmt.Errorf("hawdb: malformed result JSON: %w", err)
 	}
-	for _, row := range result.Rows {
-		for i, value := range row {
-			row[i] = normalizeValue(value)
-		}
-	}
-	return &result, nil
+	return result, nil
 }
 
 // UUID is a HawDB uuid value for parameters and results. It is the
@@ -260,39 +253,139 @@ func floatParam(v float64) any {
 	return json.Number(text)
 }
 
-// normalizeValue turns json.Number into int64 or float64, decodes the
-// {"$binary": "<base64>"} tagged object back into []byte, and recurses
-// into lists and maps so callers see plain Go values.
-func normalizeValue(value any) any {
-	switch v := value.(type) {
-	case json.Number:
-		if i, err := v.Int64(); err == nil {
-			return i
+// decodeResult streams the {"columns": [...], "rows": [[...], ...]}
+// envelope into a Result in one pass. Values are normalized while they
+// decode — numbers land as int64 or float64, the {"$binary"} and
+// {"$uuid"} tagged objects as []byte and UUID — so there is no
+// intermediate DOM and no second traversal over every value.
+func decodeResult(data []byte) (*Result, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	token, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if delim, ok := token.(json.Delim); !ok || delim != '{' {
+		return nil, errors.New("expected a JSON object")
+	}
+	result := &Result{}
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return nil, err
 		}
-		f, _ := v.Float64()
-		return f
-	case []any:
-		for i, item := range v {
-			v[i] = normalizeValue(item)
+		switch key {
+		case "columns":
+			if err := dec.Decode(&result.Columns); err != nil {
+				return nil, err
+			}
+		case "rows":
+			if err := decodeRows(dec, result); err != nil {
+				return nil, err
+			}
+		default:
+			var skip json.RawMessage
+			if err := dec.Decode(&skip); err != nil {
+				return nil, err
+			}
 		}
-		return v
-	case map[string]any:
-		if len(v) == 1 {
-			if encoded, ok := v["$binary"].(string); ok {
+	}
+	if _, err := dec.Token(); err != nil { // closing '}'
+		return nil, err
+	}
+	return result, nil
+}
+
+func decodeRows(dec *json.Decoder, result *Result) error {
+	token, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if delim, ok := token.(json.Delim); !ok || delim != '[' {
+		return errors.New("expected a rows array")
+	}
+	for dec.More() {
+		token, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if delim, ok := token.(json.Delim); !ok || delim != '[' {
+			return errors.New("expected a row array")
+		}
+		var row []any
+		for dec.More() {
+			value, err := decodeValue(dec)
+			if err != nil {
+				return err
+			}
+			row = append(row, value)
+		}
+		if _, err := dec.Token(); err != nil { // ']'
+			return err
+		}
+		result.Rows = append(result.Rows, row)
+	}
+	_, err = dec.Token() // ']'
+	return err
+}
+
+func decodeValue(dec *json.Decoder) (any, error) {
+	token, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	switch t := token.(type) {
+	case json.Delim:
+		if t == '[' {
+			var list []any
+			for dec.More() {
+				item, err := decodeValue(dec)
+				if err != nil {
+					return nil, err
+				}
+				list = append(list, item)
+			}
+			if _, err := dec.Token(); err != nil {
+				return nil, err
+			}
+			return list, nil
+		}
+		object := make(map[string]any)
+		for dec.More() {
+			key, err := dec.Token()
+			if err != nil {
+				return nil, err
+			}
+			value, err := decodeValue(dec)
+			if err != nil {
+				return nil, err
+			}
+			object[key.(string)] = value
+		}
+		if _, err := dec.Token(); err != nil {
+			return nil, err
+		}
+		// Tagged single-key objects decode back to their types; any
+		// other shape stays a plain map.
+		if len(object) == 1 {
+			if encoded, ok := object["$binary"].(string); ok {
 				if decoded, err := base64.StdEncoding.DecodeString(encoded); err == nil {
-					return decoded
+					return decoded, nil
 				}
 			}
-			if encoded, ok := v["$uuid"].(string); ok {
-				return UUID(encoded)
+			if encoded, ok := object["$uuid"].(string); ok {
+				return UUID(encoded), nil
 			}
 		}
-		for key, item := range v {
-			v[key] = normalizeValue(item)
+		return object, nil
+	case json.Number:
+		if i, err := t.Int64(); err == nil {
+			return i, nil
 		}
-		return v
+		f, _ := t.Float64()
+		return f, nil
 	default:
-		return value
+		return t, nil
 	}
 }
 

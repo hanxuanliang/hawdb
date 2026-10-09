@@ -31,6 +31,7 @@
 //! database handle usable. Passing NULL for an out parameter discards that
 //! output.
 
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::ffi::{c_char, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -210,28 +211,87 @@ unsafe fn read_opt_str<'a>(text: FfiStr, name: &str) -> Result<Option<&'a str>, 
     unsafe { read_str(text, name) }.map(Some)
 }
 
-/// Convert a HawDB [`Value`] into `serde_json::Value`.
-///
+/// Serialize a HawDB [`Value`] with the boundary's tagged encoding —
 /// `Binary` becomes `{"$binary": "<base64>"}` and `Uuid` becomes
 /// `{"$uuid": "<canonical>"}` so both stay distinguishable from plain
-/// strings.
-fn value_to_json(value: &Value) -> serde_json::Value {
-    match value {
-        Value::Null => serde_json::Value::Null,
-        Value::Bool(item) => json!(item),
-        Value::Int(item) => json!(item),
-        Value::Float(item) if item.is_finite() => json!(item),
-        Value::Float(_) => serde_json::Value::Null,
-        Value::String(item) => json!(item),
-        Value::Binary(item) => json!({ "$binary": BASE64.encode(item) }),
-        Value::Uuid(item) => json!({ "$uuid": item.to_string() }),
-        Value::List(items) => serde_json::Value::Array(items.iter().map(value_to_json).collect()),
-        Value::Map(items) => serde_json::Value::Object(
-            items
-                .iter()
-                .map(|(key, item)| (key.clone(), value_to_json(item)))
-                .collect(),
-        ),
+/// strings. Serializing straight from the value avoids materializing a
+/// `serde_json::Value` DOM per row.
+struct ValueJson<'a>(&'a Value);
+
+impl Serialize for ValueJson<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeMap, SerializeSeq};
+        match self.0 {
+            Value::Null => serializer.serialize_unit(),
+            Value::Bool(item) => serializer.serialize_bool(*item),
+            Value::Int(item) => serializer.serialize_i64(*item),
+            Value::Float(item) if item.is_finite() => serializer.serialize_f64(*item),
+            Value::Float(_) => serializer.serialize_unit(),
+            Value::String(item) => serializer.serialize_str(item),
+            Value::Binary(item) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("$binary", &BASE64.encode(item))?;
+                map.end()
+            }
+            Value::Uuid(item) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("$uuid", &item.to_string())?;
+                map.end()
+            }
+            Value::List(items) => {
+                let mut seq = serializer.serialize_seq(Some(items.len()))?;
+                for item in items {
+                    seq.serialize_element(&ValueJson(item))?;
+                }
+                seq.end()
+            }
+            Value::Map(items) => {
+                let mut map = serializer.serialize_map(Some(items.len()))?;
+                for (key, item) in items {
+                    map.serialize_entry(key, &ValueJson(item))?;
+                }
+                map.end()
+            }
+        }
+    }
+}
+
+struct RowJson<'a>(&'a [Value]);
+
+impl Serialize for RowJson<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for item in self.0 {
+            seq.serialize_element(&ValueJson(item))?;
+        }
+        seq.end()
+    }
+}
+
+/// Serialize a [`QueryOutput`] as the result envelope
+/// `{"columns": [...], "rows": [[...], ...]}` without building an
+/// intermediate DOM.
+struct OutputJson<'a>(&'a QueryOutput);
+
+impl Serialize for OutputJson<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        struct Rows<'a>(&'a QueryOutput);
+        impl Serialize for Rows<'_> {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::SerializeSeq;
+                let mut seq = s.serialize_seq(None)?;
+                for row in self.0.value_rows() {
+                    seq.serialize_element(&RowJson(row))?;
+                }
+                seq.end()
+            }
+        }
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry("columns", &self.0.schema().columns())?;
+        map.serialize_entry("rows", &Rows(self.0))?;
+        map.end()
     }
 }
 
@@ -282,15 +342,31 @@ fn json_to_value(value: &serde_json::Value) -> Result<Value, String> {
     })
 }
 
-/// Materialize a [`QueryOutput`] into the result envelope:
-/// `{"columns": [...], "rows": [[...], ...]}`.
-fn output_to_json(output: &QueryOutput) -> serde_json::Value {
-    let columns = output.schema().columns();
-    let rows: Vec<serde_json::Value> = output
-        .value_rows()
-        .map(|row| serde_json::Value::Array(row.iter().map(value_to_json).collect()))
-        .collect();
-    json!({ "columns": columns, "rows": rows })
+/// Serialize `output` into `*out`'s buffer as the result envelope
+/// `{"columns": [...], "rows": [[...], ...]}`, streaming values instead
+/// of building a DOM. JSON text never contains NUL bytes (the encoder
+/// escapes them), so the trailing terminator can be appended directly.
+///
+/// # Safety
+/// `out` must be NULL or point to writable [`HawdbBuffer`] storage.
+unsafe fn set_json_buffer(out: *mut HawdbBuffer, output: &QueryOutput) {
+    if out.is_null() {
+        return;
+    }
+    let mut bytes = Vec::new();
+    if serde_json::to_writer(&mut bytes, &OutputJson(output)).is_err() {
+        unsafe { clear_buffer(out) };
+        return;
+    }
+    bytes.push(0);
+    match CString::from_vec_with_nul(bytes) {
+        Ok(text) => {
+            let buffer = unsafe { &mut *out };
+            buffer.len = text.as_bytes().len();
+            buffer.ptr = text.into_raw();
+        }
+        Err(_) => unsafe { clear_buffer(out) },
+    }
 }
 
 /// Open a HawDB database at `path`, creating it if needed.
@@ -517,7 +593,7 @@ unsafe fn query_impl(
     }));
     match result {
         Ok(Ok(output)) => {
-            unsafe { set_buffer(result_out, output_to_json(&output)) };
+            unsafe { set_json_buffer(result_out, &output) };
             true
         }
         Ok(Err(error)) => {

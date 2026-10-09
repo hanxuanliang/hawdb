@@ -604,6 +604,7 @@ dependencies = [
  "cbindgen",
  "hawdb",
  "libc",
+ "serde",
  "serde_json",
 ]
 

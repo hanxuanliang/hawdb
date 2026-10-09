@@ -42,6 +42,7 @@ base64 = "0.22"
 # "445.85714285714283" parses 0x1 below), which silently corrupts float
 # parameters crossing the boundary. Exact round-trip is worth the parse
 # cost at this scale.
+serde = "1"
 serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [dev-dependencies]
