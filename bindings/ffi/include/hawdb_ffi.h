@@ -25,6 +25,26 @@
 #include <stdlib.h>
 
 /**
+ * Cypher statement dialect for [`HawdbQueryRequest`].
+ */
+#define HAWDB_DIALECT_CYPHER 0
+
+/**
+ * SQL statement dialect for [`HawdbQueryRequest`].
+ */
+#define HAWDB_DIALECT_SQL 1
+
+/**
+ * JSON result envelope for [`HawdbQueryRequest`].
+ */
+#define HAWDB_FORMAT_JSON 0
+
+/**
+ * Binary result envelope for [`HawdbQueryRequest`] — see `src/envelope.rs`.
+ */
+#define HAWDB_FORMAT_BINARY 1
+
+/**
  * An open HawDB database handle. Opaque to C callers.
  */
 typedef struct HawdbDatabase HawdbDatabase;
@@ -32,16 +52,55 @@ typedef struct HawdbDatabase HawdbDatabase;
 /**
  * A byte buffer the library hands to the caller.
  *
- * `ptr` is `len` bytes of UTF-8 text; it is NUL-terminated as a courtesy
- * but `len` is authoritative and the content may not contain NUL bytes
- * anyway (JSON escapes them). The caller owns every non-NULL `ptr` and
- * releases it with [`hawdb_buffer_free`]. The library never retains or
- * reuses a buffer it has returned.
+ * `len` counts the content bytes only; the library also writes a NUL
+ * byte at `ptr[len]` as a courtesy for C callers, and binary content
+ * may itself contain interior NULs. Every non-NULL `ptr` is owned by
+ * the caller and released exactly once with [`hawdb_buffer_free`] —
+ * there is one free function for every buffer kind. The library
+ * never retains or reuses a buffer it has returned.
  */
 typedef struct HawdbBuffer {
   char *ptr;
   uintptr_t len;
 } HawdbBuffer;
+
+/**
+ * A full statement request for [`hawdb_query_ex`]: the text, its
+ * dialect and parameters, and the desired result envelope — the
+ * Vulkan-style pattern where the call signature stays fixed and the
+ * request descriptor grows.
+ *
+ * Callers set `struct_size` to `sizeof(HawdbQueryRequest)`; the
+ * library reads only the fields that fit inside it, so newer releases
+ * can append fields without breaking older callers. `dialect` and
+ * `format` default to Cypher and JSON when they fall outside
+ * `struct_size`.
+ */
+typedef struct HawdbQueryRequest {
+  /**
+   * `sizeof(HawdbQueryRequest)` as seen by the caller.
+   */
+  uintptr_t struct_size;
+  /**
+   * `HAWDB_DIALECT_*` value; Cypher when the field is absent.
+   */
+  uint32_t dialect;
+  /**
+   * Statement text: `text_len` UTF-8 bytes at `text`.
+   */
+  const char *text;
+  uintptr_t text_len;
+  /**
+   * JSON parameters: object for Cypher, positional array for SQL;
+   * NULL or empty for none.
+   */
+  const char *params_json;
+  uintptr_t params_len;
+  /**
+   * `HAWDB_FORMAT_*` value; JSON when the field is absent.
+   */
+  uint32_t format;
+} HawdbQueryRequest;
 
 /**
  * Open a HawDB database at `path`, creating it if needed.
@@ -121,8 +180,31 @@ bool hawdb_query_sql(struct HawdbDatabase *db,
                      struct HawdbBuffer *err_out);
 
 /**
+ * Run one statement described by `request`.
+ *
+ * The request carries everything the call needs — dialect, text,
+ * parameters, result envelope — so this signature never grows. The
+ * simple entry points [`hawdb_query`] and [`hawdb_query_sql`] remain
+ * for calls that only need the defaults. The binary envelope's exact
+ * layout is documented in `src/envelope.rs`.
+ *
+ * # Safety
+ * `db` must be a live [`hawdb_open`] handle; `request` must not be
+ * NULL and must be readable for `request->struct_size` bytes, and its
+ * `text`/`params_json` for the recorded lengths; `result_out` and
+ * `err_out` must be NULL or writable [`HawdbBuffer`] storage. A false
+ * return leaves the handle usable.
+ */
+bool hawdb_query_ex(struct HawdbDatabase *db,
+                    const struct HawdbQueryRequest *request,
+                    struct HawdbBuffer *result_out,
+                    struct HawdbBuffer *err_out);
+
+/**
  * Free a buffer returned by this library and zero the caller's
- * [`HawdbBuffer`] so a second call is a safe no-op. Passing NULL for
+ * [`HawdbBuffer`] so a second call is a safe no-op. The library owns
+ * `len + 1` bytes behind `ptr` (content plus the NUL sentinel), so
+ * this must be the function that releases it. Passing NULL for
  * `buffer`, or a buffer whose `ptr` is NULL, is a no-op.
  *
  * # Safety

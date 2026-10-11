@@ -33,8 +33,9 @@
 
 use hawdb::{HawDBEmbedded, HawDBEmbeddedOpenOptions, QueryOutput, Value};
 use hawdb_ffi::{
-    hawdb_buffer_free, hawdb_close, hawdb_open, hawdb_query, hawdb_query_sql, HawdbBuffer,
-    HawdbDatabase,
+    hawdb_buffer_free, hawdb_close, hawdb_open, hawdb_query, hawdb_query_ex, hawdb_query_sql,
+    HawdbBuffer, HawdbDatabase, HawdbQueryRequest, HAWDB_DIALECT_CYPHER, HAWDB_DIALECT_SQL,
+    HAWDB_FORMAT_BINARY, HAWDB_FORMAT_JSON,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -228,6 +229,91 @@ fn hash_result_envelope(json_bytes: &[u8]) -> (u64, u64, u64) {
 }
 
 // ---------------------------------------------------------------------
+// Binary envelope reader: mirrors the encoder in src/lib.rs so the
+// ffi_bin layer's checksum is computed over decoded Values, keeping
+// parity with the engine and JSON layers honest.
+struct BinReader<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+impl BinReader<'_> {
+    fn take(&mut self, n: usize) -> &[u8] {
+        let slice = &self.buf[self.pos..self.pos + n];
+        self.pos += n;
+        slice
+    }
+    fn u8(&mut self) -> u8 {
+        self.take(1)[0]
+    }
+    fn u32(&mut self) -> u32 {
+        u32::from_le_bytes(self.take(4).try_into().unwrap())
+    }
+    fn u64(&mut self) -> u64 {
+        u64::from_le_bytes(self.take(8).try_into().unwrap())
+    }
+    fn i64(&mut self) -> i64 {
+        i64::from_le_bytes(self.take(8).try_into().unwrap())
+    }
+    fn f64(&mut self) -> f64 {
+        f64::from_le_bytes(self.take(8).try_into().unwrap())
+    }
+}
+
+fn read_bin_value(r: &mut BinReader) -> Value {
+    match r.u8() {
+        0 => Value::Null,
+        1 => Value::Bool(r.u8() != 0),
+        2 => Value::Int(r.i64()),
+        3 => Value::Float(r.f64()),
+        4 => {
+            let len = r.u64() as usize;
+            Value::String(String::from_utf8(r.take(len).to_vec()).unwrap())
+        }
+        5 => {
+            let len = r.u64() as usize;
+            Value::Binary(r.take(len).to_vec())
+        }
+        6 => Value::Uuid(hawdb::Uuid::from_bytes(r.take(16).try_into().unwrap())),
+        7 => {
+            let n = r.u64();
+            Value::List((0..n).map(|_| read_bin_value(r)).collect())
+        }
+        8 => {
+            let n = r.u64();
+            let mut map = BTreeMap::new();
+            for _ in 0..n {
+                let klen = r.u32() as usize;
+                let key = String::from_utf8(r.take(klen).to_vec()).unwrap();
+                map.insert(key, read_bin_value(r));
+            }
+            Value::Map(map)
+        }
+        tag => panic!("unknown binary value tag {tag}"),
+    }
+}
+
+fn hash_binary_envelope(bytes: &[u8]) -> (u64, u64, u64) {
+    let mut r = BinReader { buf: bytes, pos: 0 };
+    assert_eq!(r.take(4), b"HDB1", "bad binary envelope magic");
+    let columns = r.u32();
+    for _ in 0..columns {
+        let len = r.u32();
+        r.take(len as usize);
+    }
+    let row_count = r.u64();
+    let mut hash = FNV_OFFSET;
+    let mut values = 0u64;
+    for _ in 0..row_count {
+        for _ in 0..columns {
+            hash_value(&mut hash, &read_bin_value(&mut r));
+            values += 1;
+        }
+    }
+    (hash, row_count, values)
+}
+
+// ---------------------------------------------------------------------
 // Deterministic dataset: values derived from the row id through a LCG,
 // so every layer/language generates byte-identical inputs.
 
@@ -381,8 +467,9 @@ fn take_buffer(buffer: &mut HawdbBuffer) -> Vec<u8> {
 
 fn maybe_dump(layer: &str, tag: &str, bytes: &[u8]) {
     if let Ok(dir) = env::var("HAWDB_BENCH_DUMP") {
+        let ext = if layer == "ffi_bin" { "bin" } else { "json" };
         std::fs::create_dir_all(&dir).ok();
-        std::fs::write(format!("{dir}/{tag}_{layer}.json"), bytes).ok();
+        std::fs::write(format!("{dir}/{tag}_{layer}.{ext}"), bytes).ok();
     }
 }
 
@@ -452,6 +539,7 @@ impl Driver for EngineDriver {
 struct FfiDriver {
     db: *mut HawdbDatabase,
     tag: String,
+    binary: bool,
 }
 
 impl FfiDriver {
@@ -468,6 +556,7 @@ impl FfiDriver {
         } else {
             std::ptr::null()
         };
+        let params_len = params.map(|p| p.to_string().len()).unwrap_or(0);
         let mut result = HawdbBuffer {
             ptr: std::ptr::null_mut(),
             len: 0,
@@ -476,24 +565,38 @@ impl FfiDriver {
             ptr: std::ptr::null_mut(),
             len: 0,
         };
-        let ok = unsafe {
+        let (dialect, format) = (
             if sql_mode {
-                hawdb_query_sql(
-                    self.db,
-                    text_c.as_ptr() as *const c_char,
-                    text.len(),
-                    params_ptr,
-                    params.map(|p| p.to_string().len()).unwrap_or(0),
-                    &mut result,
-                    &mut err,
-                )
+                HAWDB_DIALECT_SQL
             } else {
-                hawdb_query(
+                HAWDB_DIALECT_CYPHER
+            },
+            if self.binary {
+                HAWDB_FORMAT_BINARY
+            } else {
+                HAWDB_FORMAT_JSON
+            },
+        );
+        let ok = unsafe {
+            if self.binary {
+                let request = HawdbQueryRequest {
+                    struct_size: std::mem::size_of::<HawdbQueryRequest>(),
+                    dialect,
+                    text: text_c.as_ptr() as *const c_char,
+                    text_len: text.len(),
+                    params_json: params_ptr,
+                    params_len,
+                    format,
+                };
+                hawdb_query_ex(self.db, &request, &mut result, &mut err)
+            } else {
+                let entry = if sql_mode { hawdb_query_sql } else { hawdb_query };
+                entry(
                     self.db,
                     text_c.as_ptr() as *const c_char,
                     text.len(),
                     params_ptr,
-                    params.map(|p| p.to_string().len()).unwrap_or(0),
+                    params_len,
                     &mut result,
                     &mut err,
                 )
@@ -502,6 +605,17 @@ impl FfiDriver {
         if !ok {
             let err_bytes = take_buffer(&mut err);
             return Err(String::from_utf8_lossy(&err_bytes).into_owned());
+        }
+        if self.binary {
+            let bytes = take_buffer(&mut result);
+            black_box(&bytes);
+            maybe_dump("ffi_bin", &self.tag, &bytes);
+            let (checksum, rows, values) = hash_binary_envelope(&bytes);
+            return Ok(QueryOutcome {
+                checksum,
+                rows,
+                values,
+            });
         }
         let bytes = take_buffer(&mut result);
         black_box(&bytes);
@@ -545,6 +659,7 @@ impl Driver for FfiDriver {
         Self {
             db: backend.open_ffi(&format!("{tag}_ffi")),
             tag: tag.to_string(),
+            binary: false,
         }
     }
 
@@ -569,6 +684,35 @@ impl Driver for FfiDriver {
 
     fn close(self) {
         unsafe { hawdb_close(self.db) };
+    }
+}
+
+/// The FFI surface with the binary result envelope — same calls and
+/// parameter encoding, different result wire format and free function.
+struct FfiBinDriver(FfiDriver);
+
+impl Driver for FfiBinDriver {
+    fn open(backend: &Backend, tag: &str) -> Self {
+        // Own file name so the binary and JSON FFI layers do not reopen
+        // each other's populated database on the file backend.
+        Self(FfiDriver {
+            db: backend.open_ffi(&format!("{tag}_ffi_bin")),
+            tag: tag.to_string(),
+            binary: true,
+        })
+    }
+    fn sql(&mut self, sql: &str, params: &[Value]) -> Result<QueryOutcome, String> {
+        self.0.sql(sql, params)
+    }
+    fn cypher(
+        &mut self,
+        cypher: &str,
+        params: &BTreeMap<String, Value>,
+    ) -> Result<QueryOutcome, String> {
+        self.0.cypher(cypher, params)
+    }
+    fn close(self) {
+        self.0.close();
     }
 }
 
@@ -917,6 +1061,7 @@ fn main() {
                     match layer.as_str() {
                         "engine" => run_case::<EngineDriver>(layer, &backend, case, n),
                         "ffi" => run_case::<FfiDriver>(layer, &backend, case, n),
+                        "ffi_bin" => run_case::<FfiBinDriver>(layer, &backend, case, n),
                         other => eprintln!("unknown layer: {other}"),
                     }
                 }

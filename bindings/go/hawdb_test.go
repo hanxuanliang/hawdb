@@ -15,7 +15,9 @@
 package hawdb
 
 import (
+	"encoding/binary"
 	"errors"
+	"math"
 	"path/filepath"
 	"testing"
 )
@@ -228,5 +230,80 @@ func TestLoadLibraryMissing(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "libhawdb_ffi_missing.dylib")
 	if _, err := LoadLibrary(missing); err == nil {
 		t.Fatal("expected error loading a nonexistent library")
+	}
+}
+
+func TestDecodeResultBinaryMalformed(t *testing.T) {
+	// A well-formed 1x1 envelope (one int column, one row) to truncate.
+	good := []byte("HDB1")
+	good = binary.LittleEndian.AppendUint32(good, 1)  // ncols
+	good = binary.LittleEndian.AppendUint32(good, 2)  // name len
+	good = append(good, 'i', 'd')                     // "id"
+	good = binary.LittleEndian.AppendUint64(good, 1)  // nrows
+	good = append(good, 2)                            // tag i64
+	good = binary.LittleEndian.AppendUint64(good, 42) // value
+
+	res, err := decodeResultBinary(good)
+	if err != nil {
+		t.Fatalf("good envelope: %v", err)
+	}
+	if res.Columns[0] != "id" || res.Rows[0][0] != int64(42) {
+		t.Fatalf("unexpected decode: %+v", res)
+	}
+
+	for i := 0; i < len(good); i++ {
+		if _, err := decodeResultBinary(good[:i]); err == nil {
+			t.Fatalf("truncation at %d bytes should fail", i)
+		}
+	}
+
+	bad := make([]byte, len(good))
+	copy(bad, good)
+	copy(bad, "BAD!")
+	if _, err := decodeResultBinary(bad); err == nil {
+		t.Fatal("bad magic should fail")
+	}
+
+	copy(bad, good)
+	bad[len(bad)-9] = 0xfe // unknown tag
+	if _, err := decodeResultBinary(bad); err == nil {
+		t.Fatal("unknown tag should fail")
+	}
+
+	if _, err := decodeResultBinary(append(append([]byte(nil), good...), 0)); err == nil {
+		t.Fatal("trailing bytes should fail")
+	}
+
+	// Declared nrows beyond any possible payload. The header through
+	// the column name is 14 bytes: magic + ncols + name len + "id".
+	huge := append([]byte(nil), good[:14]...)
+	huge = binary.LittleEndian.AppendUint64(huge, math.MaxUint64) // nrows
+	if _, err := decodeResultBinary(huge); err == nil {
+		t.Fatal("absurd nrows should fail")
+	}
+
+	// A list declaring 2^32 items over a few bytes.
+	deep := []byte("HDB1")
+	deep = binary.LittleEndian.AppendUint32(deep, 1)
+	deep = binary.LittleEndian.AppendUint32(deep, 1)
+	deep = append(deep, 'l')
+	deep = binary.LittleEndian.AppendUint64(deep, 1)
+	deep = append(deep, 7) // list tag
+	deep = binary.LittleEndian.AppendUint64(deep, math.MaxUint32)
+	if _, err := decodeResultBinary(deep); err == nil {
+		t.Fatal("absurd list count should fail")
+	}
+}
+
+func TestQueryBinUnavailable(t *testing.T) {
+	// A zero-value Library stands in for an older library build whose
+	// hawdb_query_ex symbol is absent — the binary path must report
+	// unavailability, not call a nil function pointer.
+	db := &DB{lib: &Library{}}
+	if _, err := db.queryBinary(true, "SELECT 1", nil); err == nil {
+		t.Fatal("expected unavailable error")
+	}
+	if _, err := db.queryBinary(false, "RETURN 1", nil); err == nil {
+		t.Fatal("expected unavailable error")
 	}
 }

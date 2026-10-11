@@ -45,7 +45,32 @@ type Library struct {
 	querySQL   func(db unsafe.Pointer, text *byte, textLen uintptr, params *byte, paramsLen uintptr, result, errOut *ffiBuffer) bool
 	bufferFree func(buffer *ffiBuffer)
 	version    func(out *ffiBuffer)
+	// hawdb_query_ex is optional: libraries built before it existed
+	// simply leave it nil and the binary envelope is unavailable.
+	queryEx func(db unsafe.Pointer, request *ffiQueryRequest, result, errOut *ffiBuffer) bool
 }
+
+// ffiQueryRequest mirrors HawdbQueryRequest in the C ABI: the whole
+// call descriptor — dialect, text, params, result format — so
+// hawdb_query_ex's signature stays fixed as the request grows fields.
+// structSize is set to unsafe.Sizeof so the library knows how much of
+// the struct it may read.
+type ffiQueryRequest struct {
+	structSize uintptr
+	dialect    uint32
+	text       *byte
+	textLen    uintptr
+	params     *byte
+	paramsLen  uintptr
+	format     uint32
+}
+
+const (
+	ffiDialectCypher uint32 = 0
+	ffiDialectSQL    uint32 = 1
+	ffiFormatJSON    uint32 = 0
+	ffiFormatBinary  uint32 = 1
+)
 
 // LoadLibrary loads libhawdb_ffi from path. Missing libraries and
 // missing or incompatible exported symbols fail loudly here, before any
@@ -62,6 +87,11 @@ func LoadLibrary(path string) (*Library, error) {
 	purego.RegisterLibFunc(&lib.querySQL, handle, "hawdb_query_sql")
 	purego.RegisterLibFunc(&lib.bufferFree, handle, "hawdb_buffer_free")
 	purego.RegisterLibFunc(&lib.version, handle, "hawdb_version")
+	// hawdb_query_ex is optional: an older library simply leaves it
+	// nil and the extended-query path reports unavailability.
+	if sym, err := purego.Dlsym(handle, "hawdb_query_ex"); err == nil {
+		purego.RegisterFunc(&lib.queryEx, sym)
+	}
 	return lib, nil
 }
 

@@ -27,7 +27,10 @@ package hawdb
 //
 // Knobs mirror the Rust bench: HAWDB_BENCH_SIZES (comma list, default
 // 1000), HAWDB_BENCH_BACKENDS (comma list of memory,file, default
-// memory), HAWDB_BENCH_CASES (comma list, default all five).
+// memory), HAWDB_BENCH_CASES (comma list, default all five),
+// HAWDB_BENCH_WIRE (comma list of json,bin; json is the default and
+// reports layer=go, bin runs the experimental binary envelope as
+// layer=go_bin and needs a library with the hawdb_query_*_bin exports).
 
 import (
 	"encoding/json"
@@ -225,17 +228,43 @@ func benchRSS() int64 {
 	return ru.Maxrss * 1024
 }
 
-func benchReport(t *testing.T, backend, name string, n, ops int64, wall time.Duration, checksum, rows, values uint64, rssStart int64) {
+func benchReport(t *testing.T, layer, backend, name string, n, ops int64, wall time.Duration, checksum, rows, values uint64, rssStart int64) {
 	rss := benchRSS()
-	fmt.Printf("bench,layer=go,backend=%s,case=%s,n=%d,wall_ms=%.3f,ops=%d,rows_out=%d,values_out=%d,checksum=%016x,peak_rss_delta_kb=%d\n",
-		backend, name, n, float64(wall.Nanoseconds())/1e6, ops, rows, values, checksum, (rss-rssStart)/1024)
+	fmt.Printf("bench,layer=%s,backend=%s,case=%s,n=%d,wall_ms=%.3f,ops=%d,rows_out=%d,values_out=%d,checksum=%016x,peak_rss_delta_kb=%d\n",
+		layer, backend, name, n, float64(wall.Nanoseconds())/1e6, ops, rows, values, checksum, (rss-rssStart)/1024)
 }
 
 // benchReportErr records a failed measured call; budget denials are
 // part of the contract being measured, not a benchmark failure.
-func benchReportErr(backend, name string, n, ops int64, wall time.Duration, err error) {
-	fmt.Printf("bench,layer=go,backend=%s,case=%s,n=%d,wall_ms=%.3f,ops=%d,status=error,error=%q\n",
-		backend, name, n, float64(wall.Nanoseconds())/1e6, ops, err)
+func benchReportErr(layer, backend, name string, n, ops int64, wall time.Duration, err error) {
+	fmt.Printf("bench,layer=%s,backend=%s,case=%s,n=%d,wall_ms=%.3f,ops=%d,status=error,error=%q\n",
+		layer, backend, name, n, float64(wall.Nanoseconds())/1e6, ops, err)
+}
+
+// wireLayer names the reported layer for a wire choice: "" is the
+// JSON path ("go"), "bin" the binary envelope ("go_bin").
+func wireLayer(wire string) string {
+	if wire == "bin" {
+		return "go_bin"
+	}
+	return "go"
+}
+
+// benchSQL / benchQuery route a statement through the JSON or the
+// binary result envelope; the binary path needs a library built with
+// the hawdb_query_ex export.
+func benchSQL(db *DB, wire, sql string, params ...any) (*Result, error) {
+	if wire == "bin" {
+		return db.queryBinary(true, sql, params)
+	}
+	return db.QuerySQL(sql, params...)
+}
+
+func benchQuery(db *DB, wire, text string, params map[string]any) (*Result, error) {
+	if wire == "bin" {
+		return db.queryBinary(false, text, params)
+	}
+	return db.Query(text, params)
 }
 
 func benchChecksumResult(res *Result) (uint64, uint64, uint64) {
@@ -266,7 +295,7 @@ const benchChunk = 5000
 
 // benchSeed inserts n generated rows in benchChunk-sized statements and
 // returns the statement count.
-func benchSeed(t *testing.T, db *DB, g *generator, n int64) int64 {
+func benchSeed(t *testing.T, db *DB, wire string, g *generator, n int64) int64 {
 	t.Helper()
 	var b strings.Builder
 	var ops int64
@@ -283,8 +312,8 @@ func benchSeed(t *testing.T, db *DB, g *generator, n int64) int64 {
 			}
 			fmt.Fprintf(&b, "(%d,%d,'%s')", rid, v, strings.ReplaceAll(s, "'", "''"))
 		}
-		if _, err := db.QuerySQL(
-			"INSERT INTO bench_t (id, v, s) VALUES " + b.String(),
+		if _, err := benchSQL(db, wire,
+			"INSERT INTO bench_t (id, v, s) VALUES "+b.String(),
 		); err != nil {
 			t.Fatalf("seed insert chunk %d: %v", start, err)
 		}
@@ -293,8 +322,8 @@ func benchSeed(t *testing.T, db *DB, g *generator, n int64) int64 {
 	return ops
 }
 
-func benchFill(t *testing.T, backend string, n int64) {
-	db := benchOpen(t, backend, "fill")
+func benchFill(t *testing.T, backend, wire string, n int64) {
+	db := benchOpen(t, backend, "fill_"+wire)
 	defer db.Close()
 	benchSetupTable(t, db)
 	rssStart := benchRSS()
@@ -303,53 +332,53 @@ func benchFill(t *testing.T, backend string, n int64) {
 	start := time.Now()
 	for id := int64(0); id < n; id++ {
 		rid, v, s := g.row3(id)
-		if _, err := db.QuerySQL(
+		if _, err := benchSQL(db, wire,
 			"INSERT INTO bench_t (id, v, s) VALUES ($1, $2, $3)", rid, v, s,
 		); err != nil {
 			t.Fatalf("insert %d: %v", id, err)
 		}
 	}
-	benchReport(t, backend, "fill", n, n, time.Since(start), checksum, uint64(n), 0, rssStart)
+	benchReport(t, wireLayer(wire), backend, "fill", n, n, time.Since(start), checksum, uint64(n), 0, rssStart)
 }
 
-func benchFillBulk(t *testing.T, backend string, n int64) {
-	db := benchOpen(t, backend, "fill_bulk")
+func benchFillBulk(t *testing.T, backend, wire string, n int64) {
+	db := benchOpen(t, backend, "fill_bulk_"+wire)
 	defer db.Close()
 	benchSetupTable(t, db)
 	rssStart := benchRSS()
 	g := &generator{state: 0x5eed}
 	start := time.Now()
-	ops := benchSeed(t, db, g, n)
-	benchReport(t, backend, "fill_bulk", n, ops, time.Since(start), fnvOffset, uint64(n), 0, rssStart)
+	ops := benchSeed(t, db, wire, g, n)
+	benchReport(t, wireLayer(wire), backend, "fill_bulk", n, ops, time.Since(start), fnvOffset, uint64(n), 0, rssStart)
 }
 
-func benchSelect(t *testing.T, backend string, n int64) {
-	db := benchOpen(t, backend, "select")
+func benchSelect(t *testing.T, backend, wire string, n int64) {
+	db := benchOpen(t, backend, "select_"+wire)
 	defer db.Close()
 	benchSetupTable(t, db)
 	g := &generator{state: 0x5eed}
-	benchSeed(t, db, g, n)
+	benchSeed(t, db, wire, g, n)
 	// Warm pass; a budget denial is fine — the measured call reports it.
-	db.QuerySQL(benchSelectCols)
+	benchSQL(db, wire, benchSelectCols)
 	rssStart := benchRSS()
 	start := time.Now()
-	res, err := db.QuerySQL(benchSelectCols)
+	res, err := benchSQL(db, wire, benchSelectCols)
 	wall := time.Since(start)
 	if err != nil {
-		benchReportErr(backend, "select", n, 1, wall, err)
+		benchReportErr(wireLayer(wire), backend, "select", n, 1, wall, err)
 		return
 	}
 	checksum, rows, values := benchChecksumResult(res)
-	benchReport(t, backend, "select", n, 1, wall, checksum, rows, values, rssStart)
+	benchReport(t, wireLayer(wire), backend, "select", n, 1, wall, checksum, rows, values, rssStart)
 }
 
-func benchPoint(t *testing.T, backend string, n int64) {
-	db := benchOpen(t, backend, "point")
+func benchPoint(t *testing.T, backend, wire string, n int64) {
+	db := benchOpen(t, backend, "point_"+wire)
 	defer db.Close()
 	benchSetupTable(t, db)
 	g := &generator{state: 0x5eed}
-	benchSeed(t, db, g, n)
-	if _, err := db.QuerySQL("SELECT id, v, s FROM bench_t WHERE id = $1", int64(0)); err != nil {
+	benchSeed(t, db, wire, g, n)
+	if _, err := benchSQL(db, wire, "SELECT id, v, s FROM bench_t WHERE id = $1", int64(0)); err != nil {
 		t.Fatalf("warm point: %v", err)
 	}
 	rssStart := benchRSS()
@@ -357,7 +386,7 @@ func benchPoint(t *testing.T, backend string, n int64) {
 	var rows, values uint64
 	start := time.Now()
 	for id := int64(0); id < n; id++ {
-		res, err := db.QuerySQL("SELECT id, v, s FROM bench_t WHERE id = $1", id)
+		res, err := benchSQL(db, wire, "SELECT id, v, s FROM bench_t WHERE id = $1", id)
 		if err != nil {
 			t.Fatalf("point %d: %v", id, err)
 		}
@@ -366,11 +395,11 @@ func benchPoint(t *testing.T, backend string, n int64) {
 		rows += r
 		values += v
 	}
-	benchReport(t, backend, "point", n, n, time.Since(start), checksum, rows, values, rssStart)
+	benchReport(t, wireLayer(wire), backend, "point", n, n, time.Since(start), checksum, rows, values, rssStart)
 }
 
-func benchWide(t *testing.T, backend string, n int64) {
-	db := benchOpen(t, backend, "wide")
+func benchWide(t *testing.T, backend, wire string, n int64) {
+	db := benchOpen(t, backend, "wide_"+wire)
 	defer db.Close()
 	g := &generator{state: 0x1eaf}
 	rows := make([]any, n)
@@ -388,29 +417,29 @@ func benchWide(t *testing.T, backend string, n int64) {
 		if end > n {
 			end = n
 		}
-		if _, err := db.Query(create.String(), map[string]any{"rows": rows[start:end]}); err != nil {
+		if _, err := benchQuery(db, wire, create.String(), map[string]any{"rows": rows[start:end]}); err != nil {
 			t.Fatalf("wide seed chunk %d: %v", start, err)
 		}
 	}
 	const wideSelect = "MATCH (w:Wide) RETURN w.id, w.i0, w.i1, w.i2, w.i3, w.i4, w.i5, " +
 		"w.i6, w.i7, w.f0, w.f1, w.f2, w.f3, w.f4, w.s0, w.s1, w.s2, w.s3, w.lst, w.mp"
 	// Warm pass; a budget denial is fine — the measured call reports it.
-	db.Query(wideSelect, nil)
+	benchQuery(db, wire, wideSelect, nil)
 	rssStart := benchRSS()
 	start := time.Now()
-	res, err := db.Query(wideSelect, nil)
+	res, err := benchQuery(db, wire, wideSelect, nil)
 	wall := time.Since(start)
 	if err != nil {
-		benchReportErr(backend, "wide", n, 1, wall, err)
+		benchReportErr(wireLayer(wire), backend, "wide", n, 1, wall, err)
 		return
 	}
 	if dir := os.Getenv("HAWDB_BENCH_DUMP"); dir != "" {
 		if data, merr := json.Marshal(res); merr == nil {
-			os.WriteFile(dir+"/wide_go.json", data, 0o644)
+			os.WriteFile(dir+"/wide_go"+wire+".json", data, 0o644)
 		}
 	}
 	checksum, outRows, values := benchChecksumResult(res)
-	benchReport(t, backend, "wide", n, 1, wall, checksum, outRows, values, rssStart)
+	benchReport(t, wireLayer(wire), backend, "wide", n, 1, wall, checksum, outRows, values, rssStart)
 }
 
 func TestBoundaryBench(t *testing.T) {
@@ -436,22 +465,38 @@ func TestBoundaryBench(t *testing.T) {
 	if v := os.Getenv("HAWDB_BENCH_CASES"); v != "" {
 		cases = strings.Split(v, ",")
 	}
+	wires := []string{""}
+	if v := os.Getenv("HAWDB_BENCH_WIRE"); v != "" {
+		wires = nil
+		for _, w := range strings.Split(v, ",") {
+			switch w {
+			case "json":
+				wires = append(wires, "")
+			case "bin":
+				wires = append(wires, "bin")
+			default:
+				t.Fatalf("HAWDB_BENCH_WIRE: unknown wire %q", w)
+			}
+		}
+	}
 	for _, backend := range backends {
 		for _, n := range sizes {
-			for _, name := range cases {
-				switch name {
-				case "fill":
-					benchFill(t, backend, n)
-				case "fill_bulk":
-					benchFillBulk(t, backend, n)
-				case "select":
-					benchSelect(t, backend, n)
-				case "point":
-					benchPoint(t, backend, n)
-				case "wide":
-					benchWide(t, backend, n)
-				default:
-					t.Fatalf("unknown case %q", name)
+			for _, wire := range wires {
+				for _, name := range cases {
+					switch name {
+					case "fill":
+						benchFill(t, backend, wire, n)
+					case "fill_bulk":
+						benchFillBulk(t, backend, wire, n)
+					case "select":
+						benchSelect(t, backend, wire, n)
+					case "point":
+						benchPoint(t, backend, wire, n)
+					case "wide":
+						benchWide(t, backend, wire, n)
+					default:
+						t.Fatalf("unknown case %q", name)
+					}
 				}
 			}
 		}

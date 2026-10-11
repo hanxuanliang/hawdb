@@ -25,6 +25,7 @@ package hawdb
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -163,6 +164,17 @@ func (db *DB) Exec(cypher string, params map[string]any) error {
 }
 
 func (db *DB) query(sql bool, text string, params any) (*Result, error) {
+	return db.queryWire(sql, text, params, false)
+}
+
+// queryBinary runs a statement and reads the compact binary result
+// envelope instead of JSON. It requires a library built with the
+// hawdb_query_ex export; otherwise it returns an error.
+func (db *DB) queryBinary(sql bool, text string, params any) (*Result, error) {
+	return db.queryWire(sql, text, params, true)
+}
+
+func (db *DB) queryWire(sql bool, text string, params any, binary bool) (*Result, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 	if db.closed {
@@ -184,7 +196,25 @@ func (db *DB) query(sql bool, text string, params any) (*Result, error) {
 	paramsPtr, paramsLen := strArg(paramsJSON)
 	var resultBuf, errBuf ffiBuffer
 	var ok bool
-	if sql {
+	if binary {
+		if db.lib.queryEx == nil {
+			return nil, errors.New("hawdb: library lacks the extended query export")
+		}
+		dialect := ffiDialectCypher
+		if sql {
+			dialect = ffiDialectSQL
+		}
+		request := ffiQueryRequest{
+			structSize: unsafe.Sizeof(ffiQueryRequest{}),
+			dialect:    dialect,
+			text:       textPtr,
+			textLen:    textLen,
+			params:     paramsPtr,
+			paramsLen:  paramsLen,
+			format:     ffiFormatBinary,
+		}
+		ok = db.lib.queryEx(db.ptr, &request, &resultBuf, &errBuf)
+	} else if sql {
 		ok = db.lib.querySQL(db.ptr, textPtr, textLen, paramsPtr, paramsLen, &resultBuf, &errBuf)
 	} else {
 		ok = db.lib.query(db.ptr, textPtr, textLen, paramsPtr, paramsLen, &resultBuf, &errBuf)
@@ -194,6 +224,13 @@ func (db *DB) query(sql bool, text string, params any) (*Result, error) {
 			return nil, err
 		}
 		return nil, errors.New("hawdb: query failed")
+	}
+	if binary {
+		result, err := decodeResultBinary(db.lib.takeBytes(&resultBuf))
+		if err != nil {
+			return nil, fmt.Errorf("hawdb: malformed binary result: %w", err)
+		}
+		return result, nil
 	}
 	result, err := decodeResult(db.lib.takeBytes(&resultBuf))
 	if err != nil {
@@ -386,6 +423,193 @@ func decodeValue(dec *json.Decoder) (any, error) {
 		return f, nil
 	default:
 		return t, nil
+	}
+}
+
+// ------------------------------------------------------------------
+// Binary result envelope — mirrors the encoder in the FFI crate.
+// "HDB1" | u32 ncols | per column u32 len + name | u64 nrows | per
+// row, per column one tagged value:
+//   0 null · 1 bool u8 · 2 i64 · 3 f64 · 4 string (u64 len + bytes)
+//   5 binary (u64 len + bytes) · 6 uuid (16 bytes) · 7 list (u64
+//   count + items) · 8 map (u64 count; u32 key len + key + value)
+// ------------------------------------------------------------------
+
+type binReader struct {
+	buf []byte
+	pos int
+}
+
+func (r *binReader) take(n int) ([]byte, error) {
+	// n > remaining can only hold when n came from a hostile length
+	// field; written this way pos+n cannot overflow.
+	if n < 0 || n > len(r.buf)-r.pos {
+		return nil, errors.New("truncated envelope")
+	}
+	out := r.buf[r.pos : r.pos+n]
+	r.pos += n
+	return out, nil
+}
+
+func (r *binReader) u32() (uint32, error) {
+	b, err := r.take(4)
+	if err != nil {
+		return 0, err
+	}
+	return binary.LittleEndian.Uint32(b), nil
+}
+
+func (r *binReader) u64() (uint64, error) {
+	b, err := r.take(8)
+	if err != nil {
+		return 0, err
+	}
+	return binary.LittleEndian.Uint64(b), nil
+}
+
+// decodeResultBinary reads the tagged binary envelope straight into a
+// Result — no JSON parsing, no intermediate DOM.
+func decodeResultBinary(data []byte) (*Result, error) {
+	r := &binReader{buf: data}
+	magic, err := r.take(4)
+	if err != nil || string(magic) != "HDB1" {
+		return nil, errors.New("bad magic")
+	}
+	ncols, err := r.u32()
+	if err != nil {
+		return nil, err
+	}
+	result := &Result{}
+	for i := uint32(0); i < ncols; i++ {
+		nameLen, err := r.u32()
+		if err != nil {
+			return nil, err
+		}
+		name, err := r.take(int(nameLen))
+		if err != nil {
+			return nil, err
+		}
+		result.Columns = append(result.Columns, string(name))
+	}
+	nrows, err := r.u64()
+	if err != nil {
+		return nil, err
+	}
+	// Every row costs at least one tag byte per column, so a declared
+	// nrows beyond the remaining bytes can never be satisfied.
+	if nrows > uint64(len(r.buf)-r.pos) {
+		return nil, errors.New("truncated envelope")
+	}
+	for i := uint64(0); i < nrows; i++ {
+		row := make([]any, 0, ncols)
+		for j := uint32(0); j < ncols; j++ {
+			value, err := decodeBinValue(r, 0)
+			if err != nil {
+				return nil, err
+			}
+			row = append(row, value)
+		}
+		result.Rows = append(result.Rows, row)
+	}
+	if r.pos != len(r.buf) {
+		return nil, errors.New("trailing bytes after envelope")
+	}
+	return result, nil
+}
+
+func decodeBinValue(r *binReader, depth int) (any, error) {
+	// Tags cost a byte each, so depth is already bounded by the input
+	// length; the cap just keeps a hostile payload off the stack.
+	if depth > 64 {
+		return nil, errors.New("envelope nesting too deep")
+	}
+	tag, err := r.take(1)
+	if err != nil {
+		return nil, err
+	}
+	switch tag[0] {
+	case 0:
+		return nil, nil
+	case 1:
+		b, err := r.take(1)
+		if err != nil {
+			return nil, err
+		}
+		return b[0] != 0, nil
+	case 2:
+		u, err := r.u64()
+		return int64(u), err
+	case 3:
+		u, err := r.u64()
+		return math.Float64frombits(u), err
+	case 4:
+		n, err := r.u64()
+		if err != nil {
+			return nil, err
+		}
+		b, err := r.take(int(n))
+		return string(b), err
+	case 5:
+		n, err := r.u64()
+		if err != nil {
+			return nil, err
+		}
+		b, err := r.take(int(n))
+		return bytes.Clone(b), err
+	case 6:
+		b, err := r.take(16)
+		if err != nil {
+			return nil, err
+		}
+		var uuid [16]byte
+		copy(uuid[:], b)
+		return UUID(fmt.Sprintf("%x-%x-%x-%x-%x",
+			uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:16])), nil
+	case 7:
+		n, err := r.u64()
+		if err != nil {
+			return nil, err
+		}
+		if n > uint64(len(r.buf)-r.pos) {
+			return nil, errors.New("truncated envelope")
+		}
+		list := make([]any, 0, n)
+		for i := uint64(0); i < n; i++ {
+			item, err := decodeBinValue(r, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			list = append(list, item)
+		}
+		return list, nil
+	case 8:
+		n, err := r.u64()
+		if err != nil {
+			return nil, err
+		}
+		// Each entry needs at least a u32 key length and a value tag.
+		if n > uint64(len(r.buf)-r.pos)/5 {
+			return nil, errors.New("truncated envelope")
+		}
+		object := make(map[string]any, n)
+		for i := uint64(0); i < n; i++ {
+			keyLen, err := r.u32()
+			if err != nil {
+				return nil, err
+			}
+			key, err := r.take(int(keyLen))
+			if err != nil {
+				return nil, err
+			}
+			value, err := decodeBinValue(r, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			object[string(key)] = value
+		}
+		return object, nil
+	default:
+		return nil, fmt.Errorf("unknown value tag %d", tag[0])
 	}
 }
 

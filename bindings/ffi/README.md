@@ -75,6 +75,19 @@ Parameters and results are JSON so hosts never see HawDB's `Value` type.
 `{"$binary": ...}` and `{"$uuid": ...}` decode back to `Binary`/`Uuid` in
 parameters; any other object shape stays a `Map`.
 
+### Binary result envelope (experimental)
+
+`hawdb_query_ex` takes a `HawdbQueryRequest` — a `struct_size`-versioned
+descriptor carrying the dialect, statement text, parameters and a
+`format` field — and `HAWDB_FORMAT_BINARY` makes `result_out` a compact
+tagged binary encoding (`"HDB1"` + column names + row values; the exact
+layout is documented and tested in `src/envelope.rs`) instead of JSON
+text. Like every returned buffer it is released with
+`hawdb_buffer_free`. The encoding drops JSON's `{"$binary"}`/`{"$uuid"}`
+tagging and its escaping and number-parsing costs; the format is
+experimental and exists to measure issue #976's wire-format options —
+it may change.
+
 ## Options
 
 `hawdb_open` takes `options_json`: `{"read_only": bool, "memory": bool}`
@@ -87,7 +100,9 @@ only and `path` is not used for storage.
 host-boundary cost (issue #976): it runs the same five cases
 (`fill`, `fill_bulk`, `select`, `point`, `wide`) through an
 `engine` layer (`HawDBEmbedded` direct, the lower bound) and an `ffi`
-layer (`hawdb_query`/`hawdb_query_sql`, engine plus JSON serialization).
+layer (`hawdb_query`/`hawdb_query_sql`, engine plus JSON serialization)
+and an `ffi_bin` layer (same calls through `hawdb_query_ex` with
+`HAWDB_FORMAT_BINARY`).
 Run with `cargo bench --bench boundary` or the release binary; sizes,
 backends and cases come from `HAWDB_BENCH_SIZES`,
 `HAWDB_BENCH_BACKENDS` and `HAWDB_BENCH_CASES`. The Go-side mirror is

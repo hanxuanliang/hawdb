@@ -16,8 +16,9 @@
 //!
 //! The surface is deliberately small: open a database, run one Cypher or SQL
 //! statement per call, close. All strings cross the boundary as UTF-8
-//! pointer-plus-length pairs; there is no NUL-termination contract, though
-//! returned buffers are NUL-terminated as a courtesy for C callers.
+//! pointer-plus-length pairs; there is no NUL-termination contract for
+//! inputs, though every returned buffer carries a NUL byte just past
+//! its `len` as a courtesy for C callers.
 //! Statement parameters and results are exchanged as JSON, so hosts never
 //! need to know HawDB's internal value representation.
 //!
@@ -33,7 +34,7 @@
 
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::ffi::{c_char, CString};
+use std::ffi::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::ptr;
@@ -47,6 +48,8 @@ use hawdb::{
 };
 use serde_json::json;
 
+mod envelope;
+
 /// An open HawDB database handle. Opaque to C callers.
 pub struct HawdbDatabase {
     inner: Mutex<HawDBEmbedded>,
@@ -54,11 +57,12 @@ pub struct HawdbDatabase {
 
 /// A byte buffer the library hands to the caller.
 ///
-/// `ptr` is `len` bytes of UTF-8 text; it is NUL-terminated as a courtesy
-/// but `len` is authoritative and the content may not contain NUL bytes
-/// anyway (JSON escapes them). The caller owns every non-NULL `ptr` and
-/// releases it with [`hawdb_buffer_free`]. The library never retains or
-/// reuses a buffer it has returned.
+/// `len` counts the content bytes only; the library also writes a NUL
+/// byte at `ptr[len]` as a courtesy for C callers, and binary content
+/// may itself contain interior NULs. Every non-NULL `ptr` is owned by
+/// the caller and released exactly once with [`hawdb_buffer_free`] —
+/// there is one free function for every buffer kind. The library
+/// never retains or reuses a buffer it has returned.
 #[repr(C)]
 pub struct HawdbBuffer {
     pub ptr: *mut c_char,
@@ -138,22 +142,32 @@ fn variant_name(error: &impl std::fmt::Debug) -> String {
 /// # Safety
 /// `out` must be NULL or point to writable [`HawdbBuffer`] storage.
 unsafe fn set_buffer(out: *mut HawdbBuffer, text: impl std::fmt::Display) {
-    if out.is_null() {
-        return;
-    }
     let mut text = text.to_string();
     if text.contains('\0') {
         text = text.replace('\0', " ");
     }
-    let len = text.len();
-    match CString::new(text) {
-        Ok(text) => {
-            let buffer = unsafe { &mut *out };
-            buffer.ptr = text.into_raw();
-            buffer.len = len;
-        }
-        Err(_) => unsafe { clear_buffer(out) },
+    unsafe { set_bytes(out, text.into_bytes()) };
+}
+
+/// Hand `bytes` to `*out`. Every buffer the library returns owns
+/// `len + 1` bytes — `len` bytes of content plus a trailing NUL
+/// sentinel at `ptr[len]` that is never counted in `len` but lets C
+/// callers treat text results as C strings. `len` is authoritative and
+/// binary content may contain interior NULs. Released with
+/// [`hawdb_buffer_free`]; the library never retains what it returns.
+///
+/// # Safety
+/// `out` must be NULL or point to writable [`HawdbBuffer`] storage.
+unsafe fn set_bytes(out: *mut HawdbBuffer, mut bytes: Vec<u8>) {
+    if out.is_null() {
+        return;
     }
+    bytes.push(0);
+    let mut boxed = bytes.into_boxed_slice();
+    let buffer = unsafe { &mut *out };
+    buffer.len = boxed.len() - 1;
+    buffer.ptr = boxed.as_mut_ptr() as *mut c_char;
+    std::mem::forget(boxed);
 }
 
 /// Zero an out buffer so callers that read it unconditionally see {NULL, 0}.
@@ -344,29 +358,17 @@ fn json_to_value(value: &serde_json::Value) -> Result<Value, String> {
 
 /// Serialize `output` into `*out`'s buffer as the result envelope
 /// `{"columns": [...], "rows": [[...], ...]}`, streaming values instead
-/// of building a DOM. JSON text never contains NUL bytes (the encoder
-/// escapes them), so the trailing terminator can be appended directly.
+/// of building a DOM.
 ///
 /// # Safety
 /// `out` must be NULL or point to writable [`HawdbBuffer`] storage.
 unsafe fn set_json_buffer(out: *mut HawdbBuffer, output: &QueryOutput) {
-    if out.is_null() {
-        return;
-    }
     let mut bytes = Vec::new();
     if serde_json::to_writer(&mut bytes, &OutputJson(output)).is_err() {
         unsafe { clear_buffer(out) };
         return;
     }
-    bytes.push(0);
-    match CString::from_vec_with_nul(bytes) {
-        Ok(text) => {
-            let buffer = unsafe { &mut *out };
-            buffer.len = text.as_bytes().len();
-            buffer.ptr = text.into_raw();
-        }
-        Err(_) => unsafe { clear_buffer(out) },
-    }
+    unsafe { set_bytes(out, bytes) };
 }
 
 /// Open a HawDB database at `path`, creating it if needed.
@@ -507,7 +509,8 @@ pub unsafe extern "C" fn hawdb_query(
                 ptr: params_json,
                 len: params_len,
             },
-            false,
+            Dialect::Cypher,
+            ResultFormat::Json,
             result_out,
             err_out,
         )
@@ -543,18 +546,170 @@ pub unsafe extern "C" fn hawdb_query_sql(
                 ptr: params_json,
                 len: params_len,
             },
-            true,
+            Dialect::Sql,
+            ResultFormat::Json,
             result_out,
             err_out,
         )
     }
 }
 
+/// A full statement request for [`hawdb_query_ex`]: the text, its
+/// dialect and parameters, and the desired result envelope — the
+/// Vulkan-style pattern where the call signature stays fixed and the
+/// request descriptor grows.
+///
+/// Callers set `struct_size` to `sizeof(HawdbQueryRequest)`; the
+/// library reads only the fields that fit inside it, so newer releases
+/// can append fields without breaking older callers. `dialect` and
+/// `format` default to Cypher and JSON when they fall outside
+/// `struct_size`.
+#[repr(C)]
+pub struct HawdbQueryRequest {
+    /// `sizeof(HawdbQueryRequest)` as seen by the caller.
+    pub struct_size: usize,
+    /// `HAWDB_DIALECT_*` value; Cypher when the field is absent.
+    pub dialect: u32,
+    /// Statement text: `text_len` UTF-8 bytes at `text`.
+    pub text: *const c_char,
+    pub text_len: usize,
+    /// JSON parameters: object for Cypher, positional array for SQL;
+    /// NULL or empty for none.
+    pub params_json: *const c_char,
+    pub params_len: usize,
+    /// `HAWDB_FORMAT_*` value; JSON when the field is absent.
+    pub format: u32,
+}
+
+/// Cypher statement dialect for [`HawdbQueryRequest`].
+pub const HAWDB_DIALECT_CYPHER: u32 = 0;
+/// SQL statement dialect for [`HawdbQueryRequest`].
+pub const HAWDB_DIALECT_SQL: u32 = 1;
+/// JSON result envelope for [`HawdbQueryRequest`].
+pub const HAWDB_FORMAT_JSON: u32 = 0;
+/// Binary result envelope for [`HawdbQueryRequest`] — see `src/envelope.rs`.
+pub const HAWDB_FORMAT_BINARY: u32 = 1;
+
+/// Read `request` into its parts, honoring `struct_size` so a caller
+/// compiled against a shorter request keeps defaults for the fields it
+/// does not carry.
+///
+/// # Safety
+/// `request` must be readable for `request->struct_size` bytes.
+unsafe fn read_query_request(
+    request: *const HawdbQueryRequest,
+) -> Result<(FfiStr, FfiStr, Dialect, ResultFormat), FfiError> {
+    let size = unsafe { (*request).struct_size };
+    let need = |offset: usize| size >= offset;
+    if !need(std::mem::offset_of!(HawdbQueryRequest, text) + 2 * std::mem::size_of::<usize>()) {
+        return Err(FfiError::invalid(format!(
+            "HawdbQueryRequest size {size} is too small for the statement fields"
+        )));
+    }
+    let dialect = if need(std::mem::offset_of!(HawdbQueryRequest, dialect) + 4) {
+        match unsafe { (*request).dialect } {
+            HAWDB_DIALECT_CYPHER => Dialect::Cypher,
+            HAWDB_DIALECT_SQL => Dialect::Sql,
+            other => return Err(FfiError::invalid(format!("unknown dialect {other}"))),
+        }
+    } else {
+        Dialect::Cypher
+    };
+    let format = if need(std::mem::offset_of!(HawdbQueryRequest, format) + 4) {
+        match unsafe { (*request).format } {
+            HAWDB_FORMAT_JSON => ResultFormat::Json,
+            HAWDB_FORMAT_BINARY => ResultFormat::Binary,
+            other => return Err(FfiError::invalid(format!("unknown result format {other}"))),
+        }
+    } else {
+        ResultFormat::Json
+    };
+    let params = if need(
+        std::mem::offset_of!(HawdbQueryRequest, params_json) + 2 * std::mem::size_of::<usize>(),
+    ) {
+        unsafe {
+            FfiStr {
+                ptr: (*request).params_json,
+                len: (*request).params_len,
+            }
+        }
+    } else {
+        FfiStr {
+            ptr: ptr::null(),
+            len: 0,
+        }
+    };
+    Ok((
+        unsafe {
+            FfiStr {
+                ptr: (*request).text,
+                len: (*request).text_len,
+            }
+        },
+        params,
+        dialect,
+        format,
+    ))
+}
+
+/// Which query language the statement text is written in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dialect {
+    Cypher,
+    Sql,
+}
+
+/// Result payload encoding for the query entry points.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResultFormat {
+    /// `{"columns": [...], "rows": [[...], ...]}` JSON text.
+    Json,
+    /// The compact tagged binary envelope written by
+    /// [`envelope::encode_output_binary`].
+    Binary,
+}
+
+/// Run one statement described by `request`.
+///
+/// The request carries everything the call needs — dialect, text,
+/// parameters, result envelope — so this signature never grows. The
+/// simple entry points [`hawdb_query`] and [`hawdb_query_sql`] remain
+/// for calls that only need the defaults. The binary envelope's exact
+/// layout is documented in `src/envelope.rs`.
+///
+/// # Safety
+/// `db` must be a live [`hawdb_open`] handle; `request` must not be
+/// NULL and must be readable for `request->struct_size` bytes, and its
+/// `text`/`params_json` for the recorded lengths; `result_out` and
+/// `err_out` must be NULL or writable [`HawdbBuffer`] storage. A false
+/// return leaves the handle usable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hawdb_query_ex(
+    db: *mut HawdbDatabase,
+    request: *const HawdbQueryRequest,
+    result_out: *mut HawdbBuffer,
+    err_out: *mut HawdbBuffer,
+) -> bool {
+    if request.is_null() {
+        unsafe { set_error(err_out, FfiError::invalid("request must not be NULL")) };
+        return false;
+    }
+    let (text, params_json, dialect, format) = match unsafe { read_query_request(request) } {
+        Ok(parts) => parts,
+        Err(error) => {
+            unsafe { set_error(err_out, error) };
+            return false;
+        }
+    };
+    unsafe { query_impl(db, text, params_json, dialect, format, result_out, err_out) }
+}
+
 unsafe fn query_impl(
     db: *mut HawdbDatabase,
     text: FfiStr,
     params_json: FfiStr,
-    sql: bool,
+    dialect: Dialect,
+    format: ResultFormat,
     result_out: *mut HawdbBuffer,
     err_out: *mut HawdbBuffer,
 ) -> bool {
@@ -569,7 +724,7 @@ unsafe fn query_impl(
     let database = unsafe { &*db };
     let result = catch_unwind(AssertUnwindSafe(|| unsafe {
         let text = read_str(text, "statement")?;
-        if sql {
+        if matches!(dialect, Dialect::Sql) {
             let params = parse_sql_params(params_json)?;
             database
                 .inner
@@ -593,7 +748,12 @@ unsafe fn query_impl(
     }));
     match result {
         Ok(Ok(output)) => {
-            unsafe { set_json_buffer(result_out, &output) };
+            match format {
+                ResultFormat::Json => unsafe { set_json_buffer(result_out, &output) },
+                ResultFormat::Binary => unsafe {
+                    set_bytes(result_out, envelope::encode_output_binary(&output))
+                },
+            }
             true
         }
         Ok(Err(error)) => {
@@ -651,7 +811,9 @@ fn parsed_params(text: &str, requirement: &str) -> Result<serde_json::Value, Ffi
 }
 
 /// Free a buffer returned by this library and zero the caller's
-/// [`HawdbBuffer`] so a second call is a safe no-op. Passing NULL for
+/// [`HawdbBuffer`] so a second call is a safe no-op. The library owns
+/// `len + 1` bytes behind `ptr` (content plus the NUL sentinel), so
+/// this must be the function that releases it. Passing NULL for
 /// `buffer`, or a buffer whose `ptr` is NULL, is a no-op.
 ///
 /// # Safety
@@ -666,7 +828,12 @@ pub unsafe extern "C" fn hawdb_buffer_free(buffer: *mut HawdbBuffer) {
     if buffer.ptr.is_null() {
         return;
     }
-    drop(unsafe { CString::from_raw(buffer.ptr) });
+    drop(unsafe {
+        Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+            buffer.ptr as *mut u8,
+            buffer.len + 1,
+        ))
+    });
     buffer.ptr = ptr::null_mut();
     buffer.len = 0;
 }
